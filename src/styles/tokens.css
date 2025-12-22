@@ -1,0 +1,188 @@
+/**
+ * Leviathan Design Tokens
+ * CSS Custom Properties for theming
+ */
+
+:root {
+  /* Colors - Light Theme */
+  --color-bg-primary: #ffffff;
+  --color-bg-secondary: #f8f9fa;
+  --color-bg-tertiary: #e9ecef;
+  --color-bg-hover: #f1f3f4;
+  --color-bg-selected: #e3f2fd;
+
+  --color-text-primary: #1a1a1a;
+  --color-text-secondary: #5f6368;
+  --color-text-muted: #9aa0a6;
+  --color-text-inverse: #ffffff;
+
+  --color-border: #dadce0;
+  --color-border-strong: #bdc1c6;
+
+  --color-primary: #1a73e8;
+  --color-primary-hover: #1557b0;
+  --color-primary-light: #e8f0fe;
+
+  --color-success: #34a853;
+  --color-success-bg: rgba(52, 168, 83, 0.15);
+  --color-warning: #fbbc04;
+  --color-warning-bg: rgba(251, 188, 4, 0.15);
+  --color-error: #ea4335;
+  --color-error-bg: rgba(234, 67, 53, 0.15);
+  --color-info: #4285f4;
+  --color-info-bg: rgba(66, 133, 244, 0.15);
+
+  /* Diff Colors */
+  --color-diff-add-bg: rgba(52, 168, 83, 0.15);
+  --color-diff-add-line-bg: rgba(52, 168, 83, 0.25);
+  --color-diff-del-bg: rgba(234, 67, 53, 0.15);
+  --color-diff-del-line-bg: rgba(234, 67, 53, 0.25);
+
+  /* Primary background for selected items */
+  --color-primary-bg: rgba(26, 115, 232, 0.1);
+
+  /* Graph Colors */
+  --color-branch-1: #1a73e8;
+  --color-branch-2: #34a853;
+  --color-branch-3: #ea4335;
+  --color-branch-4: #fbbc04;
+  --color-branch-5: #9334e6;
+  --color-branch-6: #00acc1;
+  --color-branch-7: #ff7043;
+  --color-branch-8: #7cb342;
+
+  /* Typography */
+  --font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --font-family-mono: 'SF Mono', 'Fira Code', 'Consolas', 'Monaco', monospace;
+
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 18px;
+  --font-size-2xl: 24px;
+
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+  --spacing-2xl: 48px;
+
+  /* Borders */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+
+  /* Transitions */
+  --transition-fast: 100ms ease;
+  --transition-normal: 200ms ease;
+  --transition-slow: 300ms ease;
+
+  /* Z-Index */
+  --z-dropdown: 100;
+  --z-modal: 200;
+  --z-tooltip: 300;
+  --z-toast: 400;
+
+  /* Graph Dimensions */
+  --graph-row-height: 28px;
+  --graph-node-radius: 6px;
+  --graph-lane-width: 16px;
+  --graph-line-width: 2px;
+}
+
+/* Dark Theme */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg-primary: #1e1e1e;
+    --color-bg-secondary: #252526;
+    --color-bg-tertiary: #2d2d30;
+    --color-bg-hover: #3c3c3c;
+    --color-bg-selected: #094771;
+
+    --color-text-primary: #e4e4e4;
+    --color-text-secondary: #a0a0a0;
+    --color-text-muted: #6e6e6e;
+    --color-text-inverse: #1e1e1e;
+
+    --color-border: #3c3c3c;
+    --color-border-strong: #505050;
+
+    --color-primary: #4fc3f7;
+    --color-primary-hover: #81d4fa;
+    --color-primary-light: #0d3a58;
+
+    --color-success-bg: rgba(52, 168, 83, 0.2);
+    --color-warning-bg: rgba(251, 188, 4, 0.2);
+    --color-error-bg: rgba(234, 67, 53, 0.2);
+    --color-info-bg: rgba(66, 133, 244, 0.2);
+
+    --color-diff-add-bg: rgba(52, 168, 83, 0.2);
+    --color-diff-add-line-bg: rgba(52, 168, 83, 0.3);
+    --color-diff-del-bg: rgba(234, 67, 53, 0.2);
+    --color-diff-del-line-bg: rgba(234, 67, 53, 0.3);
+
+    --color-primary-bg: rgba(79, 195, 247, 0.15);
+  }
+}
+
+/* Base Reset */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-normal);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-strong);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}

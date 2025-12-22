@@ -1,0 +1,10 @@
+//! Service layer for Leviathan
+//!
+//! This module contains services that provide higher-level abstractions
+//! over the raw git operations.
+
+pub mod git_service;
+pub mod watcher_service;
+
+pub use git_service::GitService;
+pub use watcher_service::WatcherService;
