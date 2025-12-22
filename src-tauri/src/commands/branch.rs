@@ -146,11 +146,7 @@ pub async fn delete_branch(path: String, name: String, force: Option<bool>) -> R
 
 /// Rename a branch
 #[command]
-pub async fn rename_branch(
-    path: String,
-    old_name: String,
-    new_name: String,
-) -> Result<Branch> {
+pub async fn rename_branch(path: String, old_name: String, new_name: String) -> Result<Branch> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let mut branch = repo

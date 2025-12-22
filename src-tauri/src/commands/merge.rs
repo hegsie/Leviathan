@@ -222,11 +222,7 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
 
 /// Execute an interactive rebase using git CLI
 #[command]
-pub async fn execute_interactive_rebase(
-    path: String,
-    onto: String,
-    todo: String,
-) -> Result<()> {
+pub async fn execute_interactive_rebase(path: String, onto: String, todo: String) -> Result<()> {
     // Write the todo to a temp file
     let todo_path = std::env::temp_dir().join("leviathan-rebase-todo");
     std::fs::write(&todo_path, &todo)?;
@@ -328,11 +324,7 @@ pub async fn get_blob_content(path: String, oid: String) -> Result<String> {
 
 /// Mark a file as resolved with the given content
 #[command]
-pub async fn resolve_conflict(
-    path: String,
-    file_path: String,
-    content: String,
-) -> Result<()> {
+pub async fn resolve_conflict(path: String, file_path: String, content: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     // Write the resolved content to the working directory
