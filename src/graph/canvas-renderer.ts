@@ -10,6 +10,7 @@
 
 import type { RenderData } from './virtual-scroll.ts';
 import type { RefInfo, RefType } from '../types/git.types.ts';
+import { md5 } from '../utils/md5.ts';
 
 export interface RenderConfig {
   /** Row height in pixels */
@@ -238,25 +239,11 @@ export class CanvasRenderer {
   }
 
   /**
-   * Get Gravatar URL from email
+   * Get Gravatar URL from email using proper MD5 hash
    */
   private getGravatarUrl(email: string, size: number = 64): string {
-    // Simple hash function for gravatar (MD5 would be better but this is quick)
-    const hash = this.simpleHash(email.toLowerCase().trim());
+    const hash = md5(email.toLowerCase().trim());
     return `https://www.gravatar.com/avatar/${hash}?s=${size}&d=identicon`;
-  }
-
-  /**
-   * Simple string hash for avatar URLs
-   */
-  private simpleHash(str: string): string {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash;
-    }
-    return Math.abs(hash).toString(16).padStart(32, '0');
   }
 
   /**
