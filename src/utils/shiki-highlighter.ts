@@ -9,7 +9,6 @@ import {
   createHighlighter,
   type Highlighter,
   type BundledLanguage,
-  type ThemedToken,
   bundledLanguages,
 } from 'shiki';
 

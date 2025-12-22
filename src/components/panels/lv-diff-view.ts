@@ -7,7 +7,6 @@ import {
   detectLanguage,
   highlightLineSync,
   preloadLanguage,
-  type HighlightToken,
 } from '../../utils/shiki-highlighter.ts';
 import type { BundledLanguage } from 'shiki';
 import type { DiffFile, DiffHunk, DiffLine, StatusEntry } from '../../types/git.types.ts';

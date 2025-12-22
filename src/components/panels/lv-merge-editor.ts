@@ -11,7 +11,7 @@
  * +-------------------------------------------------------+
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
@@ -23,12 +23,6 @@ import {
 } from '../../utils/shiki-highlighter.ts';
 import type { BundledLanguage } from 'shiki';
 import type { ConflictFile } from '../../types/git.types.ts';
-
-interface DiffLine {
-  lineNumber: number;
-  content: string;
-  type: 'unchanged' | 'added' | 'removed' | 'conflict';
-}
 
 @customElement('lv-merge-editor')
 export class LvMergeEditor extends LitElement {

@@ -777,7 +777,7 @@ export class CanvasRenderer {
         ctx.stroke();
         break;
 
-      case 'tag':
+      case 'tag': {
         // Tag icon - pentagon shape with hole
         const cx = left + size / 2;
         const cy = y;
@@ -796,6 +796,7 @@ export class CanvasRenderer {
         ctx.arc(cx, cy - 2 * ts, 1.5 * ts, 0, Math.PI * 2);
         ctx.stroke();
         break;
+      }
 
       default:
         // Default: simple circle

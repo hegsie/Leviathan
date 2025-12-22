@@ -285,7 +285,7 @@ const LANGUAGES: Record<string, LanguageRules> = {
   markdown: {
     keywords: new Set([]),
     types: new Set([]),
-    operators: /^[#*_\-\[\]()!`]/,
+    operators: /^[#*_\-[\]()!`]/,
     lineComment: '',
     blockCommentStart: '',
     blockCommentEnd: '',
@@ -294,7 +294,7 @@ const LANGUAGES: Record<string, LanguageRules> = {
   toml: {
     keywords: new Set(['true', 'false']),
     types: new Set([]),
-    operators: /^[=\[\].]/,
+    operators: /^[=[\].]/,
     lineComment: '#',
     blockCommentStart: '',
     blockCommentEnd: '',
@@ -534,7 +534,7 @@ function tokenizeXmlLine(line: string): Token[] {
       }
 
       // Tag name
-      const tagMatch = line.substring(i).match(/^[a-zA-Z_:][\w:.\-]*/);
+      const tagMatch = line.substring(i).match(/^[a-zA-Z_:][\w:.-]*/);
       if (tagMatch) {
         tokens.push({ type: 'keyword', value: tagMatch[0] });
         i += tagMatch[0].length;
@@ -560,7 +560,7 @@ function tokenizeXmlLine(line: string): Token[] {
         }
 
         // Attribute name
-        const attrMatch = line.substring(i).match(/^[a-zA-Z_:][\w:.\-]*/);
+        const attrMatch = line.substring(i).match(/^[a-zA-Z_:][\w:.-]*/);
         if (attrMatch) {
           tokens.push({ type: 'type', value: attrMatch[0] });
           i += attrMatch[0].length;
