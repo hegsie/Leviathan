@@ -98,10 +98,7 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
             is_head,
         };
 
-        refs_map
-            .entry(target_oid)
-            .or_default()
-            .push(ref_info);
+        refs_map.entry(target_oid).or_default().push(ref_info);
     }
 
     Ok(refs_map)
