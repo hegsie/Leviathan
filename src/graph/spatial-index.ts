@@ -42,6 +42,7 @@ export class SpatialIndex {
   private offsetY: number = 0;
   private rowHeight: number = 28;
   private laneWidth: number = 20;
+  private maxLane: number = 0;
 
   constructor(options: SpatialIndexOptions = {}) {
     this.cellSize = options.cellSize ?? 50;
@@ -57,11 +58,21 @@ export class SpatialIndex {
     offsetY: number;
     rowHeight: number;
     laneWidth: number;
+    maxLane?: number;
   }): void {
     this.offsetX = params.offsetX;
     this.offsetY = params.offsetY;
     this.rowHeight = params.rowHeight;
     this.laneWidth = params.laneWidth;
+    this.maxLane = params.maxLane ?? 0;
+  }
+
+  /**
+   * Get X coordinate for a lane (mirrored: lane 0 on right)
+   */
+  private getLaneX(lane: number): number {
+    const graphEndX = this.offsetX + (this.maxLane + 1) * this.laneWidth;
+    return graphEndX - (lane + 1) * this.laneWidth + this.laneWidth / 2;
   }
 
   /**
@@ -79,7 +90,7 @@ export class SpatialIndex {
 
     // Index nodes
     for (const node of nodes) {
-      const x = this.offsetX + node.lane * this.laneWidth;
+      const x = this.getLaneX(node.lane);
       const y = this.offsetY + node.row * this.rowHeight;
       this.addNodeToGrid(node, x, y);
     }
@@ -105,7 +116,7 @@ export class SpatialIndex {
     for (const node of nodes) {
       const y = this.offsetY + node.row * this.rowHeight;
       if (y >= viewportTop - this.cellSize && y <= viewportBottom + this.cellSize) {
-        const x = this.offsetX + node.lane * this.laneWidth;
+        const x = this.getLaneX(node.lane);
         this.addNodeToGrid(node, x, y);
       }
     }
@@ -150,9 +161,9 @@ export class SpatialIndex {
    * Add an edge to the grid
    */
   private addEdgeToGrid(edge: LayoutEdge): void {
-    const x1 = this.offsetX + edge.fromLane * this.laneWidth;
+    const x1 = this.getLaneX(edge.fromLane);
     const y1 = this.offsetY + edge.fromRow * this.rowHeight;
-    const x2 = this.offsetX + edge.toLane * this.laneWidth;
+    const x2 = this.getLaneX(edge.toLane);
     const y2 = this.offsetY + edge.toRow * this.rowHeight;
 
     // Get bounding box of edge
@@ -197,7 +208,7 @@ export class SpatialIndex {
     let closestNodeDist = Infinity;
 
     for (const node of cell.nodes) {
-      const nodeX = this.offsetX + node.lane * this.laneWidth;
+      const nodeX = this.getLaneX(node.lane);
       const nodeY = this.offsetY + node.row * this.rowHeight;
       const dist = Math.sqrt((x - nodeX) ** 2 + (y - nodeY) ** 2);
 
@@ -235,9 +246,9 @@ export class SpatialIndex {
    * Calculate distance from point to edge
    */
   private pointToEdgeDistance(px: number, py: number, edge: LayoutEdge): number {
-    const x1 = this.offsetX + edge.fromLane * this.laneWidth;
+    const x1 = this.getLaneX(edge.fromLane);
     const y1 = this.offsetY + edge.fromRow * this.rowHeight;
-    const x2 = this.offsetX + edge.toLane * this.laneWidth;
+    const x2 = this.getLaneX(edge.toLane);
     const y2 = this.offsetY + edge.toRow * this.rowHeight;
 
     if (edge.fromLane === edge.toLane) {

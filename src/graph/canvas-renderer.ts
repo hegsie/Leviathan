@@ -62,28 +62,39 @@ export interface RenderTheme {
 }
 
 const DEFAULT_CONFIG: RenderConfig = {
-  rowHeight: 40,
-  laneWidth: 28,
-  nodeRadius: 14,
-  minNodeRadius: 10,
-  maxNodeRadius: 18,
-  lineWidth: 3,
+  rowHeight: 28,
+  laneWidth: 24,
+  nodeRadius: 6,
+  minNodeRadius: 5,
+  maxNodeRadius: 10,
+  lineWidth: 2,
   showLabels: false,
-  showFps: true,
-  showAvatars: true,
+  showFps: false,
+  showAvatars: false,
   showRefIcons: true,
 };
 
 const DEFAULT_THEME: RenderTheme = {
   background: '#1a1520',
-  // Earthy palette with subtle variety
+  // Vibrant, well-separated colors for maximum distinction between adjacent lanes
+  // Colors are ordered to maximize contrast between neighbors
   laneColors: [
-    '#d4a54a', // gold
-    '#b85c3c', // ember
-    '#8a7a6a', // stone
-    '#9a6a5a', // terracotta
-    '#7a8a7a', // lichen
-    '#a87830', // bronze
+    '#6fbf73', // green
+    '#ce93d8', // purple
+    '#4fc3f7', // cyan
+    '#ffb74d', // orange
+    '#f06292', // pink
+    '#81c784', // light green
+    '#ba68c8', // violet
+    '#4dd0e1', // teal
+    '#ffa726', // amber
+    '#ec407a', // rose
+    '#aed581', // lime
+    '#9575cd', // deep purple
+    '#26c6da', // cyan light
+    '#ff8a65', // deep orange
+    '#f48fb1', // pink light
+    '#c5e1a5', // light lime
   ],
   textColor: '#c8c8c8',
   selectedColor: '#ffffff',
@@ -360,16 +371,19 @@ export class CanvasRenderer {
    */
   private renderEdges(data: RenderData): void {
     const { ctx, config } = this;
-    const { edges, offsetX, offsetY } = data;
+    const { edges, offsetX, offsetY, maxLane } = data;
 
     ctx.lineWidth = config.lineWidth;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
+    // Graph is mirrored: lane 0 is on the right, higher lanes extend left
+    const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
+
     for (const edge of edges) {
-      const fromX = offsetX + edge.fromLane * config.laneWidth;
+      const fromX = graphEndX - (edge.fromLane + 1) * config.laneWidth + config.laneWidth / 2;
       const fromY = offsetY + edge.fromRow * config.rowHeight;
-      const toX = offsetX + edge.toLane * config.laneWidth;
+      const toX = graphEndX - (edge.toLane + 1) * config.laneWidth + config.laneWidth / 2;
       const toY = offsetY + edge.toRow * config.rowHeight;
 
       ctx.strokeStyle = this.getLaneColor(edge.fromLane);
@@ -380,10 +394,45 @@ export class CanvasRenderer {
         ctx.moveTo(fromX, fromY);
         ctx.lineTo(toX, toY);
       } else {
-        // Bezier curve
-        const midY = (fromY + toY) / 2;
+        // Angular elbow curve (like GitKraken)
+        const cornerRadius = 5;
+        const goingRight = toX > fromX;
+        const goingDown = toY > fromY;
+
         ctx.moveTo(fromX, fromY);
-        ctx.bezierCurveTo(fromX, midY, toX, midY, toX, toY);
+
+        if (goingDown) {
+          // Going down: vertical first, then horizontal
+          const turnY = toY - cornerRadius;
+
+          // Vertical segment
+          ctx.lineTo(fromX, turnY);
+
+          // Rounded corner
+          if (goingRight) {
+            ctx.arcTo(fromX, toY, fromX + cornerRadius, toY, cornerRadius);
+          } else {
+            ctx.arcTo(fromX, toY, fromX - cornerRadius, toY, cornerRadius);
+          }
+
+          // Horizontal segment to target
+          ctx.lineTo(toX, toY);
+        } else {
+          // Going up: horizontal first, then vertical
+          const turnY = fromY;
+
+          // Horizontal segment
+          if (goingRight) {
+            ctx.lineTo(toX - cornerRadius, turnY);
+            ctx.arcTo(toX, turnY, toX, turnY - cornerRadius, cornerRadius);
+          } else {
+            ctx.lineTo(toX + cornerRadius, turnY);
+            ctx.arcTo(toX, turnY, toX, turnY - cornerRadius, cornerRadius);
+          }
+
+          // Vertical segment to target
+          ctx.lineTo(toX, toY);
+        }
       }
 
       ctx.stroke();
@@ -395,10 +444,13 @@ export class CanvasRenderer {
    */
   private renderNodes(data: RenderData): void {
     const { ctx, config, theme } = this;
-    const { nodes, offsetX, offsetY, authorEmails } = data;
+    const { nodes, offsetX, offsetY, authorEmails, maxLane } = data;
+
+    // Graph is mirrored: lane 0 is on the right, higher lanes extend left
+    const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
 
     for (const node of nodes) {
-      const x = offsetX + node.lane * config.laneWidth;
+      const x = graphEndX - (node.lane + 1) * config.laneWidth + config.laneWidth / 2;
       const y = offsetY + node.row * config.rowHeight;
       const color = this.getLaneColor(node.lane);
       const radius = this.getNodeRadius(node.oid);
@@ -472,13 +524,13 @@ export class CanvasRenderer {
         ctx.fillText(initials, x, y + 1);
       }
 
-      // Draw label for selected/hovered
+      // Draw label for selected/hovered (to the left since graph is mirrored)
       if ((isSelected || isHovered) && config.showLabels) {
         ctx.fillStyle = theme.textColor;
         ctx.font = '11px monospace';
-        ctx.textAlign = 'left';
+        ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.fillText(node.oid.substring(0, 7), x + radius + 6, y);
+        ctx.fillText(node.oid.substring(0, 7), x - radius - 6, y);
       }
     }
   }
@@ -495,147 +547,287 @@ export class CanvasRenderer {
   }
 
   /**
-   * Render ref labels (branches, tags) next to nodes with icons
+   * Render ref labels and commit messages in fixed columns
    */
   private renderRefLabels(data: RenderData): void {
     const { ctx, config, theme } = this;
-    const { nodes, offsetX, offsetY, refsByCommit } = data;
+    const { nodes, offsetX, offsetY, refsByCommit, maxLane } = data;
 
-    if (!refsByCommit || Object.keys(refsByCommit).length === 0) {
-      return;
-    }
+    const labelHeight = 18;
+    const labelPadding = 6;
+    const labelGap = 4;
+    const labelRadius = 4;
+    const iconSize = 12;
+    const iconPadding = 3;
 
-    const labelHeight = 24;
-    const labelPadding = 10;
-    const labelGap = 6;
-    const labelRadius = 5;
-    const iconSize = 14;
-    const iconPadding = 5;
+    // Fixed column positions based on global maxLane - tight spacing
+    const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
+    const avatarColumnX = graphEndX + 10;
+    const avatarSize = 22;
+    const messageColumnX = avatarColumnX + avatarSize + 10;
+    const messageColumnWidth = 360;  // Fixed width for message column
+    const labelColumnX = messageColumnX + messageColumnWidth + 10;
 
     for (const node of nodes) {
-      const refs = refsByCommit[node.oid];
-      if (!refs || refs.length === 0) continue;
-
-      const x = offsetX + node.lane * config.laneWidth;
       const y = offsetY + node.row * config.rowHeight;
-      const nodeRadius = this.getNodeRadius(node.oid);
+      const refs = refsByCommit?.[node.oid] ?? [];
+      const hasRefs = refs.length > 0;
+      const laneColor = this.getLaneColor(node.lane);
 
-      // Start position for labels (to the right of the node)
-      let labelX = x + nodeRadius + 10;
+      // Render avatar in avatar column
+      const authorEmail = data.authorEmails?.[node.oid];
+      const avatarRadius = avatarSize / 2;
+      const avatarCenterX = avatarColumnX + avatarRadius;
 
+      if (authorEmail) {
+        const avatar = this.avatarCache.get(authorEmail);
+        if (avatar) {
+          // Draw circular avatar
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
+          ctx.clip();
+          ctx.drawImage(avatar, avatarCenterX - avatarRadius + 1, y - avatarRadius + 1, avatarSize - 2, avatarSize - 2);
+          ctx.restore();
+        } else {
+          // Trigger avatar load and show initials
+          this.loadAvatar(authorEmail);
+          // Draw initials circle
+          ctx.beginPath();
+          ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
+          ctx.fillStyle = laneColor;
+          ctx.fill();
+          // Draw initials
+          const initials = this.getInitials(node.commit.author);
+          ctx.fillStyle = '#ffffff';
+          ctx.font = `bold ${Math.floor(avatarSize * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(initials, avatarCenterX, y + 1);
+        }
+      } else {
+        // No email - draw colored circle with initials
+        ctx.beginPath();
+        ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
+        ctx.fillStyle = laneColor;
+        ctx.fill();
+        const initials = this.getInitials(node.commit.author);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = `bold ${Math.floor(avatarSize * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(initials, avatarCenterX, y + 1);
+      }
+
+      // Render commit message (in message column)
+      // Use the lane color for the message text (like GitKraken)
+      const message = node.commit.message;
+      ctx.font = '13px -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.fillStyle = laneColor;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+
+      // Allow message to extend into label column if no refs
+      const maxWidth = hasRefs ? messageColumnWidth - 8 : messageColumnWidth + 300;
+
+      // Truncate message to fit available space
+      let displayMessage = message;
+      if (ctx.measureText(displayMessage).width > maxWidth) {
+        while (ctx.measureText(displayMessage + '…').width > maxWidth && displayMessage.length > 0) {
+          displayMessage = displayMessage.slice(0, -1);
+        }
+        displayMessage += '…';
+      }
+      ctx.fillText(displayMessage, messageColumnX, y);
+
+      // Render refs in label column (after message)
+      let currentX = labelColumnX;
       for (const ref of refs) {
         const label = ref.shorthand;
 
-        // Set font for measuring
-        ctx.font = 'bold 13px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
         const textWidth = ctx.measureText(label).width;
 
-        // Calculate pill width with icon space if enabled
         const hasIcon = config.showRefIcons;
         const pillWidth = textWidth + labelPadding * 2 + (hasIcon ? iconSize + iconPadding : 0);
 
-        // Get colors based on ref type
         const { bgColor, textColor } = this.getRefColors(ref);
 
         // Draw pill background
         ctx.fillStyle = bgColor;
-        this.drawRoundedRect(
-          labelX,
-          y - labelHeight / 2,
-          pillWidth,
-          labelHeight,
-          labelRadius
-        );
+        this.drawRoundedRect(currentX, y - labelHeight / 2, pillWidth, labelHeight, labelRadius);
 
-        // Draw special indicator for HEAD
+        // Draw HEAD indicator
         if (ref.isHead) {
           ctx.strokeStyle = theme.refColors.head;
           ctx.lineWidth = 2;
-          this.strokeRoundedRect(
-            labelX,
-            y - labelHeight / 2,
-            pillWidth,
-            labelHeight,
-            labelRadius
-          );
+          this.strokeRoundedRect(currentX, y - labelHeight / 2, pillWidth, labelHeight, labelRadius);
         }
 
-        // Draw icon if enabled
-        let textStartX = labelX + labelPadding;
+        // Draw icon
+        let textStartX = currentX + labelPadding;
         if (hasIcon) {
-          ctx.fillStyle = textColor;
-          const iconX = labelX + labelPadding;
-          const iconY = y;
-          this.drawRefIcon(ref.refType, iconX, iconY, iconSize);
-          textStartX = iconX + iconSize + iconPadding;
+          // Use a contrasting color for icon - darken or lighten based on background
+          const iconColor = this.getContrastingIconColor(bgColor);
+          ctx.strokeStyle = iconColor;
+          ctx.fillStyle = iconColor;
+          this.drawRefIcon(ref.refType, currentX + labelPadding, y, iconSize);
+          textStartX = currentX + labelPadding + iconSize + iconPadding;
         }
 
         // Draw label text
         ctx.fillStyle = textColor;
-        ctx.font = 'bold 13px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText(label, textStartX, y);
 
-        // Move to next label position
-        labelX += pillWidth + labelGap;
+        currentX += pillWidth + labelGap;
       }
     }
   }
 
   /**
-   * Draw an icon for a ref type - using simple filled shapes for clarity
+   * Draw an icon for a ref type - matches sidebar branch icons exactly
+   * SVG viewBox is 0 0 24 24, scaled to iconSize
    */
   private drawRefIcon(refType: RefType, x: number, y: number, size: number): void {
     const { ctx } = this;
-    const cx = x + size / 2;
-    const cy = y;
+    const s = size / 24;  // Scale factor from SVG viewBox (24x24) to icon size
+    const top = y - size / 2;  // Top of icon area
+    const left = x;  // Left of icon area
 
     ctx.save();
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
 
     switch (refType) {
       case 'localBranch':
-        // Filled circle with a line - represents a branch node
+        // Matches sidebar exactly:
+        // <line x1="6" y1="3" x2="6" y2="15"></line>
+        // <circle cx="18" cy="6" r="3"></circle>
+        // <circle cx="6" cy="18" r="3"></circle>
+        // <path d="M18 9a9 9 0 01-9 9"></path>
+
+        // Vertical line
         ctx.beginPath();
-        ctx.arc(cx, cy - 2, 4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillRect(cx - 1.5, cy + 1, 3, 5);
+        ctx.moveTo(left + 6 * s, top + 3 * s);
+        ctx.lineTo(left + 6 * s, top + 15 * s);
+        ctx.stroke();
+
+        // Top-right circle (stroked, not filled)
+        ctx.beginPath();
+        ctx.arc(left + 18 * s, top + 6 * s, 3 * s, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Bottom-left circle (stroked)
+        ctx.beginPath();
+        ctx.arc(left + 6 * s, top + 18 * s, 3 * s, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Curved path from (18, 9) arcing to (9, 18)
+        // SVG: M18 9a9 9 0 01-9 9 is an arc from (18,9) to (9,18) with radius 9
+        ctx.beginPath();
+        ctx.moveTo(left + 18 * s, top + 9 * s);
+        ctx.bezierCurveTo(
+          left + 18 * s, top + 14 * s,  // control point 1
+          left + 14 * s, top + 18 * s,  // control point 2
+          left + 9 * s, top + 18 * s    // end point
+        );
+        ctx.stroke();
         break;
 
       case 'remoteBranch':
-        // Arrow pointing up - represents sync/remote
+        // Same structure as local branch with arrow indicator
+        // Vertical line
         ctx.beginPath();
-        ctx.moveTo(cx, cy - 5);
-        ctx.lineTo(cx + 5, cy + 1);
-        ctx.lineTo(cx + 2, cy + 1);
-        ctx.lineTo(cx + 2, cy + 5);
-        ctx.lineTo(cx - 2, cy + 5);
-        ctx.lineTo(cx - 2, cy + 1);
-        ctx.lineTo(cx - 5, cy + 1);
-        ctx.closePath();
-        ctx.fill();
+        ctx.moveTo(left + 6 * s, top + 3 * s);
+        ctx.lineTo(left + 6 * s, top + 15 * s);
+        ctx.stroke();
+
+        // Top-right circle
+        ctx.beginPath();
+        ctx.arc(left + 18 * s, top + 6 * s, 3 * s, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Bottom-left circle
+        ctx.beginPath();
+        ctx.arc(left + 6 * s, top + 18 * s, 3 * s, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Curved path
+        ctx.beginPath();
+        ctx.moveTo(left + 18 * s, top + 9 * s);
+        ctx.bezierCurveTo(
+          left + 18 * s, top + 14 * s,
+          left + 14 * s, top + 18 * s,
+          left + 9 * s, top + 18 * s
+        );
+        ctx.stroke();
+
+        // Small arrow indicating remote (up-right)
+        ctx.beginPath();
+        ctx.moveTo(left + 21 * s, top + 3 * s);
+        ctx.lineTo(left + 23 * s, top + 1 * s);
+        ctx.moveTo(left + 23 * s, top + 1 * s);
+        ctx.lineTo(left + 21 * s, top + 1 * s);
+        ctx.moveTo(left + 23 * s, top + 1 * s);
+        ctx.lineTo(left + 23 * s, top + 3 * s);
+        ctx.stroke();
         break;
 
       case 'tag':
-        // Filled bookmark/tag shape
+        // Tag icon - pentagon shape with hole
+        const cx = left + size / 2;
+        const cy = y;
+        const ts = size / 11;  // Tag-specific scale
+
         ctx.beginPath();
-        ctx.moveTo(cx - 4, cy - 5);
-        ctx.lineTo(cx + 4, cy - 5);
-        ctx.lineTo(cx + 4, cy + 3);
-        ctx.lineTo(cx, cy + 6);
-        ctx.lineTo(cx - 4, cy + 3);
+        ctx.moveTo(cx + 4 * ts, cy - 4 * ts);
+        ctx.lineTo(cx + 4 * ts, cy + 1 * ts);
+        ctx.lineTo(cx, cy + 5 * ts);
+        ctx.lineTo(cx - 4 * ts, cy + 1 * ts);
+        ctx.lineTo(cx - 4 * ts, cy - 4 * ts);
         ctx.closePath();
-        ctx.fill();
+        ctx.stroke();
+        // Small hole in tag
+        ctx.beginPath();
+        ctx.arc(cx, cy - 2 * ts, 1.5 * ts, 0, Math.PI * 2);
+        ctx.stroke();
         break;
 
       default:
-        // Default: simple filled circle
+        // Default: simple circle
         ctx.beginPath();
-        ctx.arc(cx, cy, 4, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.arc(left + size / 2, y, size / 4, 0, Math.PI * 2);
+        ctx.stroke();
     }
 
     ctx.restore();
+  }
+
+  /**
+   * Get a contrasting icon color based on the background
+   */
+  private getContrastingIconColor(bgColor: string): string {
+    // Parse the background color to get luminance
+    const hex = bgColor.replace('#', '');
+    const r = parseInt(hex.substr(0, 2), 16);
+    const g = parseInt(hex.substr(2, 2), 16);
+    const b = parseInt(hex.substr(4, 2), 16);
+
+    // Calculate relative luminance
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+
+    // Return dark color for light backgrounds, light for dark
+    if (luminance > 0.5) {
+      // Light background - use darker version of the color
+      return `rgb(${Math.floor(r * 0.4)}, ${Math.floor(g * 0.4)}, ${Math.floor(b * 0.4)})`;
+    } else {
+      // Dark background - use lighter/white
+      return '#ffffff';
+    }
   }
 
   /**

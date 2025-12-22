@@ -221,12 +221,9 @@ export function assignLanes(commits: GraphCommit[]): GraphLayout {
  * Optimized lane assignment using a lane-reuse algorithm
  * that minimizes the number of active lanes at any time.
  *
- * Key insight: A lane can be reused when the commit that was using it
- * no longer needs it (i.e., when we've moved past its continuation point).
- *
- * The algorithm tracks "active lanes" - lanes that have a line continuing
- * to the next row. When a branch ends (merges into another branch or is
- * a root commit), its lane becomes available for reuse.
+ * This version also supports dense row packing - multiple commits
+ * can share the same row if they're in different lanes and don't
+ * have direct parent-child relationships at that row.
  */
 export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
   if (commits.length === 0) {
@@ -253,25 +250,23 @@ export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
   const commitOidSet = new Set(commits.map((c) => c.oid));
 
   // Active lanes: each lane tracks which OID is "continuing" through it
-  // A lane is "active" if a commit in that lane has parents that haven't been processed yet
-  // null means the lane is free for reuse
   const activeLanes: (string | null)[] = [];
   const nodes = new Map<string, LayoutNode>();
   const edges: LayoutEdge[] = [];
   const oidToLane = new Map<string, number>();
 
-  // Track which commits still have unprocessed parents in their lane
-  // Key: lane number, Value: OID of commit whose parent continues in this lane
-  const laneOwner = new Map<number, string>();
+  // Track row occupancy per lane: Map<lane, Set<row>>
+  const laneRowOccupancy = new Map<number, Set<number>>();
+
+  // Track which rows have commits and their lanes
+  const rowOccupancy = new Map<number, Map<number, string>>(); // row -> (lane -> oid)
 
   function getFreeLane(): number {
-    // Find leftmost free lane
     for (let i = 0; i < activeLanes.length; i++) {
       if (activeLanes[i] === null) {
         return i;
       }
     }
-    // Create new lane
     activeLanes.push(null);
     return activeLanes.length - 1;
   }
@@ -286,68 +281,145 @@ export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
   function releaseLane(lane: number): void {
     if (lane < activeLanes.length) {
       activeLanes[lane] = null;
-      laneOwner.delete(lane);
     }
   }
 
+  function occupyPosition(row: number, lane: number, oid: string): void {
+    if (!rowOccupancy.has(row)) {
+      rowOccupancy.set(row, new Map());
+    }
+    rowOccupancy.get(row)!.set(lane, oid);
+
+    if (!laneRowOccupancy.has(lane)) {
+      laneRowOccupancy.set(lane, new Set());
+    }
+    laneRowOccupancy.get(lane)!.add(row);
+  }
+
+  function isPositionFree(row: number, lane: number): boolean {
+    const rowMap = rowOccupancy.get(row);
+    if (!rowMap) return true;
+    return !rowMap.has(lane);
+  }
+
+  function canPlaceAtRow(row: number, lane: number, childOids: string[]): boolean {
+    // Check if position is free
+    if (!isPositionFree(row, lane)) return false;
+
+    // Check that no child is at this row (would create zero-length edge)
+    for (const childOid of childOids) {
+      const childNode = nodes.get(childOid);
+      if (childNode && childNode.row === row) {
+        return false;
+      }
+    }
+
+    // Check that edges won't cross through occupied positions
+    // For each child, check if there's a clear path
+    for (const childOid of childOids) {
+      const childNode = nodes.get(childOid);
+      if (!childNode) continue;
+
+      const childRow = childNode.row;
+      const childLane = childNode.lane;
+
+      // If same lane, check vertical path is clear
+      if (lane === childLane) {
+        for (let r = childRow + 1; r < row; r++) {
+          if (!isPositionFree(r, lane)) return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  function findBestRow(
+    baseRow: number,
+    lane: number,
+    childOids: string[],
+    previousCommitRow: number
+  ): number {
+    // Try to place at the same row as another commit if possible (dense packing)
+    // Start from baseRow and work down
+
+    // First, try the same row as the previous commit if we're in a different lane
+    if (previousCommitRow >= 0 && canPlaceAtRow(previousCommitRow, lane, childOids)) {
+      // Check if any child is in this row - if so, we need to be below
+      let canUsePrevRow = true;
+      for (const childOid of childOids) {
+        const childNode = nodes.get(childOid);
+        if (childNode && childNode.row >= previousCommitRow) {
+          canUsePrevRow = false;
+          break;
+        }
+      }
+      if (canUsePrevRow) {
+        return previousCommitRow;
+      }
+    }
+
+    // Find minimum row we must be at (below all children)
+    let minRow = 0;
+    for (const childOid of childOids) {
+      const childNode = nodes.get(childOid);
+      if (childNode) {
+        minRow = Math.max(minRow, childNode.row + 1);
+      }
+    }
+
+    // Try to find an existing row we can share
+    for (let row = minRow; row <= baseRow; row++) {
+      if (canPlaceAtRow(row, lane, childOids)) {
+        return row;
+      }
+    }
+
+    // If no existing row works, use a new row
+    return baseRow;
+  }
+
   // Process each commit from newest to oldest
-  for (let row = 0; row < sortedCommits.length; row++) {
-    const commit = sortedCommits[row];
+  let currentRow = 0;
+
+  for (let i = 0; i < sortedCommits.length; i++) {
+    const commit = sortedCommits[i];
     const children = childrenMap.get(commit.oid) || [];
 
     let lane: number = 0;
     let inheritedLane = false;
 
     // Check if any child wants us to continue in their lane
-    // A child wants us in their lane if we are their FIRST parent
     for (const childOid of children) {
       const childCommit = commitMap.get(childOid);
       const childLane = oidToLane.get(childOid);
 
       if (childCommit && childLane !== undefined) {
-        // Check if this commit is the first parent of the child
         if (childCommit.parentIds[0] === commit.oid) {
-          // We should continue in this child's lane
           lane = childLane;
           inheritedLane = true;
-
-          // Release other children's lanes if they were waiting for different parents
-          // This happens when a commit has multiple children (branch point)
-          for (const otherChildOid of children) {
-            if (otherChildOid !== childOid) {
-              const otherChildLane = oidToLane.get(otherChildOid);
-              const otherChild = commitMap.get(otherChildOid);
-              if (
-                otherChildLane !== undefined &&
-                otherChild &&
-                otherChild.parentIds[0] === commit.oid
-              ) {
-                // This other child also wants us - but we can only be in one lane
-                // The other lane should continue to this commit's other parents or be released
-              }
-            }
-          }
           break;
         }
       }
     }
 
     if (!inheritedLane) {
-      // We're not continuing any child's lane
-      // Either we're a branch tip (no children) or we're a merge parent (not first parent)
-
-      // For merge parents, check if we should merge into an existing lane
-      if (children.length > 0) {
-        // We need a lane, prefer reusing a free one near our children
-        lane = getFreeLane();
-      } else {
-        // Branch tip - get any free lane
-        lane = getFreeLane();
-      }
+      lane = getFreeLane();
     }
 
-    occupyLane(lane!, commit.oid);
-    oidToLane.set(commit.oid, lane!);
+    occupyLane(lane, commit.oid);
+    oidToLane.set(commit.oid, lane);
+
+    // Find the best row for this commit (dense packing)
+    const previousRow = i > 0 ? nodes.get(sortedCommits[i - 1].oid)?.row ?? -1 : -1;
+    const row = findBestRow(currentRow, lane, children, previousRow);
+
+    // Update currentRow if we used a new row
+    if (row >= currentRow) {
+      currentRow = row + 1;
+    }
+
+    occupyPosition(row, lane, commit.oid);
 
     // Create node
     const childLanes = children
@@ -357,7 +429,7 @@ export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
     const node: LayoutNode = {
       oid: commit.oid,
       row,
-      lane: lane!,
+      lane,
       commit,
       childLanes,
       parentLanes: [],
@@ -374,34 +446,26 @@ export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
           toOid: childOid,
           fromRow: row,
           toRow: childNode.row,
-          fromLane: lane!,
+          fromLane: lane,
           toLane: childLane,
           isMerge: childNode.commit.parentIds.length > 1,
         });
 
-        // Check if we should release the child's lane
-        // A child's lane can be released if:
-        // 1. We are NOT continuing in that lane (lane != childLane)
-        // 2. All of the child's parents have been processed
         if (lane !== childLane) {
           const childCommit = commitMap.get(childOid)!;
           const allParentsProcessed = childCommit.parentIds.every(
             (pid) => !commitOidSet.has(pid) || nodes.has(pid) || pid === commit.oid
           );
           if (allParentsProcessed) {
-            // This child's lane is no longer needed
             releaseLane(childLane);
           }
         }
       }
     }
 
-    // Check if this commit's lane should be released
-    // Release if this commit has no parents in the commit set (root commit)
-    // or if all parents are outside the loaded commit range
     const hasParentsInSet = commit.parentIds.some((pid) => commitOidSet.has(pid));
     if (!hasParentsInSet) {
-      releaseLane(lane!);
+      releaseLane(lane);
     }
   }
 
@@ -414,11 +478,17 @@ export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
 
   const maxLane = activeLanes.length > 0 ? activeLanes.length - 1 : 0;
 
+  // Calculate actual total rows used
+  let maxRow = 0;
+  for (const node of nodes.values()) {
+    maxRow = Math.max(maxRow, node.row);
+  }
+
   return {
     nodes,
     edges,
     maxLane,
-    totalRows: sortedCommits.length,
+    totalRows: maxRow + 1,
   };
 }
 
@@ -455,12 +525,10 @@ export function validateLayout(layout: GraphLayout, commits: GraphCommit[]): str
     positions.set(key, node.oid);
   }
 
-  // Check rows are sequential
-  const rows = [...layout.nodes.values()].map((n) => n.row).sort((a, b) => a - b);
-  for (let i = 0; i < rows.length; i++) {
-    if (rows[i] !== i) {
-      errors.push(`Non-sequential rows: expected ${i}, got ${rows[i]}`);
-      break;
+  // Check rows are valid (non-negative)
+  for (const node of layout.nodes.values()) {
+    if (node.row < 0) {
+      errors.push(`Invalid row ${node.row} for commit ${node.oid}`);
     }
   }
 

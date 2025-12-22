@@ -55,13 +55,15 @@ export interface RenderData {
   refsByCommit: RefsByCommit;
   /** Author emails by commit OID for avatar loading */
   authorEmails: Record<string, string>;
+  /** Maximum lane in the graph (for label positioning) */
+  maxLane: number;
 }
 
 const DEFAULT_CONFIG: VirtualScrollConfig = {
-  rowHeight: 40,
-  laneWidth: 28,
-  padding: 50,
-  overscanRows: 10,
+  rowHeight: 28,
+  laneWidth: 24,
+  padding: 20,
+  overscanRows: 15,
 };
 
 /**
@@ -208,6 +210,7 @@ export class VirtualScrollManager {
       offsetY: this.config.padding - viewport.scrollTop,
       refsByCommit: this.refsByCommit,
       authorEmails: this.authorEmails,
+      maxLane: this.layout?.maxLane ?? 0,
     };
   }
 

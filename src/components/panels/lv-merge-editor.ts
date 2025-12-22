@@ -15,6 +15,13 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import {
+  initHighlighter,
+  detectLanguage,
+  highlightLineSync,
+  preloadLanguage,
+} from '../../utils/shiki-highlighter.ts';
+import type { BundledLanguage } from 'shiki';
 import type { ConflictFile } from '../../types/git.types.ts';
 
 interface DiffLine {
@@ -323,6 +330,8 @@ export class LvMergeEditor extends LitElement {
   @state() private outputContent = '';
   @state() private loading = false;
 
+  private language: BundledLanguage | null = null;
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('conflictFile') && this.conflictFile) {
       await this.loadContents();
@@ -333,6 +342,13 @@ export class LvMergeEditor extends LitElement {
     if (!this.repositoryPath || !this.conflictFile) return;
 
     this.loading = true;
+
+    // Initialize Shiki highlighter and detect language
+    await initHighlighter();
+    this.language = detectLanguage(this.conflictFile.path);
+    if (this.language) {
+      await preloadLanguage(this.language);
+    }
 
     try {
       // Load all three versions in parallel
@@ -462,6 +478,13 @@ export class LvMergeEditor extends LitElement {
     return this.outputContent;
   }
 
+  private renderHighlightedContent(content: string) {
+    const tokens = highlightLineSync(content, this.language);
+    return html`${tokens.map(
+      (token) => html`<span style="color: ${token.color}">${token.content}</span>`
+    )}`;
+  }
+
   private renderCodeView(content: string, diffAgainst?: string): ReturnType<typeof html> {
     const lines = content.split('\n');
     const compareLines = diffAgainst?.split('\n') ?? [];
@@ -483,7 +506,7 @@ export class LvMergeEditor extends LitElement {
           return html`
             <div class="code-line ${lineClass}">
               <span class="line-number">${index + 1}</span>
-              <span class="line-content">${line || ' '}</span>
+              <span class="line-content">${this.renderHighlightedContent(line) || ' '}</span>
             </div>
           `;
         })}

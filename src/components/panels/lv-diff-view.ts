@@ -2,7 +2,14 @@ import { LitElement, html, css, nothing, TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { tokenizeLine, detectLanguage, getTokenColor } from '../../utils/syntax-highlighter.ts';
+import {
+  initHighlighter,
+  detectLanguage,
+  highlightLineSync,
+  preloadLanguage,
+  type HighlightToken,
+} from '../../utils/shiki-highlighter.ts';
+import type { BundledLanguage } from 'shiki';
 import type { DiffFile, DiffHunk, DiffLine, StatusEntry } from '../../types/git.types.ts';
 
 type DiffViewMode = 'unified' | 'split';
@@ -29,17 +36,6 @@ export class LvDiffView extends LitElement {
         overflow: hidden;
         font-family: var(--font-family-mono);
         font-size: var(--font-size-xs);
-
-        /* Syntax highlighting colors */
-        --syntax-keyword: #c678dd;
-        --syntax-string: #98c379;
-        --syntax-number: #d19a66;
-        --syntax-comment: #5c6370;
-        --syntax-operator: #56b6c2;
-        --syntax-function: #61afef;
-        --syntax-type: #e5c07b;
-        --syntax-variable: #abb2bf;
-        --syntax-punctuation: #abb2bf;
       }
 
       .header {
@@ -429,7 +425,7 @@ export class LvDiffView extends LitElement {
   @state() private error: string | null = null;
   @state() private viewMode: DiffViewMode = 'unified';
 
-  private language: string | null = null;
+  private language: BundledLanguage | null = null;
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('file') && this.file) {
@@ -448,6 +444,13 @@ export class LvDiffView extends LitElement {
     this.diff = null;
 
     try {
+      // Initialize highlighter and detect language
+      await initHighlighter();
+      this.language = detectLanguage(this.file.path);
+      if (this.language) {
+        await preloadLanguage(this.language);
+      }
+
       const result = await gitService.getFileDiff(
         this.repositoryPath,
         this.file.path,
@@ -456,7 +459,6 @@ export class LvDiffView extends LitElement {
 
       if (result.success) {
         this.diff = result.data!;
-        this.language = detectLanguage(this.file.path);
       } else {
         this.error = result.error?.message ?? 'Failed to load diff';
       }
@@ -475,6 +477,13 @@ export class LvDiffView extends LitElement {
     this.diff = null;
 
     try {
+      // Initialize highlighter and detect language
+      await initHighlighter();
+      this.language = detectLanguage(this.commitFile.filePath);
+      if (this.language) {
+        await preloadLanguage(this.language);
+      }
+
       const result = await gitService.getCommitFileDiff(
         this.repositoryPath,
         this.commitFile.commitOid,
@@ -483,7 +492,6 @@ export class LvDiffView extends LitElement {
 
       if (result.success) {
         this.diff = result.data!;
-        this.language = detectLanguage(this.commitFile.filePath);
       } else {
         this.error = result.error?.message ?? 'Failed to load diff';
       }
@@ -643,9 +651,9 @@ export class LvDiffView extends LitElement {
   }
 
   private renderHighlightedContent(content: string): TemplateResult {
-    const tokens = tokenizeLine(content, this.language);
+    const tokens = highlightLineSync(content, this.language);
     return html`${tokens.map(
-      (token) => html`<span style="color: ${getTokenColor(token.type)}">${token.value}</span>`
+      (token) => html`<span style="color: ${token.color}">${token.content}</span>`
     )}`;
   }
 

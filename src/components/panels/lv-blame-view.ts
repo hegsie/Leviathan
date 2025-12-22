@@ -3,7 +3,13 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getFileBlame } from '../../services/git.service.ts';
 import { formatRelativeTime } from '../../utils/format.ts';
-import { tokenizeLine, detectLanguage, getTokenColor } from '../../utils/syntax-highlighter.ts';
+import {
+  initHighlighter,
+  detectLanguage,
+  highlightLineSync,
+  preloadLanguage,
+} from '../../utils/shiki-highlighter.ts';
+import type { BundledLanguage } from 'shiki';
 import type { BlameLine } from '../../types/git.types.ts';
 
 // Group of consecutive lines from the same commit
@@ -39,17 +45,6 @@ export class LvBlameView extends LitElement {
         overflow: hidden;
         font-family: var(--font-family-mono);
         font-size: var(--font-size-xs);
-
-        /* Syntax highlighting colors */
-        --syntax-keyword: #c678dd;
-        --syntax-string: #98c379;
-        --syntax-number: #d19a66;
-        --syntax-comment: #5c6370;
-        --syntax-operator: #56b6c2;
-        --syntax-function: #61afef;
-        --syntax-type: #e5c07b;
-        --syntax-variable: #abb2bf;
-        --syntax-punctuation: #abb2bf;
       }
 
       .header {
@@ -341,7 +336,7 @@ export class LvBlameView extends LitElement {
   @state() private isLoading = false;
   @state() private error: string | null = null;
 
-  private language: string | null = null;
+  private language: BundledLanguage | null = null;
   private authorColors: Map<string, string> = new Map();
   private uniqueAuthors: Set<string> = new Set();
   private uniqueCommits: Set<string> = new Set();
@@ -365,7 +360,13 @@ export class LvBlameView extends LitElement {
 
     this.isLoading = true;
     this.error = null;
+
+    // Initialize Shiki highlighter and detect language
+    await initHighlighter();
     this.language = detectLanguage(this.filePath);
+    if (this.language) {
+      await preloadLanguage(this.language);
+    }
 
     try {
       const result = await getFileBlame(
@@ -437,9 +438,9 @@ export class LvBlameView extends LitElement {
   }
 
   private renderHighlightedContent(content: string) {
-    const tokens = tokenizeLine(content, this.language);
+    const tokens = highlightLineSync(content, this.language);
     return html`${tokens.map(
-      (token) => html`<span style="color: ${getTokenColor(token.type)}">${token.value}</span>`
+      (token) => html`<span style="color: ${token.color}">${token.content}</span>`
     )}`;
   }
 

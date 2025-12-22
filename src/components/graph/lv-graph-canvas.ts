@@ -170,11 +170,11 @@ export class LvGraphCanvas extends LitElement {
   private lastRenderData: RenderData | null = null;
   private sortedNodesByRow: LayoutNode[] = [];
 
-  // Config - larger for bolder design with avatars
-  private readonly ROW_HEIGHT = 40;
-  private readonly LANE_WIDTH = 28;
-  private readonly PADDING = 50;
-  private readonly NODE_RADIUS = 14;
+  // Config - balanced size
+  private readonly ROW_HEIGHT = 28;
+  private readonly LANE_WIDTH = 24;
+  private readonly PADDING = 20;
+  private readonly NODE_RADIUS = 6;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -190,6 +190,26 @@ export class LvGraphCanvas extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.cleanup();
+  }
+
+  willUpdate(changedProperties: Map<string, unknown>): void {
+    // Reload when repository path changes
+    if (changedProperties.has('repositoryPath') && changedProperties.get('repositoryPath') !== undefined) {
+      // Clear existing state when switching repositories
+      this.layout = null;
+      this.selectedNode = null;
+      this.hoveredNode = null;
+      this.realCommits.clear();
+      this.refsByCommit = {};
+
+      // Reload commits for the new repository
+      this.loadCommits();
+    }
+
+    // Reload when search filter changes
+    if (changedProperties.has('searchFilter')) {
+      this.loadCommits();
+    }
   }
 
   private initializeSystems(): void {
@@ -317,8 +337,8 @@ export class LvGraphCanvas extends LitElement {
   }
 
   private processLayout(): void {
-    // Compute layout
-    const result = computeGraphLayout(this.commits, { optimized: true });
+    // Compute layout (use simple algorithm for cleaner one-commit-per-row layout)
+    const result = computeGraphLayout(this.commits, { optimized: false });
     this.layout = result.layout;
 
     // Build sorted nodes array for keyboard navigation
@@ -391,6 +411,15 @@ export class LvGraphCanvas extends LitElement {
 
   private rebuildSpatialIndex(): void {
     if (!this.layout || !this.spatialIndex) return;
+
+    // Configure spatial index with current maxLane for mirrored coordinates
+    this.spatialIndex.configure({
+      offsetX: this.PADDING,
+      offsetY: this.PADDING,
+      rowHeight: this.ROW_HEIGHT,
+      laneWidth: this.LANE_WIDTH,
+      maxLane: this.layout.maxLane,
+    });
 
     const viewport = this.getViewport();
     const range = this.virtualScroll?.getVisibleRange(viewport);
@@ -727,10 +756,6 @@ export class LvGraphCanvas extends LitElement {
   }
 
   private hitTest(e: MouseEvent): HitTestResult {
-    if (!this.spatialIndex) {
-      return { type: 'none', distance: Infinity };
-    }
-
     const rect = this.canvasEl.getBoundingClientRect();
     const viewport = this.getViewport();
 
@@ -738,7 +763,30 @@ export class LvGraphCanvas extends LitElement {
     const graphX = e.clientX - rect.left + viewport.scrollLeft;
     const graphY = e.clientY - rect.top + viewport.scrollTop;
 
-    return this.spatialIndex.hitTest(graphX, graphY);
+    // First check spatial index for node hits
+    if (this.spatialIndex) {
+      const result = this.spatialIndex.hitTest(graphX, graphY);
+      if (result.type === 'node' && result.node) {
+        return result;
+      }
+    }
+
+    // If no node hit, check if we clicked in a row (for message/label area)
+    // Calculate which row was clicked based on Y coordinate
+    // Use Math.round so the click region is centered around each node
+    const adjustedY = graphY - this.PADDING;
+    if (adjustedY >= 0 && this.layout) {
+      const row = Math.round(adjustedY / this.ROW_HEIGHT);
+
+      // Find the node at this row
+      for (const node of this.layout.nodes.values()) {
+        if (node.row === row) {
+          return { type: 'node', node, distance: 0 };
+        }
+      }
+    }
+
+    return { type: 'none', distance: Infinity };
   }
 
   private dispatchSelectionEvent(): void {
@@ -811,20 +859,7 @@ export class LvGraphCanvas extends LitElement {
                   <div class="message">${this.loadError}</div>
                 </div>
               `
-            : this.selectedNode
-              ? html`
-                  <div class="info-panel">
-                    <div class="oid">${this.selectedNode.oid}</div>
-                    <div class="message">${this.selectedNode.commit.message}</div>
-                    <div class="meta">
-                      ${this.selectedNode.commit.author} &bull;
-                      Row ${this.selectedNode.row} &bull;
-                      Lane ${this.selectedNode.lane} &bull;
-                      ${this.selectedNode.commit.parentIds.length} parent(s)
-                    </div>
-                  </div>
-                `
-              : ''}
+            : ''}
         </div>
       </div>
     `;
