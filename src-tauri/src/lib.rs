@@ -78,6 +78,7 @@ pub fn run() {
             commands::diff::get_commit_files,
             commands::diff::get_commit_file_diff,
             commands::diff::get_commits_stats,
+            commands::diff::get_file_blame,
             commands::refs::get_refs_by_commit,
         ])
         .run(tauri::generate_context!())

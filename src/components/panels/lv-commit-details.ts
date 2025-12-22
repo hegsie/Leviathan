@@ -258,6 +258,38 @@ export class LvCommitDetails extends LitElement {
         color: var(--color-error);
       }
 
+      .file-actions {
+        display: flex;
+        gap: 4px;
+        margin-left: auto;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+      }
+
+      .file-item:hover .file-actions {
+        opacity: 1;
+      }
+
+      .file-action {
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-sm);
+        color: var(--color-primary);
+        background: var(--color-bg-tertiary);
+        border: 1px solid var(--color-border);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .file-action:hover {
+        background: var(--color-primary);
+        color: white;
+        border-color: var(--color-primary);
+      }
+
       .loading-files {
         color: var(--color-text-muted);
         font-size: var(--font-size-xs);
@@ -389,6 +421,23 @@ export class LvCommitDetails extends LitElement {
     );
   }
 
+  private handleBlameClick(file: CommitFileEntry, e: Event): void {
+    e.stopPropagation();
+    // Don't show blame for deleted files
+    if (file.status === 'deleted') return;
+
+    this.dispatchEvent(
+      new CustomEvent('show-blame', {
+        detail: {
+          filePath: file.path,
+          commitOid: this.commit?.oid,
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
   private getRefClass(refType: string): string {
     switch (refType) {
       case 'localBranch':
@@ -419,6 +468,7 @@ export class LvCommitDetails extends LitElement {
 
   private renderFileItem(file: CommitFileEntry) {
     const filename = file.path.split('/').pop() || file.path;
+    const canBlame = file.status !== 'deleted';
 
     return html`
       <li
@@ -432,6 +482,20 @@ export class LvCommitDetails extends LitElement {
           ${file.additions > 0 ? html`<span class="additions">+${file.additions}</span>` : nothing}
           ${file.deletions > 0 ? html`<span class="deletions">-${file.deletions}</span>` : nothing}
         </span>
+        <div class="file-actions">
+          ${canBlame ? html`
+            <button
+              class="file-action"
+              title="View file blame"
+              @click=${(e: Event) => this.handleBlameClick(file, e)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </button>
+          ` : nothing}
+        </div>
       </li>
     `;
   }

@@ -76,22 +76,25 @@ const DEFAULT_CONFIG: RenderConfig = {
 
 const DEFAULT_THEME: RenderTheme = {
   background: '#1e1e1e',
+  // Simplified color palette - 4 muted, harmonious colors
   laneColors: [
-    '#3b82f6', '#22c55e', '#ef4444', '#f59e0b', '#8b5cf6',
-    '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#6366f1',
+    '#6b8aae', // muted blue
+    '#7a9a7a', // muted green
+    '#9a8a7a', // muted tan
+    '#8a7a9a', // muted purple
   ],
-  textColor: '#e4e4e4',
+  textColor: '#c8c8c8',
   selectedColor: '#ffffff',
-  hoveredColor: '#ffffff',
-  fpsColor: '#22c55e',
+  hoveredColor: '#e0e0e0',
+  fpsColor: '#7a9a7a',
   refColors: {
-    localBranch: '#22c55e',
+    localBranch: '#5a8a5a',      // calm green
     localBranchText: '#ffffff',
-    remoteBranch: '#3b82f6',
+    remoteBranch: '#5a7a9a',     // calm blue
     remoteBranchText: '#ffffff',
-    tag: '#f59e0b',
+    tag: '#9a8a5a',              // calm gold
     tagText: '#1e1e1e',
-    head: '#ef4444',
+    head: '#9a5a6a',             // calm red/pink
     headText: '#ffffff',
   },
 };
@@ -514,12 +517,12 @@ export class CanvasRenderer {
       return;
     }
 
-    const labelHeight = 22;
-    const labelPadding = 8;
+    const labelHeight = 24;
+    const labelPadding = 10;
     const labelGap = 6;
-    const labelRadius = 4;
-    const iconSize = 12;
-    const iconPadding = 4;
+    const labelRadius = 5;
+    const iconSize = 14;
+    const iconPadding = 5;
 
     for (const node of nodes) {
       const refs = refsByCommit[node.oid];
@@ -536,7 +539,7 @@ export class CanvasRenderer {
         const label = ref.shorthand;
 
         // Set font for measuring
-        ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.font = 'bold 13px -apple-system, BlinkMacSystemFont, sans-serif';
         const textWidth = ctx.measureText(label).width;
 
         // Calculate pill width with icon space if enabled
@@ -581,7 +584,7 @@ export class CanvasRenderer {
 
         // Draw label text
         ctx.fillStyle = textColor;
-        ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.font = 'bold 13px -apple-system, BlinkMacSystemFont, sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText(label, textStartX, y);
@@ -593,71 +596,55 @@ export class CanvasRenderer {
   }
 
   /**
-   * Draw an icon for a ref type
+   * Draw an icon for a ref type - using simple filled shapes for clarity
    */
   private drawRefIcon(refType: RefType, x: number, y: number, size: number): void {
     const { ctx } = this;
-    const halfSize = size / 2;
+    const cx = x + size / 2;
+    const cy = y;
 
     ctx.save();
-    ctx.lineWidth = 1.5;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
 
     switch (refType) {
       case 'localBranch':
-        // Git branch icon (fork shape)
+        // Filled circle with a line - represents a branch node
         ctx.beginPath();
-        ctx.moveTo(x + halfSize, y - halfSize + 2);
-        ctx.lineTo(x + halfSize, y + halfSize - 2);
-        ctx.moveTo(x + 2, y - 2);
-        ctx.quadraticCurveTo(x + halfSize, y - 2, x + halfSize, y + 2);
-        ctx.stroke();
-        // Circle at branch point
-        ctx.beginPath();
-        ctx.arc(x + 2, y - 2, 2, 0, Math.PI * 2);
+        ctx.arc(cx, cy - 2, 4, 0, Math.PI * 2);
         ctx.fill();
-        ctx.beginPath();
-        ctx.arc(x + halfSize, y + halfSize - 2, 2, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.fillRect(cx - 1.5, cy + 1, 3, 5);
         break;
 
       case 'remoteBranch':
-        // Cloud/remote icon
+        // Arrow pointing up - represents sync/remote
         ctx.beginPath();
-        ctx.arc(x + halfSize, y, halfSize - 2, 0, Math.PI * 2);
-        ctx.stroke();
-        // Arrow pointing up
-        ctx.beginPath();
-        ctx.moveTo(x + halfSize, y - halfSize + 4);
-        ctx.lineTo(x + halfSize, y + halfSize - 4);
-        ctx.moveTo(x + halfSize - 3, y - halfSize + 7);
-        ctx.lineTo(x + halfSize, y - halfSize + 4);
-        ctx.lineTo(x + halfSize + 3, y - halfSize + 7);
-        ctx.stroke();
+        ctx.moveTo(cx, cy - 5);
+        ctx.lineTo(cx + 5, cy + 1);
+        ctx.lineTo(cx + 2, cy + 1);
+        ctx.lineTo(cx + 2, cy + 5);
+        ctx.lineTo(cx - 2, cy + 5);
+        ctx.lineTo(cx - 2, cy + 1);
+        ctx.lineTo(cx - 5, cy + 1);
+        ctx.closePath();
+        ctx.fill();
         break;
 
       case 'tag':
-        // Tag icon (bookmark shape)
+        // Filled bookmark/tag shape
         ctx.beginPath();
-        ctx.moveTo(x + 2, y - halfSize + 2);
-        ctx.lineTo(x + size - 2, y - halfSize + 2);
-        ctx.lineTo(x + size - 2, y + halfSize - 4);
-        ctx.lineTo(x + halfSize, y + halfSize);
-        ctx.lineTo(x + 2, y + halfSize - 4);
+        ctx.moveTo(cx - 4, cy - 5);
+        ctx.lineTo(cx + 4, cy - 5);
+        ctx.lineTo(cx + 4, cy + 3);
+        ctx.lineTo(cx, cy + 6);
+        ctx.lineTo(cx - 4, cy + 3);
         ctx.closePath();
-        ctx.stroke();
-        // Dot in tag
-        ctx.beginPath();
-        ctx.arc(x + halfSize, y - halfSize + 5, 1.5, 0, Math.PI * 2);
         ctx.fill();
         break;
 
       default:
-        // Default: simple circle
+        // Default: simple filled circle
         ctx.beginPath();
-        ctx.arc(x + halfSize, y, halfSize - 2, 0, Math.PI * 2);
-        ctx.stroke();
+        ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+        ctx.fill();
     }
 
     ctx.restore();

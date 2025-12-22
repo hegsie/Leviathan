@@ -384,3 +384,103 @@ pub async fn get_commit_file_diff(
         .next()
         .ok_or_else(|| crate::error::LeviathanError::OperationFailed("File not found in commit".to_string()))
 }
+
+/// A single line of blame output
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameLine {
+    pub line_number: usize,
+    pub content: String,
+    pub commit_oid: String,
+    pub commit_short_id: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub timestamp: i64,
+    pub summary: String,
+    pub is_boundary: bool,
+}
+
+/// Blame result for a file
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameResult {
+    pub path: String,
+    pub lines: Vec<BlameLine>,
+}
+
+/// Get blame information for a file
+#[command]
+pub async fn get_file_blame(
+    path: String,
+    file_path: String,
+    commit_oid: Option<String>,
+) -> Result<BlameResult> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let mut blame_opts = git2::BlameOptions::new();
+
+    // If a specific commit is provided, blame up to that commit
+    if let Some(ref oid_str) = commit_oid {
+        let oid = git2::Oid::from_str(oid_str)?;
+        blame_opts.newest_commit(oid);
+    }
+
+    let blame = repo.blame_file(Path::new(&file_path), Some(&mut blame_opts))?;
+
+    // Read the file content
+    let file_content = if let Some(ref oid_str) = commit_oid {
+        // Read from specific commit
+        let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
+        let tree = commit.tree()?;
+        let entry = tree.get_path(Path::new(&file_path))?;
+        let blob = repo.find_blob(entry.id())?;
+        String::from_utf8_lossy(blob.content()).to_string()
+    } else {
+        // Read from working directory
+        let full_path = Path::new(&path).join(&file_path);
+        std::fs::read_to_string(full_path).unwrap_or_default()
+    };
+
+    let content_lines: Vec<&str> = file_content.lines().collect();
+    let mut lines = Vec::new();
+
+    for (i, line_content) in content_lines.iter().enumerate() {
+        let line_num = i + 1;
+
+        if let Some(hunk) = blame.get_line(line_num) {
+            let commit_id = hunk.final_commit_id();
+            let short_id = commit_id.to_string()[..7].to_string();
+
+            // Get commit details
+            let (author_name, author_email, timestamp, summary) =
+                if let Ok(commit) = repo.find_commit(commit_id) {
+                    let author = commit.author();
+                    (
+                        author.name().unwrap_or("Unknown").to_string(),
+                        author.email().unwrap_or("").to_string(),
+                        author.when().seconds(),
+                        commit.summary().unwrap_or("").to_string(),
+                    )
+                } else {
+                    ("Unknown".to_string(), "".to_string(), 0, "".to_string())
+                };
+
+            lines.push(BlameLine {
+                line_number: line_num,
+                content: line_content.to_string(),
+                commit_oid: commit_id.to_string(),
+                commit_short_id: short_id,
+                author_name,
+                author_email,
+                timestamp,
+                summary,
+                is_boundary: hunk.is_boundary(),
+            });
+        }
+    }
+
+    Ok(BlameResult {
+        path: file_path,
+        lines,
+    })
+}

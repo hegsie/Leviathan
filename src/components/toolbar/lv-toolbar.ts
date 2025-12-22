@@ -11,8 +11,10 @@ import { openRepository, fetch as gitFetch, pull as gitPull, push as gitPush } f
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
 import '../dialogs/lv-clone-dialog.ts';
 import '../dialogs/lv-init-dialog.ts';
+import './lv-search-bar.ts';
 import type { LvCloneDialog } from '../dialogs/lv-clone-dialog.ts';
 import type { LvInitDialog } from '../dialogs/lv-init-dialog.ts';
+import type { LvSearchBar, SearchFilter } from './lv-search-bar.ts';
 
 @customElement('lv-toolbar')
 export class LvToolbar extends LitElement {
@@ -220,6 +222,9 @@ export class LvToolbar extends LitElement {
 
   @query('lv-clone-dialog') private cloneDialog!: LvCloneDialog;
   @query('lv-init-dialog') private initDialog!: LvInitDialog;
+  @query('lv-search-bar') private searchBar!: LvSearchBar;
+
+  @state() private showSearch = false;
 
   private unsubscribe?: () => void;
 
@@ -230,6 +235,14 @@ export class LvToolbar extends LitElement {
       this.openRepositories = state.openRepositories;
       this.activeIndex = state.activeIndex;
       this.isLoading = state.isLoading;
+    });
+
+    // Listen for focus-search event from app-shell
+    this.addEventListener('focus-search', () => {
+      this.showSearch = true;
+      this.updateComplete.then(() => {
+        this.searchBar?.focus();
+      });
     });
   }
 
@@ -354,6 +367,33 @@ export class LvToolbar extends LitElement {
     return this.isFetching || this.isPulling || this.isPushing;
   }
 
+  private handleToggleSearch(): void {
+    this.showSearch = !this.showSearch;
+    if (this.showSearch) {
+      this.updateComplete.then(() => {
+        this.searchBar?.focus();
+      });
+    }
+  }
+
+  private handleSearchChange(e: CustomEvent<{ filter: SearchFilter }>): void {
+    this.dispatchEvent(new CustomEvent('search-change', {
+      detail: e.detail,
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
+  private handleSearchClose(): void {
+    this.showSearch = false;
+    // Clear search
+    this.dispatchEvent(new CustomEvent('search-change', {
+      detail: { filter: { query: '', author: '', dateFrom: '', dateTo: '' } },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   render() {
     return html`
       <lv-clone-dialog></lv-clone-dialog>
@@ -422,6 +462,28 @@ export class LvToolbar extends LitElement {
       </div>
 
       <div class="spacer"></div>
+
+      ${this.activeRepo ? html`
+        <div class="toolbar-section">
+          <button
+            class="menu-btn ${this.showSearch ? 'active' : ''}"
+            title="Search commits (Ctrl+F)"
+            @click=${this.handleToggleSearch}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"></circle>
+              <path d="M21 21l-4.35-4.35"></path>
+            </svg>
+          </button>
+        </div>
+      ` : ''}
+
+      ${this.showSearch && this.activeRepo ? html`
+        <lv-search-bar
+          @search-change=${this.handleSearchChange}
+          @close=${this.handleSearchClose}
+        ></lv-search-bar>
+      ` : ''}
 
       ${this.activeRepo ? html`
         <div class="toolbar-section remote-buttons">

@@ -1,15 +1,19 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from './styles/shared-styles.ts';
-import { useRepositoryStore, type OpenRepository } from './stores/index.ts';
+import { useRepositoryStore, useUIStore, type OpenRepository } from './stores/index.ts';
+import { registerDefaultShortcuts } from './services/keyboard.service.ts';
 import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
 import './components/panels/lv-diff-view.ts';
+import './components/panels/lv-blame-view.ts';
 import './components/sidebar/lv-left-panel.ts';
 import './components/sidebar/lv-right-panel.ts';
+import './components/dialogs/lv-settings-dialog.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
+import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 
 /**
  * Main application shell component
@@ -178,6 +182,8 @@ export class AppShell extends LitElement {
       :host(.resizing-h) * {
         cursor: col-resize !important;
       }
+
+      /* Blame view uses the same diff-area styling */
     `,
   ];
 
@@ -189,6 +195,17 @@ export class AppShell extends LitElement {
   @state() private showDiff = false;
   @state() private diffFile: StatusEntry | null = null;
   @state() private diffCommitFile: { commitOid: string; filePath: string } | null = null;
+
+  // Blame view state
+  @state() private showBlame = false;
+  @state() private blameFile: string | null = null;
+  @state() private blameCommitOid: string | null = null;
+
+  // Settings dialog
+  @state() private showSettings = false;
+
+  // Search/filter
+  @state() private searchFilter: SearchFilter | null = null;
 
   // Panel dimensions
   @state() private leftPanelWidth = 220;
@@ -215,6 +232,21 @@ export class AppShell extends LitElement {
       this.activeRepository = state.getActiveRepository();
     });
     document.addEventListener('keydown', this.boundHandleKeyDown);
+
+    // Register keyboard shortcuts
+    registerDefaultShortcuts({
+      navigateUp: () => this.graphCanvas?.navigatePrevious?.(),
+      navigateDown: () => this.graphCanvas?.navigateNext?.(),
+      selectCommit: () => {/* handled by graph canvas */},
+      stageAll: () => this.handleStageAll(),
+      unstageAll: () => this.handleUnstageAll(),
+      commit: () => {/* handled by commit panel */},
+      refresh: () => this.handleRefresh(),
+      search: () => this.handleToggleSearch(),
+      openSettings: () => this.showSettings = true,
+      toggleLeftPanel: () => useUIStore.getState().togglePanel('left'),
+      toggleRightPanel: () => useUIStore.getState().togglePanel('right'),
+    });
   }
 
   disconnectedCallback(): void {
@@ -226,8 +258,12 @@ export class AppShell extends LitElement {
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
-    if (e.key === 'Escape' && this.showDiff) {
-      this.handleCloseDiff();
+    if (e.key === 'Escape') {
+      if (this.showDiff) {
+        this.handleCloseDiff();
+      } else if (this.showBlame) {
+        this.handleCloseBlame();
+      }
     }
   }
 
@@ -272,6 +308,10 @@ export class AppShell extends LitElement {
   }
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry }>): void {
+    // Close blame if open
+    this.showBlame = false;
+    this.blameFile = null;
+    this.blameCommitOid = null;
     // Working directory file selected - show diff
     this.diffFile = e.detail.file;
     this.diffCommitFile = null;
@@ -279,6 +319,10 @@ export class AppShell extends LitElement {
   }
 
   private handleCommitFileSelected(e: CustomEvent<{ commitOid: string; filePath: string }>): void {
+    // Close blame if open
+    this.showBlame = false;
+    this.blameFile = null;
+    this.blameCommitOid = null;
     // Commit file selected - show diff
     this.diffCommitFile = {
       commitOid: e.detail.commitOid,
@@ -326,6 +370,63 @@ export class AppShell extends LitElement {
       return this.diffCommitFile.filePath;
     }
     return '';
+  }
+
+  private handleStageAll(): void {
+    // TODO: Implement stage all via git service
+    console.log('Stage all shortcut triggered');
+  }
+
+  private handleUnstageAll(): void {
+    // TODO: Implement unstage all via git service
+    console.log('Unstage all shortcut triggered');
+  }
+
+  private handleRefresh(): void {
+    // Trigger refresh of the graph
+    this.graphCanvas?.refresh?.();
+  }
+
+  private handleToggleSearch(): void {
+    // TODO: Focus search input in toolbar
+    const toolbar = this.shadowRoot?.querySelector('lv-toolbar');
+    if (toolbar) {
+      (toolbar as HTMLElement).dispatchEvent(new CustomEvent('focus-search'));
+    }
+  }
+
+  private handleCloseSettings(): void {
+    this.showSettings = false;
+  }
+
+  private handleBlameCommitClick(e: CustomEvent<{ oid: string }>): void {
+    this.showBlame = false;
+    this.graphCanvas?.selectCommit(e.detail.oid);
+  }
+
+  private handleCloseBlame(): void {
+    this.showBlame = false;
+    this.blameFile = null;
+    this.blameCommitOid = null;
+  }
+
+  private handleShowBlame(e: CustomEvent<{ filePath: string; commitOid?: string }>): void {
+    // Close diff if open
+    this.showDiff = false;
+    this.diffFile = null;
+    this.diffCommitFile = null;
+    // Open blame
+    this.blameFile = e.detail.filePath;
+    this.blameCommitOid = e.detail.commitOid ?? null;
+    this.showBlame = true;
+  }
+
+  private handleSearchChange(e: CustomEvent<{ filter: SearchFilter }>): void {
+    this.searchFilter = e.detail.filter;
+    // Pass filter to graph canvas
+    if (this.graphCanvas) {
+      this.graphCanvas.searchFilter = this.searchFilter;
+    }
   }
 
   render() {
@@ -385,7 +486,19 @@ export class AppShell extends LitElement {
                         </div>
                       </div>
                     `
-                  : ''}
+                  : this.showBlame && this.blameFile
+                    ? html`
+                        <div class="diff-area">
+                          <lv-blame-view
+                            .repositoryPath=${this.activeRepository.repository.path}
+                            .filePath=${this.blameFile}
+                            .commitOid=${this.blameCommitOid}
+                            @close=${this.handleCloseBlame}
+                            @commit-click=${this.handleBlameCommitClick}
+                          ></lv-blame-view>
+                        </div>
+                      `
+                    : ''}
               </main>
 
               <div
@@ -399,6 +512,7 @@ export class AppShell extends LitElement {
                 @file-selected=${this.handleFileSelected}
                 @select-commit=${this.handleSelectCommit}
                 @commit-file-selected=${this.handleCommitFileSelected}
+                @show-blame=${this.handleShowBlame}
               >
                 <lv-right-panel
                   .commit=${this.selectedCommit}
@@ -412,6 +526,15 @@ export class AppShell extends LitElement {
             </footer>
           `
         : html`<lv-welcome></lv-welcome>`}
+
+      ${this.showSettings
+        ? html`
+            <lv-settings-dialog
+              @close=${this.handleCloseSettings}
+            ></lv-settings-dialog>
+          `
+        : ''}
+
     `;
   }
 }

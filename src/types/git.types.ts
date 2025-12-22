@@ -157,6 +157,23 @@ export interface CommitStats {
   filesChanged: number;
 }
 
+export interface BlameLine {
+  lineNumber: number;
+  content: string;
+  commitOid: string;
+  commitShortId: string;
+  authorName: string;
+  authorEmail: string;
+  timestamp: number;
+  summary: string;
+  isBoundary: boolean;
+}
+
+export interface BlameResult {
+  path: string;
+  lines: BlameLine[];
+}
+
 export interface ConflictFile {
   path: string;
   ancestor: ConflictEntry | null;

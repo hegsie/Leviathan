@@ -148,6 +148,7 @@ export class LvGraphCanvas extends LitElement {
 
   @property({ type: Number }) commitCount = 1000;
   @property({ type: String }) repositoryPath = '';
+  @property({ type: Object }) searchFilter: { query: string; author: string; dateFrom: string; dateTo: string } | null = null;
 
   @state() private layout: GraphLayout | null = null;
   @state() private selectedNode: LayoutNode | null = null;
@@ -676,6 +677,58 @@ export class LvGraphCanvas extends LitElement {
     console.log('[graph] selectCommit: completed, viewport:', this.getViewport());
 
     return true;
+  }
+
+  /**
+   * Navigate to the previous commit (up in the list)
+   */
+  public navigatePrevious(): void {
+    if (this.sortedNodesByRow.length === 0) return;
+
+    const currentIndex = this.selectedNode
+      ? this.sortedNodesByRow.findIndex((n) => n.oid === this.selectedNode!.oid)
+      : -1;
+
+    if (currentIndex === -1) {
+      this.selectByIndex(0);
+    } else if (currentIndex > 0) {
+      this.selectByIndex(currentIndex - 1);
+    }
+  }
+
+  /**
+   * Navigate to the next commit (down in the list)
+   */
+  public navigateNext(): void {
+    if (this.sortedNodesByRow.length === 0) return;
+
+    const currentIndex = this.selectedNode
+      ? this.sortedNodesByRow.findIndex((n) => n.oid === this.selectedNode!.oid)
+      : -1;
+
+    if (currentIndex === -1) {
+      this.selectByIndex(0);
+    } else if (currentIndex < this.sortedNodesByRow.length - 1) {
+      this.selectByIndex(currentIndex + 1);
+    }
+  }
+
+  /**
+   * Refresh the commit graph
+   */
+  public refresh(): void {
+    this.loadCommits();
+  }
+
+  private selectByIndex(index: number): void {
+    if (index < 0 || index >= this.sortedNodesByRow.length) return;
+
+    this.selectedNode = this.sortedNodesByRow[index];
+    this.dispatchSelectionEvent();
+    this.scrollToNode(this.selectedNode);
+    this.renderer?.setSelection(this.selectedNode.oid, this.hoveredNode?.oid ?? null);
+    this.renderer?.markDirty();
+    this.scheduleRender();
   }
 
   private hitTest(e: MouseEvent): HitTestResult {

@@ -12,8 +12,11 @@
     "tauri:build": "tauri build",
     "test": "web-test-runner",
     "test:watch": "web-test-runner --watch",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
-    "format": "prettier --write src"
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src"
   },
   "dependencies": {
     "@lit-labs/context": "^0.5.0",

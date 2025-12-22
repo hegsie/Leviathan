@@ -16,6 +16,7 @@ import type {
   RefsByCommit,
   CommitFileEntry,
   CommitStats,
+  BlameResult,
 } from '../types/git.types.ts';
 import type {
   OpenRepositoryCommand,
@@ -288,6 +289,17 @@ export async function getCommitsStats(
   commitOids: string[]
 ): Promise<CommandResult<CommitStats[]>> {
   return invokeCommand<CommitStats[]>('get_commits_stats', { path: repoPath, commitOids });
+}
+
+/**
+ * Get blame information for a file
+ */
+export async function getFileBlame(
+  repoPath: string,
+  filePath: string,
+  commitOid?: string
+): Promise<CommandResult<BlameResult>> {
+  return invokeCommand<BlameResult>('get_file_blame', { path: repoPath, filePath, commitOid });
 }
 
 /**

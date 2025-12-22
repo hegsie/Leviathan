@@ -304,7 +304,7 @@ export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
     const commit = sortedCommits[row];
     const children = childrenMap.get(commit.oid) || [];
 
-    let lane: number;
+    let lane: number = 0;
     let inheritedLane = false;
 
     // Check if any child wants us to continue in their lane
