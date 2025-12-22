@@ -47,6 +47,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
@@ -72,6 +78,12 @@ jobs:
           cache-on-failure: true
           prefix-key: ubuntu-22.04
 
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
       - name: Check formatting
         working-directory: src-tauri
         run: cargo fmt --check
@@ -87,6 +99,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
 
       - name: Install Linux dependencies
         run: |
@@ -110,6 +128,12 @@ jobs:
           workspaces: src-tauri
           cache-on-failure: true
           prefix-key: ubuntu-22.04
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
 
       - name: Run tests
         working-directory: src-tauri
