@@ -1,139 +1,135 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
-    <!-- Void/chaos gradient - deep purple to black -->
-    <linearGradient id="voidGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#0a0012"/>
-      <stop offset="40%" style="stop-color:#1a0a2e"/>
-      <stop offset="100%" style="stop-color:#16082a"/>
+    <!-- Night sky gradient -->
+    <linearGradient id="skyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1025"/>
+      <stop offset="100%" style="stop-color:#2d1f3d"/>
     </linearGradient>
 
-    <!-- Energy gradient - fierce purple/magenta -->
-    <linearGradient id="energyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#ff00ff"/>
-      <stop offset="50%" style="stop-color:#9d00ff"/>
-      <stop offset="100%" style="stop-color:#6b00cc"/>
+    <!-- Gold brick gradient -->
+    <linearGradient id="goldBrick" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#e8c36a"/>
+      <stop offset="100%" style="stop-color:#c9a03a"/>
     </linearGradient>
 
-    <!-- Fire/chaos gradient -->
-    <linearGradient id="chaosGrad" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" style="stop-color:#ff0080"/>
-      <stop offset="50%" style="stop-color:#ff00ff"/>
-      <stop offset="100%" style="stop-color:#8000ff"/>
+    <!-- Darker brick for depth -->
+    <linearGradient id="darkBrick" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#b8863a"/>
+      <stop offset="100%" style="stop-color:#8a6020"/>
     </linearGradient>
 
-    <!-- Glow filter -->
-    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+    <!-- Warm glow -->
+    <filter id="warmGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
       <feMerge>
-        <feMergeNode in="coloredBlur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-
-    <!-- Intense glow -->
-    <filter id="intenseGlow" x="-100%" y="-100%" width="300%" height="300%">
-      <feGaussianBlur stdDeviation="8" result="coloredBlur"/>
-      <feMerge>
-        <feMergeNode in="coloredBlur"/>
-        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="blur"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
   </defs>
 
-  <!-- Background - void circle -->
-  <circle cx="256" cy="256" r="240" fill="url(#voidGrad)"/>
+  <!-- Background - night sky -->
+  <circle cx="256" cy="256" r="248" fill="url(#skyGrad)"/>
 
-  <!-- Fractured outer ring -->
-  <circle cx="256" cy="256" r="240" fill="none" stroke="#9d00ff" stroke-width="4" opacity="0.5"/>
-  <circle cx="256" cy="256" r="235" fill="none" stroke="#ff00ff" stroke-width="1" opacity="0.3" stroke-dasharray="20,30,5,25"/>
-
-  <!-- Chaotic background fractures -->
-  <g opacity="0.15" stroke="#ff00ff" stroke-width="1" fill="none">
-    <path d="M 100 180 L 150 200 L 130 250"/>
-    <path d="M 400 160 L 380 220 L 410 260"/>
-    <path d="M 80 350 L 130 340 L 110 390"/>
-    <path d="M 420 320 L 380 360 L 400 400"/>
-    <path d="M 180 80 L 200 130 L 160 150"/>
-    <path d="M 340 430 L 320 390 L 360 370"/>
+  <!-- Stars -->
+  <g fill="#ffffff" opacity="0.6">
+    <circle cx="80" cy="80" r="2"/>
+    <circle cx="150" cy="50" r="1.5"/>
+    <circle cx="420" cy="70" r="2"/>
+    <circle cx="380" cy="120" r="1.5"/>
+    <circle cx="100" cy="150" r="1"/>
+    <circle cx="450" cy="160" r="1.5"/>
+    <circle cx="60" cy="200" r="1"/>
+    <circle cx="350" cy="60" r="1"/>
+    <circle cx="200" cy="90" r="1.5"/>
+    <circle cx="300" cy="75" r="1"/>
   </g>
 
-  <!-- Main spine - central branch (jagged/angular) -->
-  <path d="M 256 75 L 252 120 L 260 170 L 254 220 L 258 270 L 252 320 L 260 370 L 256 420 L 256 437"
-        stroke="url(#chaosGrad)" stroke-width="14" stroke-linecap="round" fill="none" filter="url(#glow)"/>
+  <!-- Ground/base -->
+  <rect x="40" y="380" width="432" height="60" fill="#3d2a1a" rx="4"/>
 
-  <!-- Left chaos branch - sharp angles -->
-  <path d="M 256 150
-           L 220 165
-           L 170 155
-           L 120 175
-           L 85 220
-           L 75 280
-           L 90 340
-           L 130 380
-           L 180 395
-           L 220 375
-           L 256 330"
-        stroke="url(#energyGrad)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#glow)"/>
+  <!-- Ziggurat - Layer 5 (bottom/largest) -->
+  <rect x="80" y="320" width="352" height="65" fill="url(#goldBrick)" rx="2"/>
+  <rect x="80" y="320" width="352" height="8" fill="url(#darkBrick)" rx="2"/>
+  <!-- Brick pattern -->
+  <g stroke="#a07020" stroke-width="1" opacity="0.4">
+    <line x1="120" y1="328" x2="120" y2="385"/>
+    <line x1="160" y1="328" x2="160" y2="385"/>
+    <line x1="200" y1="328" x2="200" y2="385"/>
+    <line x1="240" y1="328" x2="240" y2="385"/>
+    <line x1="280" y1="328" x2="280" y2="385"/>
+    <line x1="320" y1="328" x2="320" y2="385"/>
+    <line x1="360" y1="328" x2="360" y2="385"/>
+    <line x1="400" y1="328" x2="400" y2="385"/>
+    <line x1="80" y1="350" x2="432" y2="350"/>
+    <line x1="80" y1="370" x2="432" y2="370"/>
+  </g>
 
-  <!-- Right chaos branch - sharp angles -->
-  <path d="M 256 150
-           L 292 165
-           L 342 155
-           L 392 175
-           L 427 220
-           L 437 280
-           L 422 340
-           L 382 380
-           L 332 395
-           L 292 375
-           L 256 330"
-        stroke="url(#energyGrad)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#glow)"/>
+  <!-- Ziggurat - Layer 4 -->
+  <rect x="115" y="260" width="282" height="65" fill="url(#goldBrick)" rx="2"/>
+  <rect x="115" y="260" width="282" height="8" fill="url(#darkBrick)" rx="2"/>
+  <g stroke="#a07020" stroke-width="1" opacity="0.4">
+    <line x1="150" y1="268" x2="150" y2="325"/>
+    <line x1="190" y1="268" x2="190" y2="325"/>
+    <line x1="230" y1="268" x2="230" y2="325"/>
+    <line x1="270" y1="268" x2="270" y2="325"/>
+    <line x1="310" y1="268" x2="310" y2="325"/>
+    <line x1="350" y1="268" x2="350" y2="325"/>
+    <line x1="115" y1="290" x2="397" y2="290"/>
+    <line x1="115" y1="310" x2="397" y2="310"/>
+  </g>
 
-  <!-- Secondary chaos tendrils - left -->
-  <path d="M 170 155 L 140 120 L 100 110" stroke="#ff00ff" stroke-width="4" stroke-linecap="round" fill="none" opacity="0.7"/>
-  <path d="M 85 220 L 50 200 L 40 160" stroke="#9d00ff" stroke-width="3" stroke-linecap="round" fill="none" opacity="0.5"/>
-  <path d="M 75 280 L 45 290 L 35 340" stroke="#ff00ff" stroke-width="3" stroke-linecap="round" fill="none" opacity="0.5"/>
+  <!-- Ziggurat - Layer 3 -->
+  <rect x="150" y="200" width="212" height="65" fill="url(#goldBrick)" rx="2"/>
+  <rect x="150" y="200" width="212" height="8" fill="url(#darkBrick)" rx="2"/>
+  <g stroke="#a07020" stroke-width="1" opacity="0.4">
+    <line x1="185" y1="208" x2="185" y2="265"/>
+    <line x1="220" y1="208" x2="220" y2="265"/>
+    <line x1="256" y1="208" x2="256" y2="265"/>
+    <line x1="292" y1="208" x2="292" y2="265"/>
+    <line x1="327" y1="208" x2="327" y2="265"/>
+    <line x1="150" y1="230" x2="362" y2="230"/>
+    <line x1="150" y1="250" x2="362" y2="250"/>
+  </g>
 
-  <!-- Secondary chaos tendrils - right -->
-  <path d="M 342 155 L 372 120 L 412 110" stroke="#ff00ff" stroke-width="4" stroke-linecap="round" fill="none" opacity="0.7"/>
-  <path d="M 427 220 L 462 200 L 472 160" stroke="#9d00ff" stroke-width="3" stroke-linecap="round" fill="none" opacity="0.5"/>
-  <path d="M 437 280 L 467 290 L 477 340" stroke="#ff00ff" stroke-width="3" stroke-linecap="round" fill="none" opacity="0.5"/>
+  <!-- Ziggurat - Layer 2 -->
+  <rect x="185" y="145" width="142" height="60" fill="url(#goldBrick)" rx="2"/>
+  <rect x="185" y="145" width="142" height="8" fill="url(#darkBrick)" rx="2"/>
+  <g stroke="#a07020" stroke-width="1" opacity="0.4">
+    <line x1="215" y1="153" x2="215" y2="205"/>
+    <line x1="256" y1="153" x2="256" y2="205"/>
+    <line x1="297" y1="153" x2="297" y2="205"/>
+    <line x1="185" y1="175" x2="327" y2="175"/>
+  </g>
 
-  <!-- Commit nodes - angular/hexagonal feel -->
-  <!-- Top node -->
-  <polygon points="256,100 276,115 276,140 256,155 236,140 236,115"
-           fill="#0a0012" stroke="#ff00ff" stroke-width="4" filter="url(#glow)"/>
-  <circle cx="256" cy="127" r="10" fill="#ff00ff"/>
+  <!-- Ziggurat - Layer 1 (top/temple) -->
+  <rect x="220" y="95" width="72" height="55" fill="url(#goldBrick)" rx="2"/>
+  <rect x="220" y="95" width="72" height="8" fill="url(#darkBrick)" rx="2"/>
 
-  <!-- Center node - larger, more prominent -->
-  <polygon points="256,210 285,230 285,270 256,290 227,270 227,230"
-           fill="#0a0012" stroke="url(#chaosGrad)" stroke-width="5" filter="url(#intenseGlow)"/>
-  <circle cx="256" cy="250" r="16" fill="#ff00ff" opacity="0.6"/>
-  <circle cx="256" cy="250" r="10" fill="#ffffff"/>
+  <!-- Temple doorway -->
+  <rect x="244" y="115" width="24" height="35" fill="#1a1025" rx="2"/>
 
-  <!-- Bottom node -->
-  <polygon points="256,360 276,375 276,400 256,415 236,400 236,375"
-           fill="#0a0012" stroke="#ff00ff" stroke-width="4" filter="url(#glow)"/>
-  <circle cx="256" cy="387" r="10" fill="#ff00ff"/>
+  <!-- Temple top ornament -->
+  <rect x="236" y="82" width="40" height="16" fill="url(#darkBrick)" rx="2"/>
+  <polygon points="256,65 270,82 242,82" fill="#e8c36a"/>
 
-  <!-- Merge point nodes on branches -->
-  <circle cx="85" cy="220" r="8" fill="#0a0012" stroke="#9d00ff" stroke-width="3"/>
-  <circle cx="85" cy="220" r="4" fill="#9d00ff"/>
+  <!-- Stairs going up center -->
+  <rect x="248" y="150" width="16" height="230" fill="#8a6020" opacity="0.6"/>
 
-  <circle cx="427" cy="220" r="8" fill="#0a0012" stroke="#9d00ff" stroke-width="3"/>
-  <circle cx="427" cy="220" r="4" fill="#9d00ff"/>
+  <!-- Torch flames on top level -->
+  <g filter="url(#warmGlow)">
+    <!-- Left torch -->
+    <ellipse cx="228" cy="108" rx="6" ry="10" fill="#ff9933" opacity="0.9"/>
+    <ellipse cx="228" cy="105" rx="4" ry="7" fill="#ffcc66"/>
+    <ellipse cx="228" cy="103" rx="2" ry="4" fill="#ffffcc"/>
 
-  <circle cx="75" cy="280" r="6" fill="#0a0012" stroke="#ff00ff" stroke-width="2"/>
-  <circle cx="437" cy="280" r="6" fill="#0a0012" stroke="#ff00ff" stroke-width="2"/>
+    <!-- Right torch -->
+    <ellipse cx="284" cy="108" rx="6" ry="10" fill="#ff9933" opacity="0.9"/>
+    <ellipse cx="284" cy="105" rx="4" ry="7" fill="#ffcc66"/>
+    <ellipse cx="284" cy="103" rx="2" ry="4" fill="#ffffcc"/>
+  </g>
 
-  <!-- Energy particles/sparks -->
-  <circle cx="145" cy="180" r="3" fill="#ff00ff" opacity="0.8"/>
-  <circle cx="367" cy="180" r="3" fill="#ff00ff" opacity="0.8"/>
-  <circle cx="60" cy="250" r="2" fill="#9d00ff" opacity="0.9"/>
-  <circle cx="452" cy="250" r="2" fill="#9d00ff" opacity="0.9"/>
-  <circle cx="110" cy="360" r="2" fill="#ff00ff" opacity="0.7"/>
-  <circle cx="402" cy="360" r="2" fill="#ff00ff" opacity="0.7"/>
-  <circle cx="200" cy="420" r="2" fill="#9d00ff" opacity="0.6"/>
-  <circle cx="312" cy="420" r="2" fill="#9d00ff" opacity="0.6"/>
+  <!-- Decorative border -->
+  <circle cx="256" cy="256" r="244" fill="none" stroke="#c9a03a" stroke-width="5" opacity="0.7"/>
+  <circle cx="256" cy="256" r="238" fill="none" stroke="#e8c36a" stroke-width="1" opacity="0.3"/>
 </svg>

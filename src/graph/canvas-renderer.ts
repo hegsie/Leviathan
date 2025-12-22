@@ -75,27 +75,29 @@ const DEFAULT_CONFIG: RenderConfig = {
 };
 
 const DEFAULT_THEME: RenderTheme = {
-  background: '#1e1e1e',
-  // Simplified color palette - 4 muted, harmonious colors
+  background: '#1a1520',
+  // Earthy palette with subtle variety
   laneColors: [
-    '#6b8aae', // muted blue
-    '#7a9a7a', // muted green
-    '#9a8a7a', // muted tan
-    '#8a7a9a', // muted purple
+    '#d4a54a', // gold
+    '#b85c3c', // ember
+    '#8a7a6a', // stone
+    '#9a6a5a', // terracotta
+    '#7a8a7a', // lichen
+    '#a87830', // bronze
   ],
   textColor: '#c8c8c8',
   selectedColor: '#ffffff',
   hoveredColor: '#e0e0e0',
-  fpsColor: '#7a9a7a',
+  fpsColor: '#d4854a',
   refColors: {
-    localBranch: '#5a8a5a',      // calm green
-    localBranchText: '#ffffff',
-    remoteBranch: '#5a7a9a',     // calm blue
+    localBranch: '#7a8a6a',      // olive
+    localBranchText: '#1a1520',
+    remoteBranch: '#7a7a8a',     // slate
     remoteBranchText: '#ffffff',
-    tag: '#9a8a5a',              // calm gold
-    tagText: '#1e1e1e',
-    head: '#9a5a6a',             // calm red/pink
-    headText: '#ffffff',
+    tag: '#d4a54a',              // gold
+    tagText: '#1a1520',
+    head: '#d4854a',             // ember
+    headText: '#1a1520',
   },
 };
 

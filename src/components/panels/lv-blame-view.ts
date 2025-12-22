@@ -6,6 +6,17 @@ import { formatRelativeTime } from '../../utils/format.ts';
 import { tokenizeLine, detectLanguage, getTokenColor } from '../../utils/syntax-highlighter.ts';
 import type { BlameLine } from '../../types/git.types.ts';
 
+// Group of consecutive lines from the same commit
+interface BlameGroup {
+  commitOid: string;
+  commitShortId: string;
+  authorName: string;
+  authorEmail: string;
+  summary: string;
+  timestamp: number;
+  lines: BlameLine[];
+}
+
 // Generate consistent color for author
 function getAuthorColor(name: string): string {
   let hash = 0;
@@ -13,18 +24,7 @@ function getAuthorColor(name: string): string {
     hash = name.charCodeAt(i) + ((hash << 5) - hash);
   }
   const hue = Math.abs(hash % 360);
-  return `hsl(${hue}, 60%, 65%)`;
-}
-
-// Generate gravatar URL
-function getGravatarUrl(email: string, size: number = 32): string {
-  const hash = email.toLowerCase().trim();
-  // Simple hash - in production you'd use MD5
-  let hashCode = 0;
-  for (let i = 0; i < hash.length; i++) {
-    hashCode = hash.charCodeAt(i) + ((hashCode << 5) - hashCode);
-  }
-  return `https://www.gravatar.com/avatar/${Math.abs(hashCode).toString(16).padStart(32, '0')}?s=${size}&d=identicon`;
+  return `hsl(${hue}, 50%, 55%)`;
 }
 
 @customElement('lv-blame-view')
@@ -139,70 +139,43 @@ export class LvBlameView extends LitElement {
         min-width: max-content;
       }
 
-      .blame-row {
+      /* Group container - holds commit info and lines together */
+      .blame-group {
         display: flex;
-        min-height: 22px;
-        line-height: 22px;
         border-bottom: 1px solid var(--color-border);
+      }
+
+      .blame-group:last-child {
+        border-bottom: none;
+      }
+
+      /* Left side: commit info panel */
+      .group-info {
+        display: flex;
+        width: 240px;
+        min-width: 240px;
+        flex-shrink: 0;
+        cursor: pointer;
+        background: var(--color-bg-secondary);
+        border-right: 1px solid var(--color-border);
         transition: background-color 0.1s ease;
       }
 
-      .blame-row:hover {
+      .group-info:hover {
         background: var(--color-bg-hover);
       }
 
-      .blame-row:hover .blame-info {
-        opacity: 1 !important;
-      }
-
-      .blame-row.group-start {
-        border-top: 2px solid var(--color-border);
-      }
-
-      .blame-row.group-start:first-child {
-        border-top: none;
-      }
-
-      .blame-info {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        width: 320px;
-        min-width: 320px;
-        padding: 0 var(--spacing-sm);
-        background: var(--color-bg-secondary);
-        border-right: 1px solid var(--color-border);
-        cursor: pointer;
-        transition: opacity 0.15s ease;
-      }
-
-      .blame-info:hover {
-        background: var(--color-bg-hover);
-      }
-
-      .blame-info.same-commit {
-        opacity: 0.4;
-      }
-
-      .blame-info.same-commit .author-avatar,
-      .blame-info.same-commit .commit-details {
-        visibility: hidden;
-      }
-
-      .author-avatar {
-        width: 20px;
-        height: 20px;
-        border-radius: 50%;
+      .author-indicator {
+        width: 3px;
         flex-shrink: 0;
-        background: var(--color-bg-tertiary);
       }
 
       .commit-details {
         display: flex;
         flex-direction: column;
-        flex: 1;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        gap: 2px;
         min-width: 0;
-        gap: 1px;
       }
 
       .commit-top-row {
@@ -215,6 +188,7 @@ export class LvBlameView extends LitElement {
         font-size: 11px;
         color: var(--color-primary);
         font-weight: var(--font-weight-medium);
+        flex-shrink: 0;
       }
 
       .commit-message {
@@ -223,7 +197,6 @@ export class LvBlameView extends LitElement {
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        flex: 1;
       }
 
       .commit-bottom-row {
@@ -238,12 +211,30 @@ export class LvBlameView extends LitElement {
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        max-width: 120px;
+        max-width: 100px;
       }
 
       .commit-date {
         white-space: nowrap;
         flex-shrink: 0;
+      }
+
+      /* Right side: lines container */
+      .group-lines {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .blame-line {
+        display: flex;
+        height: 20px;
+        line-height: 20px;
+      }
+
+      .blame-line:hover {
+        background: var(--color-bg-hover);
       }
 
       .line-number {
@@ -338,13 +329,6 @@ export class LvBlameView extends LitElement {
         color: var(--color-text-primary);
         font-weight: var(--font-weight-medium);
       }
-
-      /* Author color indicator */
-      .author-indicator {
-        width: 3px;
-        align-self: stretch;
-        flex-shrink: 0;
-      }
     `,
   ];
 
@@ -353,6 +337,7 @@ export class LvBlameView extends LitElement {
   @property({ type: String }) commitOid: string | null = null;
 
   @state() private lines: BlameLine[] = [];
+  @state() private groups: BlameGroup[] = [];
   @state() private isLoading = false;
   @state() private error: string | null = null;
 
@@ -374,6 +359,7 @@ export class LvBlameView extends LitElement {
   private async loadBlame(): Promise<void> {
     if (!this.repositoryPath || !this.filePath) {
       this.lines = [];
+      this.groups = [];
       return;
     }
 
@@ -390,7 +376,7 @@ export class LvBlameView extends LitElement {
 
       if (result.success && result.data) {
         this.lines = result.data.lines;
-        this.processAuthors();
+        this.processLinesIntoGroups();
       } else {
         this.error = typeof result.error === 'string' ? result.error : 'Failed to load blame';
       }
@@ -401,10 +387,15 @@ export class LvBlameView extends LitElement {
     }
   }
 
-  private processAuthors(): void {
+  private processLinesIntoGroups(): void {
     this.authorColors.clear();
     this.uniqueAuthors.clear();
     this.uniqueCommits.clear();
+    this.groups = [];
+
+    if (this.lines.length === 0) return;
+
+    let currentGroup: BlameGroup | null = null;
 
     for (const line of this.lines) {
       this.uniqueAuthors.add(line.authorName);
@@ -412,6 +403,22 @@ export class LvBlameView extends LitElement {
       if (!this.authorColors.has(line.authorName)) {
         this.authorColors.set(line.authorName, getAuthorColor(line.authorName));
       }
+
+      // Start a new group if commit changed
+      if (!currentGroup || currentGroup.commitOid !== line.commitOid) {
+        currentGroup = {
+          commitOid: line.commitOid,
+          commitShortId: line.commitShortId,
+          authorName: line.authorName,
+          authorEmail: line.authorEmail,
+          summary: line.summary,
+          timestamp: line.timestamp,
+          lines: [],
+        };
+        this.groups.push(currentGroup);
+      }
+
+      currentGroup.lines.push(line);
     }
   }
 
@@ -419,20 +426,14 @@ export class LvBlameView extends LitElement {
     this.dispatchEvent(new CustomEvent('close'));
   }
 
-  private handleCommitClick(line: BlameLine): void {
+  private handleCommitClick(group: BlameGroup): void {
     this.dispatchEvent(
       new CustomEvent('commit-click', {
-        detail: { oid: line.commitOid },
+        detail: { oid: group.commitOid },
         bubbles: true,
         composed: true,
       })
     );
-  }
-
-  private shouldShowInfo(line: BlameLine, index: number): boolean {
-    if (index === 0) return true;
-    const prevLine = this.lines[index - 1];
-    return prevLine.commitOid !== line.commitOid;
   }
 
   private renderHighlightedContent(content: string) {
@@ -543,41 +544,42 @@ export class LvBlameView extends LitElement {
 
       <div class="blame-content">
         <div class="blame-table">
-          ${this.lines.map((line, index) => {
-            const showInfo = this.shouldShowInfo(line, index);
-            const authorColor = this.authorColors.get(line.authorName) || '#888';
+          ${this.groups.map((group) => {
+            const authorColor = this.authorColors.get(group.authorName) || '#888';
 
             return html`
-              <div class="blame-row ${showInfo ? 'group-start' : ''}">
+              <div class="blame-group">
                 <div
-                  class="author-indicator"
-                  style="background: ${authorColor}"
-                ></div>
-                <div
-                  class="blame-info ${showInfo ? '' : 'same-commit'}"
-                  @click=${() => this.handleCommitClick(line)}
-                  title="${line.summary}&#10;&#10;${line.authorName}&#10;${new Date(line.timestamp * 1000).toLocaleString()}"
+                  class="group-info"
+                  @click=${() => this.handleCommitClick(group)}
+                  title="${group.summary}&#10;&#10;${group.authorName}&#10;${new Date(group.timestamp * 1000).toLocaleString()}"
                 >
-                  <img
-                    class="author-avatar"
-                    src="${getGravatarUrl(line.authorEmail, 40)}"
-                    alt="${line.authorName}"
-                    loading="lazy"
-                  />
+                  <div
+                    class="author-indicator"
+                    style="background: ${authorColor}"
+                  ></div>
                   <div class="commit-details">
                     <div class="commit-top-row">
-                      <span class="commit-hash">${line.commitShortId}</span>
-                      <span class="commit-message">${line.summary}</span>
+                      <span class="commit-hash">${group.commitShortId}</span>
+                      <span class="commit-message">${group.summary}</span>
                     </div>
                     <div class="commit-bottom-row">
-                      <span class="author-name" style="color: ${authorColor}">${line.authorName}</span>
+                      <span class="author-name" style="color: ${authorColor}">${group.authorName}</span>
                       <span>•</span>
-                      <span class="commit-date">${formatRelativeTime(line.timestamp * 1000)}</span>
+                      <span class="commit-date">${formatRelativeTime(group.timestamp * 1000)}</span>
                     </div>
                   </div>
                 </div>
-                <div class="line-number">${line.lineNumber}</div>
-                <div class="line-content">${this.renderHighlightedContent(line.content)}</div>
+                <div class="group-lines">
+                  ${group.lines.map(
+                    (line) => html`
+                      <div class="blame-line">
+                        <div class="line-number">${line.lineNumber}</div>
+                        <div class="line-content">${this.renderHighlightedContent(line.content)}</div>
+                      </div>
+                    `
+                  )}
+                </div>
               </div>
             `;
           })}
