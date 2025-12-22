@@ -28,7 +28,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 keyring = "2"
-notify = "6"
+notify = "8"
 dirs = "5"
 chrono = { version = "0.4", features = ["serde"] }
 
