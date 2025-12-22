@@ -58,7 +58,7 @@ pub async fn get_branches(path: String) -> Result<Vec<Branch>> {
             name: name.clone(),
             shorthand: if is_remote {
                 // For remote branches, strip the remote name prefix (e.g., "origin/main" -> "main")
-                name.splitn(2, '/').nth(1).unwrap_or(&name).to_string()
+                name.split_once('/').map(|x| x.1).unwrap_or(&name).to_string()
             } else {
                 // For local branches, use the full name (e.g., "feature/my-fix")
                 name.clone()

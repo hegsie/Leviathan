@@ -22,11 +22,9 @@ pub async fn get_commit_history(
 
     if all_branches.unwrap_or(false) {
         // Push all branch heads for complete graph
-        for reference in repo.references()? {
-            if let Ok(reference) = reference {
-                if let Some(oid) = reference.target() {
-                    let _ = revwalk.push(oid);
-                }
+        for reference in repo.references()?.flatten() {
+            if let Some(oid) = reference.target() {
+                let _ = revwalk.push(oid);
             }
         }
     } else if let Some(ref oid_str) = start_oid {

@@ -15,15 +15,13 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
 
     let mut result = Vec::new();
 
-    for name in remotes.iter() {
-        if let Some(name) = name {
-            if let Ok(remote) = repo.find_remote(name) {
-                result.push(Remote {
-                    name: name.to_string(),
-                    url: remote.url().unwrap_or("").to_string(),
-                    push_url: remote.pushurl().map(|s| s.to_string()),
-                });
-            }
+    for name in remotes.iter().flatten() {
+        if let Ok(remote) = repo.find_remote(name) {
+            result.push(Remote {
+                name: name.to_string(),
+                url: remote.url().unwrap_or("").to_string(),
+                push_url: remote.pushurl().map(|s| s.to_string()),
+            });
         }
     }
 

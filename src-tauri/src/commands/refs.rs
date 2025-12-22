@@ -100,7 +100,7 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
 
         refs_map
             .entry(target_oid)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(ref_info);
     }
 
