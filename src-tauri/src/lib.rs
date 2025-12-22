@@ -57,6 +57,8 @@ pub fn run() {
             commands::staging::stage_files,
             commands::staging::unstage_files,
             commands::staging::discard_changes,
+            commands::staging::stage_hunk,
+            commands::staging::unstage_hunk,
             commands::remote::get_remotes,
             commands::remote::fetch,
             commands::remote::pull,

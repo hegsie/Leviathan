@@ -146,6 +146,30 @@ export async function discardChanges(
 }
 
 /**
+ * Stage a specific hunk from a diff
+ * @param repoPath Repository path
+ * @param patch The patch content for the hunk (with proper diff headers)
+ */
+export async function stageHunk(
+  repoPath: string,
+  patch: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('stage_hunk', { repoPath, patch });
+}
+
+/**
+ * Unstage a specific hunk from the index
+ * @param repoPath Repository path
+ * @param patch The patch content for the hunk (with proper diff headers)
+ */
+export async function unstageHunk(
+  repoPath: string,
+  patch: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('unstage_hunk', { repoPath, patch });
+}
+
+/**
  * Remote operations
  */
 export async function getRemotes(path: string): Promise<CommandResult<Remote[]>> {

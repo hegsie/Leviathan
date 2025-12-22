@@ -167,11 +167,66 @@ export class LvDiffView extends LitElement {
       }
 
       .hunk-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         padding: var(--spacing-xs) var(--spacing-sm);
         background: var(--color-bg-tertiary);
         color: var(--color-text-muted);
         font-style: italic;
         border-bottom: 1px solid var(--color-border);
+      }
+
+      .hunk-header-text {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .hunk-actions {
+        display: flex;
+        gap: var(--spacing-xs);
+        flex-shrink: 0;
+        margin-left: var(--spacing-sm);
+      }
+
+      .stage-btn {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-primary);
+        color: var(--color-text-secondary);
+        font-size: 11px;
+        font-style: normal;
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .stage-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+        border-color: var(--color-text-muted);
+      }
+
+      .stage-btn.stage:hover {
+        background: var(--color-success-bg);
+        color: var(--color-success);
+        border-color: var(--color-success);
+      }
+
+      .stage-btn.unstage:hover {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+        border-color: var(--color-warning);
+      }
+
+      .stage-btn svg {
+        width: 12px;
+        height: 12px;
       }
 
       .line {
@@ -443,6 +498,90 @@ export class LvDiffView extends LitElement {
     this.viewMode = mode;
   }
 
+  /**
+   * Build a patch string for a specific hunk
+   * The patch format requires diff headers and the hunk content
+   */
+  private buildHunkPatch(hunk: DiffHunk): string {
+    if (!this.diff || !this.file) return '';
+
+    const filePath = this.file.path;
+    const lines: string[] = [];
+
+    // Add diff header
+    lines.push(`--- a/${filePath}`);
+    lines.push(`+++ b/${filePath}`);
+
+    // Add hunk header
+    lines.push(hunk.header);
+
+    // Add hunk lines with proper prefixes
+    for (const line of hunk.lines) {
+      let prefix = ' ';
+      if (line.origin === 'addition') prefix = '+';
+      else if (line.origin === 'deletion') prefix = '-';
+      lines.push(prefix + line.content);
+    }
+
+    return lines.join('\n') + '\n';
+  }
+
+  /**
+   * Stage a specific hunk
+   */
+  private async handleStageHunk(hunk: DiffHunk, e: Event): Promise<void> {
+    e.stopPropagation();
+    if (!this.repositoryPath || !this.file) return;
+
+    const patch = this.buildHunkPatch(hunk);
+    if (!patch) return;
+
+    try {
+      const result = await gitService.stageHunk(this.repositoryPath, patch);
+      if (result.success) {
+        // Dispatch event to refresh status
+        this.dispatchEvent(new CustomEvent('status-changed', {
+          bubbles: true,
+          composed: true,
+        }));
+        // Reload diff to show updated state
+        await this.loadWorkingDiff();
+      } else {
+        console.error('Failed to stage hunk:', result.error);
+      }
+    } catch (err) {
+      console.error('Failed to stage hunk:', err);
+    }
+  }
+
+  /**
+   * Unstage a specific hunk
+   */
+  private async handleUnstageHunk(hunk: DiffHunk, e: Event): Promise<void> {
+    e.stopPropagation();
+    if (!this.repositoryPath || !this.file) return;
+
+    const patch = this.buildHunkPatch(hunk);
+    if (!patch) return;
+
+    try {
+      const result = await gitService.unstageHunk(this.repositoryPath, patch);
+      if (result.success) {
+        // Dispatch event to refresh status
+        this.dispatchEvent(new CustomEvent('status-changed', {
+          bubbles: true,
+          composed: true,
+        }));
+        // Reload diff to show updated state
+        await this.loadWorkingDiff();
+      } else {
+        console.error('Failed to unstage hunk:', result.error);
+      }
+    } catch (err) {
+      console.error('Failed to unstage hunk:', err);
+    }
+  }
+
   private getLineClass(origin: string): string {
     switch (origin) {
       case 'addition':
@@ -489,9 +628,42 @@ export class LvDiffView extends LitElement {
   }
 
   private renderHunk(hunk: DiffHunk, index: number) {
+    // Only show stage/unstage button for working directory diffs (not commit diffs)
+    const showStageButton = this.file !== null && !this.commitFile;
+    const isStaged = this.file?.isStaged ?? false;
+
     return html`
       <div class="hunk">
-        <div class="hunk-header">${hunk.header}</div>
+        <div class="hunk-header">
+          <span class="hunk-header-text">${hunk.header}</span>
+          ${showStageButton ? html`
+            <div class="hunk-actions">
+              ${isStaged ? html`
+                <button
+                  class="stage-btn unstage"
+                  @click=${(e: Event) => this.handleUnstageHunk(hunk, e)}
+                  title="Unstage this hunk"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="18 15 12 9 6 15"></polyline>
+                  </svg>
+                  Unstage
+                </button>
+              ` : html`
+                <button
+                  class="stage-btn stage"
+                  @click=${(e: Event) => this.handleStageHunk(hunk, e)}
+                  title="Stage this hunk"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="6 9 12 15 18 9"></polyline>
+                  </svg>
+                  Stage
+                </button>
+              `}
+            </div>
+          ` : nothing}
+        </div>
         ${hunk.lines.map((line) => this.renderLine(line))}
       </div>
     `;

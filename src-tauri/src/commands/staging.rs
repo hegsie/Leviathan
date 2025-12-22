@@ -1,6 +1,8 @@
 //! Staging command handlers
 
 use std::path::Path;
+use std::process::Command;
+use std::io::Write;
 use tauri::command;
 
 use crate::error::Result;
@@ -147,6 +149,73 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
 
     let head = repo.head()?.peel_to_tree()?;
     repo.checkout_tree(head.as_object(), Some(&mut checkout_opts))?;
+
+    Ok(())
+}
+
+/// Stage a specific hunk from a diff
+///
+/// Takes a patch string containing just the hunk to stage (with proper headers)
+/// and applies it to the index using git apply --cached
+#[command]
+pub async fn stage_hunk(repo_path: String, patch: String) -> Result<()> {
+    // Create a temporary file for the patch
+    let temp_dir = std::env::temp_dir();
+    let patch_file = temp_dir.join(format!("leviathan_hunk_{}.patch", std::process::id()));
+
+    // Write patch to temp file
+    let mut file = std::fs::File::create(&patch_file)?;
+    file.write_all(patch.as_bytes())?;
+    file.flush()?;
+    drop(file);
+
+    // Apply the patch to the index
+    let output = Command::new("git")
+        .args(["apply", "--cached", "--unidiff-zero"])
+        .arg(&patch_file)
+        .current_dir(&repo_path)
+        .output()?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&patch_file);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(crate::error::LeviathanError::OperationFailed(format!("Failed to stage hunk: {}", stderr)));
+    }
+
+    Ok(())
+}
+
+/// Unstage a specific hunk from the index
+///
+/// Takes a patch string and applies it in reverse to unstage
+#[command]
+pub async fn unstage_hunk(repo_path: String, patch: String) -> Result<()> {
+    // Create a temporary file for the patch
+    let temp_dir = std::env::temp_dir();
+    let patch_file = temp_dir.join(format!("leviathan_hunk_{}.patch", std::process::id()));
+
+    // Write patch to temp file
+    let mut file = std::fs::File::create(&patch_file)?;
+    file.write_all(patch.as_bytes())?;
+    file.flush()?;
+    drop(file);
+
+    // Apply the patch in reverse to unstage
+    let output = Command::new("git")
+        .args(["apply", "--cached", "--reverse", "--unidiff-zero"])
+        .arg(&patch_file)
+        .current_dir(&repo_path)
+        .output()?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&patch_file);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(crate::error::LeviathanError::OperationFailed(format!("Failed to unstage hunk: {}", stderr)));
+    }
 
     Ok(())
 }
