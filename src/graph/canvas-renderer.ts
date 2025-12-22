@@ -8,7 +8,6 @@
  * - FPS monitoring
  */
 
-import type { LayoutNode, LayoutEdge } from './lane-assignment.ts';
 import type { RenderData } from './virtual-scroll.ts';
 import type { RefInfo, RefType } from '../types/git.types.ts';
 
@@ -373,7 +372,7 @@ export class CanvasRenderer {
    * Render edges
    */
   private renderEdges(data: RenderData): void {
-    const { ctx, config, theme } = this;
+    const { ctx, config } = this;
     const { edges, offsetX, offsetY } = data;
 
     ctx.lineWidth = config.lineWidth;

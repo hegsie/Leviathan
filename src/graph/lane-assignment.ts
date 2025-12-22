@@ -47,15 +47,6 @@ export interface GraphLayout {
   totalRows: number;
 }
 
-/**
- * Lane state tracker
- */
-interface LaneState {
-  /** Which OID currently occupies this lane (null if free) */
-  occupiedBy: string | null;
-  /** The lane number */
-  index: number;
-}
 
 /**
  * Assigns lanes to commits using a lane-tracking approach with proper reuse.
@@ -347,12 +338,6 @@ export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
 
       // For merge parents, check if we should merge into an existing lane
       if (children.length > 0) {
-        // Find which lanes our children are in
-        const childLanes = children
-          .map((c) => oidToLane.get(c))
-          .filter((l): l is number => l !== undefined)
-          .sort((a, b) => a - b);
-
         // We need a lane, prefer reusing a free one near our children
         lane = getFreeLane();
       } else {

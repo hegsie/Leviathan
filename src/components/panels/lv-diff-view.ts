@@ -2,7 +2,7 @@ import { LitElement, html, css, nothing, TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { tokenizeLine, detectLanguage, getTokenColor, type Token } from '../../utils/syntax-highlighter.ts';
+import { tokenizeLine, detectLanguage, getTokenColor } from '../../utils/syntax-highlighter.ts';
 import type { DiffFile, DiffHunk, DiffLine, StatusEntry } from '../../types/git.types.ts';
 
 type DiffViewMode = 'unified' | 'split';
@@ -636,7 +636,7 @@ export class LvDiffView extends LitElement {
     `;
   }
 
-  private renderHunk(hunk: DiffHunk, index: number) {
+  private renderHunk(hunk: DiffHunk, _index: number) {
     // Only show stage/unstage button for working directory diffs (not commit diffs)
     const showStageButton = this.file !== null && !this.commitFile;
     const isStaged = this.file?.isStaged ?? false;

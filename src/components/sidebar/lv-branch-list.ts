@@ -5,7 +5,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import '../dialogs/lv-create-branch-dialog.ts';
 import type { LvCreateBranchDialog } from '../dialogs/lv-create-branch-dialog.ts';
-import type { Branch, Remote } from '../../types/git.types.ts';
+import type { Branch } from '../../types/git.types.ts';
 
 interface BranchSubgroup {
   prefix: string | null;
@@ -317,7 +317,7 @@ export class LvBranchList extends LitElement {
     this.error = null;
 
     try {
-      const [branchesResult, remotesResult] = await Promise.all([
+      const [branchesResult] = await Promise.all([
         gitService.getBranches(this.repositoryPath),
         gitService.getRemotes(this.repositoryPath),
       ]);
@@ -856,8 +856,6 @@ export class LvBranchList extends LitElement {
     if (this.error) {
       return html`<div class="error">${this.error}</div>`;
     }
-
-    const localExpanded = this.expandedGroups.has('local');
 
     return html`
       <lv-create-branch-dialog

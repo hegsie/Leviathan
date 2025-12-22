@@ -5,7 +5,6 @@ import { useRepositoryStore } from '../../stores/index.ts';
 import './lv-file-status.ts';
 import './lv-commit-panel.ts';
 import '../panels/lv-commit-details.ts';
-import type { LvFileStatus } from './lv-file-status.ts';
 import type { Commit, RefInfo } from '../../types/git.types.ts';
 
 /**

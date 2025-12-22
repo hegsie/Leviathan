@@ -2,7 +2,6 @@
  * API and IPC type definitions
  */
 
-import type { Repository, Commit, Branch, Remote, Tag, Stash, StatusEntry, DiffFile } from './git.types.ts';
 
 /**
  * Tauri command response wrapper

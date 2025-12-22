@@ -1,9 +1,8 @@
-import { LitElement, html, css, PropertyValues } from 'lit';
+import { LitElement, html, css } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import {
   computeGraphLayout,
-  getLaneColor,
   type GraphLayout,
   type LayoutNode,
 } from '../../graph/graph-layout.service.ts';
@@ -15,11 +14,7 @@ import {
   type Viewport,
   type RenderData,
 } from '../../graph/virtual-scroll.ts';
-import {
-  CanvasRenderer,
-  PerformanceMonitor,
-  type RenderConfig,
-} from '../../graph/canvas-renderer.ts';
+import { CanvasRenderer } from '../../graph/canvas-renderer.ts';
 import { getCommitHistory, getRefsByCommit, getCommitsStats } from '../../services/git.service.ts';
 import type { Commit, RefsByCommit, RefInfo } from '../../types/git.types.ts';
 
@@ -435,7 +430,7 @@ export class LvGraphCanvas extends LitElement {
     this.scheduleRender();
   }
 
-  private onScroll(scrollTop: number, scrollLeft: number): void {
+  private onScroll(_scrollTop: number, _scrollLeft: number): void {
     // Rebuild spatial index for new viewport
     this.rebuildSpatialIndex();
     // Mark renderer dirty so it actually redraws

@@ -23,7 +23,6 @@ import type {
   CloneRepositoryCommand,
   InitRepositoryCommand,
   CreateBranchCommand,
-  DeleteBranchCommand,
   CheckoutCommand,
   CreateCommitCommand,
   GetCommitHistoryCommand,
