@@ -512,15 +512,18 @@ export class LvDiffView extends LitElement {
     lines.push(`--- a/${filePath}`);
     lines.push(`+++ b/${filePath}`);
 
-    // Add hunk header
-    lines.push(hunk.header);
+    // Add hunk header (strip any trailing newlines)
+    lines.push(hunk.header.replace(/[\r\n]+$/, ''));
 
     // Add hunk lines with proper prefixes
+    // Note: line.content may include trailing newline, so we strip it
     for (const line of hunk.lines) {
       let prefix = ' ';
       if (line.origin === 'addition') prefix = '+';
       else if (line.origin === 'deletion') prefix = '-';
-      lines.push(prefix + line.content);
+      // Strip any trailing newlines/carriage returns from content
+      const content = line.content.replace(/[\r\n]+$/, '');
+      lines.push(prefix + content);
     }
 
     return lines.join('\n') + '\n';
@@ -535,6 +538,12 @@ export class LvDiffView extends LitElement {
 
     const patch = this.buildHunkPatch(hunk);
     if (!patch) return;
+
+    // Debug: log the patch
+    console.log('=== PATCH START ===');
+    console.log(patch);
+    console.log('=== PATCH END ===');
+    console.log('Hunk:', JSON.stringify(hunk, null, 2));
 
     try {
       const result = await gitService.stageHunk(this.repositoryPath, patch);

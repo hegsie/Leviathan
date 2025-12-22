@@ -248,7 +248,7 @@ export function layoutToAscii(layout: GraphLayout): string {
   const sortedNodes = [...layout.nodes.values()].sort((a, b) => a.row - b.row);
 
   for (const node of sortedNodes) {
-    let line = ' '.repeat(width);
+    const line = ' '.repeat(width);
     const pos = node.lane * 4;
 
     // Place the node

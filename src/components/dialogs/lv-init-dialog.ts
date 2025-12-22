@@ -272,7 +272,7 @@ export class LvInitDialog extends LitElement {
 
   private get folderName(): string {
     if (!this.path) return '';
-    const segments = this.path.split(/[\/\\]/).filter(Boolean);
+    const segments = this.path.split(/[/\\]/).filter(Boolean);
     return segments[segments.length - 1] || '';
   }
 

@@ -229,7 +229,7 @@ export class LvCloneDialog extends LitElement {
     }
 
     // Get last segment
-    const segments = name.split(/[\/:]/).filter(Boolean);
+    const segments = name.split(/[/:]/).filter(Boolean);
     return segments[segments.length - 1] || '';
   }
 

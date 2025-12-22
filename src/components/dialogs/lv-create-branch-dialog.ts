@@ -158,7 +158,7 @@ export class LvCreateBranchDialog extends LitElement {
   private handleNameChange(e: Event): void {
     const input = e.target as HTMLInputElement;
     // Sanitize branch name (replace invalid characters)
-    this.branchName = input.value.replace(/[^\w\-\/\.]/g, '-');
+    this.branchName = input.value.replace(/[^\w\-/.]/g, '-');
     this.error = '';
   }
 
