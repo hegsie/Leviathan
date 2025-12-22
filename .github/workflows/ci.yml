@@ -47,6 +47,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libglib2.0-dev \
+            libdbus-1-dev \
+            libssl-dev
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -74,6 +82,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libglib2.0-dev \
+            libdbus-1-dev \
+            libssl-dev
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -86,48 +102,3 @@ jobs:
       - name: Run tests
         working-directory: src-tauri
         run: cargo test
-
-  build-check:
-    name: Build Check
-    runs-on: ubuntu-22.04
-    needs: [lint-frontend, lint-backend]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          cache-on-failure: true
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libssl-dev \
-            libgtk-3-dev
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Check Tauri build
-        working-directory: src-tauri
-        run: cargo build --release

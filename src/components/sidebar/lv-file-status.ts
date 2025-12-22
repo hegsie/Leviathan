@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as watcherService from '../../services/watcher.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import type { StatusEntry, FileStatus } from '../../types/git.types.ts';
 
 /**
@@ -254,8 +255,17 @@ export class LvFileStatus extends LitElement {
       }
     });
 
+    // Listen for global stage-all and unstage-all events
+    this.boundHandleStageAllEvent = () => this.handleStageAll();
+    this.boundHandleUnstageAllEvent = () => this.handleUnstageAll();
+    window.addEventListener('stage-all', this.boundHandleStageAllEvent);
+    window.addEventListener('unstage-all', this.boundHandleUnstageAllEvent);
+
     await this.loadStatus();
   }
+
+  private boundHandleStageAllEvent: (() => void) | null = null;
+  private boundHandleUnstageAllEvent: (() => void) | null = null;
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
@@ -264,6 +274,14 @@ export class LvFileStatus extends LitElement {
     if (this.unsubscribeWatcher) {
       this.unsubscribeWatcher();
       this.unsubscribeWatcher = null;
+    }
+
+    // Remove global event listeners
+    if (this.boundHandleStageAllEvent) {
+      window.removeEventListener('stage-all', this.boundHandleStageAllEvent);
+    }
+    if (this.boundHandleUnstageAllEvent) {
+      window.removeEventListener('unstage-all', this.boundHandleUnstageAllEvent);
     }
   }
 
@@ -346,7 +364,15 @@ export class LvFileStatus extends LitElement {
 
   private async handleDiscardFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
-    // TODO: Add confirmation dialog
+
+    const confirmed = await showConfirm(
+      'Discard Changes',
+      `Are you sure you want to discard changes to "${file.path}"? This action cannot be undone.`,
+      'warning'
+    );
+
+    if (!confirmed) return;
+
     const result = await gitService.discardChanges(this.repositoryPath, [file.path]);
     if (result.success) {
       await this.loadStatus();

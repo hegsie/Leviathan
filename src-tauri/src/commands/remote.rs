@@ -5,6 +5,7 @@ use tauri::command;
 
 use crate::error::{LeviathanError, Result};
 use crate::models::Remote;
+use crate::services::credentials_service;
 
 /// Get all remotes
 #[command]
@@ -39,14 +40,11 @@ pub async fn fetch(path: String, remote: Option<String>, prune: Option<bool>) ->
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let mut fetch_opts = git2::FetchOptions::new();
+    let mut fetch_opts = credentials_service::get_fetch_options();
 
     if prune.unwrap_or(false) {
         fetch_opts.prune(git2::FetchPrune::On);
     }
-
-    // TODO: Add credential callbacks
-    // TODO: Add progress callbacks
 
     let refspecs: Vec<String> = remote
         .fetch_refspecs()?
@@ -169,8 +167,7 @@ pub async fn push(
         head.shorthand().unwrap_or("main").to_string()
     };
 
-    let mut push_opts = git2::PushOptions::new();
-    // TODO: Add credential callbacks
+    let mut push_opts = credentials_service::get_push_options();
 
     let refspec = if force.unwrap_or(false) {
         format!("+refs/heads/{}:refs/heads/{}", branch_name, branch_name)

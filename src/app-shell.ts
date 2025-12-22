@@ -373,13 +373,11 @@ export class AppShell extends LitElement {
   }
 
   private handleStageAll(): void {
-    // TODO: Implement stage all via git service
-    console.log('Stage all shortcut triggered');
+    window.dispatchEvent(new CustomEvent('stage-all'));
   }
 
   private handleUnstageAll(): void {
-    // TODO: Implement unstage all via git service
-    console.log('Unstage all shortcut triggered');
+    window.dispatchEvent(new CustomEvent('unstage-all'));
   }
 
   private handleRefresh(): void {
@@ -388,7 +386,6 @@ export class AppShell extends LitElement {
   }
 
   private handleToggleSearch(): void {
-    // TODO: Focus search input in toolbar
     const toolbar = this.shadowRoot?.querySelector('lv-toolbar');
     if (toolbar) {
       (toolbar as HTMLElement).dispatchEvent(new CustomEvent('focus-search'));
