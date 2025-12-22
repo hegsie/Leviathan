@@ -20,7 +20,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-git2 = "0.20"
+git2 = { version = "0.20", features = ["vendored-openssl"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 anyhow = "1"
