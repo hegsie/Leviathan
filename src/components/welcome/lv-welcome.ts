@@ -6,7 +6,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { useRepositoryStore, type RecentRepository } from '../../stores/index.ts';
+import { repositoryStore, type RecentRepository } from '../../stores/index.ts';
 import { openRepository } from '../../services/git.service.ts';
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
 import '../dialogs/lv-clone-dialog.ts';
@@ -220,12 +220,12 @@ export class LvWelcome extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
-    this.unsubscribe = useRepositoryStore.subscribe((state) => {
+    this.unsubscribe = repositoryStore.subscribe((state) => {
       this.recentRepositories = state.recentRepositories;
       this.isLoading = state.isLoading;
     });
     // Initialize from current state
-    const state = useRepositoryStore.getState();
+    const state = repositoryStore.getState();
     this.recentRepositories = state.recentRepositories;
   }
 
@@ -247,7 +247,7 @@ export class LvWelcome extends LitElement {
   }
 
   private async openRepoByPath(path: string): Promise<void> {
-    const store = useRepositoryStore.getState();
+    const store = repositoryStore.getState();
     store.setLoading(true);
 
     try {
@@ -278,11 +278,11 @@ export class LvWelcome extends LitElement {
 
   private handleRecentRemove(e: Event, path: string): void {
     e.stopPropagation();
-    useRepositoryStore.getState().removeRecentRepository(path);
+    repositoryStore.getState().removeRecentRepository(path);
   }
 
   private handleClearRecent(): void {
-    useRepositoryStore.getState().clearRecentRepositories();
+    repositoryStore.getState().clearRecentRepositories();
   }
 
   render() {

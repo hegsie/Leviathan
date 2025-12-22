@@ -1,4 +1,4 @@
-import { create } from 'zustand';
+import { createStore } from 'zustand/vanilla';
 
 export type PanelId = 'left' | 'right' | 'bottom';
 export type ModalId = 'clone' | 'branch' | 'merge' | 'rebase' | 'settings' | 'conflict' | null;
@@ -57,7 +57,7 @@ const defaultPanelState: Record<PanelId, PanelState> = {
   bottom: { isVisible: false, width: 200, isCollapsed: false },
 };
 
-export const useUIStore = create<UIState>((set) => ({
+export const uiStore = createStore<UIState>((set) => ({
   panels: defaultPanelState,
   activeModal: null,
   modalData: null,

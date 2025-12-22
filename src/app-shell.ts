@@ -1,7 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from './styles/shared-styles.ts';
-import { useRepositoryStore, useUIStore, type OpenRepository } from './stores/index.ts';
+import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
 import { registerDefaultShortcuts } from './services/keyboard.service.ts';
 import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
@@ -228,7 +228,7 @@ export class AppShell extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
-    this.unsubscribe = useRepositoryStore.subscribe((state) => {
+    this.unsubscribe = repositoryStore.subscribe((state) => {
       this.activeRepository = state.getActiveRepository();
     });
     document.addEventListener('keydown', this.boundHandleKeyDown);
@@ -244,8 +244,8 @@ export class AppShell extends LitElement {
       refresh: () => this.handleRefresh(),
       search: () => this.handleToggleSearch(),
       openSettings: () => this.showSettings = true,
-      toggleLeftPanel: () => useUIStore.getState().togglePanel('left'),
-      toggleRightPanel: () => useUIStore.getState().togglePanel('right'),
+      toggleLeftPanel: () => uiStore.getState().togglePanel('left'),
+      toggleRightPanel: () => uiStore.getState().togglePanel('right'),
     });
   }
 

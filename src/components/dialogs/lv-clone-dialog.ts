@@ -8,7 +8,7 @@ import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { cloneRepository } from '../../services/git.service.ts';
 import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
-import { useRepositoryStore } from '../../stores/index.ts';
+import { repositoryStore } from '../../stores/index.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 
@@ -275,7 +275,7 @@ export class LvCloneDialog extends LitElement {
         this.progressText = 'Clone complete!';
 
         // Add the repository to the store
-        const store = useRepositoryStore.getState();
+        const store = repositoryStore.getState();
         store.addRepository(result.data);
 
         // Close dialog after a brief delay

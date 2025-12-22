@@ -5,6 +5,8 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import '../dialogs/lv-create-branch-dialog.ts';
 import type { LvCreateBranchDialog } from '../dialogs/lv-create-branch-dialog.ts';
+import '../dialogs/lv-interactive-rebase-dialog.ts';
+import type { LvInteractiveRebaseDialog } from '../dialogs/lv-interactive-rebase-dialog.ts';
 import type { Branch } from '../../types/git.types.ts';
 
 interface BranchSubgroup {
@@ -282,6 +284,7 @@ export class LvBranchList extends LitElement {
   @state() private contextMenu: ContextMenuState = { visible: false, x: 0, y: 0, branch: null };
 
   @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
+  @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -502,6 +505,38 @@ export class LvBranchList extends LitElement {
     };
   }
 
+  private async handleRenameBranch(): Promise<void> {
+    const branch = this.contextMenu.branch;
+    if (!branch) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Cannot rename HEAD branch or remote branches
+    if (branch.isHead || branch.isRemote) {
+      return;
+    }
+
+    const newName = prompt(`Rename branch "${branch.name}" to:`, branch.name);
+    if (!newName || newName === branch.name) {
+      return;
+    }
+
+    const result = await gitService.renameBranch(this.repositoryPath, {
+      oldName: branch.name,
+      newName: newName.trim(),
+    });
+
+    if (result.success) {
+      await this.loadBranches();
+      this.dispatchEvent(new CustomEvent('branches-changed', {
+        bubbles: true,
+        composed: true,
+      }));
+    } else {
+      console.error('Rename branch failed:', result.error);
+    }
+  }
+
   private async handleDeleteBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
     if (!branch) return;
@@ -620,6 +655,22 @@ export class LvBranchList extends LitElement {
         console.error('Rebase failed:', result.error);
       }
     }
+  }
+
+  private handleInteractiveRebase(): void {
+    const branch = this.contextMenu.branch;
+    if (!branch) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.interactiveRebaseDialog.open(branch.shorthand);
+  }
+
+  private async handleRebaseComplete(): Promise<void> {
+    await this.loadBranches();
+    this.dispatchEvent(new CustomEvent('branches-changed', {
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   private handleCreateBranchFrom(): void {
@@ -832,10 +883,25 @@ export class LvBranchList extends LitElement {
             </svg>
             Rebase current onto this
           </button>
+          <button class="context-menu-item" @click=${this.handleInteractiveRebase}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+              <line x1="9" y1="9" x2="15" y2="9"></line>
+              <line x1="9" y1="13" x2="15" y2="13"></line>
+              <line x1="9" y1="17" x2="12" y2="17"></line>
+            </svg>
+            Interactive rebase onto this
+          </button>
         ` : ''}
 
         ${isLocal && !isHead ? html`
           <div class="context-menu-divider"></div>
+          <button class="context-menu-item" @click=${this.handleRenameBranch}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M17 3a2.828 2.828 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
+            </svg>
+            Rename
+          </button>
           <button class="context-menu-item danger" @click=${this.handleDeleteBranch}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="3 6 5 6 21 6"></polyline>
@@ -862,6 +928,11 @@ export class LvBranchList extends LitElement {
         .repositoryPath=${this.repositoryPath}
         @branch-created=${this.handleBranchCreated}
       ></lv-create-branch-dialog>
+
+      <lv-interactive-rebase-dialog
+        .repositoryPath=${this.repositoryPath}
+        @rebase-complete=${this.handleRebaseComplete}
+      ></lv-interactive-rebase-dialog>
 
       <!-- Local branches - shown directly without extra header -->
       ${this.localBranchGroups.length > 0 ? html`

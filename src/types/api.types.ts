@@ -192,6 +192,13 @@ export interface DeleteTagCommand {
   name: string;
 }
 
+export interface PushTagCommand {
+  path: string;
+  name: string;
+  remote?: string;
+  force?: boolean;
+}
+
 /**
  * Diff commands
  */

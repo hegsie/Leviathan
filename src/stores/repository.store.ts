@@ -1,4 +1,4 @@
-import { create } from 'zustand';
+import { createStore } from 'zustand/vanilla';
 import { persist } from 'zustand/middleware';
 import type { Repository, Branch, Remote, Tag, Stash, StatusEntry } from '../types/git.types.ts';
 
@@ -80,7 +80,7 @@ const createEmptyRepoData = (repo: Repository): OpenRepository => ({
   unstagedFiles: [],
 });
 
-export const useRepositoryStore = create<RepositoryState>()(
+export const repositoryStore = createStore<RepositoryState>()(
   persist(
     (set, get) => ({
       ...initialState,

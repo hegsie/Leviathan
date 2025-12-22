@@ -1,6 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { useSettingsStore, type Theme, type FontSize } from '../../stores/settings.store.ts';
+import { settingsStore, type Theme, type FontSize } from '../../stores/settings.store.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 
 @customElement('lv-settings-dialog')
@@ -175,7 +175,7 @@ export class LvSettingsDialog extends LitElement {
   }
 
   private loadSettings(): void {
-    const settings = useSettingsStore.getState();
+    const settings = settingsStore.getState();
     this.theme = settings.theme;
     this.fontSize = settings.fontSize;
     this.defaultBranchName = settings.defaultBranchName;
@@ -188,25 +188,25 @@ export class LvSettingsDialog extends LitElement {
   private handleThemeChange(e: Event): void {
     const select = e.target as HTMLSelectElement;
     this.theme = select.value as Theme;
-    useSettingsStore.getState().setTheme(this.theme);
+    settingsStore.getState().setTheme(this.theme);
   }
 
   private handleFontSizeChange(e: Event): void {
     const select = e.target as HTMLSelectElement;
     this.fontSize = select.value as FontSize;
-    useSettingsStore.getState().setFontSize(this.fontSize);
+    settingsStore.getState().setFontSize(this.fontSize);
   }
 
   private handleBranchNameChange(e: Event): void {
     const input = e.target as HTMLInputElement;
     this.defaultBranchName = input.value;
-    useSettingsStore.getState().setDefaultBranchName(this.defaultBranchName);
+    settingsStore.getState().setDefaultBranchName(this.defaultBranchName);
   }
 
   private handleToggle(setting: string, e: Event): void {
     const input = e.target as HTMLInputElement;
     const value = input.checked;
-    const store = useSettingsStore.getState();
+    const store = settingsStore.getState();
 
     switch (setting) {
       case 'showAvatars':
@@ -229,7 +229,7 @@ export class LvSettingsDialog extends LitElement {
   }
 
   private handleReset(): void {
-    useSettingsStore.getState().resetToDefaults();
+    settingsStore.getState().resetToDefaults();
     this.loadSettings();
   }
 

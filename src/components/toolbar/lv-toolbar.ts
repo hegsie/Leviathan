@@ -6,7 +6,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { useRepositoryStore, type OpenRepository } from '../../stores/index.ts';
+import { repositoryStore, type OpenRepository } from '../../stores/index.ts';
 import { openRepository, fetch as gitFetch, pull as gitPull, push as gitPush } from '../../services/git.service.ts';
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
 import '../dialogs/lv-clone-dialog.ts';
@@ -231,7 +231,7 @@ export class LvToolbar extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     // Subscribe to store changes
-    this.unsubscribe = useRepositoryStore.subscribe((state) => {
+    this.unsubscribe = repositoryStore.subscribe((state) => {
       this.openRepositories = state.openRepositories;
       this.activeIndex = state.activeIndex;
       this.isLoading = state.isLoading;
@@ -258,7 +258,7 @@ export class LvToolbar extends LitElement {
       console.log('Got path:', path);
       if (!path) return;
 
-      const store = useRepositoryStore.getState();
+      const store = repositoryStore.getState();
       store.setLoading(true);
 
       try {
@@ -287,12 +287,12 @@ export class LvToolbar extends LitElement {
   }
 
   private handleTabClick(index: number): void {
-    useRepositoryStore.getState().setActiveIndex(index);
+    repositoryStore.getState().setActiveIndex(index);
   }
 
   private handleTabClose(e: Event, path: string): void {
     e.stopPropagation();
-    useRepositoryStore.getState().removeRepository(path);
+    repositoryStore.getState().removeRepository(path);
   }
 
   private get activeRepo(): OpenRepository | undefined {
@@ -306,7 +306,7 @@ export class LvToolbar extends LitElement {
     try {
       const result = await gitFetch({ path: this.activeRepo.repository.path });
       if (!result.success) {
-        useRepositoryStore.getState().setError(result.error?.message ?? 'Fetch failed');
+        repositoryStore.getState().setError(result.error?.message ?? 'Fetch failed');
       } else {
         // Refresh repository data after fetch
         this.dispatchEvent(new CustomEvent('repository-refresh', {
@@ -315,7 +315,7 @@ export class LvToolbar extends LitElement {
         }));
       }
     } catch (err) {
-      useRepositoryStore.getState().setError(err instanceof Error ? err.message : 'Fetch failed');
+      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Fetch failed');
     } finally {
       this.isFetching = false;
     }
@@ -328,7 +328,7 @@ export class LvToolbar extends LitElement {
     try {
       const result = await gitPull({ path: this.activeRepo.repository.path });
       if (!result.success) {
-        useRepositoryStore.getState().setError(result.error?.message ?? 'Pull failed');
+        repositoryStore.getState().setError(result.error?.message ?? 'Pull failed');
       } else {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
@@ -336,7 +336,7 @@ export class LvToolbar extends LitElement {
         }));
       }
     } catch (err) {
-      useRepositoryStore.getState().setError(err instanceof Error ? err.message : 'Pull failed');
+      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Pull failed');
     } finally {
       this.isPulling = false;
     }
@@ -349,7 +349,7 @@ export class LvToolbar extends LitElement {
     try {
       const result = await gitPush({ path: this.activeRepo.repository.path });
       if (!result.success) {
-        useRepositoryStore.getState().setError(result.error?.message ?? 'Push failed');
+        repositoryStore.getState().setError(result.error?.message ?? 'Push failed');
       } else {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
@@ -357,7 +357,7 @@ export class LvToolbar extends LitElement {
         }));
       }
     } catch (err) {
-      useRepositoryStore.getState().setError(err instanceof Error ? err.message : 'Push failed');
+      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Push failed');
     } finally {
       this.isPushing = false;
     }

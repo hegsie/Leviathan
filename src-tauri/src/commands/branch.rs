@@ -144,6 +144,51 @@ pub async fn delete_branch(path: String, name: String, force: Option<bool>) -> R
     Ok(())
 }
 
+/// Rename a branch
+#[command]
+pub async fn rename_branch(
+    path: String,
+    old_name: String,
+    new_name: String,
+) -> Result<Branch> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let mut branch = repo
+        .find_branch(&old_name, git2::BranchType::Local)
+        .map_err(|_| LeviathanError::BranchNotFound(old_name.clone()))?;
+
+    branch.rename(&new_name, false)?;
+
+    // Get the renamed branch to return updated info
+    let renamed_branch = repo.find_branch(&new_name, git2::BranchType::Local)?;
+    let reference = renamed_branch.get();
+    let target_oid = reference
+        .target()
+        .map(|o| o.to_string())
+        .unwrap_or_default();
+
+    let is_head = repo
+        .head()
+        .ok()
+        .map(|h| h.name() == reference.name())
+        .unwrap_or(false);
+
+    let upstream = renamed_branch
+        .upstream()
+        .ok()
+        .and_then(|u| u.name().ok().flatten().map(|n| n.to_string()));
+
+    Ok(Branch {
+        name: new_name.clone(),
+        shorthand: new_name,
+        is_head,
+        is_remote: false,
+        upstream,
+        target_oid,
+        ahead_behind: None,
+    })
+}
+
 /// Checkout a branch or commit
 #[command]
 pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Result<()> {

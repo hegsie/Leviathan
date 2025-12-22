@@ -1,7 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { useRepositoryStore } from '../../stores/index.ts';
+import { repositoryStore } from '../../stores/index.ts';
 import './lv-branch-list.ts';
 import './lv-stash-list.ts';
 import './lv-tag-list.ts';
@@ -119,11 +119,11 @@ export class LvLeftPanel extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     // Get initial state
-    const initialState = useRepositoryStore.getState();
+    const initialState = repositoryStore.getState();
     this.repositoryPath = initialState.getActiveRepository()?.repository.path ?? null;
 
     // Subscribe to changes
-    this.unsubscribe = useRepositoryStore.subscribe((state) => {
+    this.unsubscribe = repositoryStore.subscribe((state) => {
       const activeRepo = state.getActiveRepository();
       this.repositoryPath = activeRepo?.repository.path ?? null;
     });

@@ -88,6 +88,15 @@ export interface Stash {
   oid: string;
 }
 
+export interface RebaseCommit {
+  oid: string;
+  shortId: string;
+  summary: string;
+  action: string;
+}
+
+export type RebaseAction = 'pick' | 'reword' | 'edit' | 'squash' | 'fixup' | 'drop';
+
 export interface StatusEntry {
   path: string;
   status: FileStatus;

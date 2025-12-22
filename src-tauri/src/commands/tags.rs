@@ -3,8 +3,9 @@
 use std::path::Path;
 use tauri::command;
 
-use crate::error::Result;
+use crate::error::{LeviathanError, Result};
 use crate::models::{Signature, Tag};
+use crate::services::credentials_service;
 
 /// Get all tags
 #[command]
@@ -104,5 +105,33 @@ pub async fn create_tag(
 pub async fn delete_tag(path: String, name: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
     repo.tag_delete(&name)?;
+    Ok(())
+}
+
+/// Push a tag to a remote
+#[command]
+pub async fn push_tag(
+    path: String,
+    name: String,
+    remote: Option<String>,
+    force: Option<bool>,
+) -> Result<()> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let remote_name = remote.as_deref().unwrap_or("origin");
+    let mut remote_obj = repo
+        .find_remote(remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
+
+    let mut push_opts = credentials_service::get_push_options();
+
+    let refspec = if force.unwrap_or(false) {
+        format!("+refs/tags/{}:refs/tags/{}", name, name)
+    } else {
+        format!("refs/tags/{}:refs/tags/{}", name, name)
+    };
+
+    remote_obj.push(&[&refspec], Some(&mut push_opts))?;
+
     Ok(())
 }

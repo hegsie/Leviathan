@@ -1,4 +1,4 @@
-import { create } from 'zustand';
+import { createStore } from 'zustand/vanilla';
 import type { Commit } from '../types/git.types.ts';
 import type { GraphLayout, GraphSelection } from '../types/graph.types.ts';
 
@@ -44,7 +44,7 @@ const initialState = {
   selection: initialSelection,
 };
 
-export const useCommitsStore = create<CommitsState>((set, get) => ({
+export const commitsStore = createStore<CommitsState>((set, get) => ({
   ...initialState,
 
   setCommits: (commits) => {

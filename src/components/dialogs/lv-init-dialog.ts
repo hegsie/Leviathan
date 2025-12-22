@@ -8,7 +8,7 @@ import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { initRepository } from '../../services/git.service.ts';
 import { openDialog } from '../../services/dialog.service.ts';
-import { useRepositoryStore } from '../../stores/index.ts';
+import { repositoryStore } from '../../stores/index.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 
@@ -245,7 +245,7 @@ export class LvInitDialog extends LitElement {
 
       if (result.success && result.data) {
         // Add the repository to the store
-        const store = useRepositoryStore.getState();
+        const store = repositoryStore.getState();
         store.addRepository(result.data);
 
         // Close dialog

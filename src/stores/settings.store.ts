@@ -3,7 +3,7 @@
  * Persisted user preferences and application settings
  */
 
-import { create } from 'zustand';
+import { createStore } from 'zustand/vanilla';
 import { persist } from 'zustand/middleware';
 
 export type Theme = 'dark' | 'light' | 'system';
@@ -78,7 +78,7 @@ const defaultSettings = {
   maxRecentRepositories: 10,
 };
 
-export const useSettingsStore = create<SettingsState>()(
+export const settingsStore = createStore<SettingsState>()(
   persist(
     (set, get) => ({
       ...defaultSettings,
@@ -181,7 +181,7 @@ function applyFontSize(size: FontSize): void {
 // Listen for system theme changes
 if (typeof window !== 'undefined') {
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-    const { theme } = useSettingsStore.getState();
+    const { theme } = settingsStore.getState();
     if (theme === 'system') {
       applyTheme('system');
     }

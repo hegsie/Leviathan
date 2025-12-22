@@ -11,6 +11,8 @@ import type {
   Remote,
   Tag,
   Stash,
+  RebaseCommit,
+  ConflictFile,
   StatusEntry,
   DiffFile,
   RefsByCommit,
@@ -23,6 +25,7 @@ import type {
   CloneRepositoryCommand,
   InitRepositoryCommand,
   CreateBranchCommand,
+  RenameBranchCommand,
   CheckoutCommand,
   CreateCommitCommand,
   GetCommitHistoryCommand,
@@ -42,6 +45,7 @@ import type {
   PopStashCommand,
   CreateTagCommand,
   DeleteTagCommand,
+  PushTagCommand,
   GetDiffCommand,
   CommandResult,
 } from '../types/api.types.ts';
@@ -87,6 +91,13 @@ export async function deleteBranch(
   force?: boolean
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>('delete_branch', { path, name, force });
+}
+
+export async function renameBranch(
+  path: string,
+  args: RenameBranchCommand
+): Promise<CommandResult<Branch>> {
+  return invokeCommand<Branch>('rename_branch', { path, ...args });
 }
 
 export async function checkout(
@@ -221,6 +232,45 @@ export async function abortRebase(
   return invokeCommand<void>('abort_rebase', args);
 }
 
+export async function getRebaseCommits(
+  path: string,
+  onto: string
+): Promise<CommandResult<RebaseCommit[]>> {
+  return invokeCommand<RebaseCommit[]>('get_rebase_commits', { path, onto });
+}
+
+export async function executeInteractiveRebase(
+  path: string,
+  onto: string,
+  todo: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('execute_interactive_rebase', { path, onto, todo });
+}
+
+/**
+ * Conflict resolution operations
+ */
+export async function getConflicts(
+  path: string
+): Promise<CommandResult<ConflictFile[]>> {
+  return invokeCommand<ConflictFile[]>('get_conflicts', { path });
+}
+
+export async function getBlobContent(
+  path: string,
+  oid: string
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>('get_blob_content', { path, oid });
+}
+
+export async function resolveConflict(
+  path: string,
+  filePath: string,
+  content: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('resolve_conflict', { path, file_path: filePath, content });
+}
+
 /**
  * Stash operations
  */
@@ -269,6 +319,12 @@ export async function deleteTag(
   args: DeleteTagCommand
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>('delete_tag', args);
+}
+
+export async function pushTag(
+  args: PushTagCommand
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('push_tag', args);
 }
 
 /**

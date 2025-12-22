@@ -4,11 +4,13 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import type { Tag } from '../../types/git.types.ts';
+import '../dialogs/lv-create-tag-dialog.ts';
+import type { LvCreateTagDialog } from '../dialogs/lv-create-tag-dialog.ts';
 
 interface ContextMenuState {
   visible: boolean;
@@ -136,6 +138,8 @@ export class LvTagList extends LitElement {
   @state() private loading = true;
   @state() private contextMenu: ContextMenuState = { visible: false, x: 0, y: 0, tag: null };
 
+  @query('lv-create-tag-dialog') private createTagDialog!: LvCreateTagDialog;
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     await this.loadTags();
@@ -257,6 +261,47 @@ export class LvTagList extends LitElement {
     }));
   }
 
+  public openCreateTagDialog(targetRef?: string): void {
+    this.createTagDialog.open(targetRef);
+  }
+
+  private handleCreateTagFromContext(): void {
+    const tag = this.contextMenu.tag;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    // Open create tag dialog with the selected tag's target as the starting point
+    this.createTagDialog.open(tag?.targetOid);
+  }
+
+  private async handleTagCreated(): Promise<void> {
+    await this.loadTags();
+    this.dispatchEvent(new CustomEvent('tags-changed', {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
+  private async handlePushTag(): Promise<void> {
+    const tag = this.contextMenu.tag;
+    if (!tag) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    const result = await gitService.pushTag({
+      path: this.repositoryPath,
+      name: tag.name,
+    });
+
+    if (result.success) {
+      this.dispatchEvent(new CustomEvent('tag-pushed', {
+        detail: { tag },
+        bubbles: true,
+        composed: true,
+      }));
+    } else {
+      console.error('Failed to push tag:', result.error);
+    }
+  }
+
   private renderContextMenu() {
     if (!this.contextMenu.visible || !this.contextMenu.tag) return nothing;
 
@@ -272,6 +317,23 @@ export class LvTagList extends LitElement {
           </svg>
           Checkout
         </button>
+        <button class="context-menu-item" @click=${this.handleCreateTagFromContext}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"></path>
+            <line x1="7" y1="7" x2="7.01" y2="7"></line>
+            <line x1="12" y1="8" x2="12" y2="14"></line>
+            <line x1="9" y1="11" x2="15" y2="11"></line>
+          </svg>
+          Create Tag Here
+        </button>
+        <button class="context-menu-item" @click=${this.handlePushTag}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="19" x2="12" y2="5"></line>
+            <polyline points="5 12 12 5 19 12"></polyline>
+          </svg>
+          Push to Remote
+        </button>
+        <div class="context-menu-divider" style="height: 1px; background: var(--color-border); margin: var(--spacing-xs) 0;"></div>
         <button class="context-menu-item danger" @click=${this.handleDeleteTag}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="3 6 5 6 21 6"></polyline>
@@ -312,6 +374,11 @@ export class LvTagList extends LitElement {
             `}
 
       ${this.renderContextMenu()}
+
+      <lv-create-tag-dialog
+        .repositoryPath=${this.repositoryPath}
+        @tag-created=${this.handleTagCreated}
+      ></lv-create-tag-dialog>
     `;
   }
 }
