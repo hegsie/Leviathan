@@ -506,26 +506,51 @@ export class LvDiffView extends LitElement {
     if (!this.diff || !this.file) return '';
 
     const filePath = this.file.path;
+    const fileStatus = this.diff.status;
     const lines: string[] = [];
 
-    // Add diff header
-    lines.push(`--- a/${filePath}`);
-    lines.push(`+++ b/${filePath}`);
+    // Add diff header - use /dev/null for new/untracked files
+    if (fileStatus === 'new' || fileStatus === 'untracked') {
+      lines.push('--- /dev/null');
+    } else {
+      lines.push(`--- a/${filePath}`);
+    }
 
-    // Add hunk header (strip any trailing newlines)
-    lines.push(hunk.header.replace(/[\r\n]+$/, ''));
+    if (fileStatus === 'deleted') {
+      lines.push('+++ /dev/null');
+    } else {
+      lines.push(`+++ b/${filePath}`);
+    }
+
+    // Add hunk header - trim whitespace and ensure clean format
+    const header = hunk.header.trim();
+    lines.push(header);
 
     // Add hunk lines with proper prefixes
-    // Note: line.content may include trailing newline, so we strip it
     for (const line of hunk.lines) {
+      // Skip metadata lines that shouldn't be in the patch content
+      if (line.origin === 'hunk-header' || line.origin === 'file-header' || line.origin === 'binary') {
+        continue;
+      }
+
+      // Handle "no newline at end of file" markers
+      if (line.origin === 'del-eofnl' || line.origin === 'add-eofnl') {
+        lines.push('\\ No newline at end of file');
+        continue;
+      }
+
+      // Determine prefix based on origin
       let prefix = ' ';
       if (line.origin === 'addition') prefix = '+';
       else if (line.origin === 'deletion') prefix = '-';
-      // Strip any trailing newlines/carriage returns from content
-      const content = line.content.replace(/[\r\n]+$/, '');
+
+      // Get content and strip only trailing newline
+      const content = line.content.replace(/\n$/, '').replace(/\r$/, '');
+
       lines.push(prefix + content);
     }
 
+    // Ensure patch ends with newline
     return lines.join('\n') + '\n';
   }
 
@@ -539,12 +564,6 @@ export class LvDiffView extends LitElement {
     const patch = this.buildHunkPatch(hunk);
     if (!patch) return;
 
-    // Debug: log the patch
-    console.log('=== PATCH START ===');
-    console.log(patch);
-    console.log('=== PATCH END ===');
-    console.log('Hunk:', JSON.stringify(hunk, null, 2));
-
     try {
       const result = await gitService.stageHunk(this.repositoryPath, patch);
       if (result.success) {
@@ -553,8 +572,18 @@ export class LvDiffView extends LitElement {
           bubbles: true,
           composed: true,
         }));
-        // Reload diff to show updated state
+        // Reload diff - if file is fully staged, clear the view
         await this.loadWorkingDiff();
+        // Check if we got a "not found" error (file fully staged)
+        if (this.error?.includes('not found in diff')) {
+          this.error = null;
+          this.diff = null;
+          this.file = null;
+          this.dispatchEvent(new CustomEvent('file-cleared', {
+            bubbles: true,
+            composed: true,
+          }));
+        }
       } else {
         console.error('Failed to stage hunk:', result.error);
       }
@@ -654,7 +683,7 @@ export class LvDiffView extends LitElement {
                   title="Unstage this hunk"
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="18 15 12 9 6 15"></polyline>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
                   </svg>
                   Unstage
                 </button>
@@ -665,7 +694,8 @@ export class LvDiffView extends LitElement {
                   title="Stage this hunk"
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="6 9 12 15 18 9"></polyline>
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
                   </svg>
                   Stage
                 </button>

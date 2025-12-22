@@ -26,65 +26,83 @@ pub async fn get_status(path: String) -> Result<Vec<StatusEntry>> {
         let path = entry.path().unwrap_or("").to_string();
         let status = entry.status();
 
-        let (file_status, is_staged, is_conflicted) = parse_status(status);
+        // A file can have both staged AND unstaged changes
+        // We need to return separate entries for each
+        let staged_entry = get_staged_status(status, &path);
+        let unstaged_entry = get_unstaged_status(status, &path);
 
-        entries.push(StatusEntry {
-            path,
-            status: file_status,
-            is_staged,
-            is_conflicted,
-        });
+        if let Some(entry) = staged_entry {
+            entries.push(entry);
+        }
+        if let Some(entry) = unstaged_entry {
+            entries.push(entry);
+        }
     }
 
     Ok(entries)
 }
 
-fn parse_status(status: git2::Status) -> (FileStatus, bool, bool) {
-    let is_conflicted = status.is_conflicted();
-
-    if is_conflicted {
-        return (FileStatus::Conflicted, false, true);
+/// Get the staged (index) status for a file, if any
+fn get_staged_status(status: git2::Status, path: &str) -> Option<StatusEntry> {
+    if status.is_conflicted() {
+        return Some(StatusEntry {
+            path: path.to_string(),
+            status: FileStatus::Conflicted,
+            is_staged: false,
+            is_conflicted: true,
+        });
     }
 
-    // Check index (staged) status first
-    if status.is_index_new() {
-        return (FileStatus::New, true, false);
-    }
-    if status.is_index_modified() {
-        return (FileStatus::Modified, true, false);
-    }
-    if status.is_index_deleted() {
-        return (FileStatus::Deleted, true, false);
-    }
-    if status.is_index_renamed() {
-        return (FileStatus::Renamed, true, false);
-    }
-    if status.is_index_typechange() {
-        return (FileStatus::Typechange, true, false);
+    let file_status = if status.is_index_new() {
+        Some(FileStatus::New)
+    } else if status.is_index_modified() {
+        Some(FileStatus::Modified)
+    } else if status.is_index_deleted() {
+        Some(FileStatus::Deleted)
+    } else if status.is_index_renamed() {
+        Some(FileStatus::Renamed)
+    } else if status.is_index_typechange() {
+        Some(FileStatus::Typechange)
+    } else {
+        None
+    };
+
+    file_status.map(|s| StatusEntry {
+        path: path.to_string(),
+        status: s,
+        is_staged: true,
+        is_conflicted: false,
+    })
+}
+
+/// Get the unstaged (worktree) status for a file, if any
+fn get_unstaged_status(status: git2::Status, path: &str) -> Option<StatusEntry> {
+    if status.is_conflicted() {
+        return None; // Already handled in staged
     }
 
-    // Check worktree (unstaged) status
-    if status.is_wt_new() {
-        return (FileStatus::Untracked, false, false);
-    }
-    if status.is_wt_modified() {
-        return (FileStatus::Modified, false, false);
-    }
-    if status.is_wt_deleted() {
-        return (FileStatus::Deleted, false, false);
-    }
-    if status.is_wt_renamed() {
-        return (FileStatus::Renamed, false, false);
-    }
-    if status.is_wt_typechange() {
-        return (FileStatus::Typechange, false, false);
-    }
+    let file_status = if status.is_wt_new() {
+        Some(FileStatus::Untracked)
+    } else if status.is_wt_modified() {
+        Some(FileStatus::Modified)
+    } else if status.is_wt_deleted() {
+        Some(FileStatus::Deleted)
+    } else if status.is_wt_renamed() {
+        Some(FileStatus::Renamed)
+    } else if status.is_wt_typechange() {
+        Some(FileStatus::Typechange)
+    } else if status.is_ignored() {
+        Some(FileStatus::Ignored)
+    } else {
+        None
+    };
 
-    if status.is_ignored() {
-        return (FileStatus::Ignored, false, false);
-    }
-
-    (FileStatus::Modified, false, false)
+    file_status.map(|s| StatusEntry {
+        path: path.to_string(),
+        status: s,
+        is_staged: false,
+        is_conflicted: false,
+    })
 }
 
 /// Stage files
