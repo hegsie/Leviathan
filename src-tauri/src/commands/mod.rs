@@ -10,3 +10,4 @@ pub mod stash;
 pub mod tags;
 pub mod diff;
 pub mod refs;
+pub mod watcher;

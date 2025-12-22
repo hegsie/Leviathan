@@ -2,6 +2,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import * as watcherService from '../../services/watcher.service.ts';
 import type { StatusEntry, FileStatus } from '../../types/git.types.ts';
 
 /**
@@ -240,13 +241,40 @@ export class LvFileStatus extends LitElement {
   @state() private unstagedExpanded = true;
   @state() private selectedFile: string | null = null;
 
+  private unsubscribeWatcher: (() => void) | null = null;
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+
+    // Subscribe to file change events
+    this.unsubscribeWatcher = watcherService.onFileChange((event) => {
+      // Refresh status on workdir or index changes
+      if (event.eventType === 'workdir-changed' || event.eventType === 'index-changed') {
+        this.loadStatus();
+      }
+    });
+
     await this.loadStatus();
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+
+    // Unsubscribe from file changes
+    if (this.unsubscribeWatcher) {
+      this.unsubscribeWatcher();
+      this.unsubscribeWatcher = null;
+    }
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+      // Start watching the new repository
+      try {
+        await watcherService.startWatching(this.repositoryPath);
+      } catch (err) {
+        console.warn('Failed to start file watcher:', err);
+      }
       await this.loadStatus();
     }
   }

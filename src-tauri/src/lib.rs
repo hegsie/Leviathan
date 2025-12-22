@@ -12,6 +12,8 @@ pub mod error;
 use tauri::Manager;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use commands::watcher::WatcherState;
+
 /// Initialize the application
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -30,6 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .manage(WatcherState::default())
         .setup(|_app| {
             tracing::info!("Application setup complete");
 
@@ -83,6 +86,8 @@ pub fn run() {
             commands::diff::get_commits_stats,
             commands::diff::get_file_blame,
             commands::refs::get_refs_by_commit,
+            commands::watcher::start_watching,
+            commands::watcher::stop_watching,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
