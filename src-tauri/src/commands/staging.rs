@@ -1,12 +1,12 @@
 //! Staging command handlers
 
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use std::io::Write;
 use tauri::command;
 
 use crate::error::Result;
-use crate::models::{StatusEntry, FileStatus};
+use crate::models::{FileStatus, StatusEntry};
 
 /// Get repository status
 #[command]
@@ -199,7 +199,10 @@ pub async fn stage_hunk(repo_path: String, patch: String) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(crate::error::LeviathanError::OperationFailed(format!("Failed to stage hunk: {}", stderr)));
+        return Err(crate::error::LeviathanError::OperationFailed(format!(
+            "Failed to stage hunk: {}",
+            stderr
+        )));
     }
 
     Ok(())
@@ -232,7 +235,10 @@ pub async fn unstage_hunk(repo_path: String, patch: String) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(crate::error::LeviathanError::OperationFailed(format!("Failed to unstage hunk: {}", stderr)));
+        return Err(crate::error::LeviathanError::OperationFailed(format!(
+            "Failed to unstage hunk: {}",
+            stderr
+        )));
     }
 
     Ok(())

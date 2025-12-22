@@ -79,9 +79,10 @@ pub async fn start_watching(
             // Emit events to frontend
             for event in events {
                 let (event_type, paths) = match event {
-                    crate::services::watcher_service::WatcherEvent::WorkdirChanged(p) => {
-                        ("workdir-changed", p.iter().map(|p| p.to_string_lossy().to_string()).collect())
-                    }
+                    crate::services::watcher_service::WatcherEvent::WorkdirChanged(p) => (
+                        "workdir-changed",
+                        p.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+                    ),
                     crate::services::watcher_service::WatcherEvent::IndexChanged => {
                         ("index-changed", vec![])
                     }
@@ -93,10 +94,13 @@ pub async fn start_watching(
                     }
                 };
 
-                let _ = app.emit("file-change", FileChangeEvent {
-                    event_type: event_type.to_string(),
-                    paths,
-                });
+                let _ = app.emit(
+                    "file-change",
+                    FileChangeEvent {
+                        event_type: event_type.to_string(),
+                        paths,
+                    },
+                );
             }
 
             // Sleep before next poll

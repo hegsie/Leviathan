@@ -39,11 +39,7 @@ pub async fn create_stash(
         flags |= git2::StashFlags::INCLUDE_UNTRACKED;
     }
 
-    let oid = repo.stash_save(
-        &signature,
-        message.as_deref().unwrap_or("WIP"),
-        Some(flags),
-    )?;
+    let oid = repo.stash_save(&signature, message.as_deref().unwrap_or("WIP"), Some(flags))?;
 
     Ok(Stash {
         index: 0,
@@ -54,11 +50,7 @@ pub async fn create_stash(
 
 /// Apply a stash
 #[command]
-pub async fn apply_stash(
-    path: String,
-    index: usize,
-    drop_after: Option<bool>,
-) -> Result<()> {
+pub async fn apply_stash(path: String, index: usize, drop_after: Option<bool>) -> Result<()> {
     let mut repo = git2::Repository::open(Path::new(&path))?;
 
     repo.stash_apply(index, None)?;

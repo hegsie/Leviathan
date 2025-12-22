@@ -33,7 +33,10 @@ pub async fn get_commit_history(
         let start = git2::Oid::from_str(oid_str)?;
         revwalk.push(start)?;
     } else {
-        let start = repo.head()?.target().ok_or(LeviathanError::RepositoryNotOpen)?;
+        let start = repo
+            .head()?
+            .target()
+            .ok_or(LeviathanError::RepositoryNotOpen)?;
         revwalk.push(start)?;
     }
 
@@ -44,9 +47,9 @@ pub async fn get_commit_history(
         .skip(skip_count)
         .take(limit_count)
         .filter_map(|oid_result| {
-            oid_result.ok().and_then(|oid| {
-                repo.find_commit(oid).ok().map(|c| Commit::from_git2(&c))
-            })
+            oid_result
+                .ok()
+                .and_then(|oid| repo.find_commit(oid).ok().map(|c| Commit::from_git2(&c)))
         })
         .collect();
 
@@ -67,11 +70,7 @@ pub async fn get_commit(path: String, oid: String) -> Result<Commit> {
 
 /// Create a new commit
 #[command]
-pub async fn create_commit(
-    path: String,
-    message: String,
-    amend: Option<bool>,
-) -> Result<Commit> {
+pub async fn create_commit(path: String, message: String, amend: Option<bool>) -> Result<Commit> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let signature = repo.signature()?;

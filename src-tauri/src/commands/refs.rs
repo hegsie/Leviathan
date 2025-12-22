@@ -55,10 +55,7 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
         // Get the target commit OID
         let target_oid = if reference.is_tag() {
             // For annotated tags, peel to the commit
-            reference
-                .peel_to_commit()
-                .ok()
-                .map(|c| c.id().to_string())
+            reference.peel_to_commit().ok().map(|c| c.id().to_string())
         } else {
             reference.target().map(|oid| oid.to_string())
         };
@@ -70,11 +67,24 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
 
         // Determine ref type and create shorthand
         let (ref_type, shorthand) = if name.starts_with("refs/heads/") {
-            (RefType::LocalBranch, name.strip_prefix("refs/heads/").unwrap_or(&name).to_string())
+            (
+                RefType::LocalBranch,
+                name.strip_prefix("refs/heads/")
+                    .unwrap_or(&name)
+                    .to_string(),
+            )
         } else if name.starts_with("refs/remotes/") {
-            (RefType::RemoteBranch, name.strip_prefix("refs/remotes/").unwrap_or(&name).to_string())
+            (
+                RefType::RemoteBranch,
+                name.strip_prefix("refs/remotes/")
+                    .unwrap_or(&name)
+                    .to_string(),
+            )
         } else if name.starts_with("refs/tags/") {
-            (RefType::Tag, name.strip_prefix("refs/tags/").unwrap_or(&name).to_string())
+            (
+                RefType::Tag,
+                name.strip_prefix("refs/tags/").unwrap_or(&name).to_string(),
+            )
         } else {
             continue; // Skip other ref types
         };

@@ -4,7 +4,7 @@ use std::path::Path;
 use tauri::command;
 
 use crate::error::Result;
-use crate::models::{Tag, Signature};
+use crate::models::{Signature, Tag};
 
 /// Get all tags
 #[command]
@@ -76,11 +76,14 @@ pub async fn create_tag(
         // Create annotated tag
         let signature = repo.signature()?;
         repo.tag(&name, &target_obj, &signature, msg, false)?;
-        (true, Some(Signature {
-            name: signature.name().unwrap_or("").to_string(),
-            email: signature.email().unwrap_or("").to_string(),
-            timestamp: signature.when().seconds(),
-        }))
+        (
+            true,
+            Some(Signature {
+                name: signature.name().unwrap_or("").to_string(),
+                email: signature.email().unwrap_or("").to_string(),
+                timestamp: signature.when().seconds(),
+            }),
+        )
     } else {
         // Create lightweight tag
         repo.tag_lightweight(&name, &target_obj, false)?;

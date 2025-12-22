@@ -4,7 +4,7 @@ use std::path::Path;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-use crate::models::{Branch, AheadBehind};
+use crate::models::{AheadBehind, Branch};
 
 /// Get all branches in the repository
 #[command]
@@ -21,19 +21,25 @@ pub async fn get_branches(path: String) -> Result<Vec<Branch>> {
         let reference = branch.get();
 
         let is_remote = branch_type == git2::BranchType::Remote;
-        let is_head = head.as_ref().map(|h| h.name() == reference.name()).unwrap_or(false);
+        let is_head = head
+            .as_ref()
+            .map(|h| h.name() == reference.name())
+            .unwrap_or(false);
 
         let target_oid = reference
             .target()
             .map(|oid| oid.to_string())
             .unwrap_or_default();
 
-        let upstream = branch.upstream().ok().and_then(|u| {
-            u.name().ok().flatten().map(|n| n.to_string())
-        });
+        let upstream = branch
+            .upstream()
+            .ok()
+            .and_then(|u| u.name().ok().flatten().map(|n| n.to_string()));
 
         let ahead_behind = if !is_remote {
-            if let (Some(local_oid), Some(upstream_branch)) = (reference.target(), branch.upstream().ok()) {
+            if let (Some(local_oid), Some(upstream_branch)) =
+                (reference.target(), branch.upstream().ok())
+            {
                 if let Some(upstream_oid) = upstream_branch.get().target() {
                     repo.graph_ahead_behind(local_oid, upstream_oid)
                         .ok()

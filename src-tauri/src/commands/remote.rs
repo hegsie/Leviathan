@@ -31,11 +31,7 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
 
 /// Fetch from remote
 #[command]
-pub async fn fetch(
-    path: String,
-    remote: Option<String>,
-    prune: Option<bool>,
-) -> Result<()> {
+pub async fn fetch(path: String, remote: Option<String>, prune: Option<bool>) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let remote_name = remote.as_deref().unwrap_or("origin");
@@ -97,12 +93,7 @@ pub async fn pull(
         let head = repo.head()?;
         let head_commit = repo.reference_to_annotated_commit(&head)?;
 
-        let mut rebase = repo.rebase(
-            Some(&head_commit),
-            Some(&fetch_commit),
-            None,
-            None,
-        )?;
+        let mut rebase = repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
 
         while let Some(op) = rebase.next() {
             let _op = op?;

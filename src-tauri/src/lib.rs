@@ -4,9 +4,9 @@
 //! built with Tauri 2.0 and Rust.
 
 pub mod commands;
+pub mod error;
 pub mod models;
 pub mod services;
-pub mod error;
 
 #[cfg(debug_assertions)]
 use tauri::Manager;

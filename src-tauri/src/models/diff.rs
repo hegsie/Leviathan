@@ -1,7 +1,7 @@
 //! Diff models
 
-use serde::{Deserialize, Serialize};
 use super::FileStatus;
+use serde::{Deserialize, Serialize};
 
 /// Diff for a single file
 #[derive(Debug, Clone, Serialize, Deserialize)]

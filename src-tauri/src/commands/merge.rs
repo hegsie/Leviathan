@@ -17,7 +17,8 @@ pub async fn merge(
     let repo = git2::Repository::open(Path::new(&path))?;
 
     // Find the commit to merge
-    let reference = repo.find_reference(&format!("refs/heads/{}", source_ref))
+    let reference = repo
+        .find_reference(&format!("refs/heads/{}", source_ref))
         .or_else(|_| repo.find_reference(&format!("refs/remotes/{}", source_ref)))
         .or_else(|_| repo.find_reference(&source_ref))?;
 
@@ -32,7 +33,9 @@ pub async fn merge(
         // Fast-forward merge
         let target_oid = annotated_commit.id();
         let head = repo.head()?;
-        let refname = head.name().ok_or_else(|| LeviathanError::InvalidReference)?;
+        let refname = head
+            .name()
+            .ok_or_else(|| LeviathanError::InvalidReference)?;
 
         let mut reference = repo.find_reference(refname)?;
         reference.set_target(target_oid, "Fast-forward merge")?;
@@ -92,14 +95,12 @@ pub async fn abort_merge(path: String) -> Result<()> {
 
 /// Rebase current branch onto another
 #[command]
-pub async fn rebase(
-    path: String,
-    onto: String,
-) -> Result<()> {
+pub async fn rebase(path: String, onto: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     // Find the onto commit
-    let onto_ref = repo.find_reference(&format!("refs/heads/{}", onto))
+    let onto_ref = repo
+        .find_reference(&format!("refs/heads/{}", onto))
         .or_else(|_| repo.find_reference(&format!("refs/remotes/{}", onto)))
         .or_else(|_| repo.find_reference(&onto))?;
 
@@ -107,12 +108,7 @@ pub async fn rebase(
     let head = repo.head()?;
     let head_commit = repo.reference_to_annotated_commit(&head)?;
 
-    let mut rebase = repo.rebase(
-        Some(&head_commit),
-        Some(&onto_commit),
-        None,
-        None,
-    )?;
+    let mut rebase = repo.rebase(Some(&head_commit), Some(&onto_commit), None, None)?;
 
     let signature = repo.signature()?;
 

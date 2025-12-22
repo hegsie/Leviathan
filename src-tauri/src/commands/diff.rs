@@ -22,11 +22,7 @@ pub async fn get_diff(
 
         if let Some(ref compare_oid) = compare_with {
             let compare_commit = repo.find_commit(git2::Oid::from_str(compare_oid)?)?;
-            repo.diff_tree_to_tree(
-                Some(&compare_commit.tree()?),
-                Some(&commit.tree()?),
-                None,
-            )?
+            repo.diff_tree_to_tree(Some(&compare_commit.tree()?), Some(&commit.tree()?), None)?
         } else {
             let parent = commit.parent(0).ok();
             let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
@@ -103,9 +99,10 @@ pub async fn get_file_diff(
         }
     }
 
-    Err(crate::error::LeviathanError::OperationFailed(
-        format!("File '{}' not found in diff", file_path),
-    ))
+    Err(crate::error::LeviathanError::OperationFailed(format!(
+        "File '{}' not found in diff",
+        file_path
+    )))
 }
 
 /// Generate a diff for a new/untracked file (entire content as additions)
@@ -174,7 +171,10 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
 
             files.push(DiffFile {
                 path: file_path.clone(),
-                old_path: delta.old_file().path().map(|p| p.to_string_lossy().to_string()),
+                old_path: delta
+                    .old_file()
+                    .path()
+                    .map(|p| p.to_string_lossy().to_string()),
                 status,
                 hunks: Vec::new(),
                 is_binary: delta.flags().is_binary(),
@@ -243,10 +243,7 @@ pub struct CommitFileEntry {
 
 /// Get list of files changed in a commit
 #[command]
-pub async fn get_commit_files(
-    path: String,
-    commit_oid: String,
-) -> Result<Vec<CommitFileEntry>> {
+pub async fn get_commit_files(path: String, commit_oid: String) -> Result<Vec<CommitFileEntry>> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let commit = repo.find_commit(git2::Oid::from_str(&commit_oid)?)?;
 
@@ -313,10 +310,7 @@ pub struct CommitStats {
 /// Get stats (additions/deletions) for multiple commits in bulk
 /// This is optimized for the graph view to show commit sizes
 #[command]
-pub async fn get_commits_stats(
-    path: String,
-    commit_oids: Vec<String>,
-) -> Result<Vec<CommitStats>> {
+pub async fn get_commits_stats(path: String, commit_oids: Vec<String>) -> Result<Vec<CommitStats>> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let mut results = Vec::with_capacity(commit_oids.len());
 
@@ -379,10 +373,9 @@ pub async fn get_commit_file_diff(
     let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
 
     let files = parse_diff(&diff)?;
-    files
-        .into_iter()
-        .next()
-        .ok_or_else(|| crate::error::LeviathanError::OperationFailed("File not found in commit".to_string()))
+    files.into_iter().next().ok_or_else(|| {
+        crate::error::LeviathanError::OperationFailed("File not found in commit".to_string())
+    })
 }
 
 /// A single line of blame output

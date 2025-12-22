@@ -40,15 +40,13 @@ impl WatcherService {
     pub fn watch(&mut self, repo_path: &Path) -> Result<()> {
         let (tx, rx) = channel();
 
-        let config = Config::default()
-            .with_poll_interval(Duration::from_secs(1));
+        let config = Config::default().with_poll_interval(Duration::from_secs(1));
 
         let tx_clone = tx.clone();
         let watcher = RecommendedWatcher::new(
             move |result: std::result::Result<Event, notify::Error>| {
-                let event = result.map_err(|e| {
-                    LeviathanError::OperationFailed(format!("Watch error: {}", e))
-                });
+                let event = result
+                    .map_err(|e| LeviathanError::OperationFailed(format!("Watch error: {}", e)));
                 let _ = tx_clone.send(event);
             },
             config,
@@ -70,8 +68,9 @@ impl WatcherService {
     /// Stop watching
     pub fn unwatch(&mut self, repo_path: &Path) -> Result<()> {
         if let Some(ref mut w) = self.watcher {
-            w.unwatch(repo_path)
-                .map_err(|e| LeviathanError::OperationFailed(format!("Failed to unwatch: {}", e)))?;
+            w.unwatch(repo_path).map_err(|e| {
+                LeviathanError::OperationFailed(format!("Failed to unwatch: {}", e))
+            })?;
         }
         self.watcher = None;
         self.event_rx = None;
