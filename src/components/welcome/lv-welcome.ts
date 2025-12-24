@@ -24,10 +24,10 @@ export class LvWelcome extends LitElement {
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: center;
         height: 100%;
         padding: var(--spacing-xl);
         background: var(--color-bg-primary);
+        overflow: auto;
       }
 
       .welcome-content {
@@ -36,6 +36,7 @@ export class LvWelcome extends LitElement {
         align-items: center;
         max-width: 600px;
         text-align: center;
+        margin: auto;
       }
 
       .mascot {
