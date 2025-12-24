@@ -4,6 +4,7 @@
  */
 
 import { invokeCommand } from './tauri-api.ts';
+import { showToast } from './notification.service.ts';
 import type {
   Repository,
   Commit,
@@ -251,16 +252,40 @@ export async function setRemoteUrl(
   return invokeCommand<Remote>('set_remote_url', { path: repoPath, name, url, push });
 }
 
-export async function fetch(args?: FetchCommand): Promise<CommandResult<void>> {
-  return invokeCommand<void>('fetch', args);
+export async function fetch(args?: FetchCommand & { silent?: boolean }): Promise<CommandResult<void>> {
+  const result = await invokeCommand<void>('fetch', args);
+  if (!args?.silent) {
+    if (result.success) {
+      showToast('Fetch completed successfully', 'success');
+    } else {
+      showToast(`Fetch failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+    }
+  }
+  return result;
 }
 
-export async function pull(args?: PullCommand): Promise<CommandResult<void>> {
-  return invokeCommand<void>('pull', args);
+export async function pull(args?: PullCommand & { silent?: boolean }): Promise<CommandResult<void>> {
+  const result = await invokeCommand<void>('pull', args);
+  if (!args?.silent) {
+    if (result.success) {
+      showToast('Pull completed successfully', 'success');
+    } else {
+      showToast(`Pull failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+    }
+  }
+  return result;
 }
 
-export async function push(args?: PushCommand): Promise<CommandResult<void>> {
-  return invokeCommand<void>('push', args);
+export async function push(args?: PushCommand & { silent?: boolean }): Promise<CommandResult<void>> {
+  const result = await invokeCommand<void>('push', args);
+  if (!args?.silent) {
+    if (result.success) {
+      showToast('Push completed successfully', 'success');
+    } else {
+      showToast(`Push failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+    }
+  }
+  return result;
 }
 
 /**
@@ -2205,4 +2230,61 @@ export async function listBitbucketPipelines(
     workspace,
     repoSlug,
   });
+}
+
+// ============================================================================
+// Commit Templates
+// ============================================================================
+
+export interface CommitTemplate {
+  id: string;
+  name: string;
+  content: string;
+  isConventional: boolean;
+  createdAt: number;
+}
+
+export interface ConventionalType {
+  typeName: string;
+  description: string;
+  emoji?: string;
+}
+
+/**
+ * Get commit template from git config or .gitmessage file
+ */
+export async function getCommitTemplate(
+  repoPath: string
+): Promise<CommandResult<string | null>> {
+  return invokeCommand<string | null>('get_commit_template', { path: repoPath });
+}
+
+/**
+ * List all saved commit templates
+ */
+export async function listTemplates(): Promise<CommandResult<CommitTemplate[]>> {
+  return invokeCommand<CommitTemplate[]>('list_templates', {});
+}
+
+/**
+ * Save a commit template
+ */
+export async function saveTemplate(
+  template: CommitTemplate
+): Promise<CommandResult<CommitTemplate>> {
+  return invokeCommand<CommitTemplate>('save_template', { template });
+}
+
+/**
+ * Delete a commit template
+ */
+export async function deleteTemplate(id: string): Promise<CommandResult<void>> {
+  return invokeCommand<void>('delete_template', { id });
+}
+
+/**
+ * Get conventional commit types
+ */
+export async function getConventionalTypes(): Promise<CommandResult<ConventionalType[]>> {
+  return invokeCommand<ConventionalType[]>('get_conventional_types', {});
 }

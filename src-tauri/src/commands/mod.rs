@@ -26,3 +26,4 @@ pub mod submodule;
 pub mod tags;
 pub mod watcher;
 pub mod worktree;
+pub mod templates;

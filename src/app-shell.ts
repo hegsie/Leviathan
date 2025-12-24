@@ -27,6 +27,7 @@ import './components/dialogs/lv-config-dialog.ts';
 import './components/dialogs/lv-credentials-dialog.ts';
 import './components/dialogs/lv-github-dialog.ts';
 import './components/panels/lv-file-history.ts';
+import './components/common/lv-toast-container.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
@@ -1263,6 +1264,8 @@ export class AppShell extends LitElement {
           @close=${() => { this.showGitHub = false; }}
         ></lv-github-dialog>
       ` : ''}
+
+      <lv-toast-container></lv-toast-container>
     `;
   }
 }

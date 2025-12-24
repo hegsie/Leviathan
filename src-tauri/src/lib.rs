@@ -32,6 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(WatcherState::default())
         .setup(|_app| {
             tracing::info!("Application setup complete");
@@ -239,6 +240,12 @@ pub fn run() {
             commands::bitbucket::create_bitbucket_pull_request,
             commands::bitbucket::list_bitbucket_issues,
             commands::bitbucket::list_bitbucket_pipelines,
+            // Commit templates
+            commands::templates::get_commit_template,
+            commands::templates::list_templates,
+            commands::templates::save_template,
+            commands::templates::delete_template,
+            commands::templates::get_conventional_types,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
