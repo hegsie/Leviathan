@@ -1,5 +1,6 @@
 //! Tauri command handlers
 
+pub mod autofetch;
 pub mod azure_devops;
 pub mod bisect;
 pub mod bitbucket;

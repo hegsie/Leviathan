@@ -13,6 +13,7 @@ use tauri::Manager;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use commands::watcher::WatcherState;
+use services::create_autofetch_state;
 
 /// Initialize the application
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -34,6 +35,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .manage(WatcherState::default())
+        .manage(create_autofetch_state())
         .setup(|_app| {
             tracing::info!("Application setup complete");
 
@@ -246,6 +248,11 @@ pub fn run() {
             commands::templates::save_template,
             commands::templates::delete_template,
             commands::templates::get_conventional_types,
+            // Auto-fetch
+            commands::autofetch::start_auto_fetch,
+            commands::autofetch::stop_auto_fetch,
+            commands::autofetch::is_auto_fetch_running,
+            commands::autofetch::get_remote_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

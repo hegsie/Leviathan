@@ -2288,3 +2288,48 @@ export async function deleteTemplate(id: string): Promise<CommandResult<void>> {
 export async function getConventionalTypes(): Promise<CommandResult<ConventionalType[]>> {
   return invokeCommand<ConventionalType[]>('get_conventional_types', {});
 }
+
+// ============================================================================
+// Auto-fetch
+// ============================================================================
+
+export interface RemoteStatus {
+  ahead: number;
+  behind: number;
+  hasUpstream: boolean;
+  upstreamName?: string;
+}
+
+/**
+ * Start auto-fetching for a repository
+ */
+export async function startAutoFetch(
+  repoPath: string,
+  intervalMinutes: number
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('start_auto_fetch', {
+    path: repoPath,
+    intervalMinutes,
+  });
+}
+
+/**
+ * Stop auto-fetching for a repository
+ */
+export async function stopAutoFetch(repoPath: string): Promise<CommandResult<void>> {
+  return invokeCommand<void>('stop_auto_fetch', { path: repoPath });
+}
+
+/**
+ * Check if auto-fetch is running for a repository
+ */
+export async function isAutoFetchRunning(repoPath: string): Promise<CommandResult<boolean>> {
+  return invokeCommand<boolean>('is_auto_fetch_running', { path: repoPath });
+}
+
+/**
+ * Get remote status (ahead/behind counts)
+ */
+export async function getRemoteStatus(repoPath: string): Promise<CommandResult<RemoteStatus>> {
+  return invokeCommand<RemoteStatus>('get_remote_status', { path: repoPath });
+}

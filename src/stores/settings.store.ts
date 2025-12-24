@@ -31,6 +31,7 @@ export interface SettingsState {
 
   // Behavior
   autoFetchInterval: number; // 0 = disabled, in minutes
+  fetchOnFocus: boolean; // Fetch when window regains focus
   confirmBeforeDiscard: boolean;
   openLastRepository: boolean;
 
@@ -51,6 +52,7 @@ export interface SettingsState {
   setWordWrap: (wrap: boolean) => void;
   setShowWhitespace: (show: boolean) => void;
   setAutoFetchInterval: (minutes: number) => void;
+  setFetchOnFocus: (enabled: boolean) => void;
   setConfirmBeforeDiscard: (confirm: boolean) => void;
   setOpenLastRepository: (open: boolean) => void;
   addRecentRepository: (path: string) => void;
@@ -72,6 +74,7 @@ const defaultSettings = {
   wordWrap: true,
   showWhitespace: false,
   autoFetchInterval: 0,
+  fetchOnFocus: false,
   confirmBeforeDiscard: true,
   openLastRepository: true,
   recentRepositories: [] as string[],
@@ -112,6 +115,8 @@ export const settingsStore = createStore<SettingsState>()(
       setShowWhitespace: (showWhitespace) => set({ showWhitespace }),
 
       setAutoFetchInterval: (autoFetchInterval) => set({ autoFetchInterval }),
+
+      setFetchOnFocus: (fetchOnFocus) => set({ fetchOnFocus }),
 
       setConfirmBeforeDiscard: (confirmBeforeDiscard) => set({ confirmBeforeDiscard }),
 
