@@ -1,10 +1,14 @@
 /**
  * Leviathan Design Tokens
  * CSS Custom Properties for theming
+ *
+ * Theme priority:
+ * 1. [data-theme="light/dark"] - Manual user selection
+ * 2. @media (prefers-color-scheme) - System preference (when data-theme="system" or not set)
  */
 
 :root {
-  /* Colors - Light Theme */
+  /* Colors - Light Theme (default) */
   --color-bg-primary: #ffffff;
   --color-bg-secondary: #f8f9fa;
   --color-bg-tertiary: #e9ecef;
@@ -13,6 +17,7 @@
 
   --color-text-primary: #1a1a1a;
   --color-text-secondary: #5f6368;
+  --color-text-tertiary: #80868b;
   --color-text-muted: #9aa0a6;
   --color-text-inverse: #ffffff;
 
@@ -41,15 +46,54 @@
   /* Primary background for selected items */
   --color-primary-bg: rgba(26, 115, 232, 0.1);
 
-  /* Graph Colors */
+  /* Input/Button colors */
+  --input-background: var(--color-bg-primary);
+  --input-border: var(--color-border);
+  --button-background: var(--color-bg-tertiary);
+  --button-hover-background: var(--color-bg-hover);
+  --hover-background: var(--color-bg-hover);
+  --panel-background: var(--color-bg-secondary);
+
+  /* Alias mappings for legacy variable names */
+  --text-primary: var(--color-text-primary);
+  --text-secondary: var(--color-text-secondary);
+  --text-tertiary: var(--color-text-tertiary);
+  --border-color: var(--color-border);
+  --accent-color: var(--color-primary);
+  --error-color: var(--color-error);
+
+  /* Toggle switch colors */
+  --toggle-knob-color: #ffffff;
+  --toggle-track-color: var(--color-border-strong);
+  --toggle-track-active: var(--color-primary);
+
+  /* Graph Colors - optimized for light backgrounds */
   --color-branch-1: #1a73e8;
-  --color-branch-2: #34a853;
-  --color-branch-3: #ea4335;
-  --color-branch-4: #fbbc04;
-  --color-branch-5: #9334e6;
-  --color-branch-6: #00acc1;
-  --color-branch-7: #ff7043;
-  --color-branch-8: #7cb342;
+  --color-branch-2: #188038;
+  --color-branch-3: #c5221f;
+  --color-branch-4: #e37400;
+  --color-branch-5: #7b1fa2;
+  --color-branch-6: #00838f;
+  --color-branch-7: #d84315;
+  --color-branch-8: #558b2f;
+
+  /* Graph node/text colors */
+  --graph-background: var(--color-bg-primary);
+  --graph-text-color: var(--color-text-primary);
+  --graph-text-secondary: var(--color-text-secondary);
+  --graph-selected-color: var(--color-text-primary);
+  --graph-hover-color: var(--color-text-secondary);
+  --graph-node-text: #ffffff;
+
+  /* Ref label colors */
+  --ref-local-bg: #c8e6c9;
+  --ref-local-text: #1b5e20;
+  --ref-remote-bg: #bbdefb;
+  --ref-remote-text: #0d47a1;
+  --ref-tag-bg: #fff3e0;
+  --ref-tag-text: #e65100;
+  --ref-head-bg: #ffccbc;
+  --ref-head-text: #bf360c;
 
   /* Typography */
   --font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
@@ -109,9 +153,9 @@
   --graph-line-width: 2px;
 }
 
-/* Dark Theme */
+/* Dark Theme - System preference */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --color-bg-primary: #1e1e1e;
     --color-bg-secondary: #252526;
     --color-bg-tertiary: #2d2d30;
@@ -120,6 +164,7 @@
 
     --color-text-primary: #e4e4e4;
     --color-text-secondary: #a0a0a0;
+    --color-text-tertiary: #808080;
     --color-text-muted: #6e6e6e;
     --color-text-inverse: #1e1e1e;
 
@@ -141,7 +186,101 @@
     --color-diff-del-line-bg: rgba(234, 67, 53, 0.3);
 
     --color-primary-bg: rgba(79, 195, 247, 0.15);
+
+    /* Toggle switch - dark mode uses dark knob on light track */
+    --toggle-knob-color: #e4e4e4;
+
+    /* Graph Colors - brighter for dark backgrounds */
+    --color-branch-1: #4fc3f7;
+    --color-branch-2: #81c784;
+    --color-branch-3: #ef5350;
+    --color-branch-4: #ffb74d;
+    --color-branch-5: #ce93d8;
+    --color-branch-6: #4dd0e1;
+    --color-branch-7: #ff8a65;
+    --color-branch-8: #aed581;
+
+    /* Graph node/text colors */
+    --graph-text-color: #c8c8c8;
+    --graph-text-secondary: #909090;
+    --graph-selected-color: #ffffff;
+    --graph-hover-color: #e0e0e0;
+    --graph-node-text: #1a1520;
+
+    /* Ref label colors - dark mode */
+    --ref-local-bg: #2e5730;
+    --ref-local-text: #a5d6a7;
+    --ref-remote-bg: #1a3a5c;
+    --ref-remote-text: #90caf9;
+    --ref-tag-bg: #5c4020;
+    --ref-tag-text: #ffe082;
+    --ref-head-bg: #5c3020;
+    --ref-head-text: #ffab91;
   }
+}
+
+/* Dark Theme - Manual override via data-theme attribute */
+:root[data-theme="dark"] {
+  --color-bg-primary: #1e1e1e;
+  --color-bg-secondary: #252526;
+  --color-bg-tertiary: #2d2d30;
+  --color-bg-hover: #3c3c3c;
+  --color-bg-selected: #094771;
+
+  --color-text-primary: #e4e4e4;
+  --color-text-secondary: #a0a0a0;
+  --color-text-tertiary: #808080;
+  --color-text-muted: #6e6e6e;
+  --color-text-inverse: #1e1e1e;
+
+  --color-border: #3c3c3c;
+  --color-border-strong: #505050;
+
+  --color-primary: #4fc3f7;
+  --color-primary-hover: #81d4fa;
+  --color-primary-light: #0d3a58;
+
+  --color-success-bg: rgba(52, 168, 83, 0.2);
+  --color-warning-bg: rgba(251, 188, 4, 0.2);
+  --color-error-bg: rgba(234, 67, 53, 0.2);
+  --color-info-bg: rgba(66, 133, 244, 0.2);
+
+  --color-diff-add-bg: rgba(52, 168, 83, 0.2);
+  --color-diff-add-line-bg: rgba(52, 168, 83, 0.3);
+  --color-diff-del-bg: rgba(234, 67, 53, 0.2);
+  --color-diff-del-line-bg: rgba(234, 67, 53, 0.3);
+
+  --color-primary-bg: rgba(79, 195, 247, 0.15);
+
+  /* Toggle switch */
+  --toggle-knob-color: #e4e4e4;
+
+  /* Graph Colors - brighter for dark backgrounds */
+  --color-branch-1: #4fc3f7;
+  --color-branch-2: #81c784;
+  --color-branch-3: #ef5350;
+  --color-branch-4: #ffb74d;
+  --color-branch-5: #ce93d8;
+  --color-branch-6: #4dd0e1;
+  --color-branch-7: #ff8a65;
+  --color-branch-8: #aed581;
+
+  /* Graph node/text colors */
+  --graph-text-color: #c8c8c8;
+  --graph-text-secondary: #909090;
+  --graph-selected-color: #ffffff;
+  --graph-hover-color: #e0e0e0;
+  --graph-node-text: #1a1520;
+
+  /* Ref label colors - dark mode */
+  --ref-local-bg: #2e5730;
+  --ref-local-text: #a5d6a7;
+  --ref-remote-bg: #1a3a5c;
+  --ref-remote-text: #90caf9;
+  --ref-tag-bg: #5c4020;
+  --ref-tag-text: #ffe082;
+  --ref-head-bg: #5c3020;
+  --ref-head-text: #ffab91;
 }
 
 /* Base Reset */

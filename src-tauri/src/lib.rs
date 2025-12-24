@@ -95,6 +95,13 @@ pub fn run() {
             commands::refs::get_refs_by_commit,
             commands::watcher::start_watching,
             commands::watcher::stop_watching,
+            commands::rewrite::cherry_pick,
+            commands::rewrite::continue_cherry_pick,
+            commands::rewrite::abort_cherry_pick,
+            commands::rewrite::revert,
+            commands::rewrite::continue_revert,
+            commands::rewrite::abort_revert,
+            commands::rewrite::reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

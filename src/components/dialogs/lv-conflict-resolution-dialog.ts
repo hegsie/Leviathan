@@ -265,7 +265,7 @@ export class LvConflictResolutionDialog extends LitElement {
 
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
-  @property({ type: String }) operationType: 'merge' | 'rebase' = 'merge';
+  @property({ type: String }) operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' = 'merge';
 
   @state() private conflicts: ConflictFile[] = [];
   @state() private resolvedFiles: Set<string> = new Set();
@@ -369,10 +369,21 @@ export class LvConflictResolutionDialog extends LitElement {
     if (!confirmAbort) return;
 
     try {
-      const result =
-        this.operationType === 'merge'
-          ? await gitService.abortMerge({ path: this.repositoryPath })
-          : await gitService.abortRebase({ path: this.repositoryPath });
+      let result;
+      switch (this.operationType) {
+        case 'merge':
+          result = await gitService.abortMerge({ path: this.repositoryPath });
+          break;
+        case 'rebase':
+          result = await gitService.abortRebase({ path: this.repositoryPath });
+          break;
+        case 'cherry-pick':
+          result = await gitService.abortCherryPick({ path: this.repositoryPath });
+          break;
+        case 'revert':
+          result = await gitService.abortRevert({ path: this.repositoryPath });
+          break;
+      }
 
       if (result.success) {
         this.dispatchEvent(
@@ -404,17 +415,49 @@ export class LvConflictResolutionDialog extends LitElement {
     }
 
     try {
-      if (this.operationType === 'rebase') {
-        const result = await gitService.continueRebase({ path: this.repositoryPath });
-        if (!result.success) {
-          console.error('Failed to continue rebase:', result.error);
-          // Might have more conflicts
-          await this.loadConflicts();
-          if (this.conflicts.length > 0) {
-            this.resolvedFiles = new Set();
-            return;
+      let result;
+      switch (this.operationType) {
+        case 'rebase':
+          result = await gitService.continueRebase({ path: this.repositoryPath });
+          if (!result.success) {
+            console.error('Failed to continue rebase:', result.error);
+            // Might have more conflicts
+            await this.loadConflicts();
+            if (this.conflicts.length > 0) {
+              this.resolvedFiles = new Set();
+              return;
+            }
           }
-        }
+          break;
+        case 'cherry-pick':
+          result = await gitService.continueCherryPick({ path: this.repositoryPath });
+          if (!result.success) {
+            console.error('Failed to continue cherry-pick:', result.error);
+            if (result.error?.code === 'CHERRY_PICK_CONFLICT') {
+              await this.loadConflicts();
+              if (this.conflicts.length > 0) {
+                this.resolvedFiles = new Set();
+                return;
+              }
+            }
+          }
+          break;
+        case 'revert':
+          result = await gitService.continueRevert({ path: this.repositoryPath });
+          if (!result.success) {
+            console.error('Failed to continue revert:', result.error);
+            if (result.error?.code === 'REVERT_CONFLICT') {
+              await this.loadConflicts();
+              if (this.conflicts.length > 0) {
+                this.resolvedFiles = new Set();
+                return;
+              }
+            }
+          }
+          break;
+        case 'merge':
+          // Merge doesn't have a continue - just close after resolving
+          break;
       }
 
       this.dispatchEvent(
@@ -441,6 +484,21 @@ export class LvConflictResolutionDialog extends LitElement {
     return this.conflicts.length;
   }
 
+  private getOperationTitle(): string {
+    switch (this.operationType) {
+      case 'merge':
+        return 'Merge';
+      case 'rebase':
+        return 'Rebase';
+      case 'cherry-pick':
+        return 'Cherry-pick';
+      case 'revert':
+        return 'Revert';
+      default:
+        return 'Merge';
+    }
+  }
+
   render() {
     if (!this.open) return nothing;
 
@@ -450,7 +508,7 @@ export class LvConflictResolutionDialog extends LitElement {
         <div class="header">
           <div>
             <div class="header-title">
-              Resolve ${this.operationType === 'merge' ? 'Merge' : 'Rebase'} Conflicts
+              Resolve ${this.getOperationTitle()} Conflicts
             </div>
             <div class="header-subtitle">
               ${this.resolvedCount} of ${this.totalCount} conflicts resolved

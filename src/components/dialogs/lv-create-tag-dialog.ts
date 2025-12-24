@@ -105,7 +105,7 @@ export class LvCreateTagDialog extends LitElement {
         width: 16px;
         left: 3px;
         bottom: 3px;
-        background-color: white;
+        background-color: var(--toggle-knob-color, #ffffff);
         transition: 0.2s;
         border-radius: 50%;
       }

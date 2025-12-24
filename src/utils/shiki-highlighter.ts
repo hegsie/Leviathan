@@ -21,18 +21,27 @@ const THEME_DARK = 'github-dark';
 const THEME_LIGHT = 'github-light';
 
 /**
- * Detect if the user prefers light color scheme
+ * Detect if the current theme is light mode.
+ * Checks data-theme attribute first (user preference), then falls back to system preference.
  */
-function prefersLightMode(): boolean {
-  if (typeof window === 'undefined') return false;
+function isLightMode(): boolean {
+  if (typeof document === 'undefined') return false;
+
+  // Check manual theme override first
+  const dataTheme = document.documentElement.getAttribute('data-theme');
+  if (dataTheme === 'light') return true;
+  if (dataTheme === 'dark') return false;
+
+  // Fall back to system preference
   return window.matchMedia('(prefers-color-scheme: light)').matches;
 }
 
 /**
- * Get the appropriate theme based on current color scheme preference
+ * Get the appropriate Shiki theme based on current color scheme.
+ * Respects both manual theme selection and system preference.
  */
 export function getCurrentTheme(): 'github-dark' | 'github-light' {
-  return prefersLightMode() ? THEME_LIGHT : THEME_DARK;
+  return isLightMode() ? THEME_LIGHT : THEME_DARK;
 }
 
 // Common languages to load initially (others loaded on demand)

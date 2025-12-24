@@ -51,6 +51,18 @@ pub enum LeviathanError {
     #[error("Rebase conflict")]
     RebaseConflict,
 
+    #[error("Cherry-pick conflict")]
+    CherryPickConflict,
+
+    #[error("Cherry-pick in progress")]
+    CherryPickInProgress,
+
+    #[error("Revert conflict")]
+    RevertConflict,
+
+    #[error("Revert in progress")]
+    RevertInProgress,
+
     #[error("Invalid reference")]
     InvalidReference,
 
@@ -84,6 +96,10 @@ impl From<LeviathanError> for ErrorResponse {
             LeviathanError::MergeConflict => "MERGE_CONFLICT",
             LeviathanError::RebaseInProgress => "REBASE_IN_PROGRESS",
             LeviathanError::RebaseConflict => "REBASE_CONFLICT",
+            LeviathanError::CherryPickConflict => "CHERRY_PICK_CONFLICT",
+            LeviathanError::CherryPickInProgress => "CHERRY_PICK_IN_PROGRESS",
+            LeviathanError::RevertConflict => "REVERT_CONFLICT",
+            LeviathanError::RevertInProgress => "REVERT_IN_PROGRESS",
             LeviathanError::InvalidReference => "INVALID_REFERENCE",
             LeviathanError::Custom(_) => "CUSTOM_ERROR",
         };
@@ -119,6 +135,10 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::MergeConflict => "MERGE_CONFLICT",
                 LeviathanError::RebaseInProgress => "REBASE_IN_PROGRESS",
                 LeviathanError::RebaseConflict => "REBASE_CONFLICT",
+                LeviathanError::CherryPickConflict => "CHERRY_PICK_CONFLICT",
+                LeviathanError::CherryPickInProgress => "CHERRY_PICK_IN_PROGRESS",
+                LeviathanError::RevertConflict => "REVERT_CONFLICT",
+                LeviathanError::RevertInProgress => "REVERT_IN_PROGRESS",
                 LeviathanError::InvalidReference => "INVALID_REFERENCE",
                 LeviathanError::Custom(_) => "CUSTOM_ERROR",
             }

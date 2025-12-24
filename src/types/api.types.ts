@@ -153,6 +153,47 @@ export interface AbortRebaseCommand {
 }
 
 /**
+ * Cherry-pick commands
+ */
+export interface CherryPickCommand {
+  path: string;
+  commit_oid: string;
+}
+
+export interface ContinueCherryPickCommand {
+  path: string;
+}
+
+export interface AbortCherryPickCommand {
+  path: string;
+}
+
+/**
+ * Revert commands
+ */
+export interface RevertCommand {
+  path: string;
+  commit_oid: string;
+}
+
+export interface ContinueRevertCommand {
+  path: string;
+}
+
+export interface AbortRevertCommand {
+  path: string;
+}
+
+/**
+ * Reset commands
+ */
+export interface ResetCommand {
+  path: string;
+  target_ref: string;
+  mode: 'soft' | 'mixed' | 'hard';
+}
+
+/**
  * Stash commands
  */
 export interface CreateStashCommand {

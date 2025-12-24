@@ -39,6 +39,13 @@ import type {
   RebaseCommand,
   ContinueRebaseCommand,
   AbortRebaseCommand,
+  CherryPickCommand,
+  ContinueCherryPickCommand,
+  AbortCherryPickCommand,
+  RevertCommand,
+  ContinueRevertCommand,
+  AbortRevertCommand,
+  ResetCommand,
   CreateStashCommand,
   ApplyStashCommand,
   DropStashCommand,
@@ -269,6 +276,57 @@ export async function resolveConflict(
   content: string
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>('resolve_conflict', { path, file_path: filePath, content });
+}
+
+/**
+ * Cherry-pick operations
+ */
+export async function cherryPick(
+  args: CherryPickCommand
+): Promise<CommandResult<Commit>> {
+  return invokeCommand<Commit>('cherry_pick', args);
+}
+
+export async function continueCherryPick(
+  args: ContinueCherryPickCommand
+): Promise<CommandResult<Commit>> {
+  return invokeCommand<Commit>('continue_cherry_pick', args);
+}
+
+export async function abortCherryPick(
+  args: AbortCherryPickCommand
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('abort_cherry_pick', args);
+}
+
+/**
+ * Revert operations
+ */
+export async function revert(
+  args: RevertCommand
+): Promise<CommandResult<Commit>> {
+  return invokeCommand<Commit>('revert', args);
+}
+
+export async function continueRevert(
+  args: ContinueRevertCommand
+): Promise<CommandResult<Commit>> {
+  return invokeCommand<Commit>('continue_revert', args);
+}
+
+export async function abortRevert(
+  args: AbortRevertCommand
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('abort_revert', args);
+}
+
+/**
+ * Reset operations
+ */
+export async function reset(
+  args: ResetCommand
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('reset', args);
 }
 
 /**

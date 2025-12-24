@@ -74,41 +74,79 @@ const DEFAULT_CONFIG: RenderConfig = {
   showRefIcons: true,
 };
 
+/**
+ * Get a CSS variable value from the document root
+ */
+function getCSSVar(name: string, fallback: string): string {
+  if (typeof document === 'undefined') return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+/**
+ * Build theme from CSS variables for dynamic light/dark mode support
+ */
+export function getThemeFromCSS(): RenderTheme {
+  return {
+    background: getCSSVar('--color-bg-primary', '#1e1e1e'),
+    laneColors: [
+      getCSSVar('--color-branch-1', '#4fc3f7'),
+      getCSSVar('--color-branch-2', '#81c784'),
+      getCSSVar('--color-branch-3', '#ef5350'),
+      getCSSVar('--color-branch-4', '#ffb74d'),
+      getCSSVar('--color-branch-5', '#ce93d8'),
+      getCSSVar('--color-branch-6', '#4dd0e1'),
+      getCSSVar('--color-branch-7', '#ff8a65'),
+      getCSSVar('--color-branch-8', '#aed581'),
+      // Extended colors - derived from base colors
+      getCSSVar('--color-branch-1', '#4fc3f7'),
+      getCSSVar('--color-branch-2', '#81c784'),
+      getCSSVar('--color-branch-3', '#ef5350'),
+      getCSSVar('--color-branch-4', '#ffb74d'),
+      getCSSVar('--color-branch-5', '#ce93d8'),
+      getCSSVar('--color-branch-6', '#4dd0e1'),
+      getCSSVar('--color-branch-7', '#ff8a65'),
+      getCSSVar('--color-branch-8', '#aed581'),
+    ],
+    textColor: getCSSVar('--graph-text-color', '#c8c8c8'),
+    selectedColor: getCSSVar('--graph-selected-color', '#ffffff'),
+    hoveredColor: getCSSVar('--graph-hover-color', '#e0e0e0'),
+    fpsColor: getCSSVar('--color-warning', '#fbbc04'),
+    refColors: {
+      localBranch: getCSSVar('--ref-local-bg', '#2e5730'),
+      localBranchText: getCSSVar('--ref-local-text', '#a5d6a7'),
+      remoteBranch: getCSSVar('--ref-remote-bg', '#1a3a5c'),
+      remoteBranchText: getCSSVar('--ref-remote-text', '#90caf9'),
+      tag: getCSSVar('--ref-tag-bg', '#5c4020'),
+      tagText: getCSSVar('--ref-tag-text', '#ffe082'),
+      head: getCSSVar('--ref-head-bg', '#5c3020'),
+      headText: getCSSVar('--ref-head-text', '#ffab91'),
+    },
+  };
+}
+
+// Fallback theme for SSR or when CSS vars aren't available
 const DEFAULT_THEME: RenderTheme = {
-  background: '#1a1520',
-  // Vibrant, well-separated colors for maximum distinction between adjacent lanes
-  // Colors are ordered to maximize contrast between neighbors
+  background: '#1e1e1e',
   laneColors: [
-    '#6fbf73', // green
-    '#ce93d8', // purple
-    '#4fc3f7', // cyan
-    '#ffb74d', // orange
-    '#f06292', // pink
-    '#81c784', // light green
-    '#ba68c8', // violet
-    '#4dd0e1', // teal
-    '#ffa726', // amber
-    '#ec407a', // rose
-    '#aed581', // lime
-    '#9575cd', // deep purple
-    '#26c6da', // cyan light
-    '#ff8a65', // deep orange
-    '#f48fb1', // pink light
-    '#c5e1a5', // light lime
+    '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
+    '#ce93d8', '#4dd0e1', '#ff8a65', '#aed581',
+    '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
+    '#ce93d8', '#4dd0e1', '#ff8a65', '#aed581',
   ],
   textColor: '#c8c8c8',
   selectedColor: '#ffffff',
   hoveredColor: '#e0e0e0',
-  fpsColor: '#d4854a',
+  fpsColor: '#fbbc04',
   refColors: {
-    localBranch: '#7a8a6a',      // olive
-    localBranchText: '#1a1520',
-    remoteBranch: '#7a7a8a',     // slate
-    remoteBranchText: '#ffffff',
-    tag: '#d4a54a',              // gold
-    tagText: '#1a1520',
-    head: '#d4854a',             // ember
-    headText: '#1a1520',
+    localBranch: '#2e5730',
+    localBranchText: '#a5d6a7',
+    remoteBranch: '#1a3a5c',
+    remoteBranchText: '#90caf9',
+    tag: '#5c4020',
+    tagText: '#ffe082',
+    head: '#5c3020',
+    headText: '#ffab91',
   },
 };
 

@@ -11,6 +11,7 @@ import './components/panels/lv-blame-view.ts';
 import './components/sidebar/lv-left-panel.ts';
 import './components/sidebar/lv-right-panel.ts';
 import './components/dialogs/lv-settings-dialog.ts';
+import './components/dialogs/lv-conflict-resolution-dialog.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
@@ -183,6 +184,86 @@ export class AppShell extends LitElement {
         cursor: col-resize !important;
       }
 
+      /* Context Menu */
+      .context-menu {
+        position: fixed;
+        z-index: var(--z-dropdown);
+        min-width: 200px;
+        max-width: 300px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        padding: var(--spacing-xs) 0;
+      }
+
+      .context-menu-header {
+        padding: var(--spacing-xs) var(--spacing-md);
+        border-bottom: 1px solid var(--color-border);
+        margin-bottom: var(--spacing-xs);
+      }
+
+      .context-menu-oid {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-xs);
+        color: var(--color-primary);
+        margin-right: var(--spacing-sm);
+      }
+
+      .context-menu-summary {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        display: block;
+        margin-top: 2px;
+      }
+
+      .context-menu-divider {
+        height: 1px;
+        background: var(--color-border);
+        margin: var(--spacing-xs) 0;
+      }
+
+      .context-menu-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .context-menu-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .context-menu-item.danger {
+        color: var(--color-error);
+      }
+
+      .context-menu-item.danger:hover {
+        background: var(--color-error-bg);
+      }
+
+      .context-menu-submenu {
+        padding: var(--spacing-xs) 0;
+      }
+
+      .context-menu-label {
+        display: block;
+        padding: var(--spacing-xs) var(--spacing-md);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        font-weight: var(--font-weight-medium);
+      }
+
       /* Blame view uses the same diff-area styling */
     `,
   ];
@@ -206,6 +287,18 @@ export class AppShell extends LitElement {
 
   // Search/filter
   @state() private searchFilter: SearchFilter | null = null;
+
+  // Commit context menu
+  @state() private contextMenu: {
+    visible: boolean;
+    x: number;
+    y: number;
+    commit: Commit | null;
+  } = { visible: false, x: 0, y: 0, commit: null };
+
+  // Conflict resolution dialog
+  @state() private showConflictDialog = false;
+  @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' = 'merge';
 
   // Panel dimensions
   @state() private leftPanelWidth = 220;
@@ -232,6 +325,7 @@ export class AppShell extends LitElement {
       this.activeRepository = state.getActiveRepository();
     });
     document.addEventListener('keydown', this.boundHandleKeyDown);
+    document.addEventListener('click', this.handleDocumentClick);
 
     // Register keyboard shortcuts
     registerDefaultShortcuts({
@@ -255,16 +349,127 @@ export class AppShell extends LitElement {
     document.removeEventListener('mousemove', this.boundHandleMouseMove);
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
     document.removeEventListener('keydown', this.boundHandleKeyDown);
+    document.removeEventListener('click', this.handleDocumentClick);
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
     if (e.key === 'Escape') {
-      if (this.showDiff) {
+      if (this.contextMenu.visible) {
+        this.contextMenu = { ...this.contextMenu, visible: false };
+      } else if (this.showDiff) {
         this.handleCloseDiff();
       } else if (this.showBlame) {
         this.handleCloseBlame();
       }
     }
+  }
+
+  private handleDocumentClick = (): void => {
+    if (this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
+
+  private handleCommitContextMenu(e: CustomEvent): void {
+    const { commit, position } = e.detail as {
+      commit: Commit;
+      refs: RefInfo[];
+      position: { x: number; y: number };
+    };
+
+    this.contextMenu = {
+      visible: true,
+      x: position.x,
+      y: position.y,
+      commit,
+    };
+  }
+
+  private async handleCherryPick(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    const result = await import('./services/git.service.ts').then((m) =>
+      m.cherryPick({
+        path: this.activeRepository!.repository.path,
+        commit_oid: commit.oid,
+      })
+    );
+
+    if (result.success) {
+      this.graphCanvas?.refresh?.();
+    } else if (result.error?.code === 'CHERRY_PICK_CONFLICT') {
+      // Show conflict resolution dialog
+      this.conflictOperationType = 'cherry-pick';
+      this.showConflictDialog = true;
+    } else {
+      console.error('Cherry-pick failed:', result.error);
+    }
+  }
+
+  private async handleRevertCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    const result = await import('./services/git.service.ts').then((m) =>
+      m.revert({
+        path: this.activeRepository!.repository.path,
+        commit_oid: commit.oid,
+      })
+    );
+
+    if (result.success) {
+      this.graphCanvas?.refresh?.();
+    } else if (result.error?.code === 'REVERT_CONFLICT') {
+      // Show conflict resolution dialog
+      this.conflictOperationType = 'revert';
+      this.showConflictDialog = true;
+    } else {
+      console.error('Revert failed:', result.error);
+    }
+  }
+
+  private async handleResetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Confirm for hard reset
+    if (mode === 'hard') {
+      const confirmed = confirm(
+        `Are you sure you want to hard reset to "${commit.summary}"?\n\nThis will discard all uncommitted changes.`
+      );
+      if (!confirmed) return;
+    }
+
+    const result = await import('./services/git.service.ts').then((m) =>
+      m.reset({
+        path: this.activeRepository!.repository.path,
+        target_ref: commit.oid,
+        mode,
+      })
+    );
+
+    if (result.success) {
+      this.graphCanvas?.refresh?.();
+    } else {
+      console.error('Reset failed:', result.error);
+    }
+  }
+
+  private handleConflictResolved(): void {
+    this.showConflictDialog = false;
+    this.graphCanvas?.refresh?.();
+  }
+
+  private handleConflictAborted(): void {
+    this.showConflictDialog = false;
+    this.graphCanvas?.refresh?.();
   }
 
   private handleResizeStart(e: MouseEvent, type: 'left' | 'right'): void {
@@ -452,6 +657,7 @@ export class AppShell extends LitElement {
                   <lv-graph-canvas
                     repositoryPath=${this.activeRepository.repository.path}
                     @commit-selected=${this.handleCommitSelected}
+                    @commit-context-menu=${this.handleCommitContextMenu}
                   ></lv-graph-canvas>
                 </div>
 
@@ -532,6 +738,60 @@ export class AppShell extends LitElement {
           `
         : ''}
 
+      ${this.showConflictDialog && this.activeRepository
+        ? html`
+            <lv-conflict-resolution-dialog
+              open
+              repositoryPath=${this.activeRepository.repository.path}
+              operationType=${this.conflictOperationType}
+              @operation-completed=${this.handleConflictResolved}
+              @operation-aborted=${this.handleConflictAborted}
+            ></lv-conflict-resolution-dialog>
+          `
+        : ''}
+
+      ${this.contextMenu.visible && this.contextMenu.commit
+        ? html`
+            <div
+              class="context-menu"
+              style="left: ${this.contextMenu.x}px; top: ${this.contextMenu.y}px;"
+              @click=${(e: Event) => e.stopPropagation()}
+            >
+              <div class="context-menu-header">
+                <span class="context-menu-oid">${this.contextMenu.commit.oid.substring(0, 7)}</span>
+                <span class="context-menu-summary">${this.contextMenu.commit.summary}</span>
+              </div>
+              <div class="context-menu-divider"></div>
+              <button class="context-menu-item" @click=${this.handleCherryPick}>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M8 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2z"/>
+                  <path d="M8 5v6M5 8h6" stroke="currentColor" stroke-width="1.5" fill="none"/>
+                </svg>
+                Cherry-pick
+              </button>
+              <button class="context-menu-item" @click=${this.handleRevertCommit}>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M1.5 8a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0zM8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3z"/>
+                  <path d="M8 4v4l3 2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+                </svg>
+                Revert
+              </button>
+              <div class="context-menu-divider"></div>
+              <div class="context-menu-submenu">
+                <span class="context-menu-label">Reset to this commit</span>
+                <button class="context-menu-item" @click=${() => this.handleResetToCommit('soft')}>
+                  Soft (keep changes staged)
+                </button>
+                <button class="context-menu-item" @click=${() => this.handleResetToCommit('mixed')}>
+                  Mixed (keep changes unstaged)
+                </button>
+                <button class="context-menu-item danger" @click=${() => this.handleResetToCommit('hard')}>
+                  Hard (discard all changes)
+                </button>
+              </div>
+            </div>
+          `
+        : ''}
     `;
   }
 }

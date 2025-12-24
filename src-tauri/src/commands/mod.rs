@@ -11,3 +11,4 @@ pub mod staging;
 pub mod stash;
 pub mod tags;
 pub mod watcher;
+pub mod rewrite;

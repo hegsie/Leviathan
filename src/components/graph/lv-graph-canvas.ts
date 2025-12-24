@@ -14,7 +14,7 @@ import {
   type Viewport,
   type RenderData,
 } from '../../graph/virtual-scroll.ts';
-import { CanvasRenderer } from '../../graph/canvas-renderer.ts';
+import { CanvasRenderer, getThemeFromCSS } from '../../graph/canvas-renderer.ts';
 import { getCommitHistory, getRefsByCommit, getCommitsStats } from '../../services/git.service.ts';
 import type { Commit, RefsByCommit, RefInfo } from '../../types/git.types.ts';
 
@@ -166,6 +166,8 @@ export class LvGraphCanvas extends LitElement {
   private spatialIndex: SpatialIndex | null = null;
   private scrollState: ScrollStateManager | null = null;
   private resizeObserver: ResizeObserver | null = null;
+  private themeObserver: MutationObserver | null = null;
+  private mediaQuery: MediaQueryList | null = null;
   private animationFrame = 0;
   private lastRenderData: RenderData | null = null;
   private sortedNodesByRow: LayoutNode[] = [];
@@ -234,15 +236,32 @@ export class LvGraphCanvas extends LitElement {
       laneWidth: this.LANE_WIDTH,
     });
 
-    // Initialize renderer
-    this.renderer = new CanvasRenderer(this.canvasEl, {
-      rowHeight: this.ROW_HEIGHT,
-      laneWidth: this.LANE_WIDTH,
-      nodeRadius: this.NODE_RADIUS,
-      lineWidth: 2,
-      showLabels: true,
-      showFps: false, // We show our own FPS
+    // Initialize renderer with theme from CSS variables
+    this.renderer = new CanvasRenderer(
+      this.canvasEl,
+      {
+        rowHeight: this.ROW_HEIGHT,
+        laneWidth: this.LANE_WIDTH,
+        nodeRadius: this.NODE_RADIUS,
+        lineWidth: 2,
+        showLabels: true,
+        showFps: false, // We show our own FPS
+      },
+      getThemeFromCSS()
+    );
+
+    // Listen for theme changes via data-theme attribute
+    this.themeObserver = new MutationObserver(() => {
+      this.renderer?.setTheme(getThemeFromCSS());
     });
+    this.themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+
+    // Also listen for system theme changes
+    this.mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    this.mediaQuery.addEventListener('change', this.handleThemeChange);
 
     // Initialize scroll state
     this.scrollState = new ScrollStateManager((scrollTop, scrollLeft) => {
@@ -271,6 +290,7 @@ export class LvGraphCanvas extends LitElement {
     this.canvasEl.addEventListener('mousemove', this.handleMouseMove.bind(this));
     this.canvasEl.addEventListener('click', this.handleClick.bind(this));
     this.canvasEl.addEventListener('mouseleave', this.handleMouseLeave.bind(this));
+    this.canvasEl.addEventListener('contextmenu', this.handleContextMenu.bind(this));
 
     // Keyboard navigation
     this.canvasEl.addEventListener('keydown', this.handleKeyDown.bind(this));
@@ -283,7 +303,13 @@ export class LvGraphCanvas extends LitElement {
     this.renderer?.destroy();
     this.scrollState?.destroy();
     this.resizeObserver?.disconnect();
+    this.themeObserver?.disconnect();
+    this.mediaQuery?.removeEventListener('change', this.handleThemeChange);
   }
+
+  private handleThemeChange = (): void => {
+    this.renderer?.setTheme(getThemeFromCSS());
+  };
 
   private async generateAndLayout(): Promise<void> {
     await this.loadCommits();
@@ -531,6 +557,45 @@ export class LvGraphCanvas extends LitElement {
     this.renderer?.setSelection(this.selectedNode?.oid ?? null, null);
     this.renderer?.markDirty();
     this.scheduleRender();
+  }
+
+  private handleContextMenu(e: MouseEvent): void {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const result = this.hitTest(e);
+
+    if (result.type === 'node' && result.node) {
+      const commit = this.realCommits.get(result.node.oid);
+      if (commit) {
+        // Select the commit on right-click
+        this.selectedNode = result.node;
+        this.dispatchSelectionEvent();
+
+        // Dispatch context menu event
+        this.dispatchEvent(
+          new CustomEvent('commit-context-menu', {
+            detail: {
+              commit,
+              refs: this.refsByCommit[result.node.oid] || [],
+              position: {
+                x: e.clientX,
+                y: e.clientY,
+              },
+            },
+            bubbles: true,
+            composed: true,
+          })
+        );
+
+        this.renderer?.setSelection(
+          this.selectedNode?.oid ?? null,
+          this.hoveredNode?.oid ?? null
+        );
+        this.renderer?.markDirty();
+        this.scheduleRender();
+      }
+    }
   }
 
   private handleKeyDown(e: KeyboardEvent): void {

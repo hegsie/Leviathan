@@ -2,6 +2,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import type { Commit } from '../../types/git.types.ts';
 
 /**
  * Commit panel component
@@ -176,6 +177,11 @@ export class LvCommitPanel extends LitElement {
   @state() private isCommitting: boolean = false;
   @state() private error: string | null = null;
   @state() private success: string | null = null;
+  @state() private lastCommit: Commit | null = null;
+
+  // Store original input before amend pre-population
+  private originalSummary: string = '';
+  private originalDescription: string = '';
 
   @query('.summary-input') private summaryInput!: HTMLTextAreaElement;
 
@@ -201,9 +207,42 @@ export class LvCommitPanel extends LitElement {
     this.description = target.value;
   }
 
-  private handleAmendToggle(e: Event): void {
+  private async handleAmendToggle(e: Event): Promise<void> {
     const target = e.target as HTMLInputElement;
     this.amend = target.checked;
+
+    if (this.amend) {
+      // Store current input before pre-populating
+      this.originalSummary = this.summary;
+      this.originalDescription = this.description;
+
+      // Fetch last commit and pre-populate message
+      await this.fetchLastCommitMessage();
+    } else {
+      // Restore original input when toggling off
+      this.summary = this.originalSummary;
+      this.description = this.originalDescription;
+      this.lastCommit = null;
+    }
+  }
+
+  private async fetchLastCommitMessage(): Promise<void> {
+    if (!this.repositoryPath) return;
+
+    try {
+      const result = await gitService.getCommitHistory({
+        path: this.repositoryPath,
+        limit: 1,
+      });
+
+      if (result.success && result.data && result.data.length > 0) {
+        this.lastCommit = result.data[0];
+        this.summary = this.lastCommit.summary;
+        this.description = this.lastCommit.body ?? '';
+      }
+    } catch (err) {
+      console.error('Failed to fetch last commit:', err);
+    }
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
@@ -236,6 +275,9 @@ export class LvCommitPanel extends LitElement {
         this.summary = '';
         this.description = '';
         this.amend = false;
+        this.lastCommit = null;
+        this.originalSummary = '';
+        this.originalDescription = '';
 
         // Notify parent to refresh
         this.dispatchEvent(new CustomEvent('commit-created', {
@@ -298,7 +340,7 @@ export class LvCommitPanel extends LitElement {
           .checked=${this.amend}
           @change=${this.handleAmendToggle}
         />
-        Amend last commit
+        Amend last commit${this.amend && this.lastCommit ? ` (${this.lastCommit.shortId})` : ''}
       </label>
 
       ${this.error ? html`<div class="error">${this.error}</div>` : nothing}
