@@ -9,6 +9,7 @@ pub mod config;
 pub mod credentials;
 pub mod diff;
 pub mod github;
+pub mod gitlab;
 pub mod gpg;
 pub mod lfs;
 pub mod merge;

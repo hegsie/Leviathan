@@ -215,6 +215,19 @@ pub fn run() {
             commands::azure_devops::get_ado_work_items,
             commands::azure_devops::query_ado_work_items,
             commands::azure_devops::list_ado_pipeline_runs,
+            // GitLab integration
+            commands::gitlab::store_gitlab_token,
+            commands::gitlab::get_gitlab_token,
+            commands::gitlab::delete_gitlab_token,
+            commands::gitlab::check_gitlab_connection,
+            commands::gitlab::detect_gitlab_repo,
+            commands::gitlab::list_gitlab_merge_requests,
+            commands::gitlab::get_gitlab_merge_request,
+            commands::gitlab::create_gitlab_merge_request,
+            commands::gitlab::list_gitlab_issues,
+            commands::gitlab::create_gitlab_issue,
+            commands::gitlab::list_gitlab_pipelines,
+            commands::gitlab::get_gitlab_labels,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

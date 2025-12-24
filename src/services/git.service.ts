@@ -1856,3 +1856,194 @@ export async function listAdoPipelineRuns(
 ): Promise<CommandResult<AdoPipelineRun[]>> {
   return invokeCommand<AdoPipelineRun[]>('list_ado_pipeline_runs', { organization, project, top });
 }
+
+// =======================
+// GitLab Integration
+// =======================
+
+export interface GitLabUser {
+  id: number;
+  username: string;
+  name: string;
+  avatarUrl: string | null;
+  webUrl: string;
+}
+
+export interface GitLabConnectionStatus {
+  connected: boolean;
+  user: GitLabUser | null;
+  instanceUrl: string;
+}
+
+export interface DetectedGitLabRepo {
+  instanceUrl: string;
+  projectPath: string;
+  remoteName: string;
+}
+
+export interface GitLabMergeRequest {
+  iid: number;
+  title: string;
+  description: string | null;
+  state: string;
+  author: GitLabUser;
+  createdAt: string;
+  sourceBranch: string;
+  targetBranch: string;
+  draft: boolean;
+  webUrl: string;
+  mergeStatus: string;
+}
+
+export interface CreateMergeRequestInput {
+  title: string;
+  description?: string;
+  sourceBranch: string;
+  targetBranch: string;
+  draft?: boolean;
+}
+
+export interface GitLabIssue {
+  iid: number;
+  title: string;
+  description: string | null;
+  state: string;
+  author: GitLabUser;
+  assignees: GitLabUser[];
+  labels: string[];
+  createdAt: string;
+  webUrl: string;
+}
+
+export interface CreateGitLabIssueInput {
+  title: string;
+  description?: string;
+  labels?: string[];
+}
+
+export interface GitLabPipeline {
+  id: number;
+  iid: number;
+  status: string;
+  source: string;
+  ref: string;
+  sha: string;
+  createdAt: string;
+  updatedAt: string;
+  webUrl: string;
+}
+
+// GitLab Token Management
+
+export async function storeGitLabToken(token: string): Promise<CommandResult<void>> {
+  return invokeCommand<void>('store_gitlab_token', { token });
+}
+
+export async function getGitLabToken(): Promise<CommandResult<string | null>> {
+  return invokeCommand<string | null>('get_gitlab_token', {});
+}
+
+export async function deleteGitLabToken(): Promise<CommandResult<void>> {
+  return invokeCommand<void>('delete_gitlab_token', {});
+}
+
+// GitLab Connection
+
+export async function checkGitLabConnection(
+  instanceUrl: string
+): Promise<CommandResult<GitLabConnectionStatus>> {
+  return invokeCommand<GitLabConnectionStatus>('check_gitlab_connection', { instanceUrl });
+}
+
+export async function detectGitLabRepo(
+  path: string
+): Promise<CommandResult<DetectedGitLabRepo | null>> {
+  return invokeCommand<DetectedGitLabRepo | null>('detect_gitlab_repo', { path });
+}
+
+// GitLab Merge Requests
+
+export async function listGitLabMergeRequests(
+  instanceUrl: string,
+  projectPath: string,
+  state?: string
+): Promise<CommandResult<GitLabMergeRequest[]>> {
+  return invokeCommand<GitLabMergeRequest[]>('list_gitlab_merge_requests', {
+    instanceUrl,
+    projectPath,
+    state,
+  });
+}
+
+export async function getGitLabMergeRequest(
+  instanceUrl: string,
+  projectPath: string,
+  mrIid: number
+): Promise<CommandResult<GitLabMergeRequest>> {
+  return invokeCommand<GitLabMergeRequest>('get_gitlab_merge_request', {
+    instanceUrl,
+    projectPath,
+    mrIid,
+  });
+}
+
+export async function createGitLabMergeRequest(
+  instanceUrl: string,
+  projectPath: string,
+  input: CreateMergeRequestInput
+): Promise<CommandResult<GitLabMergeRequest>> {
+  return invokeCommand<GitLabMergeRequest>('create_gitlab_merge_request', {
+    instanceUrl,
+    projectPath,
+    input,
+  });
+}
+
+// GitLab Issues
+
+export async function listGitLabIssues(
+  instanceUrl: string,
+  projectPath: string,
+  state?: string,
+  labels?: string
+): Promise<CommandResult<GitLabIssue[]>> {
+  return invokeCommand<GitLabIssue[]>('list_gitlab_issues', {
+    instanceUrl,
+    projectPath,
+    state,
+    labels,
+  });
+}
+
+export async function createGitLabIssue(
+  instanceUrl: string,
+  projectPath: string,
+  input: CreateGitLabIssueInput
+): Promise<CommandResult<GitLabIssue>> {
+  return invokeCommand<GitLabIssue>('create_gitlab_issue', {
+    instanceUrl,
+    projectPath,
+    input,
+  });
+}
+
+// GitLab Pipelines
+
+export async function listGitLabPipelines(
+  instanceUrl: string,
+  projectPath: string,
+  status?: string
+): Promise<CommandResult<GitLabPipeline[]>> {
+  return invokeCommand<GitLabPipeline[]>('list_gitlab_pipelines', {
+    instanceUrl,
+    projectPath,
+    status,
+  });
+}
+
+export async function getGitLabLabels(
+  instanceUrl: string,
+  projectPath: string
+): Promise<CommandResult<string[]>> {
+  return invokeCommand<string[]>('get_gitlab_labels', { instanceUrl, projectPath });
+}

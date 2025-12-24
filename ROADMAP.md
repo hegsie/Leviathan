@@ -86,17 +86,16 @@
 - **Work Items** - browse and query work items by project
 - **Pipelines** - view pipeline/build run status
 
+### GitLab Integration
+- **Merge Requests** - view MRs, create MRs, status filtering
+- **Issues** - view issues, create issues, label filtering
+- **Pipelines** - view CI/CD pipeline status
+
 ---
 
 ## Planned Features
 
 ### Phase 5: Platform Integrations (In Progress)
-
-#### GitLab Integration
-- Merge request support
-- Issue tracking
-- CI/CD pipeline status
-- GitLab CI configuration
 
 #### Bitbucket Integration
 - Pull request support
