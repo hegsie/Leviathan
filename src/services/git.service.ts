@@ -21,6 +21,7 @@ import type {
   CommitStats,
   BlameResult,
   ReflogEntry,
+  ImageVersions,
 } from '../types/git.types.ts';
 import type {
   OpenRepositoryCommand,
@@ -211,6 +212,36 @@ export async function unstageHunk(
   patch: string
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>('unstage_hunk', { repoPath, patch });
+}
+
+/**
+ * Write content to a file in the working directory
+ * @param repoPath Repository path
+ * @param filePath Path to the file relative to repo root
+ * @param content Content to write
+ * @param stageAfter Whether to stage the file after writing
+ */
+export async function writeFileContent(
+  repoPath: string,
+  filePath: string,
+  content: string,
+  stageAfter?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('write_file_content', { repoPath, filePath, content, stageAfter });
+}
+
+/**
+ * Read file content from working directory or index
+ * @param repoPath Repository path
+ * @param filePath Path to the file relative to repo root
+ * @param fromIndex Whether to read from index instead of working directory
+ */
+export async function readFileContent(
+  repoPath: string,
+  filePath: string,
+  fromIndex?: boolean
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>('read_file_content', { repoPath, filePath, fromIndex });
 }
 
 /**
@@ -520,6 +551,23 @@ export async function getFileBlame(
   commitOid?: string
 ): Promise<CommandResult<BlameResult>> {
   return invokeCommand<BlameResult>('get_file_blame', { path: repoPath, filePath, commitOid });
+}
+
+/**
+ * Get image versions for comparison (old and new base64-encoded data)
+ */
+export async function getImageVersions(
+  repoPath: string,
+  filePath: string,
+  staged?: boolean,
+  commitOid?: string
+): Promise<CommandResult<ImageVersions>> {
+  return invokeCommand<ImageVersions>('get_image_versions', {
+    path: repoPath,
+    filePath,
+    staged,
+    commitOid,
+  });
 }
 
 /**

@@ -12,8 +12,29 @@ pub struct DiffFile {
     pub status: FileStatus,
     pub hunks: Vec<DiffHunk>,
     pub is_binary: bool,
+    pub is_image: bool,
+    pub image_type: Option<String>,
     pub additions: usize,
     pub deletions: usize,
+}
+
+/// Check if a file path is an image based on extension
+pub fn is_image_file(path: &str) -> bool {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "bmp" | "tiff" | "tif"
+    )
+}
+
+/// Get the image type from a file path
+pub fn get_image_type(path: &str) -> Option<String> {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    if is_image_file(path) {
+        Some(ext)
+    } else {
+        None
+    }
 }
 
 /// A hunk in a diff

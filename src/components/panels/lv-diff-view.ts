@@ -10,12 +10,25 @@ import {
 } from '../../utils/shiki-highlighter.ts';
 import type { BundledLanguage } from 'shiki';
 import type { DiffFile, DiffHunk, DiffLine, StatusEntry } from '../../types/git.types.ts';
+import './lv-image-diff.ts';
 
 type DiffViewMode = 'unified' | 'split';
 
 interface SplitLine {
   left: DiffLine | null;
   right: DiffLine | null;
+}
+
+interface ConflictRegion {
+  index: number;
+  startLine: number;
+  endLine: number;
+  oursStart: number;
+  oursEnd: number;
+  theirsStart: number;
+  theirsEnd: number;
+  oursContent: string;
+  theirsContent: string;
 }
 
 /**
@@ -412,6 +425,221 @@ export class LvDiffView extends LitElement {
         color: var(--color-text-muted);
         font-style: italic;
       }
+
+      /* Edit mode styles */
+      .edit-btn {
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: transparent;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        font-size: var(--font-size-xs);
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        transition: all 0.15s ease;
+      }
+
+      .edit-btn:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .edit-btn.active {
+        background: var(--color-accent-bg);
+        border-color: var(--color-accent);
+        color: var(--color-accent);
+      }
+
+      .edit-btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .editor-container {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .editor-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-sm);
+        background: var(--color-bg-tertiary);
+        border-bottom: 1px solid var(--color-border);
+      }
+
+      .editor-toolbar button {
+        padding: var(--spacing-xs) var(--spacing-md);
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .editor-toolbar .cancel-btn {
+        background: transparent;
+        border: 1px solid var(--color-border);
+        color: var(--color-text-secondary);
+      }
+
+      .editor-toolbar .cancel-btn:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .editor-toolbar .save-btn {
+        background: var(--color-accent);
+        border: 1px solid var(--color-accent);
+        color: white;
+      }
+
+      .editor-toolbar .save-btn:hover {
+        filter: brightness(1.1);
+      }
+
+      .editor-toolbar .save-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .editor-textarea {
+        flex: 1;
+        width: 100%;
+        padding: var(--spacing-sm);
+        border: none;
+        background: var(--color-bg-primary);
+        color: var(--color-text-primary);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-xs);
+        line-height: 20px;
+        resize: none;
+        outline: none;
+        tab-size: 2;
+      }
+
+      .editor-textarea:focus {
+        outline: none;
+      }
+
+      .edit-indicator {
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+        font-size: var(--font-size-xs);
+        text-align: center;
+      }
+
+      /* Conflict resolution styles */
+      .conflict-banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--spacing-sm);
+        background: var(--color-error-bg);
+        border-bottom: 1px solid var(--color-error);
+      }
+
+      .conflict-info {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        color: var(--color-error);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .conflict-actions {
+        display: flex;
+        gap: var(--spacing-sm);
+      }
+
+      .conflict-btn {
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .conflict-btn.ours {
+        background: rgba(34, 197, 94, 0.15);
+        border: 1px solid var(--color-success);
+        color: var(--color-success);
+      }
+
+      .conflict-btn.ours:hover {
+        background: rgba(34, 197, 94, 0.25);
+      }
+
+      .conflict-btn.theirs {
+        background: rgba(59, 130, 246, 0.15);
+        border: 1px solid var(--color-info);
+        color: var(--color-info);
+      }
+
+      .conflict-btn.theirs:hover {
+        background: rgba(59, 130, 246, 0.25);
+      }
+
+      .conflict-btn.both {
+        background: rgba(168, 85, 247, 0.15);
+        border: 1px solid #a855f7;
+        color: #a855f7;
+      }
+
+      .conflict-btn.both:hover {
+        background: rgba(168, 85, 247, 0.25);
+      }
+
+      .conflict-marker {
+        display: flex;
+        align-items: center;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-error-bg);
+        border-left: 3px solid var(--color-error);
+        font-size: var(--font-size-xs);
+        color: var(--color-error);
+        font-weight: var(--font-weight-bold);
+      }
+
+      .conflict-inline-actions {
+        display: flex;
+        gap: var(--spacing-xs);
+        margin-left: auto;
+        padding-left: var(--spacing-md);
+      }
+
+      .conflict-inline-btn {
+        padding: 2px 6px;
+        border-radius: var(--radius-sm);
+        font-size: 10px;
+        font-weight: var(--font-weight-medium);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .conflict-inline-btn.ours {
+        background: var(--color-success-bg);
+        border: 1px solid var(--color-success);
+        color: var(--color-success);
+      }
+
+      .conflict-inline-btn.theirs {
+        background: var(--color-info-bg);
+        border: 1px solid var(--color-info);
+        color: var(--color-info);
+      }
+
+      .conflict-inline-btn.both {
+        background: rgba(168, 85, 247, 0.15);
+        border: 1px solid #a855f7;
+        color: #a855f7;
+      }
     `,
   ];
 
@@ -423,6 +651,12 @@ export class LvDiffView extends LitElement {
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private viewMode: DiffViewMode = 'unified';
+  @state() private editMode = false;
+  @state() private editContent = '';
+  @state() private originalContent = '';
+  @state() private saving = false;
+  @state() private conflictRegions: ConflictRegion[] = [];
+  @state() private hasConflicts = false;
 
   private language: BundledLanguage | null = null;
 
@@ -458,6 +692,8 @@ export class LvDiffView extends LitElement {
 
       if (result.success) {
         this.diff = result.data!;
+        // Check for conflict markers in conflicted files
+        await this.checkForConflicts();
       } else {
         this.error = result.error?.message ?? 'Failed to load diff';
       }
@@ -503,6 +739,308 @@ export class LvDiffView extends LitElement {
 
   private setViewMode(mode: DiffViewMode): void {
     this.viewMode = mode;
+  }
+
+  /**
+   * Check if edit mode is available (only for working directory changes, not commit diffs)
+   */
+  private get canEdit(): boolean {
+    return this.file !== null && this.commitFile === null && !this.diff?.isBinary;
+  }
+
+  /**
+   * Toggle edit mode
+   */
+  private async toggleEditMode(): Promise<void> {
+    if (!this.canEdit) return;
+
+    if (!this.editMode) {
+      // Enter edit mode - load file content
+      await this.loadFileContent();
+    } else {
+      // Exit edit mode without saving
+      this.editMode = false;
+      this.editContent = '';
+      this.originalContent = '';
+    }
+  }
+
+  /**
+   * Load file content for editing
+   */
+  private async loadFileContent(): Promise<void> {
+    if (!this.repositoryPath || !this.file) return;
+
+    const result = await gitService.readFileContent(
+      this.repositoryPath,
+      this.file.path,
+      false // Read from working directory
+    );
+
+    if (result.success && result.data !== undefined) {
+      this.originalContent = result.data;
+      this.editContent = result.data;
+      this.editMode = true;
+    }
+  }
+
+  /**
+   * Handle content change in editor
+   */
+  private handleEditorChange(e: Event): void {
+    const textarea = e.target as HTMLTextAreaElement;
+    this.editContent = textarea.value;
+  }
+
+  /**
+   * Handle tab key in editor
+   */
+  private handleEditorKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const textarea = e.target as HTMLTextAreaElement;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      this.editContent = this.editContent.substring(0, start) + '  ' + this.editContent.substring(end);
+      // Set cursor position after the inserted spaces
+      requestAnimationFrame(() => {
+        textarea.selectionStart = textarea.selectionEnd = start + 2;
+      });
+    } else if (e.key === 'Escape') {
+      this.cancelEdit();
+    } else if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      this.saveEdit();
+    }
+  }
+
+  /**
+   * Save edits
+   */
+  private async saveEdit(): Promise<void> {
+    if (!this.repositoryPath || !this.file || this.saving) return;
+
+    this.saving = true;
+
+    const result = await gitService.writeFileContent(
+      this.repositoryPath,
+      this.file.path,
+      this.editContent,
+      false // Don't auto-stage
+    );
+
+    this.saving = false;
+
+    if (result.success) {
+      this.editMode = false;
+      this.editContent = '';
+      this.originalContent = '';
+      // Reload the diff to show updated changes
+      await this.loadWorkingDiff();
+      // Dispatch event to notify parent to refresh status
+      this.dispatchEvent(new CustomEvent('file-edited', {
+        bubbles: true,
+        composed: true,
+        detail: { path: this.file.path }
+      }));
+    }
+  }
+
+  /**
+   * Cancel editing
+   */
+  private cancelEdit(): void {
+    this.editMode = false;
+    this.editContent = '';
+    this.originalContent = '';
+  }
+
+  /**
+   * Check if content has been modified
+   */
+  private get hasChanges(): boolean {
+    return this.editContent !== this.originalContent;
+  }
+
+  /**
+   * Check if this is a conflicted file
+   */
+  private get isConflicted(): boolean {
+    return this.file?.isConflicted ?? false;
+  }
+
+  /**
+   * Check file content for conflict markers and parse regions
+   */
+  private async checkForConflicts(): Promise<void> {
+    if (!this.isConflicted || !this.repositoryPath || !this.file) {
+      this.hasConflicts = false;
+      this.conflictRegions = [];
+      return;
+    }
+
+    const result = await gitService.readFileContent(this.repositoryPath, this.file.path, false);
+    if (!result.success || !result.data) {
+      this.hasConflicts = false;
+      this.conflictRegions = [];
+      return;
+    }
+
+    this.parseConflictRegions(result.data);
+  }
+
+  /**
+   * Parse conflict markers from file content
+   */
+  private parseConflictRegions(content: string): void {
+    const lines = content.split('\n');
+    const regions: ConflictRegion[] = [];
+    let index = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith('<<<<<<<')) {
+        // Found start of conflict
+        const region: ConflictRegion = {
+          index: index++,
+          startLine: i,
+          endLine: -1,
+          oursStart: i + 1,
+          oursEnd: -1,
+          theirsStart: -1,
+          theirsEnd: -1,
+          oursContent: '',
+          theirsContent: '',
+        };
+
+        // Find the separator and end
+        const oursLines: string[] = [];
+        const theirsLines: string[] = [];
+        let inTheirs = false;
+
+        for (let j = i + 1; j < lines.length; j++) {
+          if (lines[j].startsWith('=======')) {
+            region.oursEnd = j - 1;
+            region.theirsStart = j + 1;
+            inTheirs = true;
+          } else if (lines[j].startsWith('>>>>>>>')) {
+            region.theirsEnd = j - 1;
+            region.endLine = j;
+            break;
+          } else if (inTheirs) {
+            theirsLines.push(lines[j]);
+          } else {
+            oursLines.push(lines[j]);
+          }
+        }
+
+        region.oursContent = oursLines.join('\n');
+        region.theirsContent = theirsLines.join('\n');
+        regions.push(region);
+
+        // Skip past this conflict
+        i = region.endLine;
+      }
+    }
+
+    this.conflictRegions = regions;
+    this.hasConflicts = regions.length > 0;
+  }
+
+  /**
+   * Resolve a single conflict region
+   */
+  private async resolveConflict(region: ConflictRegion, choice: 'ours' | 'theirs' | 'both'): Promise<void> {
+    if (!this.repositoryPath || !this.file) return;
+
+    const result = await gitService.readFileContent(this.repositoryPath, this.file.path, false);
+    if (!result.success || !result.data) return;
+
+    const lines = result.data.split('\n');
+    let replacement: string[];
+
+    switch (choice) {
+      case 'ours':
+        replacement = region.oursContent.split('\n');
+        break;
+      case 'theirs':
+        replacement = region.theirsContent.split('\n');
+        break;
+      case 'both':
+        replacement = [...region.oursContent.split('\n'), ...region.theirsContent.split('\n')];
+        break;
+    }
+
+    // Replace the conflict region with the resolution
+    const newLines = [
+      ...lines.slice(0, region.startLine),
+      ...replacement,
+      ...lines.slice(region.endLine + 1),
+    ];
+
+    const newContent = newLines.join('\n');
+    const writeResult = await gitService.writeFileContent(
+      this.repositoryPath,
+      this.file.path,
+      newContent,
+      false
+    );
+
+    if (writeResult.success) {
+      // Reload the diff and re-check for conflicts
+      await this.loadWorkingDiff();
+      await this.checkForConflicts();
+
+      this.dispatchEvent(new CustomEvent('file-edited', {
+        bubbles: true,
+        composed: true,
+        detail: { path: this.file.path }
+      }));
+    }
+  }
+
+  /**
+   * Resolve all conflicts with the same choice
+   */
+  private async resolveAllConflicts(choice: 'ours' | 'theirs'): Promise<void> {
+    if (!this.repositoryPath || !this.file) return;
+
+    const result = await gitService.readFileContent(this.repositoryPath, this.file.path, false);
+    if (!result.success || !result.data) return;
+
+    let content = result.data;
+
+    // Process conflicts from end to start to maintain line numbers
+    for (const region of [...this.conflictRegions].reverse()) {
+      const lines = content.split('\n');
+      const replacement = choice === 'ours' ? region.oursContent : region.theirsContent;
+
+      const newLines = [
+        ...lines.slice(0, region.startLine),
+        ...replacement.split('\n'),
+        ...lines.slice(region.endLine + 1),
+      ];
+
+      content = newLines.join('\n');
+    }
+
+    const writeResult = await gitService.writeFileContent(
+      this.repositoryPath,
+      this.file.path,
+      content,
+      false
+    );
+
+    if (writeResult.success) {
+      await this.loadWorkingDiff();
+      await this.checkForConflicts();
+
+      this.dispatchEvent(new CustomEvent('file-edited', {
+        bubbles: true,
+        composed: true,
+        detail: { path: this.file.path }
+      }));
+    }
   }
 
   /**
@@ -838,8 +1376,69 @@ export class LvDiffView extends LitElement {
       return html`<div class="empty">No changes to display</div>`;
     }
 
-    if (this.diff.isBinary) {
+    if (this.diff.isBinary && !this.diff.isImage) {
       return html`<div class="binary-notice">Binary file - cannot display diff</div>`;
+    }
+
+    // Render image diff component for image files
+    if (this.diff.isImage) {
+      const filePath = this.commitFile?.filePath ?? this.file?.path ?? '';
+      const staged = this.file?.isStaged ?? false;
+      const commitOid = this.commitFile?.commitOid;
+      return html`
+        <lv-image-diff
+          .repoPath=${this.repositoryPath}
+          .filePath=${filePath}
+          .status=${this.diff.status}
+          .staged=${staged}
+          .commitOid=${commitOid}
+        ></lv-image-diff>
+      `;
+    }
+
+    // Render edit mode
+    if (this.editMode) {
+      return html`
+        <div class="header">
+          <div class="file-info">
+            <span class="file-status ${this.diff.status}">${this.diff.status}</span>
+            <span class="file-path">${this.file?.path ?? ''}</span>
+          </div>
+          <button
+            class="edit-btn active"
+            @click=${this.toggleEditMode}
+            title="Exit edit mode"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+            </svg>
+            Editing
+          </button>
+        </div>
+        ${this.hasChanges
+          ? html`<div class="edit-indicator">Unsaved changes (Ctrl+S to save, Esc to cancel)</div>`
+          : nothing}
+        <div class="editor-container">
+          <div class="editor-toolbar">
+            <button class="cancel-btn" @click=${this.cancelEdit}>Cancel</button>
+            <button
+              class="save-btn"
+              @click=${this.saveEdit}
+              ?disabled=${!this.hasChanges || this.saving}
+            >
+              ${this.saving ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+          <textarea
+            class="editor-textarea"
+            .value=${this.editContent}
+            @input=${this.handleEditorChange}
+            @keydown=${this.handleEditorKeydown}
+            spellcheck="false"
+          ></textarea>
+        </div>
+      `;
     }
 
     return html`
@@ -852,6 +1451,21 @@ export class LvDiffView extends LitElement {
           </div>
         </div>
         <div class="view-controls">
+          ${this.canEdit
+            ? html`
+                <button
+                  class="edit-btn"
+                  @click=${this.toggleEditMode}
+                  title="Edit file"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                  </svg>
+                  Edit
+                </button>
+              `
+            : nothing}
           <button
             class="view-btn ${this.viewMode === 'unified' ? 'active' : ''}"
             @click=${() => this.setViewMode('unified')}
@@ -875,7 +1489,68 @@ export class LvDiffView extends LitElement {
           </button>
         </div>
       </div>
+      ${this.hasConflicts
+        ? html`
+            <div class="conflict-banner">
+              <div class="conflict-info">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                  <line x1="12" y1="9" x2="12" y2="13"></line>
+                  <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                </svg>
+                ${this.conflictRegions.length} conflict${this.conflictRegions.length !== 1 ? 's' : ''} found
+              </div>
+              <div class="conflict-actions">
+                <button
+                  class="conflict-btn ours"
+                  @click=${() => this.resolveAllConflicts('ours')}
+                  title="Accept all changes from current branch"
+                >
+                  Accept All Ours
+                </button>
+                <button
+                  class="conflict-btn theirs"
+                  @click=${() => this.resolveAllConflicts('theirs')}
+                  title="Accept all changes from incoming branch"
+                >
+                  Accept All Theirs
+                </button>
+              </div>
+            </div>
+          `
+        : nothing}
       ${this.viewMode === 'split' ? this.renderSplitView() : this.renderUnifiedView()}
+    `;
+  }
+
+  /**
+   * Render a conflict region with inline resolution buttons
+   */
+  private renderConflictActions(region: ConflictRegion) {
+    return html`
+      <div class="conflict-inline-actions">
+        <button
+          class="conflict-inline-btn ours"
+          @click=${() => this.resolveConflict(region, 'ours')}
+          title="Accept current branch version"
+        >
+          Ours
+        </button>
+        <button
+          class="conflict-inline-btn theirs"
+          @click=${() => this.resolveConflict(region, 'theirs')}
+          title="Accept incoming branch version"
+        >
+          Theirs
+        </button>
+        <button
+          class="conflict-inline-btn both"
+          @click=${() => this.resolveConflict(region, 'both')}
+          title="Keep both versions"
+        >
+          Both
+        </button>
+      </div>
     `;
   }
 }

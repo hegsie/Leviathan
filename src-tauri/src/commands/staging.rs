@@ -243,3 +243,62 @@ pub async fn unstage_hunk(repo_path: String, patch: String) -> Result<()> {
 
     Ok(())
 }
+
+/// Write content to a file and optionally stage it
+/// Used for inline editing in the diff view
+#[command]
+pub async fn write_file_content(
+    repo_path: String,
+    file_path: String,
+    content: String,
+    stage_after: Option<bool>,
+) -> Result<()> {
+    let full_path = Path::new(&repo_path).join(&file_path);
+
+    // Ensure parent directory exists
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Write content to file
+    std::fs::write(&full_path, content)?;
+
+    // Optionally stage the file
+    if stage_after.unwrap_or(false) {
+        let repo = git2::Repository::open(Path::new(&repo_path))?;
+        let mut index = repo.index()?;
+        index.add_path(Path::new(&file_path))?;
+        index.write()?;
+    }
+
+    Ok(())
+}
+
+/// Read file content from working directory or index
+#[command]
+pub async fn read_file_content(
+    repo_path: String,
+    file_path: String,
+    from_index: Option<bool>,
+) -> Result<String> {
+    if from_index.unwrap_or(false) {
+        // Read from index
+        let repo = git2::Repository::open(Path::new(&repo_path))?;
+        let index = repo.index()?;
+
+        if let Some(entry) = index.get_path(Path::new(&file_path), 0) {
+            let blob = repo.find_blob(entry.id)?;
+            let content = String::from_utf8_lossy(blob.content()).to_string();
+            return Ok(content);
+        }
+
+        Err(crate::error::LeviathanError::OperationFailed(
+            "File not found in index".to_string(),
+        ))
+    } else {
+        // Read from working directory
+        let full_path = Path::new(&repo_path).join(&file_path);
+        let content = std::fs::read_to_string(&full_path)?;
+        Ok(content)
+    }
+}

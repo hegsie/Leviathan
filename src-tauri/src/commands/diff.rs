@@ -1,9 +1,11 @@
 //! Diff command handlers
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use std::path::Path;
 use tauri::command;
 
 use crate::error::Result;
+use crate::models::diff::{get_image_type, is_image_file};
 use crate::models::{DiffFile, DiffHunk, DiffLine, DiffLineOrigin, FileStatus};
 
 /// Get diff for all changed files
@@ -133,12 +135,17 @@ fn generate_new_file_diff(full_path: &Path, file_path: &str) -> Result<DiffFile>
         lines,
     };
 
+    let is_image = is_image_file(file_path);
+    let image_type = get_image_type(file_path);
+
     Ok(DiffFile {
         path: file_path.to_string(),
         old_path: None,
         status: FileStatus::New,
         hunks: vec![hunk],
         is_binary: false,
+        is_image,
+        image_type,
         additions,
         deletions: 0,
     })
@@ -169,6 +176,9 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
                 _ => FileStatus::Modified,
             };
 
+            let is_image = is_image_file(&file_path);
+            let image_type = get_image_type(&file_path);
+
             files.push(DiffFile {
                 path: file_path.clone(),
                 old_path: delta
@@ -178,6 +188,8 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
                 status,
                 hunks: Vec::new(),
                 is_binary: delta.flags().is_binary(),
+                is_image,
+                image_type,
                 additions: 0,
                 deletions: 0,
             });
@@ -476,4 +488,100 @@ pub async fn get_file_blame(
         path: file_path,
         lines,
     })
+}
+
+/// Image version data for comparison
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageVersions {
+    pub path: String,
+    pub old_data: Option<String>,
+    pub new_data: Option<String>,
+    pub old_size: Option<(u32, u32)>,
+    pub new_size: Option<(u32, u32)>,
+    pub image_type: Option<String>,
+}
+
+/// Get base64-encoded image data for old and new versions of a file
+#[command]
+pub async fn get_image_versions(
+    path: String,
+    file_path: String,
+    staged: Option<bool>,
+    commit_oid: Option<String>,
+) -> Result<ImageVersions> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let is_staged = staged.unwrap_or(false);
+
+    let image_type = get_image_type(&file_path);
+
+    // Get old version (from HEAD or parent commit)
+    let old_data = if let Some(ref oid_str) = commit_oid {
+        // For commit diff, get from parent
+        let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
+        if let Ok(parent) = commit.parent(0) {
+            get_blob_base64(&repo, &parent.tree()?, &file_path)
+        } else {
+            None
+        }
+    } else if is_staged {
+        // For staged changes, old is from HEAD
+        if let Ok(head) = repo.head() {
+            if let Ok(tree) = head.peel_to_tree() {
+                get_blob_base64(&repo, &tree, &file_path)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        // For unstaged changes, old is from index
+        if let Ok(index) = repo.index() {
+            if let Some(entry) = index.get_path(Path::new(&file_path), 0) {
+                if let Ok(blob) = repo.find_blob(entry.id) {
+                    Some(STANDARD.encode(blob.content()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // Get new version
+    let new_data = if let Some(ref oid_str) = commit_oid {
+        // For commit diff, get from commit tree
+        let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
+        get_blob_base64(&repo, &commit.tree()?, &file_path)
+    } else {
+        // For working directory changes, read from disk
+        let full_path = Path::new(&path).join(&file_path);
+        if full_path.exists() {
+            std::fs::read(&full_path)
+                .ok()
+                .map(|data| STANDARD.encode(&data))
+        } else {
+            None
+        }
+    };
+
+    Ok(ImageVersions {
+        path: file_path,
+        old_data,
+        new_data,
+        old_size: None, // Size detection would require image parsing
+        new_size: None,
+        image_type,
+    })
+}
+
+/// Get base64-encoded blob content from a tree
+fn get_blob_base64(repo: &git2::Repository, tree: &git2::Tree, file_path: &str) -> Option<String> {
+    let entry = tree.get_path(Path::new(file_path)).ok()?;
+    let blob = repo.find_blob(entry.id()).ok()?;
+    Some(STANDARD.encode(blob.content()))
 }

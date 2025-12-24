@@ -121,8 +121,19 @@ export interface DiffFile {
   status: FileStatus;
   hunks: DiffHunk[];
   isBinary: boolean;
+  isImage: boolean;
+  imageType: string | null;
   additions: number;
   deletions: number;
+}
+
+export interface ImageVersions {
+  path: string;
+  oldData: string | null;
+  newData: string | null;
+  oldSize: [number, number] | null;
+  newSize: [number, number] | null;
+  imageType: string | null;
 }
 
 export interface DiffHunk {
