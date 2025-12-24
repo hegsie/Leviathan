@@ -16,8 +16,24 @@ import {
 let highlighterInstance: Highlighter | null = null;
 let initPromise: Promise<Highlighter> | null = null;
 
-// Theme to use - matches our dark UI
-const THEME = 'github-dark';
+// Themes for light and dark modes
+const THEME_DARK = 'github-dark';
+const THEME_LIGHT = 'github-light';
+
+/**
+ * Detect if the user prefers light color scheme
+ */
+function prefersLightMode(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.matchMedia('(prefers-color-scheme: light)').matches;
+}
+
+/**
+ * Get the appropriate theme based on current color scheme preference
+ */
+export function getCurrentTheme(): 'github-dark' | 'github-light' {
+  return prefersLightMode() ? THEME_LIGHT : THEME_DARK;
+}
 
 // Common languages to load initially (others loaded on demand)
 const PRELOAD_LANGUAGES: BundledLanguage[] = [
@@ -250,7 +266,7 @@ export async function initHighlighter(): Promise<Highlighter> {
   }
 
   initPromise = createHighlighter({
-    themes: [THEME],
+    themes: [THEME_DARK, THEME_LIGHT],
     langs: PRELOAD_LANGUAGES,
   });
 
@@ -345,7 +361,7 @@ export async function highlightLine(
     const highlighter = await initHighlighter();
     const result = highlighter.codeToTokens(line, {
       lang: language,
-      theme: THEME,
+      theme: getCurrentTheme(),
     });
 
     // Flatten tokens from all lines (should be just one line)
@@ -386,7 +402,7 @@ export async function highlightCode(
     const highlighter = await initHighlighter();
     const result = highlighter.codeToTokens(code, {
       lang: language,
-      theme: THEME,
+      theme: getCurrentTheme(),
     });
 
     return result.tokens.map(tokenLine =>
@@ -424,7 +440,7 @@ export function highlightLineSync(
 
     const result = highlighterInstance.codeToTokens(line, {
       lang: language,
-      theme: THEME,
+      theme: getCurrentTheme(),
     });
 
     const tokens: HighlightToken[] = [];
