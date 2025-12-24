@@ -341,7 +341,6 @@ pub async fn get_ado_pull_request(
         target_ref_name: String,
         #[serde(rename = "isDraft")]
         is_draft: Option<bool>,
-        url: String,
         repository: ApiRepository,
     }
 
@@ -510,7 +509,6 @@ pub async fn list_ado_pull_requests(
         target_ref_name: String,
         #[serde(rename = "isDraft")]
         is_draft: Option<bool>,
-        url: String,
         repository: ApiRepository,
     }
 
@@ -638,7 +636,6 @@ pub async fn create_ado_pull_request(
         target_ref_name: String,
         #[serde(rename = "isDraft")]
         is_draft: Option<bool>,
-        url: String,
         repository: ApiRepository,
     }
 
@@ -746,7 +743,6 @@ pub async fn get_ado_work_items(
     struct ApiWorkItem {
         id: u32,
         fields: ApiFields,
-        url: String,
     }
 
     #[derive(Deserialize)]
