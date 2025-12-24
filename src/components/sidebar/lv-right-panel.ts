@@ -2,6 +2,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { repositoryStore } from '../../stores/index.ts';
+import * as gitService from '../../services/git.service.ts';
 import './lv-file-status.ts';
 import './lv-commit-panel.ts';
 import '../panels/lv-commit-details.ts';
@@ -125,6 +126,8 @@ export class LvRightPanel extends LitElement {
   @state() private stagedCount: number = 0;
   @state() private changesCount: number = 0;
   @state() private expandedSections = new Set<string>(['changes', 'details']);
+  @state() private githubOwner: string = '';
+  @state() private githubRepo: string = '';
 
   private unsubscribe?: () => void;
 
@@ -132,11 +135,41 @@ export class LvRightPanel extends LitElement {
     super.connectedCallback();
     const initialState = repositoryStore.getState();
     this.repositoryPath = initialState.getActiveRepository()?.repository.path ?? null;
+    if (this.repositoryPath) {
+      this.detectGitHubRepo();
+    }
 
     this.unsubscribe = repositoryStore.subscribe((state) => {
       const activeRepo = state.getActiveRepository();
-      this.repositoryPath = activeRepo?.repository.path ?? null;
+      const newPath = activeRepo?.repository.path ?? null;
+      if (newPath !== this.repositoryPath) {
+        this.repositoryPath = newPath;
+        if (newPath) {
+          this.detectGitHubRepo();
+        } else {
+          this.githubOwner = '';
+          this.githubRepo = '';
+        }
+      }
     });
+  }
+
+  private async detectGitHubRepo(): Promise<void> {
+    if (!this.repositoryPath) return;
+
+    try {
+      const result = await gitService.detectGitHubRepo(this.repositoryPath);
+      if (result.success && result.data) {
+        this.githubOwner = result.data.owner;
+        this.githubRepo = result.data.repo;
+      } else {
+        this.githubOwner = '';
+        this.githubRepo = '';
+      }
+    } catch {
+      this.githubOwner = '';
+      this.githubRepo = '';
+    }
   }
 
   disconnectedCallback(): void {
@@ -196,6 +229,8 @@ export class LvRightPanel extends LitElement {
             .repositoryPath=${this.repositoryPath}
             .commit=${this.commit}
             .refs=${this.refs}
+            .githubOwner=${this.githubOwner}
+            .githubRepo=${this.githubRepo}
           ></lv-commit-details>
         </div>
       </section>

@@ -7,6 +7,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { parseIssueReferences, isClosingKeyword } from '../../services/git.service.ts';
+import type { IssueReference } from '../../services/git.service.ts';
 import type { Commit, RefInfo, CommitFileEntry, FileStatus } from '../../types/git.types.ts';
 
 @customElement('lv-commit-details')
@@ -295,16 +297,59 @@ export class LvCommitDetails extends LitElement {
         font-size: var(--font-size-xs);
         font-style: italic;
       }
+
+      /* Linked Issues */
+      .linked-issues {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-xs);
+      }
+
+      .issue-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px var(--spacing-sm);
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+        text-decoration: none;
+      }
+
+      .issue-badge:hover {
+        opacity: 0.8;
+      }
+
+      .issue-badge.closes {
+        background: var(--color-success-bg);
+        color: var(--color-success);
+      }
+
+      .issue-badge.references {
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-secondary);
+        border: 1px solid var(--color-border);
+      }
+
+      .issue-badge .issue-icon {
+        width: 12px;
+        height: 12px;
+      }
     `,
   ];
 
   @property({ type: String }) repositoryPath: string = '';
   @property({ type: Object }) commit: Commit | null = null;
   @property({ type: Array }) refs: RefInfo[] = [];
+  @property({ type: String }) githubOwner: string = '';
+  @property({ type: String }) githubRepo: string = '';
 
   @state() private files: CommitFileEntry[] = [];
   @state() private loadingFiles = false;
   @state() private selectedFilePath: string | null = null;
+  @state() private issueReferences: IssueReference[] = [];
 
   private currentCommitOid: string | null = null;
 
@@ -334,8 +379,23 @@ export class LvCommitDetails extends LitElement {
         this.currentCommitOid = this.commit.oid;
         this.selectedFilePath = null;
         this.loadFiles();
+        this.parseIssueRefs();
       }
     }
+  }
+
+  private parseIssueRefs(): void {
+    if (!this.commit) {
+      this.issueReferences = [];
+      return;
+    }
+
+    // Parse from summary + body
+    const fullMessage = this.commit.body
+      ? `${this.commit.summary}\n\n${this.commit.body}`
+      : this.commit.summary;
+
+    this.issueReferences = parseIssueReferences(fullMessage);
   }
 
   private async loadFiles(): Promise<void> {
@@ -450,6 +510,44 @@ export class LvCommitDetails extends LitElement {
         composed: true,
       })
     );
+  }
+
+  private handleIssueClick(issueNumber: number): void {
+    if (!this.githubOwner || !this.githubRepo) return;
+
+    const url = `https://github.com/${this.githubOwner}/${this.githubRepo}/issues/${issueNumber}`;
+    window.open(url, '_blank');
+  }
+
+  private renderLinkedIssues() {
+    if (this.issueReferences.length === 0) return nothing;
+    if (!this.githubOwner || !this.githubRepo) return nothing;
+
+    return html`
+      <div class="section">
+        <div class="section-title">Linked Issues</div>
+        <div class="linked-issues">
+          ${this.issueReferences.map(ref => {
+            const closes = isClosingKeyword(ref.keyword);
+            return html`
+              <span
+                class="issue-badge ${closes ? 'closes' : 'references'}"
+                @click=${() => this.handleIssueClick(ref.number)}
+                title="${closes ? `Closes issue #${ref.number}` : `References issue #${ref.number}`}"
+              >
+                <svg class="issue-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="12" y1="8" x2="12" y2="12"></line>
+                  <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+                #${ref.number}
+                ${closes ? html`<span style="font-size: 10px; opacity: 0.8;">(closes)</span>` : ''}
+              </span>
+            `;
+          })}
+        </div>
+      </div>
+    `;
   }
 
   private getRefClass(refType: string): string {
@@ -574,6 +672,8 @@ export class LvCommitDetails extends LitElement {
               </div>
             `
           : ''}
+
+        ${this.renderLinkedIssues()}
 
         <div class="section">
           <div class="section-title">Files Changed (${this.files.length})</div>

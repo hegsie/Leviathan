@@ -1562,3 +1562,65 @@ export async function getRepoLabels(
 ): Promise<CommandResult<Label[]>> {
   return invokeCommand<Label[]>('get_repo_labels', { owner, repo, perPage });
 }
+
+// Issue Reference Utilities
+
+export interface IssueReference {
+  number: number;
+  keyword: string | null; // 'fixes', 'closes', 'resolves', etc. or null for plain #123
+  fullMatch: string;
+}
+
+/**
+ * Parse issue references from commit message text.
+ * Detects patterns like: #123, fixes #123, closes #123, resolves #123
+ */
+export function parseIssueReferences(text: string): IssueReference[] {
+  const references: IssueReference[] = [];
+  const seen = new Set<number>();
+
+  // Keywords that GitHub recognizes for auto-closing issues
+  const keywords = ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved'];
+  const keywordPattern = keywords.join('|');
+
+  // Match keyword + issue reference (e.g., "fixes #123" or "fix #123")
+  const keywordRegex = new RegExp(`\\b(${keywordPattern})\\s+#(\\d+)\\b`, 'gi');
+  let match;
+
+  while ((match = keywordRegex.exec(text)) !== null) {
+    const num = parseInt(match[2], 10);
+    if (!seen.has(num)) {
+      seen.add(num);
+      references.push({
+        number: num,
+        keyword: match[1].toLowerCase(),
+        fullMatch: match[0],
+      });
+    }
+  }
+
+  // Match standalone issue references (e.g., "#123" not preceded by a keyword)
+  const standaloneRegex = /#(\d+)\b/g;
+  while ((match = standaloneRegex.exec(text)) !== null) {
+    const num = parseInt(match[1], 10);
+    if (!seen.has(num)) {
+      seen.add(num);
+      references.push({
+        number: num,
+        keyword: null,
+        fullMatch: match[0],
+      });
+    }
+  }
+
+  return references;
+}
+
+/**
+ * Check if a keyword indicates the issue should be closed
+ */
+export function isClosingKeyword(keyword: string | null): boolean {
+  if (!keyword) return false;
+  const closingKeywords = ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved'];
+  return closingKeywords.includes(keyword.toLowerCase());
+}
