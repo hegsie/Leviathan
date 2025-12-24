@@ -1779,3 +1779,456 @@ pub async fn get_repo_labels(
         })
         .collect())
 }
+
+// ============================================================================
+// Release Types
+// ============================================================================
+
+/// GitHub release summary
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseSummary {
+    pub id: u64,
+    pub tag_name: String,
+    pub name: Option<String>,
+    pub body: Option<String>,
+    pub draft: bool,
+    pub prerelease: bool,
+    pub created_at: String,
+    pub published_at: Option<String>,
+    pub html_url: String,
+    pub author: GitHubUser,
+    pub assets_count: usize,
+}
+
+/// Release asset
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseAsset {
+    pub id: u64,
+    pub name: String,
+    pub label: Option<String>,
+    pub content_type: String,
+    pub size: u64,
+    pub download_count: u64,
+    pub browser_download_url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Create release input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateReleaseInput {
+    pub tag_name: String,
+    pub target_commitish: Option<String>,
+    pub name: Option<String>,
+    pub body: Option<String>,
+    pub draft: Option<bool>,
+    pub prerelease: Option<bool>,
+    pub generate_release_notes: Option<bool>,
+}
+
+// ============================================================================
+// Release Commands
+// ============================================================================
+
+/// List releases for a repository
+#[command]
+pub async fn list_releases(
+    owner: String,
+    repo: String,
+    per_page: Option<u32>,
+) -> Result<Vec<ReleaseSummary>> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    let per_page = per_page.unwrap_or(30);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "{}/repos/{}/{}/releases",
+            GITHUB_API_BASE, owner, repo
+        ))
+        .query(&[("per_page", per_page.to_string())])
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch releases: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiRelease {
+        id: u64,
+        tag_name: String,
+        name: Option<String>,
+        body: Option<String>,
+        draft: bool,
+        prerelease: bool,
+        created_at: String,
+        published_at: Option<String>,
+        html_url: String,
+        author: ApiUser,
+        assets: Vec<serde_json::Value>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    let releases: Vec<ApiRelease> = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse releases: {}", e)))?;
+
+    Ok(releases
+        .into_iter()
+        .map(|r| ReleaseSummary {
+            id: r.id,
+            tag_name: r.tag_name,
+            name: r.name,
+            body: r.body,
+            draft: r.draft,
+            prerelease: r.prerelease,
+            created_at: r.created_at,
+            published_at: r.published_at,
+            html_url: r.html_url,
+            author: GitHubUser {
+                login: r.author.login,
+                id: r.author.id,
+                avatar_url: r.author.avatar_url,
+                name: r.author.name,
+                email: r.author.email,
+            },
+            assets_count: r.assets.len(),
+        })
+        .collect())
+}
+
+/// Get release by tag
+#[command]
+pub async fn get_release_by_tag(
+    owner: String,
+    repo: String,
+    tag: String,
+) -> Result<ReleaseSummary> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "{}/repos/{}/{}/releases/tags/{}",
+            GITHUB_API_BASE, owner, repo, tag
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch release: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiRelease {
+        id: u64,
+        tag_name: String,
+        name: Option<String>,
+        body: Option<String>,
+        draft: bool,
+        prerelease: bool,
+        created_at: String,
+        published_at: Option<String>,
+        html_url: String,
+        author: ApiUser,
+        assets: Vec<serde_json::Value>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    let release: ApiRelease = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse release: {}", e)))?;
+
+    Ok(ReleaseSummary {
+        id: release.id,
+        tag_name: release.tag_name,
+        name: release.name,
+        body: release.body,
+        draft: release.draft,
+        prerelease: release.prerelease,
+        created_at: release.created_at,
+        published_at: release.published_at,
+        html_url: release.html_url,
+        author: GitHubUser {
+            login: release.author.login,
+            id: release.author.id,
+            avatar_url: release.author.avatar_url,
+            name: release.author.name,
+            email: release.author.email,
+        },
+        assets_count: release.assets.len(),
+    })
+}
+
+/// Get latest release
+#[command]
+pub async fn get_latest_release(owner: String, repo: String) -> Result<ReleaseSummary> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "{}/repos/{}/{}/releases/latest",
+            GITHUB_API_BASE, owner, repo
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to fetch latest release: {}", e))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiRelease {
+        id: u64,
+        tag_name: String,
+        name: Option<String>,
+        body: Option<String>,
+        draft: bool,
+        prerelease: bool,
+        created_at: String,
+        published_at: Option<String>,
+        html_url: String,
+        author: ApiUser,
+        assets: Vec<serde_json::Value>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    let release: ApiRelease = response.json().await.map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to parse latest release: {}", e))
+    })?;
+
+    Ok(ReleaseSummary {
+        id: release.id,
+        tag_name: release.tag_name,
+        name: release.name,
+        body: release.body,
+        draft: release.draft,
+        prerelease: release.prerelease,
+        created_at: release.created_at,
+        published_at: release.published_at,
+        html_url: release.html_url,
+        author: GitHubUser {
+            login: release.author.login,
+            id: release.author.id,
+            avatar_url: release.author.avatar_url,
+            name: release.author.name,
+            email: release.author.email,
+        },
+        assets_count: release.assets.len(),
+    })
+}
+
+/// Create a new release
+#[command]
+pub async fn create_release(
+    owner: String,
+    repo: String,
+    input: CreateReleaseInput,
+) -> Result<ReleaseSummary> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    #[derive(Serialize)]
+    struct CreateReleaseBody {
+        tag_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_commitish: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        draft: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prerelease: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        generate_release_notes: Option<bool>,
+    }
+
+    let body = CreateReleaseBody {
+        tag_name: input.tag_name,
+        target_commitish: input.target_commitish,
+        name: input.name,
+        body: input.body,
+        draft: input.draft,
+        prerelease: input.prerelease,
+        generate_release_notes: input.generate_release_notes,
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/repos/{}/{}/releases",
+            GITHUB_API_BASE, owner, repo
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to create release: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiRelease {
+        id: u64,
+        tag_name: String,
+        name: Option<String>,
+        body: Option<String>,
+        draft: bool,
+        prerelease: bool,
+        created_at: String,
+        published_at: Option<String>,
+        html_url: String,
+        author: ApiUser,
+        assets: Vec<serde_json::Value>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    let release: ApiRelease = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse release: {}", e)))?;
+
+    Ok(ReleaseSummary {
+        id: release.id,
+        tag_name: release.tag_name,
+        name: release.name,
+        body: release.body,
+        draft: release.draft,
+        prerelease: release.prerelease,
+        created_at: release.created_at,
+        published_at: release.published_at,
+        html_url: release.html_url,
+        author: GitHubUser {
+            login: release.author.login,
+            id: release.author.id,
+            avatar_url: release.author.avatar_url,
+            name: release.author.name,
+            email: release.author.email,
+        },
+        assets_count: release.assets.len(),
+    })
+}
+
+/// Delete a release
+#[command]
+pub async fn delete_release(owner: String, repo: String, release_id: u64) -> Result<()> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .delete(format!(
+            "{}/repos/{}/{}/releases/{}",
+            GITHUB_API_BASE, owner, repo, release_id
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to delete release: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    Ok(())
+}

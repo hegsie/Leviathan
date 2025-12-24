@@ -1624,3 +1624,68 @@ export function isClosingKeyword(keyword: string | null): boolean {
   const closingKeywords = ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved'];
   return closingKeywords.includes(keyword.toLowerCase());
 }
+
+// GitHub Releases
+
+export interface ReleaseSummary {
+  id: number;
+  tagName: string;
+  name: string | null;
+  body: string | null;
+  draft: boolean;
+  prerelease: boolean;
+  createdAt: string;
+  publishedAt: string | null;
+  htmlUrl: string;
+  author: GitHubUser;
+  assetsCount: number;
+}
+
+export interface CreateReleaseInput {
+  tagName: string;
+  targetCommitish?: string;
+  name?: string;
+  body?: string;
+  draft?: boolean;
+  prerelease?: boolean;
+  generateReleaseNotes?: boolean;
+}
+
+export async function listReleases(
+  owner: string,
+  repo: string,
+  perPage?: number
+): Promise<CommandResult<ReleaseSummary[]>> {
+  return invokeCommand<ReleaseSummary[]>('list_releases', { owner, repo, perPage });
+}
+
+export async function getReleaseByTag(
+  owner: string,
+  repo: string,
+  tag: string
+): Promise<CommandResult<ReleaseSummary>> {
+  return invokeCommand<ReleaseSummary>('get_release_by_tag', { owner, repo, tag });
+}
+
+export async function getLatestRelease(
+  owner: string,
+  repo: string
+): Promise<CommandResult<ReleaseSummary>> {
+  return invokeCommand<ReleaseSummary>('get_latest_release', { owner, repo });
+}
+
+export async function createRelease(
+  owner: string,
+  repo: string,
+  input: CreateReleaseInput
+): Promise<CommandResult<ReleaseSummary>> {
+  return invokeCommand<ReleaseSummary>('create_release', { owner, repo, input });
+}
+
+export async function deleteRelease(
+  owner: string,
+  repo: string,
+  releaseId: number
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('delete_release', { owner, repo, releaseId });
+}

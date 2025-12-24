@@ -197,6 +197,12 @@ pub fn run() {
             commands::github::get_issue_comments,
             commands::github::add_issue_comment,
             commands::github::get_repo_labels,
+            // GitHub Releases
+            commands::github::list_releases,
+            commands::github::get_release_by_tag,
+            commands::github::get_latest_release,
+            commands::github::create_release,
+            commands::github::delete_release,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -16,10 +16,12 @@ import type {
   IssueSummary,
   CreateIssueInput,
   Label,
+  ReleaseSummary,
+  CreateReleaseInput,
 } from '../../services/git.service.ts';
 import './lv-modal.ts';
 
-type TabType = 'connection' | 'pull-requests' | 'issues' | 'actions' | 'create-pr' | 'create-issue';
+type TabType = 'connection' | 'pull-requests' | 'issues' | 'releases' | 'actions' | 'create-pr' | 'create-issue' | 'create-release';
 
 @customElement('lv-github-dialog')
 export class LvGitHubDialog extends LitElement {
@@ -331,6 +333,70 @@ export class LvGitHubDialog extends LitElement {
         color: var(--color-text-muted);
       }
 
+      /* Release styles */
+      .release-item {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--spacing-md);
+        padding: var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        transition: background var(--transition-fast);
+      }
+
+      .release-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .release-tag {
+        font-family: var(--font-family-mono);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-primary);
+        min-width: 80px;
+      }
+
+      .release-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .release-title {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+        margin-bottom: var(--spacing-xs);
+      }
+
+      .release-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-sm);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
+      .release-badge {
+        padding: 2px 8px;
+        border-radius: var(--radius-full);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .release-badge.latest {
+        background: var(--color-success-bg);
+        color: var(--color-success);
+      }
+
+      .release-badge.prerelease {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+      }
+
+      .release-badge.draft {
+        background: var(--color-bg-hover);
+        color: var(--color-text-muted);
+      }
+
       .pr-stats {
         display: flex;
         gap: var(--spacing-sm);
@@ -573,6 +639,17 @@ export class LvGitHubDialog extends LitElement {
   @state() private createIssueBody = '';
   @state() private createIssueLabels: string[] = [];
 
+  // Releases
+  @state() private releases: ReleaseSummary[] = [];
+
+  // Create Release form
+  @state() private createReleaseTag = '';
+  @state() private createReleaseName = '';
+  @state() private createReleaseBody = '';
+  @state() private createReleasePrerelease = false;
+  @state() private createReleaseDraft = false;
+  @state() private createReleaseGenerateNotes = true;
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     if (this.open) {
@@ -625,6 +702,7 @@ export class LvGitHubDialog extends LitElement {
           this.loadWorkflowRuns(),
           this.loadIssues(),
           this.loadLabels(),
+          this.loadReleases(),
         ]);
       }
     }
@@ -712,6 +790,24 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
+  private async loadReleases(): Promise<void> {
+    if (!this.detectedRepo || !this.connectionStatus?.connected) return;
+
+    try {
+      const result = await gitService.listReleases(
+        this.detectedRepo.owner,
+        this.detectedRepo.repo,
+        20
+      );
+
+      if (result.success && result.data) {
+        this.releases = result.data;
+      }
+    } catch {
+      // Silently fail for releases
+    }
+  }
+
   private async handleSaveToken(): Promise<void> {
     if (!this.tokenInput.trim()) return;
 
@@ -729,6 +825,7 @@ export class LvGitHubDialog extends LitElement {
             this.loadWorkflowRuns(),
             this.loadIssues(),
             this.loadLabels(),
+            this.loadReleases(),
           ]);
         }
       } else {
@@ -752,6 +849,7 @@ export class LvGitHubDialog extends LitElement {
       this.workflowRuns = [];
       this.issues = [];
       this.repoLabels = [];
+      this.releases = [];
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to disconnect';
     } finally {
@@ -863,6 +961,48 @@ export class LvGitHubDialog extends LitElement {
     const b = parseInt(hex.substring(4, 6), 16);
     const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
     return luminance > 0.5 ? '#000000' : '#ffffff';
+  }
+
+  private async handleCreateRelease(): Promise<void> {
+    if (!this.detectedRepo || !this.createReleaseTag) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const input: CreateReleaseInput = {
+        tagName: this.createReleaseTag,
+        name: this.createReleaseName || undefined,
+        body: this.createReleaseBody || undefined,
+        draft: this.createReleaseDraft || undefined,
+        prerelease: this.createReleasePrerelease || undefined,
+        generateReleaseNotes: this.createReleaseGenerateNotes || undefined,
+      };
+
+      const result = await gitService.createRelease(
+        this.detectedRepo.owner,
+        this.detectedRepo.repo,
+        input
+      );
+
+      if (result.success && result.data) {
+        // Reset form and switch to releases list
+        this.createReleaseTag = '';
+        this.createReleaseName = '';
+        this.createReleaseBody = '';
+        this.createReleasePrerelease = false;
+        this.createReleaseDraft = false;
+        this.createReleaseGenerateNotes = true;
+        this.activeTab = 'releases';
+        await this.loadReleases();
+      } else {
+        this.error = result.error?.message ?? 'Failed to create release';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to create release';
+    } finally {
+      this.isLoading = false;
+    }
   }
 
   private handleClose(): void {
@@ -1238,6 +1378,161 @@ export class LvGitHubDialog extends LitElement {
     `;
   }
 
+  private renderReleasesTab() {
+    if (!this.connectionStatus?.connected) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path>
+          </svg>
+          <p>Connect to GitHub to view releases</p>
+        </div>
+      `;
+    }
+
+    if (!this.detectedRepo) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+          <p>No GitHub repository detected</p>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="filter-row">
+        <button class="btn" @click=${() => this.activeTab = 'create-release'}>
+          + New Release
+        </button>
+      </div>
+
+      ${this.isLoading ? html`<div class="loading">Loading releases...</div>` : ''}
+
+      ${!this.isLoading && this.releases.length === 0 ? html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
+            <line x1="7" y1="7" x2="7.01" y2="7"></line>
+          </svg>
+          <p>No releases found</p>
+        </div>
+      ` : ''}
+
+      <div class="pr-list">
+        ${this.releases.map((release, index) => html`
+          <div class="release-item" @click=${() => this.openInBrowser(release.htmlUrl)}>
+            <span class="release-tag">${release.tagName}</span>
+            <div class="release-info">
+              <div class="release-title">${release.name || release.tagName}</div>
+              <div class="release-meta">
+                ${index === 0 && !release.draft && !release.prerelease ? html`
+                  <span class="release-badge latest">Latest</span>
+                ` : ''}
+                ${release.prerelease ? html`
+                  <span class="release-badge prerelease">Pre-release</span>
+                ` : ''}
+                ${release.draft ? html`
+                  <span class="release-badge draft">Draft</span>
+                ` : ''}
+                <span>by ${release.author.login}</span>
+                <span>${this.formatDate(release.createdAt)}</span>
+                ${release.assetsCount > 0 ? html`
+                  <span>${release.assetsCount} asset${release.assetsCount !== 1 ? 's' : ''}</span>
+                ` : ''}
+              </div>
+            </div>
+          </div>
+        `)}
+      </div>
+    `;
+  }
+
+  private renderCreateReleaseTab() {
+    return html`
+      <div class="token-form">
+        <div class="form-group">
+          <label>Tag Name</label>
+          <input
+            type="text"
+            placeholder="v1.0.0"
+            .value=${this.createReleaseTag}
+            @input=${(e: Event) => this.createReleaseTag = (e.target as HTMLInputElement).value}
+          />
+          <span class="help-text">Create a new tag or use an existing one</span>
+        </div>
+
+        <div class="form-group">
+          <label>Release Title</label>
+          <input
+            type="text"
+            placeholder="Release title (optional)"
+            .value=${this.createReleaseName}
+            @input=${(e: Event) => this.createReleaseName = (e.target as HTMLInputElement).value}
+          />
+        </div>
+
+        <div class="form-group">
+          <label>Description</label>
+          <textarea
+            placeholder="Describe this release..."
+            .value=${this.createReleaseBody}
+            @input=${(e: Event) => this.createReleaseBody = (e.target as HTMLTextAreaElement).value}
+          ></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>
+            <input
+              type="checkbox"
+              .checked=${this.createReleaseGenerateNotes}
+              @change=${(e: Event) => this.createReleaseGenerateNotes = (e.target as HTMLInputElement).checked}
+            />
+            Auto-generate release notes
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label>
+            <input
+              type="checkbox"
+              .checked=${this.createReleasePrerelease}
+              @change=${(e: Event) => this.createReleasePrerelease = (e.target as HTMLInputElement).checked}
+            />
+            Mark as pre-release
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label>
+            <input
+              type="checkbox"
+              .checked=${this.createReleaseDraft}
+              @change=${(e: Event) => this.createReleaseDraft = (e.target as HTMLInputElement).checked}
+            />
+            Save as draft
+          </label>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn" @click=${() => this.activeTab = 'releases'}>
+            Cancel
+          </button>
+          <button
+            class="btn btn-primary"
+            @click=${this.handleCreateRelease}
+            ?disabled=${this.isLoading || !this.createReleaseTag}
+          >
+            Create Release
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   private renderCreatePrTab() {
     return html`
       <div class="token-form">
@@ -1345,6 +1640,12 @@ export class LvGitHubDialog extends LitElement {
               Issues
             </button>
             <button
+              class="tab ${this.activeTab === 'releases' ? 'active' : ''}"
+              @click=${() => this.activeTab = 'releases'}
+            >
+              Releases
+            </button>
+            <button
               class="tab ${this.activeTab === 'actions' ? 'active' : ''}"
               @click=${() => this.activeTab = 'actions'}
             >
@@ -1360,9 +1661,11 @@ export class LvGitHubDialog extends LitElement {
             ${this.activeTab === 'connection' ? this.renderConnectionTab() : ''}
             ${this.activeTab === 'pull-requests' ? this.renderPullRequestsTab() : ''}
             ${this.activeTab === 'issues' ? this.renderIssuesTab() : ''}
+            ${this.activeTab === 'releases' ? this.renderReleasesTab() : ''}
             ${this.activeTab === 'actions' ? this.renderActionsTab() : ''}
             ${this.activeTab === 'create-pr' ? this.renderCreatePrTab() : ''}
             ${this.activeTab === 'create-issue' ? this.renderCreateIssueTab() : ''}
+            ${this.activeTab === 'create-release' ? this.renderCreateReleaseTab() : ''}
           </div>
         </div>
       </lv-modal>
