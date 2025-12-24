@@ -74,20 +74,18 @@
 - **Git Configuration** - view/edit global and repository config, manage aliases, user identity
 - **Credential Management** - credential helper configuration, test credentials, per-remote settings
 
+### GitHub Integration
+- **Pull Requests** - view PRs, create PRs, PR status visualization in commit graph
+- **Issues** - view issues, create issues, filter by state/labels
+- **Commit Linking** - automatic issue reference detection (fixes #123, closes #456)
+- **Releases** - view releases, create releases with auto-generated notes
+- **Actions** - workflow run status, check runs for commits
+
 ---
 
 ## Planned Features
 
 ### Phase 5: Platform Integrations (In Progress)
-
-#### GitHub Integration
-- View pull requests
-- Create pull requests
-- Review PR diffs
-- View/create issues
-- Link commits to issues
-- GitHub Actions status
-- Release management
 
 #### GitLab Integration
 - Merge request support
