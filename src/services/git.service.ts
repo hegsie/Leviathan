@@ -1267,3 +1267,204 @@ export async function eraseCredentials(
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>('erase_credentials', { path, host, protocol });
 }
+
+// ============================================================================
+// GitHub Integration
+// ============================================================================
+
+export interface GitHubUser {
+  login: string;
+  id: number;
+  avatarUrl: string;
+  name: string | null;
+  email: string | null;
+}
+
+export interface GitHubConnectionStatus {
+  connected: boolean;
+  user: GitHubUser | null;
+  scopes: string[];
+}
+
+export interface DetectedGitHubRepo {
+  owner: string;
+  repo: string;
+  remoteName: string;
+}
+
+export interface PullRequestSummary {
+  number: number;
+  title: string;
+  state: string;
+  user: GitHubUser;
+  createdAt: string;
+  updatedAt: string;
+  headRef: string;
+  baseRef: string;
+  draft: boolean;
+  mergeable: boolean | null;
+  htmlUrl: string;
+  additions: number | null;
+  deletions: number | null;
+  changedFiles: number | null;
+}
+
+export interface Label {
+  id: number;
+  name: string;
+  color: string;
+  description: string | null;
+}
+
+export interface PullRequestDetails {
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  user: GitHubUser;
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+  mergedAt: string | null;
+  headRef: string;
+  headSha: string;
+  baseRef: string;
+  baseSha: string;
+  draft: boolean;
+  mergeable: boolean | null;
+  mergeableState: string | null;
+  htmlUrl: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  commits: number;
+  comments: number;
+  reviewComments: number;
+  labels: Label[];
+  assignees: GitHubUser[];
+  reviewers: GitHubUser[];
+}
+
+export interface PullRequestReview {
+  id: number;
+  user: GitHubUser;
+  body: string | null;
+  state: string;
+  submittedAt: string | null;
+  htmlUrl: string;
+}
+
+export interface WorkflowRun {
+  id: number;
+  name: string;
+  headBranch: string;
+  headSha: string;
+  status: string;
+  conclusion: string | null;
+  workflowId: number;
+  htmlUrl: string;
+  createdAt: string;
+  updatedAt: string;
+  runNumber: number;
+  event: string;
+}
+
+export interface CheckRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  htmlUrl: string | null;
+}
+
+export interface CreatePullRequestInput {
+  title: string;
+  body?: string;
+  head: string;
+  base: string;
+  draft?: boolean;
+}
+
+// Authentication
+export async function storeGitHubToken(token: string): Promise<CommandResult<void>> {
+  return invokeCommand<void>('store_github_token', { token });
+}
+
+export async function getGitHubToken(): Promise<CommandResult<string | null>> {
+  return invokeCommand<string | null>('get_github_token', {});
+}
+
+export async function deleteGitHubToken(): Promise<CommandResult<void>> {
+  return invokeCommand<void>('delete_github_token', {});
+}
+
+export async function checkGitHubConnection(): Promise<CommandResult<GitHubConnectionStatus>> {
+  return invokeCommand<GitHubConnectionStatus>('check_github_connection', {});
+}
+
+// Repository Detection
+export async function detectGitHubRepo(path: string): Promise<CommandResult<DetectedGitHubRepo | null>> {
+  return invokeCommand<DetectedGitHubRepo | null>('detect_github_repo', { path });
+}
+
+// Pull Requests
+export async function listPullRequests(
+  owner: string,
+  repo: string,
+  state?: string,
+  perPage?: number
+): Promise<CommandResult<PullRequestSummary[]>> {
+  return invokeCommand<PullRequestSummary[]>('list_pull_requests', { owner, repo, state, perPage });
+}
+
+export async function getPullRequest(
+  owner: string,
+  repo: string,
+  number: number
+): Promise<CommandResult<PullRequestDetails>> {
+  return invokeCommand<PullRequestDetails>('get_pull_request', { owner, repo, number });
+}
+
+export async function createPullRequest(
+  owner: string,
+  repo: string,
+  input: CreatePullRequestInput
+): Promise<CommandResult<PullRequestSummary>> {
+  return invokeCommand<PullRequestSummary>('create_pull_request', { owner, repo, input });
+}
+
+export async function getPullRequestReviews(
+  owner: string,
+  repo: string,
+  number: number
+): Promise<CommandResult<PullRequestReview[]>> {
+  return invokeCommand<PullRequestReview[]>('get_pull_request_reviews', { owner, repo, number });
+}
+
+// GitHub Actions
+export async function getWorkflowRuns(
+  owner: string,
+  repo: string,
+  branch?: string,
+  perPage?: number
+): Promise<CommandResult<WorkflowRun[]>> {
+  return invokeCommand<WorkflowRun[]>('get_workflow_runs', { owner, repo, branch, perPage });
+}
+
+export async function getCheckRuns(
+  owner: string,
+  repo: string,
+  commitSha: string
+): Promise<CommandResult<CheckRun[]>> {
+  return invokeCommand<CheckRun[]>('get_check_runs', { owner, repo, commitSha });
+}
+
+export async function getCommitStatus(
+  owner: string,
+  repo: string,
+  commitSha: string
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>('get_commit_status', { owner, repo, commitSha });
+}

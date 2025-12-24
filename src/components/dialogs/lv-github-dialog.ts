@@ -1,0 +1,1024 @@
+/**
+ * GitHub Integration Dialog
+ * Manage GitHub connection, view PRs, and check Actions status
+ */
+
+import { LitElement, html, css } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
+import { sharedStyles } from '../../styles/shared-styles.ts';
+import * as gitService from '../../services/git.service.ts';
+import type {
+  GitHubConnectionStatus,
+  DetectedGitHubRepo,
+  PullRequestSummary,
+  WorkflowRun,
+  CreatePullRequestInput,
+} from '../../services/git.service.ts';
+import './lv-modal.ts';
+
+type TabType = 'connection' | 'pull-requests' | 'actions' | 'create-pr';
+
+@customElement('lv-github-dialog')
+export class LvGitHubDialog extends LitElement {
+  static styles = [
+    sharedStyles,
+    css`
+      .content {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-md);
+        min-height: 400px;
+        max-height: 70vh;
+      }
+
+      .tabs {
+        display: flex;
+        gap: var(--spacing-xs);
+        border-bottom: 1px solid var(--color-border);
+        padding-bottom: var(--spacing-sm);
+      }
+
+      .tab {
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        border-radius: var(--radius-sm);
+        transition: all var(--transition-fast);
+      }
+
+      .tab:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .tab.active {
+        background: var(--color-primary-bg);
+        color: var(--color-primary);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .tab-content {
+        flex: 1;
+        overflow: auto;
+      }
+
+      /* Connection Tab */
+      .connection-status {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-md);
+        padding: var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-md);
+      }
+
+      .avatar {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+      }
+
+      .user-info {
+        flex: 1;
+      }
+
+      .user-name {
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+      }
+
+      .user-login {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+      }
+
+      .scopes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-xs);
+        margin-top: var(--spacing-xs);
+      }
+
+      .scope-badge {
+        font-size: var(--font-size-xs);
+        padding: 2px 6px;
+        background: var(--color-bg-hover);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-muted);
+      }
+
+      .token-form {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-md);
+      }
+
+      .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-xs);
+      }
+
+      .form-group label {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-secondary);
+      }
+
+      .form-group input,
+      .form-group textarea {
+        padding: var(--spacing-sm);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-secondary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+      }
+
+      .form-group textarea {
+        min-height: 100px;
+        resize: vertical;
+        font-family: inherit;
+      }
+
+      .form-group input:focus,
+      .form-group textarea:focus {
+        outline: none;
+        border-color: var(--color-primary);
+      }
+
+      .help-text {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
+      .help-link {
+        color: var(--color-primary);
+        text-decoration: none;
+      }
+
+      .help-link:hover {
+        text-decoration: underline;
+      }
+
+      /* PR List */
+      .pr-list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-sm);
+      }
+
+      .pr-item {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--spacing-md);
+        padding: var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        transition: background var(--transition-fast);
+      }
+
+      .pr-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .pr-number {
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-primary);
+        min-width: 50px;
+      }
+
+      .pr-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .pr-title {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+        margin-bottom: var(--spacing-xs);
+      }
+
+      .pr-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-sm);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
+      .pr-branch {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-family: var(--font-family-mono);
+        background: var(--color-bg-hover);
+        padding: 2px 6px;
+        border-radius: var(--radius-sm);
+      }
+
+      .pr-state {
+        padding: 2px 8px;
+        border-radius: var(--radius-full);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .pr-state.open {
+        background: var(--color-success-bg);
+        color: var(--color-success);
+      }
+
+      .pr-state.closed {
+        background: var(--color-error-bg);
+        color: var(--color-error);
+      }
+
+      .pr-state.merged {
+        background: #8250df20;
+        color: #8250df;
+      }
+
+      .pr-state.draft {
+        background: var(--color-bg-hover);
+        color: var(--color-text-muted);
+      }
+
+      .pr-stats {
+        display: flex;
+        gap: var(--spacing-sm);
+        font-size: var(--font-size-xs);
+      }
+
+      .stat-additions {
+        color: var(--color-success);
+      }
+
+      .stat-deletions {
+        color: var(--color-error);
+      }
+
+      /* Workflow Runs */
+      .workflow-list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-sm);
+      }
+
+      .workflow-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-md);
+        padding: var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-md);
+      }
+
+      .workflow-status {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+      }
+
+      .workflow-status.success {
+        background: var(--color-success);
+      }
+
+      .workflow-status.failure {
+        background: var(--color-error);
+      }
+
+      .workflow-status.pending,
+      .workflow-status.in_progress {
+        background: var(--color-warning);
+        animation: pulse 2s infinite;
+      }
+
+      .workflow-status.cancelled,
+      .workflow-status.skipped {
+        background: var(--color-text-muted);
+      }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+      }
+
+      .workflow-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .workflow-name {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+      }
+
+      .workflow-meta {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
+      .workflow-branch {
+        font-family: var(--font-family-mono);
+      }
+
+      .workflow-link {
+        color: var(--color-primary);
+        text-decoration: none;
+        font-size: var(--font-size-sm);
+      }
+
+      .workflow-link:hover {
+        text-decoration: underline;
+      }
+
+      /* Empty/Error States */
+      .empty-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: var(--spacing-xl);
+        text-align: center;
+        color: var(--color-text-muted);
+      }
+
+      .empty-state svg {
+        width: 48px;
+        height: 48px;
+        margin-bottom: var(--spacing-md);
+        opacity: 0.5;
+      }
+
+      .error-message {
+        padding: var(--spacing-md);
+        background: var(--color-error-bg);
+        color: var(--color-error);
+        border-radius: var(--radius-md);
+        font-size: var(--font-size-sm);
+      }
+
+      .loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: var(--spacing-xl);
+        color: var(--color-text-muted);
+      }
+
+      /* Buttons */
+      .btn-row {
+        display: flex;
+        gap: var(--spacing-sm);
+        margin-top: var(--spacing-md);
+      }
+
+      .btn {
+        padding: var(--spacing-sm) var(--spacing-md);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-secondary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .btn:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-primary {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
+      .btn-primary:hover:not(:disabled) {
+        background: var(--color-primary-hover);
+      }
+
+      .btn-danger {
+        color: var(--color-error);
+        border-color: var(--color-error);
+      }
+
+      .btn-danger:hover:not(:disabled) {
+        background: var(--color-error-bg);
+      }
+
+      /* Filter row */
+      .filter-row {
+        display: flex;
+        gap: var(--spacing-sm);
+        margin-bottom: var(--spacing-md);
+      }
+
+      .filter-select {
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-secondary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+      }
+
+      /* Detected repo info */
+      .repo-info {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-sm) var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-md);
+        margin-bottom: var(--spacing-md);
+      }
+
+      .repo-icon {
+        width: 20px;
+        height: 20px;
+        color: var(--color-text-muted);
+      }
+
+      .repo-name {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+      }
+
+      .repo-remote {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+    `,
+  ];
+
+  @property({ type: Boolean }) open = false;
+  @property({ type: String }) repositoryPath = '';
+
+  @state() private activeTab: TabType = 'connection';
+  @state() private connectionStatus: GitHubConnectionStatus | null = null;
+  @state() private detectedRepo: DetectedGitHubRepo | null = null;
+  @state() private pullRequests: PullRequestSummary[] = [];
+  @state() private workflowRuns: WorkflowRun[] = [];
+  @state() private isLoading = false;
+  @state() private error: string | null = null;
+  @state() private tokenInput = '';
+  @state() private prFilter: 'open' | 'closed' | 'all' = 'open';
+
+  // Create PR form
+  @state() private createPrTitle = '';
+  @state() private createPrBody = '';
+  @state() private createPrHead = '';
+  @state() private createPrBase = '';
+  @state() private createPrDraft = false;
+
+  async connectedCallback(): Promise<void> {
+    super.connectedCallback();
+    if (this.open) {
+      await this.loadInitialData();
+    }
+  }
+
+  async updated(changedProperties: Map<string, unknown>): Promise<void> {
+    if (changedProperties.has('open') && this.open) {
+      await this.loadInitialData();
+    }
+    if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
+      await this.detectRepo();
+    }
+  }
+
+  private async loadInitialData(): Promise<void> {
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      await this.checkConnection();
+      if (this.repositoryPath) {
+        await this.detectRepo();
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load data';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  private async checkConnection(): Promise<void> {
+    const result = await gitService.checkGitHubConnection();
+    if (result.success && result.data) {
+      this.connectionStatus = result.data;
+    }
+  }
+
+  private async detectRepo(): Promise<void> {
+    if (!this.repositoryPath) return;
+
+    const result = await gitService.detectGitHubRepo(this.repositoryPath);
+    if (result.success && result.data) {
+      this.detectedRepo = result.data;
+      // Auto-load PRs if connected
+      if (this.connectionStatus?.connected) {
+        await this.loadPullRequests();
+        await this.loadWorkflowRuns();
+      }
+    }
+  }
+
+  private async loadPullRequests(): Promise<void> {
+    if (!this.detectedRepo || !this.connectionStatus?.connected) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const result = await gitService.listPullRequests(
+        this.detectedRepo.owner,
+        this.detectedRepo.repo,
+        this.prFilter,
+        30
+      );
+
+      if (result.success && result.data) {
+        this.pullRequests = result.data;
+      } else {
+        this.error = result.error?.message ?? 'Failed to load pull requests';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load pull requests';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  private async loadWorkflowRuns(): Promise<void> {
+    if (!this.detectedRepo || !this.connectionStatus?.connected) return;
+
+    try {
+      const result = await gitService.getWorkflowRuns(
+        this.detectedRepo.owner,
+        this.detectedRepo.repo,
+        undefined,
+        20
+      );
+
+      if (result.success && result.data) {
+        this.workflowRuns = result.data;
+      }
+    } catch {
+      // Silently fail for workflow runs
+    }
+  }
+
+  private async handleSaveToken(): Promise<void> {
+    if (!this.tokenInput.trim()) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const result = await gitService.storeGitHubToken(this.tokenInput.trim());
+      if (result.success) {
+        this.tokenInput = '';
+        await this.checkConnection();
+        if (this.connectionStatus?.connected && this.detectedRepo) {
+          await this.loadPullRequests();
+          await this.loadWorkflowRuns();
+        }
+      } else {
+        this.error = result.error?.message ?? 'Failed to save token';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to save token';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  private async handleDisconnect(): Promise<void> {
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      await gitService.deleteGitHubToken();
+      this.connectionStatus = { connected: false, user: null, scopes: [] };
+      this.pullRequests = [];
+      this.workflowRuns = [];
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to disconnect';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  private async handleCreatePR(): Promise<void> {
+    if (!this.detectedRepo || !this.createPrTitle || !this.createPrHead || !this.createPrBase) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const input: CreatePullRequestInput = {
+        title: this.createPrTitle,
+        body: this.createPrBody || undefined,
+        head: this.createPrHead,
+        base: this.createPrBase,
+        draft: this.createPrDraft || undefined,
+      };
+
+      const result = await gitService.createPullRequest(
+        this.detectedRepo.owner,
+        this.detectedRepo.repo,
+        input
+      );
+
+      if (result.success && result.data) {
+        // Reset form and switch to PR list
+        this.createPrTitle = '';
+        this.createPrBody = '';
+        this.createPrHead = '';
+        this.createPrBase = '';
+        this.createPrDraft = false;
+        this.activeTab = 'pull-requests';
+        await this.loadPullRequests();
+      } else {
+        this.error = result.error?.message ?? 'Failed to create pull request';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to create pull request';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  private handlePrFilterChange(e: Event): void {
+    const select = e.target as HTMLSelectElement;
+    this.prFilter = select.value as 'open' | 'closed' | 'all';
+    this.loadPullRequests();
+  }
+
+  private handleClose(): void {
+    this.dispatchEvent(new CustomEvent('close'));
+  }
+
+  private openInBrowser(url: string): void {
+    window.open(url, '_blank');
+  }
+
+  private getPrState(pr: PullRequestSummary): string {
+    if (pr.draft) return 'draft';
+    if (pr.state === 'closed') {
+      // Check if merged based on URL pattern (GitHub PRs have /pull/N for open, merged shows differently)
+      return 'closed';
+    }
+    return pr.state;
+  }
+
+  private formatDate(dateStr: string): string {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diff = now.getTime() - date.getTime();
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+
+    if (days === 0) return 'today';
+    if (days === 1) return 'yesterday';
+    if (days < 7) return `${days} days ago`;
+    if (days < 30) return `${Math.floor(days / 7)} weeks ago`;
+    return date.toLocaleDateString();
+  }
+
+  private renderConnectionTab() {
+    if (this.connectionStatus?.connected && this.connectionStatus.user) {
+      const user = this.connectionStatus.user;
+      return html`
+        <div class="connection-status">
+          <img class="avatar" src="${user.avatarUrl}" alt="${user.login}" />
+          <div class="user-info">
+            <div class="user-name">${user.name ?? user.login}</div>
+            <div class="user-login">@${user.login}</div>
+            ${this.connectionStatus.scopes.length > 0 ? html`
+              <div class="scopes">
+                ${this.connectionStatus.scopes.map(scope => html`
+                  <span class="scope-badge">${scope}</span>
+                `)}
+              </div>
+            ` : ''}
+          </div>
+          <button class="btn btn-danger" @click=${this.handleDisconnect} ?disabled=${this.isLoading}>
+            Disconnect
+          </button>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="token-form">
+        <div class="form-group">
+          <label>Personal Access Token</label>
+          <input
+            type="password"
+            placeholder="ghp_xxxxxxxxxxxx"
+            .value=${this.tokenInput}
+            @input=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
+          />
+          <span class="help-text">
+            Create a token at
+            <a
+              class="help-link"
+              href="https://github.com/settings/tokens/new?scopes=repo,read:user"
+              target="_blank"
+            >github.com/settings/tokens</a>
+            with <code>repo</code> and <code>read:user</code> scopes.
+          </span>
+        </div>
+        <div class="btn-row">
+          <button
+            class="btn btn-primary"
+            @click=${this.handleSaveToken}
+            ?disabled=${this.isLoading || !this.tokenInput.trim()}
+          >
+            Connect to GitHub
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderPullRequestsTab() {
+    if (!this.connectionStatus?.connected) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path>
+          </svg>
+          <p>Connect to GitHub to view pull requests</p>
+        </div>
+      `;
+    }
+
+    if (!this.detectedRepo) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+          <p>No GitHub repository detected</p>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="filter-row">
+        <select class="filter-select" @change=${this.handlePrFilterChange}>
+          <option value="open" ?selected=${this.prFilter === 'open'}>Open</option>
+          <option value="closed" ?selected=${this.prFilter === 'closed'}>Closed</option>
+          <option value="all" ?selected=${this.prFilter === 'all'}>All</option>
+        </select>
+        <button class="btn" @click=${() => this.activeTab = 'create-pr'}>
+          + New PR
+        </button>
+      </div>
+
+      ${this.isLoading ? html`<div class="loading">Loading pull requests...</div>` : ''}
+
+      ${!this.isLoading && this.pullRequests.length === 0 ? html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="18" cy="18" r="3"></circle>
+            <circle cx="6" cy="6" r="3"></circle>
+            <path d="M6 21V9a9 9 0 0 0 9 9"></path>
+          </svg>
+          <p>No ${this.prFilter} pull requests</p>
+        </div>
+      ` : ''}
+
+      <div class="pr-list">
+        ${this.pullRequests.map(pr => html`
+          <div class="pr-item" @click=${() => this.openInBrowser(pr.htmlUrl)}>
+            <span class="pr-number">#${pr.number}</span>
+            <div class="pr-info">
+              <div class="pr-title">${pr.title}</div>
+              <div class="pr-meta">
+                <span class="pr-state ${this.getPrState(pr)}">${this.getPrState(pr)}</span>
+                <span class="pr-branch">${pr.headRef} → ${pr.baseRef}</span>
+                <span>by ${pr.user.login}</span>
+                <span>${this.formatDate(pr.createdAt)}</span>
+              </div>
+            </div>
+            ${pr.additions != null && pr.deletions != null ? html`
+              <div class="pr-stats">
+                <span class="stat-additions">+${pr.additions}</span>
+                <span class="stat-deletions">-${pr.deletions}</span>
+              </div>
+            ` : ''}
+          </div>
+        `)}
+      </div>
+    `;
+  }
+
+  private renderActionsTab() {
+    if (!this.connectionStatus?.connected) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path>
+          </svg>
+          <p>Connect to GitHub to view workflow runs</p>
+        </div>
+      `;
+    }
+
+    if (!this.detectedRepo) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+          <p>No GitHub repository detected</p>
+        </div>
+      `;
+    }
+
+    if (this.workflowRuns.length === 0) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+          </svg>
+          <p>No workflow runs found</p>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="workflow-list">
+        ${this.workflowRuns.map(run => html`
+          <div class="workflow-item">
+            <div class="workflow-status ${run.conclusion ?? run.status}"></div>
+            <div class="workflow-info">
+              <div class="workflow-name">${run.name}</div>
+              <div class="workflow-meta">
+                <span class="workflow-branch">${run.headBranch}</span>
+                <span>#${run.runNumber}</span>
+                <span>${run.event}</span>
+                <span>${this.formatDate(run.createdAt)}</span>
+              </div>
+            </div>
+            <a
+              class="workflow-link"
+              href="${run.htmlUrl}"
+              target="_blank"
+              @click=${(e: Event) => e.stopPropagation()}
+            >
+              View →
+            </a>
+          </div>
+        `)}
+      </div>
+    `;
+  }
+
+  private renderCreatePrTab() {
+    return html`
+      <div class="token-form">
+        <div class="form-group">
+          <label>Title</label>
+          <input
+            type="text"
+            placeholder="Pull request title"
+            .value=${this.createPrTitle}
+            @input=${(e: Event) => this.createPrTitle = (e.target as HTMLInputElement).value}
+          />
+        </div>
+
+        <div class="form-group">
+          <label>Description</label>
+          <textarea
+            placeholder="Describe your changes..."
+            .value=${this.createPrBody}
+            @input=${(e: Event) => this.createPrBody = (e.target as HTMLTextAreaElement).value}
+          ></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>Head Branch (your changes)</label>
+          <input
+            type="text"
+            placeholder="feature-branch"
+            .value=${this.createPrHead}
+            @input=${(e: Event) => this.createPrHead = (e.target as HTMLInputElement).value}
+          />
+        </div>
+
+        <div class="form-group">
+          <label>Base Branch (merge into)</label>
+          <input
+            type="text"
+            placeholder="main"
+            .value=${this.createPrBase}
+            @input=${(e: Event) => this.createPrBase = (e.target as HTMLInputElement).value}
+          />
+        </div>
+
+        <div class="form-group">
+          <label>
+            <input
+              type="checkbox"
+              .checked=${this.createPrDraft}
+              @change=${(e: Event) => this.createPrDraft = (e.target as HTMLInputElement).checked}
+            />
+            Create as draft
+          </label>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn" @click=${() => this.activeTab = 'pull-requests'}>
+            Cancel
+          </button>
+          <button
+            class="btn btn-primary"
+            @click=${this.handleCreatePR}
+            ?disabled=${this.isLoading || !this.createPrTitle || !this.createPrHead || !this.createPrBase}
+          >
+            Create Pull Request
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  render() {
+    return html`
+      <lv-modal
+        ?open=${this.open}
+        title="GitHub"
+        @close=${this.handleClose}
+      >
+        <div class="content">
+          ${this.detectedRepo ? html`
+            <div class="repo-info">
+              <svg class="repo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+              </svg>
+              <span class="repo-name">${this.detectedRepo.owner}/${this.detectedRepo.repo}</span>
+              <span class="repo-remote">(${this.detectedRepo.remoteName})</span>
+            </div>
+          ` : ''}
+
+          <div class="tabs">
+            <button
+              class="tab ${this.activeTab === 'connection' ? 'active' : ''}"
+              @click=${() => this.activeTab = 'connection'}
+            >
+              Connection
+            </button>
+            <button
+              class="tab ${this.activeTab === 'pull-requests' ? 'active' : ''}"
+              @click=${() => this.activeTab = 'pull-requests'}
+            >
+              Pull Requests
+            </button>
+            <button
+              class="tab ${this.activeTab === 'actions' ? 'active' : ''}"
+              @click=${() => this.activeTab = 'actions'}
+            >
+              Actions
+            </button>
+          </div>
+
+          ${this.error ? html`
+            <div class="error-message">${this.error}</div>
+          ` : ''}
+
+          <div class="tab-content">
+            ${this.activeTab === 'connection' ? this.renderConnectionTab() : ''}
+            ${this.activeTab === 'pull-requests' ? this.renderPullRequestsTab() : ''}
+            ${this.activeTab === 'actions' ? this.renderActionsTab() : ''}
+            ${this.activeTab === 'create-pr' ? this.renderCreatePrTab() : ''}
+          </div>
+        </div>
+      </lv-modal>
+    `;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'lv-github-dialog': LvGitHubDialog;
+  }
+}

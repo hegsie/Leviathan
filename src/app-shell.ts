@@ -25,6 +25,7 @@ import './components/dialogs/lv-gpg-dialog.ts';
 import './components/dialogs/lv-ssh-dialog.ts';
 import './components/dialogs/lv-config-dialog.ts';
 import './components/dialogs/lv-credentials-dialog.ts';
+import './components/dialogs/lv-github-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
@@ -360,6 +361,9 @@ export class AppShell extends LitElement {
 
   // Credentials dialog
   @state() private showCredentials = false;
+
+  // GitHub dialog
+  @state() private showGitHub = false;
 
   // Panel dimensions
   @state() private leftPanelWidth = 220;
@@ -855,6 +859,13 @@ export class AppShell extends LitElement {
         action: () => { this.showCredentials = true; },
       },
       {
+        id: 'github',
+        label: 'GitHub Integration',
+        category: 'action',
+        icon: 'globe',
+        action: () => { this.showGitHub = true; },
+      },
+      {
         id: 'search',
         label: 'Search commits',
         category: 'action',
@@ -1243,6 +1254,14 @@ export class AppShell extends LitElement {
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showCredentials = false; }}
         ></lv-credentials-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-github-dialog
+          ?open=${this.showGitHub}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showGitHub = false; }}
+        ></lv-github-dialog>
       ` : ''}
     `;
   }

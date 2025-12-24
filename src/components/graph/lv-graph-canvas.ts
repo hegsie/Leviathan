@@ -15,8 +15,17 @@ import {
   type RenderData,
 } from '../../graph/virtual-scroll.ts';
 import { CanvasRenderer, getThemeFromCSS } from '../../graph/canvas-renderer.ts';
-import { getCommitHistory, getRefsByCommit, getCommitsStats, searchCommits } from '../../services/git.service.ts';
+import {
+  getCommitHistory,
+  getRefsByCommit,
+  getCommitsStats,
+  searchCommits,
+  detectGitHubRepo,
+  listPullRequests,
+  checkGitHubConnection,
+} from '../../services/git.service.ts';
 import type { Commit, RefsByCommit, RefInfo } from '../../types/git.types.ts';
+import type { GraphPullRequest } from '../../graph/virtual-scroll.ts';
 
 export interface CommitSelectedEvent {
   commit: Commit | null;
@@ -161,6 +170,8 @@ export class LvGraphCanvas extends LitElement {
   private commits: GraphCommit[] = [];
   private realCommits: Map<string, Commit> = new Map();
   private refsByCommit: RefsByCommit = {};
+  private pullRequestsByCommit: Record<string, GraphPullRequest[]> = {};
+  private githubRepo: { owner: string; repo: string } | null = null;
   private renderer: CanvasRenderer | null = null;
   private virtualScroll: VirtualScrollManager | null = null;
   private spatialIndex: SpatialIndex | null = null;
@@ -340,7 +351,7 @@ export class LvGraphCanvas extends LitElement {
       const useSearch = this.hasActiveSearch();
 
       // Fetch commits and refs in parallel
-      const [commitsResult, refsResult] = await Promise.all([
+      const [commitsResult, refsResult, githubRepoResult] = await Promise.all([
         useSearch
           ? searchCommits(this.repositoryPath, {
               query: this.searchFilter?.query || undefined,
@@ -359,7 +370,21 @@ export class LvGraphCanvas extends LitElement {
               allBranches: true,
             }),
         getRefsByCommit(this.repositoryPath),
+        detectGitHubRepo(this.repositoryPath),
       ]);
+
+      // Check if we have a GitHub repo and fetch PRs
+      if (githubRepoResult.success && githubRepoResult.data) {
+        this.githubRepo = {
+          owner: githubRepoResult.data.owner,
+          repo: githubRepoResult.data.repo,
+        };
+        // Load PRs in background (don't block render)
+        this.loadPullRequests();
+      } else {
+        this.githubRepo = null;
+        this.pullRequestsByCommit = {};
+      }
 
       if (!commitsResult.success || !commitsResult.data) {
         this.loadError = commitsResult.error?.message ?? 'Failed to load commits';
@@ -388,6 +413,88 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
+  /**
+   * Load pull requests for GitHub repositories
+   * Maps PRs to their head commit SHA for display
+   */
+  private async loadPullRequests(): Promise<void> {
+    if (!this.githubRepo) return;
+
+    try {
+      // Check if GitHub is connected
+      const connectionResult = await checkGitHubConnection();
+      if (!connectionResult.success || !connectionResult.data?.connected) {
+        return; // Not connected, skip PR loading
+      }
+
+      // Fetch open PRs (and recently closed for context)
+      const [openPrs, closedPrs] = await Promise.all([
+        listPullRequests(this.githubRepo.owner, this.githubRepo.repo, 'open', 50),
+        listPullRequests(this.githubRepo.owner, this.githubRepo.repo, 'closed', 20),
+      ]);
+
+      const prsByCommit: Record<string, GraphPullRequest[]> = {};
+
+      // Helper to add PR to commit map
+      const addPr = (headRef: string, pr: GraphPullRequest) => {
+        // Find the commit that matches this PR's head branch
+        // We need to look up by branch ref -> commit SHA
+        // For now, we'll match by checking refs
+        for (const [oid, refs] of Object.entries(this.refsByCommit)) {
+          const hasMatchingRef = refs.some(ref =>
+            ref.shorthand === headRef ||
+            ref.shorthand.endsWith('/' + headRef)
+          );
+          if (hasMatchingRef) {
+            if (!prsByCommit[oid]) {
+              prsByCommit[oid] = [];
+            }
+            // Avoid duplicates
+            if (!prsByCommit[oid].some(p => p.number === pr.number)) {
+              prsByCommit[oid].push(pr);
+            }
+            break;
+          }
+        }
+      };
+
+      // Process open PRs
+      if (openPrs.success && openPrs.data) {
+        for (const pr of openPrs.data) {
+          addPr(pr.headRef, {
+            number: pr.number,
+            state: pr.state,
+            draft: pr.draft,
+            url: pr.htmlUrl,
+          });
+        }
+      }
+
+      // Process closed PRs
+      // Note: We can't determine merged vs closed from summary alone
+      // The state will be 'closed' for both - would need details API for merged_at
+      if (closedPrs.success && closedPrs.data) {
+        for (const pr of closedPrs.data) {
+          addPr(pr.headRef, {
+            number: pr.number,
+            state: pr.state,
+            draft: pr.draft,
+            url: pr.htmlUrl,
+          });
+        }
+      }
+
+      this.pullRequestsByCommit = prsByCommit;
+
+      // Update virtual scroll and re-render
+      this.virtualScroll?.setPullRequests(this.pullRequestsByCommit);
+      this.renderer?.markDirty();
+      this.scheduleRender();
+    } catch (err) {
+      console.warn('Failed to load pull requests:', err);
+    }
+  }
+
   private processLayout(): void {
     // Compute layout (use simple algorithm for cleaner one-commit-per-row layout)
     const result = computeGraphLayout(this.commits, { optimized: false });
@@ -406,6 +513,7 @@ export class LvGraphCanvas extends LitElement {
     this.virtualScroll?.setLayout(this.layout);
     this.virtualScroll?.setRefs(this.refsByCommit);
     this.virtualScroll?.setAuthorEmails(authorEmails);
+    this.virtualScroll?.setPullRequests(this.pullRequestsByCommit);
 
     // Update scroll content size
     this.updateScrollContentSize();

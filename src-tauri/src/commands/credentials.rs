@@ -72,9 +72,11 @@ fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
     } else if output.status.code() == Some(1) && stderr.is_empty() && stdout.is_empty() {
         Ok(String::new())
     } else {
-        Err(LeviathanError::OperationFailed(
-            if stderr.is_empty() { stdout } else { stderr },
-        ))
+        Err(LeviathanError::OperationFailed(if stderr.is_empty() {
+            stdout
+        } else {
+            stderr
+        }))
     }
 }
 
@@ -110,8 +112,10 @@ pub async fn get_credential_helpers(path: String) -> Result<Vec<CredentialHelper
     }
 
     // Get URL-specific credential helpers
-    if let Ok(config) = run_git_config(Some(repo_path), &["--get-regexp", "^credential\\..+\\.helper"])
-    {
+    if let Ok(config) = run_git_config(
+        Some(repo_path),
+        &["--get-regexp", "^credential\\..+\\.helper"],
+    ) {
         for line in config.lines() {
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             if parts.len() == 2 {

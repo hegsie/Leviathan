@@ -68,44 +68,17 @@
 - **Worktrees** - create, remove, lock/unlock multiple working directories
 - **Git LFS** - track patterns, pull/fetch/prune large files
 
+### Security & Configuration
+- **GPG Signing** - configure keys, sign commits/tags, verify signatures, trust levels
+- **SSH Key Management** - generate keys (Ed25519, RSA, ECDSA), view/copy public keys, test connections
+- **Git Configuration** - view/edit global and repository config, manage aliases, user identity
+- **Credential Management** - credential helper configuration, test credentials, per-remote settings
+
 ---
 
 ## Planned Features
 
-### Phase 4: Security & Configuration
-
-#### GPG Signing
-- Configure GPG keys
-- Sign commits
-- Sign tags
-- Verify commit signatures
-- Verify tag signatures
-- Visual indicators for signed commits
-- Trust level display
-
-#### SSH Key Management
-- Generate SSH keys (Ed25519, RSA)
-- View/copy public keys
-- Test SSH connections
-- Manage multiple keys
-- SSH agent integration
-
-#### Git Configuration
-- View/edit global config
-- View/edit repository config
-- Manage aliases
-- Configure user identity
-- Editor preferences
-- Merge/diff tool configuration
-
-#### Credential Management
-- Credential helper configuration
-- Store/cache credentials
-- Per-remote credentials
-
----
-
-### Phase 5: Platform Integrations
+### Phase 5: Platform Integrations (In Progress)
 
 #### GitHub Integration
 - View pull requests

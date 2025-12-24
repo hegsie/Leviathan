@@ -41,6 +41,18 @@ export interface VisibleRange {
   endLane: number;
 }
 
+/** Pull request info for graph display */
+export interface GraphPullRequest {
+  /** PR number */
+  number: number;
+  /** PR state (open, closed, merged) */
+  state: string;
+  /** Whether it's a draft */
+  draft: boolean;
+  /** URL to open in browser */
+  url: string;
+}
+
 export interface RenderData {
   /** Nodes to render */
   nodes: LayoutNode[];
@@ -57,6 +69,8 @@ export interface RenderData {
   authorEmails: Record<string, string>;
   /** Maximum lane in the graph (for label positioning) */
   maxLane: number;
+  /** Pull requests by commit SHA (head commit of PR) */
+  pullRequestsByCommit?: Record<string, GraphPullRequest[]>;
 }
 
 const DEFAULT_CONFIG: VirtualScrollConfig = {
@@ -76,6 +90,7 @@ export class VirtualScrollManager {
   private edgesByRowRange: Map<string, LayoutEdge[]> = new Map();
   private refsByCommit: RefsByCommit = {};
   private authorEmails: Record<string, string> = {};
+  private pullRequestsByCommit: Record<string, GraphPullRequest[]> = {};
 
   constructor(config: Partial<VirtualScrollConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -93,6 +108,13 @@ export class VirtualScrollManager {
    */
   setAuthorEmails(emails: Record<string, string>): void {
     this.authorEmails = emails;
+  }
+
+  /**
+   * Set pull requests by commit SHA
+   */
+  setPullRequests(prs: Record<string, GraphPullRequest[]>): void {
+    this.pullRequestsByCommit = prs;
   }
 
   /**
@@ -211,6 +233,7 @@ export class VirtualScrollManager {
       refsByCommit: this.refsByCommit,
       authorEmails: this.authorEmails,
       maxLane: this.layout?.maxLane ?? 0,
+      pullRequestsByCommit: this.pullRequestsByCommit,
     };
   }
 

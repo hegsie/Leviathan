@@ -22,3 +22,4 @@ export { LvGpgDialog } from './lv-gpg-dialog.ts';
 export { LvSshDialog } from './lv-ssh-dialog.ts';
 export { LvConfigDialog } from './lv-config-dialog.ts';
 export { LvCredentialsDialog } from './lv-credentials-dialog.ts';
+export { LvGitHubDialog } from './lv-github-dialog.ts';

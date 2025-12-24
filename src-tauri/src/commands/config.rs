@@ -70,9 +70,11 @@ fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
         if output.status.code() == Some(1) && stderr.is_empty() && stdout.is_empty() {
             Ok(String::new())
         } else {
-            Err(LeviathanError::OperationFailed(
-                if stderr.is_empty() { stdout } else { stderr },
-            ))
+            Err(LeviathanError::OperationFailed(if stderr.is_empty() {
+                stdout
+            } else {
+                stderr
+            }))
         }
     }
 }
@@ -267,7 +269,10 @@ pub async fn get_aliases(path: Option<String>) -> Result<Vec<GitAlias>> {
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             if parts.len() == 2 && parts[0].starts_with("alias.") {
                 Some(GitAlias {
-                    name: parts[0].strip_prefix("alias.").unwrap_or(parts[0]).to_string(),
+                    name: parts[0]
+                        .strip_prefix("alias.")
+                        .unwrap_or(parts[0])
+                        .to_string(),
                     command: parts[1].to_string(),
                     is_global: true,
                 })
@@ -287,7 +292,10 @@ pub async fn get_aliases(path: Option<String>) -> Result<Vec<GitAlias>> {
         for line in local_result.lines() {
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             if parts.len() == 2 && parts[0].starts_with("alias.") {
-                let name = parts[0].strip_prefix("alias.").unwrap_or(parts[0]).to_string();
+                let name = parts[0]
+                    .strip_prefix("alias.")
+                    .unwrap_or(parts[0])
+                    .to_string();
 
                 // Check if we already have a global alias with this name
                 // If so, replace it with the local one

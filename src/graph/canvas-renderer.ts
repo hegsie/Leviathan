@@ -8,7 +8,7 @@
  * - FPS monitoring
  */
 
-import type { RenderData } from './virtual-scroll.ts';
+import type { RenderData, GraphPullRequest } from './virtual-scroll.ts';
 import type { RefInfo, RefType } from '../types/git.types.ts';
 import { md5 } from '../utils/md5.ts';
 
@@ -58,6 +58,17 @@ export interface RenderTheme {
     tagText: string;
     head: string;
     headText: string;
+  };
+  /** Pull request label colors */
+  prColors: {
+    open: string;
+    openText: string;
+    closed: string;
+    closedText: string;
+    merged: string;
+    mergedText: string;
+    draft: string;
+    draftText: string;
   };
 }
 
@@ -122,6 +133,16 @@ export function getThemeFromCSS(): RenderTheme {
       head: getCSSVar('--ref-head-bg', '#5c3020'),
       headText: getCSSVar('--ref-head-text', '#ffab91'),
     },
+    prColors: {
+      open: getCSSVar('--color-success-bg', '#1a3d1a'),
+      openText: getCSSVar('--color-success', '#4caf50'),
+      closed: getCSSVar('--color-error-bg', '#3d1a1a'),
+      closedText: getCSSVar('--color-error', '#ef5350'),
+      merged: '#2d1f4e',
+      mergedText: '#a371f7',
+      draft: getCSSVar('--color-bg-hover', '#2d2d2d'),
+      draftText: getCSSVar('--color-text-muted', '#888888'),
+    },
   };
 }
 
@@ -147,6 +168,16 @@ const DEFAULT_THEME: RenderTheme = {
     tagText: '#ffe082',
     head: '#5c3020',
     headText: '#ffab91',
+  },
+  prColors: {
+    open: '#1a3d1a',
+    openText: '#4caf50',
+    closed: '#3d1a1a',
+    closedText: '#ef5350',
+    merged: '#2d1f4e',
+    mergedText: '#a371f7',
+    draft: '#2d2d2d',
+    draftText: '#888888',
   },
 };
 
@@ -722,6 +753,38 @@ export class CanvasRenderer {
 
         currentX += pillWidth + labelGap;
       }
+
+      // Render PR badges after refs
+      const prs = data.pullRequestsByCommit?.[node.oid] ?? [];
+      for (const pr of prs) {
+        const { bgColor, textColor: prTextColor } = this.getPrColors(pr);
+        const prLabel = `#${pr.number}`;
+
+        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
+        const prTextWidth = ctx.measureText(prLabel).width;
+
+        // Add PR icon width
+        const prIconSize = 10;
+        const prPillWidth = prTextWidth + labelPadding * 2 + prIconSize + iconPadding;
+
+        // Draw PR pill background
+        ctx.fillStyle = bgColor;
+        this.drawRoundedRect(currentX, y - labelHeight / 2, prPillWidth, labelHeight, labelRadius);
+
+        // Draw PR icon (merge/pull request icon)
+        ctx.strokeStyle = prTextColor;
+        ctx.fillStyle = prTextColor;
+        this.drawPrIcon(currentX + labelPadding, y, prIconSize);
+
+        // Draw PR number
+        ctx.fillStyle = prTextColor;
+        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(prLabel, currentX + labelPadding + prIconSize + iconPadding, y);
+
+        currentX += prPillWidth + labelGap;
+      }
     }
   }
 
@@ -905,6 +968,85 @@ export class CanvasRenderer {
           textColor: theme.refColors.localBranchText,
         };
     }
+  }
+
+  /**
+   * Get colors for a pull request based on its state
+   */
+  private getPrColors(pr: GraphPullRequest): { bgColor: string; textColor: string } {
+    const { theme } = this;
+
+    if (pr.draft) {
+      return {
+        bgColor: theme.prColors.draft,
+        textColor: theme.prColors.draftText,
+      };
+    }
+
+    switch (pr.state.toLowerCase()) {
+      case 'open':
+        return {
+          bgColor: theme.prColors.open,
+          textColor: theme.prColors.openText,
+        };
+      case 'closed':
+        return {
+          bgColor: theme.prColors.closed,
+          textColor: theme.prColors.closedText,
+        };
+      case 'merged':
+        return {
+          bgColor: theme.prColors.merged,
+          textColor: theme.prColors.mergedText,
+        };
+      default:
+        return {
+          bgColor: theme.prColors.open,
+          textColor: theme.prColors.openText,
+        };
+    }
+  }
+
+  /**
+   * Draw a pull request icon (merge request style)
+   */
+  private drawPrIcon(x: number, y: number, size: number): void {
+    const { ctx } = this;
+    const s = size / 24;
+    const top = y - size / 2;
+    const left = x;
+
+    ctx.save();
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Draw merge/PR icon - two circles connected by curved line
+    // Top circle
+    ctx.beginPath();
+    ctx.arc(left + 6 * s, top + 6 * s, 3 * s, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Bottom circle
+    ctx.beginPath();
+    ctx.arc(left + 18 * s, top + 18 * s, 3 * s, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Connecting line with arrow
+    ctx.beginPath();
+    ctx.moveTo(left + 6 * s, top + 9 * s);
+    ctx.lineTo(left + 6 * s, top + 12 * s);
+    ctx.quadraticCurveTo(left + 6 * s, top + 18 * s, left + 15 * s, top + 18 * s);
+    ctx.stroke();
+
+    // Arrow head
+    ctx.beginPath();
+    ctx.moveTo(left + 12 * s, top + 15 * s);
+    ctx.lineTo(left + 15 * s, top + 18 * s);
+    ctx.lineTo(left + 12 * s, top + 21 * s);
+    ctx.stroke();
+
+    ctx.restore();
   }
 
   /**

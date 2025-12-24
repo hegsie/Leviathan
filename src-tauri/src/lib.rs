@@ -176,6 +176,19 @@ pub fn run() {
             commands::credentials::get_available_helpers,
             commands::credentials::test_credentials,
             commands::credentials::erase_credentials,
+            // GitHub integration
+            commands::github::store_github_token,
+            commands::github::get_github_token,
+            commands::github::delete_github_token,
+            commands::github::check_github_connection,
+            commands::github::detect_github_repo,
+            commands::github::list_pull_requests,
+            commands::github::get_pull_request,
+            commands::github::create_pull_request,
+            commands::github::get_pull_request_reviews,
+            commands::github::get_workflow_runs,
+            commands::github::get_check_runs,
+            commands::github::get_commit_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
