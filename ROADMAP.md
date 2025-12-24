@@ -91,18 +91,14 @@
 - **Issues** - view issues, create issues, label filtering
 - **Pipelines** - view CI/CD pipeline status
 
+### Bitbucket Integration
+- **Pull Requests** - view PRs, create PRs, status filtering
+- **Issues** - view issues with priority and status
+- **Pipelines** - view pipeline run status
+
 ---
 
 ## Planned Features
-
-### Phase 5: Platform Integrations (In Progress)
-
-#### Bitbucket Integration
-- Pull request support
-- Issue tracking
-- Pipelines status
-
----
 
 ### Phase 6: UI/UX Enhancements
 

@@ -228,6 +228,17 @@ pub fn run() {
             commands::gitlab::create_gitlab_issue,
             commands::gitlab::list_gitlab_pipelines,
             commands::gitlab::get_gitlab_labels,
+            // Bitbucket integration
+            commands::bitbucket::store_bitbucket_credentials,
+            commands::bitbucket::get_bitbucket_credentials,
+            commands::bitbucket::delete_bitbucket_credentials,
+            commands::bitbucket::check_bitbucket_connection,
+            commands::bitbucket::detect_bitbucket_repo,
+            commands::bitbucket::list_bitbucket_pull_requests,
+            commands::bitbucket::get_bitbucket_pull_request,
+            commands::bitbucket::create_bitbucket_pull_request,
+            commands::bitbucket::list_bitbucket_issues,
+            commands::bitbucket::list_bitbucket_pipelines,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

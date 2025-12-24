@@ -2047,3 +2047,162 @@ export async function getGitLabLabels(
 ): Promise<CommandResult<string[]>> {
   return invokeCommand<string[]>('get_gitlab_labels', { instanceUrl, projectPath });
 }
+
+// =======================
+// Bitbucket Integration
+// =======================
+
+export interface BitbucketUser {
+  uuid: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+}
+
+export interface BitbucketConnectionStatus {
+  connected: boolean;
+  user: BitbucketUser | null;
+}
+
+export interface DetectedBitbucketRepo {
+  workspace: string;
+  repoSlug: string;
+  remoteName: string;
+}
+
+export interface BitbucketPullRequest {
+  id: number;
+  title: string;
+  description: string | null;
+  state: string;
+  author: BitbucketUser;
+  createdOn: string;
+  sourceBranch: string;
+  destinationBranch: string;
+  url: string;
+}
+
+export interface CreateBitbucketPullRequestInput {
+  title: string;
+  description?: string;
+  sourceBranch: string;
+  destinationBranch: string;
+  closeSourceBranch?: boolean;
+}
+
+export interface BitbucketIssue {
+  id: number;
+  title: string;
+  content: string | null;
+  state: string;
+  priority: string;
+  kind: string;
+  reporter: BitbucketUser | null;
+  assignee: BitbucketUser | null;
+  createdOn: string;
+  url: string;
+}
+
+export interface BitbucketPipeline {
+  uuid: string;
+  buildNumber: number;
+  stateName: string;
+  resultName: string | null;
+  targetBranch: string;
+  createdOn: string;
+  completedOn: string | null;
+  url: string;
+}
+
+// Bitbucket Credential Management
+
+export async function storeBitbucketCredentials(
+  username: string,
+  appPassword: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('store_bitbucket_credentials', { username, appPassword });
+}
+
+export async function getBitbucketCredentials(): Promise<CommandResult<[string, string] | null>> {
+  return invokeCommand<[string, string] | null>('get_bitbucket_credentials', {});
+}
+
+export async function deleteBitbucketCredentials(): Promise<CommandResult<void>> {
+  return invokeCommand<void>('delete_bitbucket_credentials', {});
+}
+
+// Bitbucket Connection
+
+export async function checkBitbucketConnection(): Promise<CommandResult<BitbucketConnectionStatus>> {
+  return invokeCommand<BitbucketConnectionStatus>('check_bitbucket_connection', {});
+}
+
+export async function detectBitbucketRepo(
+  path: string
+): Promise<CommandResult<DetectedBitbucketRepo | null>> {
+  return invokeCommand<DetectedBitbucketRepo | null>('detect_bitbucket_repo', { path });
+}
+
+// Bitbucket Pull Requests
+
+export async function listBitbucketPullRequests(
+  workspace: string,
+  repoSlug: string,
+  state?: string
+): Promise<CommandResult<BitbucketPullRequest[]>> {
+  return invokeCommand<BitbucketPullRequest[]>('list_bitbucket_pull_requests', {
+    workspace,
+    repoSlug,
+    state,
+  });
+}
+
+export async function getBitbucketPullRequest(
+  workspace: string,
+  repoSlug: string,
+  prId: number
+): Promise<CommandResult<BitbucketPullRequest>> {
+  return invokeCommand<BitbucketPullRequest>('get_bitbucket_pull_request', {
+    workspace,
+    repoSlug,
+    prId,
+  });
+}
+
+export async function createBitbucketPullRequest(
+  workspace: string,
+  repoSlug: string,
+  input: CreateBitbucketPullRequestInput
+): Promise<CommandResult<BitbucketPullRequest>> {
+  return invokeCommand<BitbucketPullRequest>('create_bitbucket_pull_request', {
+    workspace,
+    repoSlug,
+    input,
+  });
+}
+
+// Bitbucket Issues
+
+export async function listBitbucketIssues(
+  workspace: string,
+  repoSlug: string,
+  state?: string
+): Promise<CommandResult<BitbucketIssue[]>> {
+  return invokeCommand<BitbucketIssue[]>('list_bitbucket_issues', {
+    workspace,
+    repoSlug,
+    state,
+  });
+}
+
+// Bitbucket Pipelines
+
+export async function listBitbucketPipelines(
+  workspace: string,
+  repoSlug: string
+): Promise<CommandResult<BitbucketPipeline[]>> {
+  return invokeCommand<BitbucketPipeline[]>('list_bitbucket_pipelines', {
+    workspace,
+    repoSlug,
+  });
+}

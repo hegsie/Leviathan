@@ -2,6 +2,7 @@
 
 pub mod azure_devops;
 pub mod bisect;
+pub mod bitbucket;
 pub mod branch;
 pub mod clean;
 pub mod commit;
