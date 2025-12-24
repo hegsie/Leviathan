@@ -110,3 +110,225 @@ pub async fn create_commit(path: String, message: String, amend: Option<bool>) -
     let commit = repo.find_commit(commit_oid)?;
     Ok(Commit::from_git2(&commit))
 }
+
+/// Search commits with filters
+#[command]
+pub async fn search_commits(
+    path: String,
+    query: Option<String>,
+    author: Option<String>,
+    date_from: Option<i64>,
+    date_to: Option<i64>,
+    file_path: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<Commit>> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let mut revwalk = repo.revwalk()?;
+    revwalk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
+
+    // Push all branch heads for complete search
+    for reference in repo.references()?.flatten() {
+        if let Some(oid) = reference.target() {
+            let _ = revwalk.push(oid);
+        }
+    }
+
+    let limit_count = limit.unwrap_or(500);
+    let query_lower = query.as_ref().map(|q| q.to_lowercase());
+    let author_lower = author.as_ref().map(|a| a.to_lowercase());
+
+    let mut results = Vec::new();
+
+    for oid_result in revwalk {
+        if results.len() >= limit_count {
+            break;
+        }
+
+        let oid = match oid_result {
+            Ok(oid) => oid,
+            Err(_) => continue,
+        };
+
+        let commit = match repo.find_commit(oid) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Check query filter (message, SHA)
+        if let Some(ref q) = query_lower {
+            let message = commit.message().unwrap_or("").to_lowercase();
+            let sha = commit.id().to_string().to_lowercase();
+            if !message.contains(q) && !sha.starts_with(q) {
+                continue;
+            }
+        }
+
+        // Check author filter
+        if let Some(ref a) = author_lower {
+            let author_name = commit.author().name().unwrap_or("").to_lowercase();
+            let author_email = commit.author().email().unwrap_or("").to_lowercase();
+            if !author_name.contains(a) && !author_email.contains(a) {
+                continue;
+            }
+        }
+
+        // Check date range
+        let commit_time = commit.time().seconds();
+        if let Some(from) = date_from {
+            if commit_time < from {
+                continue;
+            }
+        }
+        if let Some(to) = date_to {
+            if commit_time > to {
+                continue;
+            }
+        }
+
+        // Check file path filter
+        if let Some(ref fp) = file_path {
+            let tree = match commit.tree() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+
+            let mut diff_opts = git2::DiffOptions::new();
+            diff_opts.pathspec(fp);
+
+            let diff = match repo.diff_tree_to_tree(
+                parent_tree.as_ref(),
+                Some(&tree),
+                Some(&mut diff_opts),
+            ) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            if diff.deltas().count() == 0 {
+                continue;
+            }
+        }
+
+        results.push(Commit::from_git2(&commit));
+    }
+
+    Ok(results)
+}
+
+/// Get all commits that modified a specific file
+#[command]
+pub async fn get_file_history(
+    path: String,
+    file_path: String,
+    limit: Option<usize>,
+    follow_renames: Option<bool>,
+) -> Result<Vec<Commit>> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let mut revwalk = repo.revwalk()?;
+    revwalk.set_sorting(git2::Sort::TIME)?;
+
+    // Start from HEAD
+    let head = repo
+        .head()?
+        .target()
+        .ok_or(LeviathanError::RepositoryNotOpen)?;
+    revwalk.push(head)?;
+
+    let limit_count = limit.unwrap_or(500);
+    let should_follow = follow_renames.unwrap_or(true);
+    let mut commits = Vec::new();
+    let mut current_path = file_path.clone();
+
+    for oid_result in revwalk {
+        if commits.len() >= limit_count {
+            break;
+        }
+
+        let oid = match oid_result {
+            Ok(oid) => oid,
+            Err(_) => continue,
+        };
+
+        let commit = match repo.find_commit(oid) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let tree = match commit.tree() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        // Check if file exists in this commit
+        let file_in_commit = tree.get_path(std::path::Path::new(&current_path)).is_ok();
+
+        if !file_in_commit && !should_follow {
+            continue;
+        }
+
+        // Get parent tree for diff
+        let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+
+        // Create diff options
+        let mut diff_opts = git2::DiffOptions::new();
+        diff_opts.pathspec(&current_path);
+
+        let diff =
+            match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut diff_opts)) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+        // Check if file was modified in this commit
+        let mut file_modified = false;
+        let mut renamed_from: Option<String> = None;
+
+        if should_follow {
+            // Check for renames with find_similar
+            let mut diff_with_renames = diff;
+            let mut find_opts = git2::DiffFindOptions::new();
+            find_opts.renames(true);
+            find_opts.copies(false);
+            let _ = diff_with_renames.find_similar(Some(&mut find_opts));
+
+            for delta in diff_with_renames.deltas() {
+                if let Some(new_file) = delta.new_file().path() {
+                    if new_file.to_string_lossy() == current_path {
+                        file_modified = true;
+
+                        // Check if this was a rename
+                        if delta.status() == git2::Delta::Renamed {
+                            if let Some(old_file) = delta.old_file().path() {
+                                renamed_from = Some(old_file.to_string_lossy().to_string());
+                            }
+                        }
+                        break;
+                    }
+                }
+                // Also check old file path for renames
+                if let Some(old_file) = delta.old_file().path() {
+                    if old_file.to_string_lossy() == current_path {
+                        file_modified = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            file_modified = diff.deltas().count() > 0;
+        }
+
+        if file_modified {
+            commits.push(Commit::from_git2(&commit));
+
+            // Follow the rename backwards
+            if let Some(old_path) = renamed_from {
+                current_path = old_path;
+            }
+        }
+    }
+
+    Ok(commits)
+}

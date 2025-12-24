@@ -438,6 +438,20 @@ export class LvCommitDetails extends LitElement {
     );
   }
 
+  private handleHistoryClick(file: CommitFileEntry, e: Event): void {
+    e.stopPropagation();
+
+    this.dispatchEvent(
+      new CustomEvent('show-file-history', {
+        detail: {
+          filePath: file.path,
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
   private getRefClass(refType: string): string {
     switch (refType) {
       case 'localBranch':
@@ -483,6 +497,16 @@ export class LvCommitDetails extends LitElement {
           ${file.deletions > 0 ? html`<span class="deletions">-${file.deletions}</span>` : nothing}
         </span>
         <div class="file-actions">
+          <button
+            class="file-action"
+            title="View file history"
+            @click=${(e: Event) => this.handleHistoryClick(file, e)}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+          </button>
           ${canBlame ? html`
             <button
               class="file-action"

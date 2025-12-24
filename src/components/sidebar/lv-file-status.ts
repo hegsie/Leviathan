@@ -4,6 +4,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as watcherService from '../../services/watcher.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { dragDropService, type DragItem } from '../../services/drag-drop.service.ts';
 import type { StatusEntry, FileStatus } from '../../types/git.types.ts';
 
 /**
@@ -229,6 +230,55 @@ export class LvFileStatus extends LitElement {
       .clean-state .subtitle {
         font-size: var(--font-size-xs);
       }
+
+      /* Drag and drop styles */
+      .file-item[draggable="true"] {
+        cursor: grab;
+      }
+
+      .file-item.dragging {
+        opacity: 0.5;
+        cursor: grabbing;
+      }
+
+      .section.drop-target .section-header {
+        background: var(--color-primary-bg);
+      }
+
+      .section.drop-target-stage .section-header {
+        background: var(--color-success-bg);
+        color: var(--color-success);
+      }
+
+      .section.drop-target-unstage .section-header {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+      }
+
+      .drop-hint {
+        display: none;
+        padding: var(--spacing-sm) var(--spacing-md);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        text-align: center;
+        border: 2px dashed var(--color-border);
+        border-radius: var(--radius-md);
+        margin: var(--spacing-xs);
+      }
+
+      .section.drop-target .drop-hint {
+        display: block;
+      }
+
+      .section.drop-target-stage .drop-hint {
+        border-color: var(--color-success);
+        color: var(--color-success);
+      }
+
+      .section.drop-target-unstage .drop-hint {
+        border-color: var(--color-warning);
+        color: var(--color-warning);
+      }
     `,
   ];
 
@@ -241,6 +291,8 @@ export class LvFileStatus extends LitElement {
   @state() private stagedExpanded = true;
   @state() private unstagedExpanded = true;
   @state() private selectedFile: string | null = null;
+  @state() private draggingFile: StatusEntry | null = null;
+  @state() private dropTargetSection: 'staged' | 'unstaged' | null = null;
 
   private unsubscribeWatcher: (() => void) | null = null;
 
@@ -410,11 +462,15 @@ export class LvFileStatus extends LitElement {
 
   private renderFileItem(file: StatusEntry, staged: boolean) {
     const filename = file.path.split('/').pop() || file.path;
+    const isDragging = this.draggingFile?.path === file.path;
 
     return html`
       <li
-        class="file-item ${this.selectedFile === file.path ? 'selected' : ''}"
+        class="file-item ${this.selectedFile === file.path ? 'selected' : ''} ${isDragging ? 'dragging' : ''}"
+        draggable="true"
         @click=${() => this.handleFileClick(file)}
+        @dragstart=${(e: DragEvent) => this.handleFileDragStart(e, file, staged)}
+        @dragend=${() => this.handleFileDragEnd()}
         title="${file.path}"
       >
         <span class="file-status ${file.status}">${this.getStatusLabel(file.status)}</span>
@@ -457,6 +513,87 @@ export class LvFileStatus extends LitElement {
     `;
   }
 
+  // File drag handlers
+  private handleFileDragStart(e: DragEvent, file: StatusEntry, staged: boolean): void {
+    this.draggingFile = file;
+    const item: DragItem = { type: 'file', data: { file, staged } };
+    e.dataTransfer?.setData('application/json', JSON.stringify(item));
+    e.dataTransfer!.effectAllowed = 'move';
+    dragDropService.startDrag(item);
+  }
+
+  private handleFileDragEnd(): void {
+    this.draggingFile = null;
+    this.dropTargetSection = null;
+    dragDropService.endDrag();
+  }
+
+  private handleSectionDragOver(e: DragEvent, section: 'staged' | 'unstaged'): void {
+    if (!this.draggingFile) return;
+
+    // Check if we're dragging to a different section
+    const isDraggedFromStaged = this.stagedFiles.some(f => f.path === this.draggingFile?.path);
+    const isDroppingToSameSection = (section === 'staged' && isDraggedFromStaged) ||
+                                     (section === 'unstaged' && !isDraggedFromStaged);
+
+    if (isDroppingToSameSection) return;
+
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'move';
+  }
+
+  private handleSectionDragEnter(e: DragEvent, section: 'staged' | 'unstaged'): void {
+    if (!this.draggingFile) return;
+
+    // Check if we're dragging to a different section
+    const isDraggedFromStaged = this.stagedFiles.some(f => f.path === this.draggingFile?.path);
+    const isDroppingToSameSection = (section === 'staged' && isDraggedFromStaged) ||
+                                     (section === 'unstaged' && !isDraggedFromStaged);
+
+    if (isDroppingToSameSection) return;
+
+    e.preventDefault();
+    this.dropTargetSection = section;
+  }
+
+  private handleSectionDragLeave(e: DragEvent, section: 'staged' | 'unstaged'): void {
+    const target = e.currentTarget as HTMLElement;
+    if (target.contains(e.relatedTarget as Node)) return;
+
+    if (this.dropTargetSection === section) {
+      this.dropTargetSection = null;
+    }
+  }
+
+  private async handleSectionDrop(e: DragEvent, targetSection: 'staged' | 'unstaged'): Promise<void> {
+    e.preventDefault();
+
+    const file = this.draggingFile;
+    if (!file) return;
+
+    // Clear drag state
+    this.draggingFile = null;
+    this.dropTargetSection = null;
+    dragDropService.endDrag();
+
+    // Determine if we need to stage or unstage
+    const isDraggedFromStaged = this.stagedFiles.some(f => f.path === file.path);
+
+    if (targetSection === 'staged' && !isDraggedFromStaged) {
+      // Stage the file
+      const result = await gitService.stageFiles(this.repositoryPath, { paths: [file.path] });
+      if (result.success) {
+        await this.loadStatus();
+      }
+    } else if (targetSection === 'unstaged' && isDraggedFromStaged) {
+      // Unstage the file
+      const result = await gitService.unstageFiles(this.repositoryPath, { paths: [file.path] });
+      if (result.success) {
+        await this.loadStatus();
+      }
+    }
+  }
+
   render() {
     if (this.loading) {
       return html`<div class="loading">Loading changes...</div>`;
@@ -481,14 +618,20 @@ export class LvFileStatus extends LitElement {
 
     return html`
       <!-- Staged changes -->
-      ${this.stagedFiles.length > 0 ? html`
-        <div class="section">
-          <div class="section-header" @click=${() => this.stagedExpanded = !this.stagedExpanded}>
-            <svg class="chevron ${this.stagedExpanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="9 18 15 12 9 6"></polyline>
-            </svg>
-            <span class="section-title">Staged</span>
-            <span class="section-count">${this.stagedFiles.length}</span>
+      <div
+        class="section ${this.dropTargetSection === 'staged' ? 'drop-target drop-target-stage' : ''}"
+        @dragover=${(e: DragEvent) => this.handleSectionDragOver(e, 'staged')}
+        @dragenter=${(e: DragEvent) => this.handleSectionDragEnter(e, 'staged')}
+        @dragleave=${(e: DragEvent) => this.handleSectionDragLeave(e, 'staged')}
+        @drop=${(e: DragEvent) => this.handleSectionDrop(e, 'staged')}
+      >
+        <div class="section-header" @click=${() => this.stagedExpanded = !this.stagedExpanded}>
+          <svg class="chevron ${this.stagedExpanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="9 18 15 12 9 6"></polyline>
+          </svg>
+          <span class="section-title">Staged</span>
+          <span class="section-count">${this.stagedFiles.length}</span>
+          ${this.stagedFiles.length > 0 ? html`
             <div class="section-actions" @click=${(e: Event) => e.stopPropagation()}>
               <button
                 class="section-action"
@@ -500,24 +643,31 @@ export class LvFileStatus extends LitElement {
                 </svg>
               </button>
             </div>
-          </div>
-          ${this.stagedExpanded ? html`
-            <ul class="file-list">
-              ${this.stagedFiles.map((f) => this.renderFileItem(f, true))}
-            </ul>
           ` : nothing}
         </div>
-      ` : nothing}
+        ${this.stagedFiles.length > 0 && this.stagedExpanded ? html`
+          <ul class="file-list">
+            ${this.stagedFiles.map((f) => this.renderFileItem(f, true))}
+          </ul>
+        ` : nothing}
+        <div class="drop-hint">Drop files here to stage</div>
+      </div>
 
       <!-- Unstaged changes -->
-      ${this.unstagedFiles.length > 0 ? html`
-        <div class="section">
-          <div class="section-header" @click=${() => this.unstagedExpanded = !this.unstagedExpanded}>
-            <svg class="chevron ${this.unstagedExpanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="9 18 15 12 9 6"></polyline>
-            </svg>
-            <span class="section-title">Changes</span>
-            <span class="section-count">${this.unstagedFiles.length}</span>
+      <div
+        class="section ${this.dropTargetSection === 'unstaged' ? 'drop-target drop-target-unstage' : ''}"
+        @dragover=${(e: DragEvent) => this.handleSectionDragOver(e, 'unstaged')}
+        @dragenter=${(e: DragEvent) => this.handleSectionDragEnter(e, 'unstaged')}
+        @dragleave=${(e: DragEvent) => this.handleSectionDragLeave(e, 'unstaged')}
+        @drop=${(e: DragEvent) => this.handleSectionDrop(e, 'unstaged')}
+      >
+        <div class="section-header" @click=${() => this.unstagedExpanded = !this.unstagedExpanded}>
+          <svg class="chevron ${this.unstagedExpanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="9 18 15 12 9 6"></polyline>
+          </svg>
+          <span class="section-title">Changes</span>
+          <span class="section-count">${this.unstagedFiles.length}</span>
+          ${this.unstagedFiles.length > 0 ? html`
             <div class="section-actions" @click=${(e: Event) => e.stopPropagation()}>
               <button
                 class="section-action"
@@ -530,14 +680,15 @@ export class LvFileStatus extends LitElement {
                 </svg>
               </button>
             </div>
-          </div>
-          ${this.unstagedExpanded ? html`
-            <ul class="file-list">
-              ${this.unstagedFiles.map((f) => this.renderFileItem(f, false))}
-            </ul>
           ` : nothing}
         </div>
-      ` : nothing}
+        ${this.unstagedFiles.length > 0 && this.unstagedExpanded ? html`
+          <ul class="file-list">
+            ${this.unstagedFiles.map((f) => this.renderFileItem(f, false))}
+          </ul>
+        ` : nothing}
+        <div class="drop-hint">Drop files here to unstage</div>
+      </div>
     `;
   }
 }

@@ -7,6 +7,110 @@ use crate::error::{LeviathanError, Result};
 use crate::models::Remote;
 use crate::services::credentials_service;
 
+/// Add a new remote
+#[command]
+pub async fn add_remote(path: String, name: String, url: String) -> Result<Remote> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    // Check if remote already exists
+    if repo.find_remote(&name).is_ok() {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Remote '{}' already exists",
+            name
+        )));
+    }
+
+    let remote = repo.remote(&name, &url)?;
+
+    Ok(Remote {
+        name,
+        url: remote.url().unwrap_or("").to_string(),
+        push_url: remote.pushurl().map(|s| s.to_string()),
+    })
+}
+
+/// Remove a remote
+#[command]
+pub async fn remove_remote(path: String, name: String) -> Result<()> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    // Check if remote exists
+    repo.find_remote(&name)
+        .map_err(|_| LeviathanError::RemoteNotFound(name.clone()))?;
+
+    repo.remote_delete(&name)?;
+
+    Ok(())
+}
+
+/// Rename a remote
+#[command]
+pub async fn rename_remote(path: String, old_name: String, new_name: String) -> Result<Remote> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    // Check if old remote exists
+    let old_remote = repo
+        .find_remote(&old_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(old_name.clone()))?;
+
+    let url = old_remote.url().unwrap_or("").to_string();
+    let push_url = old_remote.pushurl().map(|s| s.to_string());
+
+    // Check if new name already exists
+    if repo.find_remote(&new_name).is_ok() {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Remote '{}' already exists",
+            new_name
+        )));
+    }
+
+    // git2 remote_rename returns problems as a string array
+    let problems = repo.remote_rename(&old_name, &new_name)?;
+
+    if !problems.is_empty() {
+        let problem_list: Vec<&str> = problems.iter().flatten().collect();
+        if !problem_list.is_empty() {
+            tracing::warn!("Remote rename had issues: {:?}", problem_list);
+        }
+    }
+
+    Ok(Remote {
+        name: new_name,
+        url,
+        push_url,
+    })
+}
+
+/// Set the URL of a remote
+#[command]
+pub async fn set_remote_url(
+    path: String,
+    name: String,
+    url: String,
+    push: Option<bool>,
+) -> Result<Remote> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    // Check if remote exists
+    repo.find_remote(&name)
+        .map_err(|_| LeviathanError::RemoteNotFound(name.clone()))?;
+
+    if push.unwrap_or(false) {
+        repo.remote_set_pushurl(&name, Some(&url))?;
+    } else {
+        repo.remote_set_url(&name, &url)?;
+    }
+
+    // Get updated remote info
+    let remote = repo.find_remote(&name)?;
+
+    Ok(Remote {
+        name,
+        url: remote.url().unwrap_or("").to_string(),
+        push_url: remote.pushurl().map(|s| s.to_string()),
+    })
+}
+
 /// Get all remotes
 #[command]
 pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {

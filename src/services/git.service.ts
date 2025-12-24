@@ -19,6 +19,7 @@ import type {
   CommitFileEntry,
   CommitStats,
   BlameResult,
+  ReflogEntry,
 } from '../types/git.types.ts';
 import type {
   OpenRepositoryCommand,
@@ -127,6 +128,31 @@ export async function getCommit(oid: string): Promise<CommandResult<Commit>> {
   return invokeCommand<Commit>('get_commit', { oid });
 }
 
+/**
+ * Search commits with filters
+ */
+export async function searchCommits(
+  repoPath: string,
+  options: {
+    query?: string;
+    author?: string;
+    dateFrom?: number;
+    dateTo?: number;
+    filePath?: string;
+    limit?: number;
+  }
+): Promise<CommandResult<Commit[]>> {
+  return invokeCommand<Commit[]>('search_commits', {
+    path: repoPath,
+    query: options.query,
+    author: options.author,
+    date_from: options.dateFrom,
+    date_to: options.dateTo,
+    file_path: options.filePath,
+    limit: options.limit,
+  });
+}
+
 export async function createCommit(
   path: string,
   args: CreateCommitCommand
@@ -191,6 +217,38 @@ export async function unstageHunk(
  */
 export async function getRemotes(path: string): Promise<CommandResult<Remote[]>> {
   return invokeCommand<Remote[]>('get_remotes', { path });
+}
+
+export async function addRemote(
+  repoPath: string,
+  name: string,
+  url: string
+): Promise<CommandResult<Remote>> {
+  return invokeCommand<Remote>('add_remote', { path: repoPath, name, url });
+}
+
+export async function removeRemote(
+  repoPath: string,
+  name: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('remove_remote', { path: repoPath, name });
+}
+
+export async function renameRemote(
+  repoPath: string,
+  oldName: string,
+  newName: string
+): Promise<CommandResult<Remote>> {
+  return invokeCommand<Remote>('rename_remote', { path: repoPath, oldName, newName });
+}
+
+export async function setRemoteUrl(
+  repoPath: string,
+  name: string,
+  url: string,
+  push?: boolean
+): Promise<CommandResult<Remote>> {
+  return invokeCommand<Remote>('set_remote_url', { path: repoPath, name, url, push });
 }
 
 export async function fetch(args?: FetchCommand): Promise<CommandResult<void>> {
@@ -440,10 +498,772 @@ export async function getFileBlame(
 }
 
 /**
+ * Get all commits that modified a specific file
+ */
+export async function getFileHistory(
+  repoPath: string,
+  filePath: string,
+  limit?: number,
+  followRenames?: boolean
+): Promise<CommandResult<Commit[]>> {
+  return invokeCommand<Commit[]>('get_file_history', {
+    path: repoPath,
+    filePath,
+    limit,
+    followRenames,
+  });
+}
+
+/**
  * Refs operations
  */
 export async function getRefsByCommit(
   path: string
 ): Promise<CommandResult<RefsByCommit>> {
   return invokeCommand<RefsByCommit>('get_refs_by_commit', { path });
+}
+
+/**
+ * Reflog operations
+ */
+export async function getReflog(
+  repoPath: string,
+  limit?: number
+): Promise<CommandResult<ReflogEntry[]>> {
+  return invokeCommand<ReflogEntry[]>('get_reflog', { path: repoPath, limit });
+}
+
+export async function resetToReflog(
+  repoPath: string,
+  reflogIndex: number,
+  mode: 'soft' | 'mixed' | 'hard' = 'mixed'
+): Promise<CommandResult<ReflogEntry>> {
+  return invokeCommand<ReflogEntry>('reset_to_reflog', {
+    path: repoPath,
+    reflogIndex,
+    mode,
+  });
+}
+
+/**
+ * Clean operations
+ */
+export interface CleanEntry {
+  path: string;
+  isDirectory: boolean;
+  isIgnored: boolean;
+  size: number | null;
+}
+
+export async function getCleanableFiles(
+  repoPath: string,
+  includeIgnored?: boolean,
+  includeDirectories?: boolean
+): Promise<CommandResult<CleanEntry[]>> {
+  return invokeCommand<CleanEntry[]>('get_cleanable_files', {
+    path: repoPath,
+    includeIgnored,
+    includeDirectories,
+  });
+}
+
+export async function cleanFiles(
+  repoPath: string,
+  paths: string[]
+): Promise<CommandResult<number>> {
+  return invokeCommand<number>('clean_files', {
+    path: repoPath,
+    paths,
+  });
+}
+
+export async function cleanAll(
+  repoPath: string,
+  includeIgnored?: boolean,
+  includeDirectories?: boolean
+): Promise<CommandResult<number>> {
+  return invokeCommand<number>('clean_all', {
+    path: repoPath,
+    includeIgnored,
+    includeDirectories,
+  });
+}
+
+/**
+ * Bisect operations
+ */
+export interface BisectLogEntry {
+  commitOid: string;
+  action: string;
+  message: string | null;
+}
+
+export interface BisectStatus {
+  active: boolean;
+  currentCommit: string | null;
+  badCommit: string | null;
+  goodCommit: string | null;
+  remaining: number | null;
+  totalSteps: number | null;
+  currentStep: number | null;
+  log: BisectLogEntry[];
+}
+
+export interface CulpritCommit {
+  oid: string;
+  summary: string;
+  author: string;
+  email: string;
+}
+
+export interface BisectStepResult {
+  status: BisectStatus;
+  culprit: CulpritCommit | null;
+  message: string;
+}
+
+export async function getBisectStatus(
+  repoPath: string
+): Promise<CommandResult<BisectStatus>> {
+  return invokeCommand<BisectStatus>('get_bisect_status', { path: repoPath });
+}
+
+export async function bisectStart(
+  repoPath: string,
+  badCommit?: string,
+  goodCommit?: string
+): Promise<CommandResult<BisectStepResult>> {
+  return invokeCommand<BisectStepResult>('bisect_start', {
+    path: repoPath,
+    badCommit,
+    goodCommit,
+  });
+}
+
+export async function bisectBad(
+  repoPath: string,
+  commit?: string
+): Promise<CommandResult<BisectStepResult>> {
+  return invokeCommand<BisectStepResult>('bisect_bad', {
+    path: repoPath,
+    commit,
+  });
+}
+
+export async function bisectGood(
+  repoPath: string,
+  commit?: string
+): Promise<CommandResult<BisectStepResult>> {
+  return invokeCommand<BisectStepResult>('bisect_good', {
+    path: repoPath,
+    commit,
+  });
+}
+
+export async function bisectSkip(
+  repoPath: string,
+  commit?: string
+): Promise<CommandResult<BisectStepResult>> {
+  return invokeCommand<BisectStepResult>('bisect_skip', {
+    path: repoPath,
+    commit,
+  });
+}
+
+export async function bisectReset(
+  repoPath: string
+): Promise<CommandResult<BisectStepResult>> {
+  return invokeCommand<BisectStepResult>('bisect_reset', { path: repoPath });
+}
+
+/**
+ * Submodule operations
+ */
+export type SubmoduleStatus = 'current' | 'modified' | 'uninitialized' | 'missing' | 'dirty';
+
+export interface Submodule {
+  name: string;
+  path: string;
+  url: string | null;
+  headOid: string | null;
+  branch: string | null;
+  initialized: boolean;
+  status: SubmoduleStatus;
+}
+
+export async function getSubmodules(
+  repoPath: string
+): Promise<CommandResult<Submodule[]>> {
+  return invokeCommand<Submodule[]>('get_submodules', { path: repoPath });
+}
+
+export async function addSubmodule(
+  repoPath: string,
+  url: string,
+  submodulePath: string,
+  branch?: string
+): Promise<CommandResult<Submodule>> {
+  return invokeCommand<Submodule>('add_submodule', {
+    path: repoPath,
+    url,
+    submodulePath,
+    branch,
+  });
+}
+
+export async function initSubmodules(
+  repoPath: string,
+  submodulePaths?: string[]
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('init_submodules', {
+    path: repoPath,
+    submodulePaths,
+  });
+}
+
+export async function updateSubmodules(
+  repoPath: string,
+  options?: {
+    submodulePaths?: string[];
+    init?: boolean;
+    recursive?: boolean;
+    remote?: boolean;
+  }
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('update_submodules', {
+    path: repoPath,
+    submodulePaths: options?.submodulePaths,
+    init: options?.init,
+    recursive: options?.recursive,
+    remote: options?.remote,
+  });
+}
+
+export async function syncSubmodules(
+  repoPath: string,
+  submodulePaths?: string[]
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('sync_submodules', {
+    path: repoPath,
+    submodulePaths,
+  });
+}
+
+export async function deinitSubmodule(
+  repoPath: string,
+  submodulePath: string,
+  force?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('deinit_submodule', {
+    path: repoPath,
+    submodulePath,
+    force,
+  });
+}
+
+export async function removeSubmodule(
+  repoPath: string,
+  submodulePath: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('remove_submodule', {
+    path: repoPath,
+    submodulePath,
+  });
+}
+
+/**
+ * Worktree operations
+ */
+export interface Worktree {
+  path: string;
+  headOid: string | null;
+  branch: string | null;
+  isMain: boolean;
+  isLocked: boolean;
+  lockReason: string | null;
+  isBare: boolean;
+  isPrunable: boolean;
+}
+
+export async function getWorktrees(
+  repoPath: string
+): Promise<CommandResult<Worktree[]>> {
+  return invokeCommand<Worktree[]>('get_worktrees', { path: repoPath });
+}
+
+export async function addWorktree(
+  repoPath: string,
+  worktreePath: string,
+  options?: {
+    branch?: string;
+    newBranch?: string;
+    commit?: string;
+    force?: boolean;
+    detach?: boolean;
+  }
+): Promise<CommandResult<Worktree>> {
+  return invokeCommand<Worktree>('add_worktree', {
+    path: repoPath,
+    worktreePath,
+    branch: options?.branch,
+    newBranch: options?.newBranch,
+    commit: options?.commit,
+    force: options?.force,
+    detach: options?.detach,
+  });
+}
+
+export async function removeWorktree(
+  repoPath: string,
+  worktreePath: string,
+  force?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('remove_worktree', {
+    path: repoPath,
+    worktreePath,
+    force,
+  });
+}
+
+export async function pruneWorktrees(
+  repoPath: string,
+  dryRun?: boolean
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>('prune_worktrees', {
+    path: repoPath,
+    dryRun,
+  });
+}
+
+export async function lockWorktree(
+  repoPath: string,
+  worktreePath: string,
+  reason?: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('lock_worktree', {
+    path: repoPath,
+    worktreePath,
+    reason,
+  });
+}
+
+export async function unlockWorktree(
+  repoPath: string,
+  worktreePath: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('unlock_worktree', {
+    path: repoPath,
+    worktreePath,
+  });
+}
+
+/**
+ * Git LFS operations
+ */
+export interface LfsPattern {
+  pattern: string;
+}
+
+export interface LfsFile {
+  path: string;
+  oid: string | null;
+  size: number | null;
+  downloaded: boolean;
+}
+
+export interface LfsStatus {
+  installed: boolean;
+  version: string | null;
+  enabled: boolean;
+  patterns: LfsPattern[];
+  fileCount: number;
+  totalSize: number;
+}
+
+export async function getLfsStatus(
+  repoPath: string
+): Promise<CommandResult<LfsStatus>> {
+  return invokeCommand<LfsStatus>('get_lfs_status', { path: repoPath });
+}
+
+export async function initLfs(
+  repoPath: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('init_lfs', { path: repoPath });
+}
+
+export async function lfsTrack(
+  repoPath: string,
+  pattern: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('lfs_track', { path: repoPath, pattern });
+}
+
+export async function lfsUntrack(
+  repoPath: string,
+  pattern: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('lfs_untrack', { path: repoPath, pattern });
+}
+
+export async function getLfsFiles(
+  repoPath: string
+): Promise<CommandResult<LfsFile[]>> {
+  return invokeCommand<LfsFile[]>('get_lfs_files', { path: repoPath });
+}
+
+export async function lfsPull(
+  repoPath: string
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>('lfs_pull', { path: repoPath });
+}
+
+export async function lfsFetch(
+  repoPath: string,
+  refs?: string[]
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>('lfs_fetch', { path: repoPath, refs });
+}
+
+export async function lfsPrune(
+  repoPath: string,
+  dryRun?: boolean
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>('lfs_prune', { path: repoPath, dryRun });
+}
+
+/**
+ * GPG operations
+ */
+export interface GpgKey {
+  keyId: string;
+  keyIdLong: string;
+  userId: string;
+  email: string;
+  created: string | null;
+  expires: string | null;
+  isSigningKey: boolean;
+  keyType: string;
+  keySize: number;
+  trust: string;
+}
+
+export interface GpgConfig {
+  gpgAvailable: boolean;
+  gpgVersion: string | null;
+  signingKey: string | null;
+  signCommits: boolean;
+  signTags: boolean;
+  gpgProgram: string | null;
+}
+
+export interface CommitSignature {
+  signed: boolean;
+  status: string | null;
+  keyId: string | null;
+  signer: string | null;
+  valid: boolean;
+  trust: string | null;
+}
+
+export async function getGpgConfig(
+  repoPath: string
+): Promise<CommandResult<GpgConfig>> {
+  return invokeCommand<GpgConfig>('get_gpg_config', { path: repoPath });
+}
+
+export async function getGpgKeys(
+  repoPath: string
+): Promise<CommandResult<GpgKey[]>> {
+  return invokeCommand<GpgKey[]>('get_gpg_keys', { path: repoPath });
+}
+
+export async function setSigningKey(
+  repoPath: string,
+  keyId: string | null,
+  global?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_signing_key', {
+    path: repoPath,
+    keyId,
+    global,
+  });
+}
+
+export async function setCommitSigning(
+  repoPath: string,
+  enabled: boolean,
+  global?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_commit_signing', {
+    path: repoPath,
+    enabled,
+    global,
+  });
+}
+
+export async function setTagSigning(
+  repoPath: string,
+  enabled: boolean,
+  global?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_tag_signing', {
+    path: repoPath,
+    enabled,
+    global,
+  });
+}
+
+export async function getCommitSignature(
+  repoPath: string,
+  commitOid: string
+): Promise<CommandResult<CommitSignature>> {
+  return invokeCommand<CommitSignature>('get_commit_signature', {
+    path: repoPath,
+    commitOid,
+  });
+}
+
+// ============================================================================
+// SSH Key Management
+// ============================================================================
+
+export interface SshKey {
+  name: string;
+  path: string;
+  publicPath: string;
+  keyType: string;
+  fingerprint: string | null;
+  comment: string | null;
+  publicKey: string | null;
+}
+
+export interface SshConfig {
+  sshAvailable: boolean;
+  sshVersion: string | null;
+  sshDir: string;
+  gitSshCommand: string | null;
+}
+
+export interface SshTestResult {
+  success: boolean;
+  host: string;
+  message: string;
+  username: string | null;
+}
+
+export async function getSshConfig(): Promise<CommandResult<SshConfig>> {
+  return invokeCommand<SshConfig>('get_ssh_config', {});
+}
+
+export async function getSshKeys(): Promise<CommandResult<SshKey[]>> {
+  return invokeCommand<SshKey[]>('get_ssh_keys', {});
+}
+
+export async function generateSshKey(
+  keyType: string,
+  email: string,
+  filename?: string,
+  passphrase?: string
+): Promise<CommandResult<SshKey>> {
+  return invokeCommand<SshKey>('generate_ssh_key', {
+    keyType,
+    email,
+    filename,
+    passphrase,
+  });
+}
+
+export async function testSshConnection(
+  host: string
+): Promise<CommandResult<SshTestResult>> {
+  return invokeCommand<SshTestResult>('test_ssh_connection', { host });
+}
+
+export async function addKeyToAgent(
+  keyPath: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('add_key_to_agent', { keyPath });
+}
+
+export async function listAgentKeys(): Promise<CommandResult<string[]>> {
+  return invokeCommand<string[]>('list_agent_keys', {});
+}
+
+export async function getPublicKeyContent(
+  keyName: string
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>('get_public_key_content', { keyName });
+}
+
+export async function deleteSshKey(
+  keyName: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('delete_ssh_key', { keyName });
+}
+
+// ============================================================================
+// Git Configuration
+// ============================================================================
+
+export interface ConfigEntry {
+  key: string;
+  value: string;
+  scope: string;
+}
+
+export interface GitAlias {
+  name: string;
+  command: string;
+  isGlobal: boolean;
+}
+
+export interface UserIdentity {
+  name: string | null;
+  email: string | null;
+  nameIsGlobal: boolean;
+  emailIsGlobal: boolean;
+}
+
+export async function getConfigValue(
+  path: string | null,
+  key: string,
+  global?: boolean
+): Promise<CommandResult<string | null>> {
+  return invokeCommand<string | null>('get_config_value', { path, key, global });
+}
+
+export async function setConfigValue(
+  path: string | null,
+  key: string,
+  value: string,
+  global?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_config_value', { path, key, value, global });
+}
+
+export async function unsetConfigValue(
+  path: string | null,
+  key: string,
+  global?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('unset_config_value', { path, key, global });
+}
+
+export async function getConfigList(
+  path: string | null,
+  global?: boolean
+): Promise<CommandResult<ConfigEntry[]>> {
+  return invokeCommand<ConfigEntry[]>('get_config_list', { path, global });
+}
+
+export async function getUserIdentity(
+  path: string
+): Promise<CommandResult<UserIdentity>> {
+  return invokeCommand<UserIdentity>('get_user_identity', { path });
+}
+
+export async function setUserIdentity(
+  path: string | null,
+  name: string | null,
+  email: string | null,
+  global?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_user_identity', { path, name, email, global });
+}
+
+export async function getAliases(
+  path?: string
+): Promise<CommandResult<GitAlias[]>> {
+  return invokeCommand<GitAlias[]>('get_aliases', { path });
+}
+
+export async function setAlias(
+  path: string | null,
+  name: string,
+  command: string,
+  global?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_alias', { path, name, command, global });
+}
+
+export async function deleteAlias(
+  path: string | null,
+  name: string,
+  global?: boolean
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('delete_alias', { path, name, global });
+}
+
+export async function getCommonSettings(
+  path: string
+): Promise<CommandResult<ConfigEntry[]>> {
+  return invokeCommand<ConfigEntry[]>('get_common_settings', { path });
+}
+
+// ============================================================================
+// Credential Management
+// ============================================================================
+
+export interface CredentialHelper {
+  name: string;
+  command: string;
+  scope: string;
+  urlPattern: string | null;
+}
+
+export interface CredentialTestResult {
+  success: boolean;
+  host: string;
+  protocol: string;
+  username: string | null;
+  message: string;
+}
+
+export interface AvailableHelper {
+  name: string;
+  description: string;
+  available: boolean;
+}
+
+export async function getCredentialHelpers(
+  path: string
+): Promise<CommandResult<CredentialHelper[]>> {
+  return invokeCommand<CredentialHelper[]>('get_credential_helpers', { path });
+}
+
+export async function setCredentialHelper(
+  path: string | null,
+  helper: string,
+  global?: boolean,
+  urlPattern?: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_credential_helper', { path, helper, global, urlPattern });
+}
+
+export async function unsetCredentialHelper(
+  path: string | null,
+  global?: boolean,
+  urlPattern?: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('unset_credential_helper', { path, global, urlPattern });
+}
+
+export async function getAvailableHelpers(): Promise<CommandResult<AvailableHelper[]>> {
+  return invokeCommand<AvailableHelper[]>('get_available_helpers', {});
+}
+
+export async function testCredentials(
+  path: string,
+  remoteUrl: string
+): Promise<CommandResult<CredentialTestResult>> {
+  return invokeCommand<CredentialTestResult>('test_credentials', { path, remoteUrl });
+}
+
+export async function eraseCredentials(
+  path: string,
+  host: string,
+  protocol: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('erase_credentials', { path, host, protocol });
 }

@@ -2,7 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from './styles/shared-styles.ts';
 import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
-import { registerDefaultShortcuts } from './services/keyboard.service.ts';
+import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
 import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
@@ -12,9 +12,25 @@ import './components/sidebar/lv-left-panel.ts';
 import './components/sidebar/lv-right-panel.ts';
 import './components/dialogs/lv-settings-dialog.ts';
 import './components/dialogs/lv-conflict-resolution-dialog.ts';
+import './components/dialogs/lv-command-palette.ts';
+import './components/dialogs/lv-reflog-dialog.ts';
+import './components/dialogs/lv-keyboard-shortcuts-dialog.ts';
+import './components/dialogs/lv-remote-dialog.ts';
+import './components/dialogs/lv-clean-dialog.ts';
+import './components/dialogs/lv-bisect-dialog.ts';
+import './components/dialogs/lv-submodule-dialog.ts';
+import './components/dialogs/lv-worktree-dialog.ts';
+import './components/dialogs/lv-lfs-dialog.ts';
+import './components/dialogs/lv-gpg-dialog.ts';
+import './components/dialogs/lv-ssh-dialog.ts';
+import './components/dialogs/lv-config-dialog.ts';
+import './components/dialogs/lv-credentials-dialog.ts';
+import './components/panels/lv-file-history.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
+import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
+import * as gitService from './services/git.service.ts';
 
 /**
  * Main application shell component
@@ -300,6 +316,51 @@ export class AppShell extends LitElement {
   @state() private showConflictDialog = false;
   @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' = 'merge';
 
+  // Command palette
+  @state() private showCommandPalette = false;
+  @state() private branches: Branch[] = [];
+
+  // File history
+  @state() private showFileHistory = false;
+  @state() private fileHistoryPath: string | null = null;
+
+  // Reflog dialog
+  @state() private showReflog = false;
+
+  // Keyboard shortcuts dialog
+  @state() private showShortcuts = false;
+  @state() private vimMode = false;
+
+  // Remote management dialog
+  @state() private showRemotes = false;
+
+  // Clean dialog
+  @state() private showClean = false;
+
+  // Bisect dialog
+  @state() private showBisect = false;
+
+  // Submodule dialog
+  @state() private showSubmodules = false;
+
+  // Worktree dialog
+  @state() private showWorktrees = false;
+
+  // LFS dialog
+  @state() private showLfs = false;
+
+  // GPG dialog
+  @state() private showGpg = false;
+
+  // SSH dialog
+  @state() private showSsh = false;
+
+  // Config dialog
+  @state() private showConfig = false;
+
+  // Credentials dialog
+  @state() private showCredentials = false;
+
   // Panel dimensions
   @state() private leftPanelWidth = 220;
   @state() private rightPanelWidth = 350;
@@ -327,19 +388,32 @@ export class AppShell extends LitElement {
     document.addEventListener('keydown', this.boundHandleKeyDown);
     document.addEventListener('click', this.handleDocumentClick);
 
+    // Load vim mode from keyboard service
+    this.vimMode = keyboardService.isVimMode();
+
     // Register keyboard shortcuts
     registerDefaultShortcuts({
       navigateUp: () => this.graphCanvas?.navigatePrevious?.(),
       navigateDown: () => this.graphCanvas?.navigateNext?.(),
+      navigateFirst: () => this.graphCanvas?.navigateFirst?.(),
+      navigateLast: () => this.graphCanvas?.navigateLast?.(),
       selectCommit: () => {/* handled by graph canvas */},
       stageAll: () => this.handleStageAll(),
       unstageAll: () => this.handleUnstageAll(),
       commit: () => {/* handled by commit panel */},
       refresh: () => this.handleRefresh(),
       search: () => this.handleToggleSearch(),
-      openSettings: () => this.showSettings = true,
+      openSettings: () => { this.showSettings = true; },
+      openShortcuts: () => { this.showShortcuts = true; },
       toggleLeftPanel: () => uiStore.getState().togglePanel('left'),
       toggleRightPanel: () => uiStore.getState().togglePanel('right'),
+      openCommandPalette: () => this.openCommandPalette(),
+      openReflog: () => { this.showReflog = true; },
+      fetch: () => this.handleFetch(),
+      pull: () => this.handlePull(),
+      push: () => this.handlePush(),
+      createStash: () => this.handleCreateStash(),
+      closeDiff: () => this.handleCloseOverlay(),
     });
   }
 
@@ -353,14 +427,33 @@ export class AppShell extends LitElement {
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
-    if (e.key === 'Escape') {
-      if (this.contextMenu.visible) {
-        this.contextMenu = { ...this.contextMenu, visible: false };
-      } else if (this.showDiff) {
-        this.handleCloseDiff();
-      } else if (this.showBlame) {
-        this.handleCloseBlame();
-      }
+    // Keyboard shortcuts are now handled by the keyboard service
+    // Only handle special cases here
+
+    // ? to show shortcuts help (need to handle separately due to shift key)
+    if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      this.showShortcuts = true;
+      return;
+    }
+  }
+
+  private handleCloseOverlay(): void {
+    // Close any open overlay in priority order
+    if (this.showShortcuts) {
+      this.showShortcuts = false;
+    } else if (this.showCommandPalette) {
+      this.showCommandPalette = false;
+    } else if (this.showReflog) {
+      this.showReflog = false;
+    } else if (this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    } else if (this.showDiff) {
+      this.handleCloseDiff();
+    } else if (this.showBlame) {
+      this.handleCloseBlame();
+    } else if (this.showFileHistory) {
+      this.handleCloseFileHistory();
     }
   }
 
@@ -631,6 +724,244 @@ export class AppShell extends LitElement {
     }
   }
 
+  private async openCommandPalette(): Promise<void> {
+    // Fetch branches for quick switching
+    if (this.activeRepository) {
+      const result = await gitService.getBranches(this.activeRepository.repository.path);
+      if (result.success && result.data) {
+        this.branches = result.data;
+      }
+    }
+    this.showCommandPalette = true;
+  }
+
+  private getPaletteCommands(): PaletteCommand[] {
+    const isMac = navigator.platform.includes('Mac');
+    const mod = isMac ? '⌘' : 'Ctrl';
+
+    const commands: PaletteCommand[] = [
+      {
+        id: 'fetch',
+        label: 'Fetch from remote',
+        category: 'action',
+        icon: 'fetch',
+        action: () => this.handleFetch(),
+      },
+      {
+        id: 'pull',
+        label: 'Pull from remote',
+        category: 'action',
+        icon: 'pull',
+        action: () => this.handlePull(),
+      },
+      {
+        id: 'push',
+        label: 'Push to remote',
+        category: 'action',
+        icon: 'push',
+        action: () => this.handlePush(),
+      },
+      {
+        id: 'refresh',
+        label: 'Refresh repository',
+        category: 'action',
+        icon: 'refresh',
+        shortcut: `${mod}R`,
+        action: () => this.handleRefresh(),
+      },
+      {
+        id: 'stash',
+        label: 'Create stash',
+        category: 'action',
+        icon: 'stash',
+        action: () => this.handleCreateStash(),
+      },
+      {
+        id: 'settings',
+        label: 'Open settings',
+        category: 'action',
+        icon: 'settings',
+        shortcut: `${mod},`,
+        action: () => { this.showSettings = true; },
+      },
+      {
+        id: 'remotes',
+        label: 'Manage remotes',
+        category: 'action',
+        icon: 'globe',
+        action: () => { this.showRemotes = true; },
+      },
+      {
+        id: 'clean',
+        label: 'Clean working directory',
+        category: 'action',
+        icon: 'trash',
+        action: () => { this.showClean = true; },
+      },
+      {
+        id: 'bisect',
+        label: 'Start bisect (find bug)',
+        category: 'action',
+        icon: 'search',
+        action: () => { this.showBisect = true; },
+      },
+      {
+        id: 'submodules',
+        label: 'Manage submodules',
+        category: 'action',
+        icon: 'folder',
+        action: () => { this.showSubmodules = true; },
+      },
+      {
+        id: 'worktrees',
+        label: 'Manage worktrees',
+        category: 'action',
+        icon: 'folder',
+        action: () => { this.showWorktrees = true; },
+      },
+      {
+        id: 'lfs',
+        label: 'Manage Git LFS',
+        category: 'action',
+        icon: 'folder',
+        action: () => { this.showLfs = true; },
+      },
+      {
+        id: 'gpg',
+        label: 'GPG Signing Settings',
+        category: 'action',
+        icon: 'key',
+        action: () => { this.showGpg = true; },
+      },
+      {
+        id: 'ssh',
+        label: 'SSH Key Management',
+        category: 'action',
+        icon: 'key',
+        action: () => { this.showSsh = true; },
+      },
+      {
+        id: 'config',
+        label: 'Git Configuration',
+        category: 'action',
+        icon: 'settings',
+        action: () => { this.showConfig = true; },
+      },
+      {
+        id: 'credentials',
+        label: 'Credential Management',
+        category: 'action',
+        icon: 'key',
+        action: () => { this.showCredentials = true; },
+      },
+      {
+        id: 'search',
+        label: 'Search commits',
+        category: 'action',
+        icon: 'search',
+        shortcut: `${mod}F`,
+        action: () => this.handleToggleSearch(),
+      },
+      {
+        id: 'stage-all',
+        label: 'Stage all changes',
+        category: 'action',
+        icon: 'commit',
+        action: () => this.handleStageAll(),
+      },
+      {
+        id: 'unstage-all',
+        label: 'Unstage all changes',
+        category: 'action',
+        icon: 'commit',
+        action: () => this.handleUnstageAll(),
+      },
+      {
+        id: 'toggle-left-panel',
+        label: 'Toggle left panel',
+        category: 'navigation',
+        shortcut: `${mod}B`,
+        action: () => uiStore.getState().togglePanel('left'),
+      },
+      {
+        id: 'toggle-right-panel',
+        label: 'Toggle right panel',
+        category: 'navigation',
+        shortcut: `${mod}J`,
+        action: () => uiStore.getState().togglePanel('right'),
+      },
+      {
+        id: 'undo',
+        label: 'Undo (open reflog)',
+        category: 'action',
+        icon: 'refresh',
+        shortcut: `${mod}Z`,
+        action: () => { this.showReflog = true; },
+      },
+    ];
+
+    return commands;
+  }
+
+  private async handleFetch(): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.fetch({ path: this.activeRepository.repository.path });
+    this.handleRefresh();
+  }
+
+  private async handlePull(): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.pull({ path: this.activeRepository.repository.path });
+    this.handleRefresh();
+  }
+
+  private async handlePush(): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.push({ path: this.activeRepository.repository.path });
+    this.handleRefresh();
+  }
+
+  private async handleCreateStash(): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.createStash({ path: this.activeRepository.repository.path });
+    this.handleRefresh();
+  }
+
+  private async handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.checkout(this.activeRepository.repository.path, { ref: e.detail.branch });
+    this.handleRefresh();
+  }
+
+  private handleShowFileHistory(e: CustomEvent<{ filePath: string }>): void {
+    this.fileHistoryPath = e.detail.filePath;
+    this.showFileHistory = true;
+  }
+
+  private handleCloseFileHistory(): void {
+    this.showFileHistory = false;
+    this.fileHistoryPath = null;
+  }
+
+  private handleFileHistoryCommitSelected(e: CustomEvent<{ commit: Commit }>): void {
+    // Select the commit in the graph
+    this.selectedCommit = e.detail.commit;
+  }
+
+  private handleFileHistoryViewDiff(e: CustomEvent<{ commitOid: string; filePath: string }>): void {
+    // Open the diff view for this file at the specific commit
+    this.diffCommitFile = {
+      commitOid: e.detail.commitOid,
+      filePath: e.detail.filePath,
+    };
+    this.showDiff = true;
+  }
+
+  private handleVimModeChange(e: CustomEvent<{ enabled: boolean }>): void {
+    this.vimMode = e.detail.enabled;
+    keyboardService.setVimMode(e.detail.enabled);
+  }
+
   render() {
     return html`
       <lv-toolbar></lv-toolbar>
@@ -701,7 +1032,19 @@ export class AppShell extends LitElement {
                           ></lv-blame-view>
                         </div>
                       `
-                    : ''}
+                    : this.showFileHistory && this.fileHistoryPath
+                      ? html`
+                          <div class="diff-area">
+                            <lv-file-history
+                              .repositoryPath=${this.activeRepository.repository.path}
+                              .filePath=${this.fileHistoryPath}
+                              @close=${this.handleCloseFileHistory}
+                              @commit-selected=${this.handleFileHistoryCommitSelected}
+                              @view-diff=${this.handleFileHistoryViewDiff}
+                            ></lv-file-history>
+                          </div>
+                        `
+                      : ''}
               </main>
 
               <div
@@ -716,6 +1059,7 @@ export class AppShell extends LitElement {
                 @select-commit=${this.handleSelectCommit}
                 @commit-file-selected=${this.handleCommitFileSelected}
                 @show-blame=${this.handleShowBlame}
+                @show-file-history=${this.handleShowFileHistory}
               >
                 <lv-right-panel
                   .commit=${this.selectedCommit}
@@ -792,6 +1136,114 @@ export class AppShell extends LitElement {
             </div>
           `
         : ''}
+
+      <lv-command-palette
+        ?open=${this.showCommandPalette}
+        .commands=${this.getPaletteCommands()}
+        .branches=${this.branches}
+        @close=${() => { this.showCommandPalette = false; }}
+        @checkout-branch=${this.handleCheckoutBranch}
+      ></lv-command-palette>
+
+      ${this.activeRepository ? html`
+        <lv-reflog-dialog
+          ?open=${this.showReflog}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showReflog = false; }}
+          @undo-complete=${() => { this.showReflog = false; this.handleRefresh(); }}
+        ></lv-reflog-dialog>
+      ` : ''}
+
+      <lv-keyboard-shortcuts-dialog
+        ?open=${this.showShortcuts}
+        ?vimMode=${this.vimMode}
+        @close=${() => { this.showShortcuts = false; }}
+        @vim-mode-change=${this.handleVimModeChange}
+      ></lv-keyboard-shortcuts-dialog>
+
+      ${this.activeRepository ? html`
+        <lv-remote-dialog
+          ?open=${this.showRemotes}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showRemotes = false; }}
+          @remotes-changed=${() => this.handleRefresh()}
+        ></lv-remote-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-clean-dialog
+          ?open=${this.showClean}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showClean = false; }}
+          @files-cleaned=${() => this.handleRefresh()}
+        ></lv-clean-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-bisect-dialog
+          ?open=${this.showBisect}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showBisect = false; }}
+          @bisect-step=${() => this.handleRefresh()}
+          @bisect-complete=${() => { this.showBisect = false; this.handleRefresh(); }}
+        ></lv-bisect-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-submodule-dialog
+          ?open=${this.showSubmodules}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showSubmodules = false; }}
+          @submodules-changed=${() => this.handleRefresh()}
+        ></lv-submodule-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-worktree-dialog
+          ?open=${this.showWorktrees}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showWorktrees = false; }}
+          @worktrees-changed=${() => this.handleRefresh()}
+        ></lv-worktree-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-lfs-dialog
+          ?open=${this.showLfs}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showLfs = false; }}
+          @lfs-changed=${() => this.handleRefresh()}
+        ></lv-lfs-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-gpg-dialog
+          ?open=${this.showGpg}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showGpg = false; }}
+        ></lv-gpg-dialog>
+      ` : ''}
+
+      <lv-ssh-dialog
+        ?open=${this.showSsh}
+        @close=${() => { this.showSsh = false; }}
+      ></lv-ssh-dialog>
+
+      ${this.activeRepository ? html`
+        <lv-config-dialog
+          ?open=${this.showConfig}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showConfig = false; }}
+        ></lv-config-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-credentials-dialog
+          ?open=${this.showCredentials}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showCredentials = false; }}
+        ></lv-credentials-dialog>
+      ` : ''}
     `;
   }
 }

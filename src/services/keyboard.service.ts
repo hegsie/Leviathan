@@ -19,14 +19,54 @@ export interface ShortcutRegistration {
   shortcut: Shortcut;
 }
 
+export interface KeyboardSettings {
+  vimMode: boolean;
+  customBindings: Record<string, string>;
+}
+
+const STORAGE_KEY = 'leviathan-keyboard-settings';
+
 class KeyboardService {
   private shortcuts: Map<string, Shortcut> = new Map();
   private enabled = true;
   private listeners: Set<(e: KeyboardEvent) => void> = new Set();
+  private vimMode = false;
+  private vimPendingKey: string | null = null;
+  private vimActions: {
+    navigateUp?: () => void;
+    navigateDown?: () => void;
+    navigateFirst?: () => void;
+    navigateLast?: () => void;
+  } = {};
 
   constructor() {
     this.handleKeyDown = this.handleKeyDown.bind(this);
     document.addEventListener('keydown', this.handleKeyDown);
+    this.loadSettings();
+  }
+
+  private loadSettings(): void {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const settings: KeyboardSettings = JSON.parse(stored);
+        this.vimMode = settings.vimMode ?? false;
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
+  private saveSettings(): void {
+    try {
+      const settings: KeyboardSettings = {
+        vimMode: this.vimMode,
+        customBindings: {},
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    } catch {
+      // Ignore storage errors
+    }
   }
 
   /**
@@ -70,6 +110,63 @@ class KeyboardService {
   }
 
   /**
+   * Handle vim-style navigation
+   */
+  private handleVimKey(e: KeyboardEvent): boolean {
+    if (!this.vimMode) return false;
+
+    // Don't process if modifier keys are pressed (except shift for G)
+    if (e.ctrlKey || e.metaKey || e.altKey) return false;
+
+    const key = e.key.toLowerCase();
+
+    // Handle pending 'g' for 'gg' command
+    if (this.vimPendingKey === 'g') {
+      this.vimPendingKey = null;
+      if (key === 'g' && this.vimActions.navigateFirst) {
+        e.preventDefault();
+        this.vimActions.navigateFirst();
+        return true;
+      }
+      // Not a valid sequence, don't consume
+      return false;
+    }
+
+    // j - down
+    if (key === 'j' && this.vimActions.navigateDown) {
+      e.preventDefault();
+      this.vimActions.navigateDown();
+      return true;
+    }
+
+    // k - up
+    if (key === 'k' && this.vimActions.navigateUp) {
+      e.preventDefault();
+      this.vimActions.navigateUp();
+      return true;
+    }
+
+    // G (shift+g) - go to end
+    if (e.key === 'G' && e.shiftKey && this.vimActions.navigateLast) {
+      e.preventDefault();
+      this.vimActions.navigateLast();
+      return true;
+    }
+
+    // g - start of 'gg' command
+    if (key === 'g' && !e.shiftKey) {
+      this.vimPendingKey = 'g';
+      // Set timeout to clear pending key
+      setTimeout(() => {
+        this.vimPendingKey = null;
+      }, 500);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Handle keydown events
    */
   private handleKeyDown(e: KeyboardEvent): void {
@@ -86,6 +183,11 @@ class KeyboardService {
       if (!e.ctrlKey && !e.metaKey) return;
     }
 
+    // Try vim navigation first
+    if (this.handleVimKey(e)) {
+      return;
+    }
+
     const key = this.getShortcutKey(e);
     const shortcut = this.shortcuts.get(key);
 
@@ -99,6 +201,33 @@ class KeyboardService {
     for (const listener of this.listeners) {
       listener(e);
     }
+  }
+
+  /**
+   * Set vim mode navigation actions
+   */
+  setVimActions(actions: {
+    navigateUp?: () => void;
+    navigateDown?: () => void;
+    navigateFirst?: () => void;
+    navigateLast?: () => void;
+  }): void {
+    this.vimActions = actions;
+  }
+
+  /**
+   * Enable/disable vim mode
+   */
+  setVimMode(enabled: boolean): void {
+    this.vimMode = enabled;
+    this.saveSettings();
+  }
+
+  /**
+   * Check if vim mode is enabled
+   */
+  isVimMode(): boolean {
+    return this.vimMode;
   }
 
   /**
@@ -180,6 +309,8 @@ export const keyboardService = new KeyboardService();
 export function registerDefaultShortcuts(actions: {
   navigateUp: () => void;
   navigateDown: () => void;
+  navigateFirst?: () => void;
+  navigateLast?: () => void;
   selectCommit: () => void;
   stageAll: () => void;
   unstageAll: () => void;
@@ -187,9 +318,26 @@ export function registerDefaultShortcuts(actions: {
   refresh: () => void;
   search: () => void;
   openSettings: () => void;
+  openShortcuts?: () => void;
   toggleLeftPanel: () => void;
   toggleRightPanel: () => void;
+  openCommandPalette?: () => void;
+  openReflog?: () => void;
+  fetch?: () => void;
+  pull?: () => void;
+  push?: () => void;
+  createBranch?: () => void;
+  createStash?: () => void;
+  closeDiff?: () => void;
 }): void {
+  // Set vim actions
+  keyboardService.setVimActions({
+    navigateUp: actions.navigateUp,
+    navigateDown: actions.navigateDown,
+    navigateFirst: actions.navigateFirst,
+    navigateLast: actions.navigateLast,
+  });
+
   // Navigation
   keyboardService.register('nav-up', {
     key: 'ArrowUp',
@@ -211,6 +359,24 @@ export function registerDefaultShortcuts(actions: {
     description: 'Select commit',
     category: 'Navigation',
   });
+
+  if (actions.navigateFirst) {
+    keyboardService.register('nav-first', {
+      key: 'Home',
+      action: actions.navigateFirst,
+      description: 'First commit',
+      category: 'Navigation',
+    });
+  }
+
+  if (actions.navigateLast) {
+    keyboardService.register('nav-last', {
+      key: 'End',
+      action: actions.navigateLast,
+      description: 'Last commit',
+      category: 'Navigation',
+    });
+  }
 
   // Staging
   keyboardService.register('stage-all', {
@@ -261,6 +427,92 @@ export function registerDefaultShortcuts(actions: {
     category: 'General',
   });
 
+  if (actions.openShortcuts) {
+    keyboardService.register('shortcuts', {
+      key: '?',
+      shift: true,
+      action: actions.openShortcuts,
+      description: 'Show keyboard shortcuts',
+      category: 'General',
+    });
+  }
+
+  if (actions.openCommandPalette) {
+    keyboardService.register('command-palette', {
+      key: 'p',
+      ctrl: true,
+      action: actions.openCommandPalette,
+      description: 'Open command palette',
+      category: 'General',
+    });
+  }
+
+  if (actions.openReflog) {
+    keyboardService.register('reflog', {
+      key: 'z',
+      ctrl: true,
+      action: actions.openReflog,
+      description: 'Open undo history',
+      category: 'General',
+    });
+  }
+
+  // Git operations
+  if (actions.fetch) {
+    keyboardService.register('fetch', {
+      key: 'f',
+      ctrl: true,
+      shift: true,
+      action: actions.fetch,
+      description: 'Fetch from remote',
+      category: 'Git',
+    });
+  }
+
+  if (actions.pull) {
+    keyboardService.register('pull', {
+      key: 'p',
+      ctrl: true,
+      shift: true,
+      action: actions.pull,
+      description: 'Pull from remote',
+      category: 'Git',
+    });
+  }
+
+  if (actions.push) {
+    keyboardService.register('push', {
+      key: 'u',
+      ctrl: true,
+      shift: true,
+      action: actions.push,
+      description: 'Push to remote',
+      category: 'Git',
+    });
+  }
+
+  if (actions.createBranch) {
+    keyboardService.register('new-branch', {
+      key: 'n',
+      ctrl: true,
+      shift: true,
+      action: actions.createBranch,
+      description: 'Create new branch',
+      category: 'Git',
+    });
+  }
+
+  if (actions.createStash) {
+    keyboardService.register('stash', {
+      key: 's',
+      ctrl: true,
+      shift: true,
+      action: actions.createStash,
+      description: 'Create stash',
+      category: 'Git',
+    });
+  }
+
   // Panels
   keyboardService.register('toggle-left', {
     key: 'b',
@@ -277,4 +529,13 @@ export function registerDefaultShortcuts(actions: {
     description: 'Toggle right panel',
     category: 'View',
   });
+
+  if (actions.closeDiff) {
+    keyboardService.register('close-diff', {
+      key: 'Escape',
+      action: actions.closeDiff,
+      description: 'Close diff/panel',
+      category: 'View',
+    });
+  }
 }

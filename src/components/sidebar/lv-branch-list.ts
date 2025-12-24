@@ -3,6 +3,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { dragDropService, type DragItem } from '../../services/drag-drop.service.ts';
 import '../dialogs/lv-create-branch-dialog.ts';
 import type { LvCreateBranchDialog } from '../dialogs/lv-create-branch-dialog.ts';
 import '../dialogs/lv-interactive-rebase-dialog.ts';
@@ -271,6 +272,52 @@ export class LvBranchList extends LitElement {
         background: var(--color-border);
         margin: var(--spacing-xs) 0;
       }
+
+      /* Drag and drop styles */
+      .branch-item[draggable="true"] {
+        cursor: grab;
+      }
+
+      .branch-item.dragging {
+        opacity: 0.5;
+        cursor: grabbing;
+      }
+
+      .branch-item.drop-target {
+        background: var(--color-primary-bg);
+        outline: 2px dashed var(--color-primary);
+        outline-offset: -2px;
+      }
+
+      .branch-item.drop-target-merge {
+        outline-color: var(--color-success);
+        background: var(--color-success-bg);
+      }
+
+      .branch-item.drop-target-rebase {
+        outline-color: var(--color-warning);
+        background: var(--color-warning-bg);
+      }
+
+      .drop-indicator {
+        position: absolute;
+        right: var(--spacing-sm);
+        padding: 2px 6px;
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+        border-radius: var(--radius-sm);
+        pointer-events: none;
+      }
+
+      .drop-indicator.merge {
+        background: var(--color-success-bg);
+        color: var(--color-success);
+      }
+
+      .drop-indicator.rebase {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+      }
     `,
   ];
 
@@ -282,6 +329,9 @@ export class LvBranchList extends LitElement {
   @state() private error: string | null = null;
   @state() private expandedGroups = new Set<string>(['local', 'local-ungrouped']);
   @state() private contextMenu: ContextMenuState = { visible: false, x: 0, y: 0, branch: null };
+  @state() private draggingBranch: Branch | null = null;
+  @state() private dropTargetBranch: Branch | null = null;
+  @state() private dropAction: 'merge' | 'rebase' | null = null;
 
   @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
   @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
@@ -720,19 +770,192 @@ export class LvBranchList extends LitElement {
       displayName = displayName.substring(stripPrefix.length + 1);
     }
 
+    const isDragging = this.draggingBranch?.name === branch.name;
+    const isDropTarget = this.dropTargetBranch?.name === branch.name;
+    const dropClass = isDropTarget ? `drop-target drop-target-${this.dropAction}` : '';
+
     return html`
       <li
-        class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''}"
+        class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''} ${isDragging ? 'dragging' : ''} ${dropClass}"
+        draggable=${!branch.isHead ? 'true' : 'false'}
         @click=${() => this.handleBranchClick(branch)}
         @dblclick=${() => this.handleCheckout(branch)}
         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, branch)}
+        @dragstart=${(e: DragEvent) => this.handleDragStart(e, branch)}
+        @dragend=${() => this.handleDragEnd()}
+        @dragover=${(e: DragEvent) => this.handleDragOver(e, branch)}
+        @dragenter=${(e: DragEvent) => this.handleDragEnter(e, branch)}
+        @dragleave=${(e: DragEvent) => this.handleDragLeave(e, branch)}
+        @drop=${(e: DragEvent) => this.handleDrop(e, branch)}
         title="${branch.name}"
       >
         ${this.renderBranchIcon(branch.isHead)}
         <span class="branch-name">${displayName}</span>
         ${this.renderAheadBehind(branch)}
+        ${isDropTarget ? html`
+          <span class="drop-indicator ${this.dropAction}">${this.dropAction === 'merge' ? 'Merge' : 'Rebase'}</span>
+        ` : nothing}
       </li>
     `;
+  }
+
+  // Drag and drop handlers
+  private handleDragStart(e: DragEvent, branch: Branch): void {
+    if (branch.isHead) {
+      e.preventDefault();
+      return;
+    }
+
+    this.draggingBranch = branch;
+    const item: DragItem = { type: 'branch', data: branch };
+    e.dataTransfer?.setData('application/json', JSON.stringify(item));
+    e.dataTransfer!.effectAllowed = 'move';
+    dragDropService.startDrag(item);
+  }
+
+  private handleDragEnd(): void {
+    this.draggingBranch = null;
+    this.dropTargetBranch = null;
+    this.dropAction = null;
+    dragDropService.endDrag();
+  }
+
+  private handleDragOver(e: DragEvent, branch: Branch): void {
+    // Can't drop on self or HEAD
+    if (!this.draggingBranch || this.draggingBranch.name === branch.name) return;
+
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'move';
+
+    // Determine action based on alt key (alt = rebase, no alt = merge)
+    this.dropAction = e.altKey ? 'rebase' : 'merge';
+  }
+
+  private handleDragEnter(e: DragEvent, branch: Branch): void {
+    // Can't drop on self
+    if (!this.draggingBranch || this.draggingBranch.name === branch.name) return;
+
+    e.preventDefault();
+    this.dropTargetBranch = branch;
+    this.dropAction = e.altKey ? 'rebase' : 'merge';
+  }
+
+  private handleDragLeave(e: DragEvent, branch: Branch): void {
+    // Only clear if we're actually leaving this element
+    const target = e.currentTarget as HTMLElement;
+    if (target.contains(e.relatedTarget as Node)) return;
+
+    if (this.dropTargetBranch?.name === branch.name) {
+      this.dropTargetBranch = null;
+      this.dropAction = null;
+    }
+  }
+
+  private async handleDrop(e: DragEvent, targetBranch: Branch): Promise<void> {
+    e.preventDefault();
+
+    const sourceBranch = this.draggingBranch;
+    if (!sourceBranch || sourceBranch.name === targetBranch.name) return;
+
+    // Determine action based on alt key
+    const action = e.altKey ? 'rebase' : 'merge';
+
+    // Clear drag state
+    this.draggingBranch = null;
+    this.dropTargetBranch = null;
+    this.dropAction = null;
+    dragDropService.endDrag();
+
+    // If target is HEAD, merge source into current
+    if (targetBranch.isHead) {
+      if (action === 'merge') {
+        // Merge source branch into current (HEAD)
+        const confirmed = await showConfirm(
+          'Merge Branch',
+          `Merge "${sourceBranch.shorthand}" into the current branch?`,
+          'info'
+        );
+        if (!confirmed) return;
+
+        const result = await gitService.merge({
+          path: this.repositoryPath,
+          source_ref: sourceBranch.shorthand,
+        });
+
+        if (result.success) {
+          await this.loadBranches();
+          this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+        } else if (result.error?.code === 'MERGE_CONFLICT') {
+          this.dispatchEvent(new CustomEvent('merge-conflict', { bubbles: true, composed: true }));
+        }
+      } else {
+        // Rebase current branch onto source
+        const confirmed = await showConfirm(
+          'Rebase Branch',
+          `Rebase current branch onto "${sourceBranch.shorthand}"?`,
+          'warning'
+        );
+        if (!confirmed) return;
+
+        const result = await gitService.rebase({
+          path: this.repositoryPath,
+          onto: sourceBranch.shorthand,
+        });
+
+        if (result.success) {
+          await this.loadBranches();
+          this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+        } else if (result.error?.code === 'REBASE_CONFLICT') {
+          this.dispatchEvent(new CustomEvent('rebase-conflict', { bubbles: true, composed: true }));
+        }
+      }
+    } else {
+      // Dropping on a non-HEAD branch: need to checkout first, then merge/rebase
+      const actionText = action === 'merge' ? 'merge' : 'rebase onto';
+      const confirmed = await showConfirm(
+        action === 'merge' ? 'Merge Branch' : 'Rebase Branch',
+        `This will checkout "${targetBranch.shorthand}" and ${actionText} "${sourceBranch.shorthand}". Continue?`,
+        action === 'merge' ? 'info' : 'warning'
+      );
+      if (!confirmed) return;
+
+      // First checkout target branch
+      const checkoutResult = await gitService.checkout(this.repositoryPath, {
+        ref: targetBranch.shorthand
+      });
+
+      if (!checkoutResult.success) {
+        console.error('Checkout failed:', checkoutResult.error);
+        return;
+      }
+
+      // Then perform the action
+      if (action === 'merge') {
+        const result = await gitService.merge({
+          path: this.repositoryPath,
+          source_ref: sourceBranch.shorthand,
+        });
+
+        if (result.success) {
+          await this.loadBranches();
+          this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+        } else if (result.error?.code === 'MERGE_CONFLICT') {
+          this.dispatchEvent(new CustomEvent('merge-conflict', { bubbles: true, composed: true }));
+        }
+      } else {
+        const result = await gitService.rebase({
+          path: this.repositoryPath,
+          onto: sourceBranch.shorthand,
+        });
+
+        if (result.success) {
+          await this.loadBranches();
+          this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+        } else if (result.error?.code === 'REBASE_CONFLICT') {
+          this.dispatchEvent(new CustomEvent('rebase-conflict', { bubbles: true, composed: true }));
+        }
+      }
+    }
   }
 
   private renderLocalGroup(group: LocalBranchGroup) {

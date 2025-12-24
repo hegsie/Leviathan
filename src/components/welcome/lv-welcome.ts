@@ -13,6 +13,7 @@ import '../dialogs/lv-clone-dialog.ts';
 import '../dialogs/lv-init-dialog.ts';
 import type { LvCloneDialog } from '../dialogs/lv-clone-dialog.ts';
 import type { LvInitDialog } from '../dialogs/lv-init-dialog.ts';
+import mascotImage from '../../assets/mascot/leviathan-tower-400.png';
 
 @customElement('lv-welcome')
 export class LvWelcome extends LitElement {
@@ -35,6 +36,20 @@ export class LvWelcome extends LitElement {
         align-items: center;
         max-width: 600px;
         text-align: center;
+      }
+
+      .mascot {
+        width: 200px;
+        height: auto;
+        margin-bottom: var(--spacing-lg);
+        border-radius: var(--radius-lg);
+        opacity: 0.9;
+        transition: opacity var(--transition-fast), transform var(--transition-fast);
+      }
+
+      .mascot:hover {
+        opacity: 1;
+        transform: scale(1.02);
       }
 
       .logo {
@@ -291,6 +306,7 @@ export class LvWelcome extends LitElement {
       <lv-init-dialog></lv-init-dialog>
 
       <div class="welcome-content">
+        <img class="mascot" src="${mascotImage}" alt="Leviathan - Dragon wrapped around a tower" />
         <div class="logo">Leviathan</div>
         <p class="tagline">A powerful, open-source Git client</p>
 

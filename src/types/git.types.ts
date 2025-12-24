@@ -166,6 +166,16 @@ export interface CommitStats {
   filesChanged: number;
 }
 
+export interface ReflogEntry {
+  oid: string;
+  shortId: string;
+  index: number;
+  action: string;
+  message: string;
+  timestamp: number;
+  author: string;
+}
+
 export interface BlameLine {
   lineNumber: number;
   content: string;

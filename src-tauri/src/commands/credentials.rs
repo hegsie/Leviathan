@@ -1,0 +1,477 @@
+//! Credential management command handlers
+//! Manage git credential helpers and stored credentials
+
+use std::path::Path;
+use std::process::Command;
+use tauri::command;
+
+use crate::error::{LeviathanError, Result};
+
+/// Credential helper configuration
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialHelper {
+    /// Helper name (e.g., "osxkeychain", "manager-core", "store")
+    pub name: String,
+    /// Full helper command
+    pub command: String,
+    /// Scope (global, local, or url-specific)
+    pub scope: String,
+    /// URL pattern if url-specific
+    pub url_pattern: Option<String>,
+}
+
+/// Credential test result
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialTestResult {
+    /// Whether credentials are configured and working
+    pub success: bool,
+    /// The host that was tested
+    pub host: String,
+    /// Protocol used (https or ssh)
+    pub protocol: String,
+    /// Username if available
+    pub username: Option<String>,
+    /// Message describing the result
+    pub message: String,
+}
+
+/// Available credential helper
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableHelper {
+    /// Helper name
+    pub name: String,
+    /// Description
+    pub description: String,
+    /// Whether it's available on this system
+    pub available: bool,
+}
+
+/// Run git config command
+fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
+    let mut cmd = Command::new("git");
+
+    if let Some(path) = repo_path {
+        cmd.current_dir(path);
+    }
+
+    cmd.arg("config");
+    cmd.args(args);
+
+    let output = cmd
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git config: {}", e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if output.status.success() {
+        Ok(stdout)
+    } else if output.status.code() == Some(1) && stderr.is_empty() && stdout.is_empty() {
+        Ok(String::new())
+    } else {
+        Err(LeviathanError::OperationFailed(
+            if stderr.is_empty() { stdout } else { stderr },
+        ))
+    }
+}
+
+/// Get configured credential helpers
+#[command]
+pub async fn get_credential_helpers(path: String) -> Result<Vec<CredentialHelper>> {
+    let repo_path = Path::new(&path);
+    let mut helpers = Vec::new();
+
+    // Get global credential helper
+    if let Ok(helper) = run_git_config(None, &["--global", "--get", "credential.helper"]) {
+        if !helper.is_empty() {
+            helpers.push(CredentialHelper {
+                name: extract_helper_name(&helper),
+                command: helper,
+                scope: "global".to_string(),
+                url_pattern: None,
+            });
+        }
+    }
+
+    // Get local credential helper
+    if let Ok(helper) = run_git_config(Some(repo_path), &["--local", "--get", "credential.helper"])
+    {
+        if !helper.is_empty() {
+            helpers.push(CredentialHelper {
+                name: extract_helper_name(&helper),
+                command: helper,
+                scope: "local".to_string(),
+                url_pattern: None,
+            });
+        }
+    }
+
+    // Get URL-specific credential helpers
+    if let Ok(config) = run_git_config(Some(repo_path), &["--get-regexp", "^credential\\..+\\.helper"])
+    {
+        for line in config.lines() {
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                // Extract URL pattern from key (credential.https://github.com.helper)
+                let key = parts[0];
+                if let Some(url) = key
+                    .strip_prefix("credential.")
+                    .and_then(|s| s.strip_suffix(".helper"))
+                {
+                    helpers.push(CredentialHelper {
+                        name: extract_helper_name(parts[1]),
+                        command: parts[1].to_string(),
+                        scope: "url".to_string(),
+                        url_pattern: Some(url.to_string()),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(helpers)
+}
+
+/// Extract helper name from command
+fn extract_helper_name(cmd: &str) -> String {
+    // Handle common formats:
+    // - "osxkeychain" -> "osxkeychain"
+    // - "manager-core" -> "manager-core"
+    // - "/path/to/helper" -> "helper"
+    // - "!helper" -> "helper"
+    let clean = cmd.trim_start_matches('!');
+    clean
+        .split('/')
+        .next_back()
+        .unwrap_or(clean)
+        .split_whitespace()
+        .next()
+        .unwrap_or(clean)
+        .to_string()
+}
+
+/// Set credential helper
+#[command]
+pub async fn set_credential_helper(
+    path: Option<String>,
+    helper: String,
+    global: Option<bool>,
+    url_pattern: Option<String>,
+) -> Result<()> {
+    let repo_path = path.as_ref().map(|p| Path::new(p.as_str()));
+
+    if let Some(url) = url_pattern {
+        // URL-specific helper
+        let key = format!("credential.{}.helper", url);
+        let scope = if global.unwrap_or(false) {
+            "--global"
+        } else {
+            "--local"
+        };
+        run_git_config(repo_path, &[scope, &key, &helper])?;
+    } else {
+        // Global or local helper
+        let scope = if global.unwrap_or(false) {
+            "--global"
+        } else {
+            "--local"
+        };
+        run_git_config(repo_path, &[scope, "credential.helper", &helper])?;
+    }
+
+    Ok(())
+}
+
+/// Unset credential helper
+#[command]
+pub async fn unset_credential_helper(
+    path: Option<String>,
+    global: Option<bool>,
+    url_pattern: Option<String>,
+) -> Result<()> {
+    let repo_path = path.as_ref().map(|p| Path::new(p.as_str()));
+
+    if let Some(url) = url_pattern {
+        // URL-specific helper
+        let key = format!("credential.{}.helper", url);
+        let scope = if global.unwrap_or(false) {
+            "--global"
+        } else {
+            "--local"
+        };
+        let _ = run_git_config(repo_path, &[scope, "--unset", &key]);
+    } else {
+        // Global or local helper
+        let scope = if global.unwrap_or(false) {
+            "--global"
+        } else {
+            "--local"
+        };
+        let _ = run_git_config(repo_path, &[scope, "--unset", "credential.helper"]);
+    }
+
+    Ok(())
+}
+
+/// Get available credential helpers on this system
+#[command]
+pub async fn get_available_helpers() -> Result<Vec<AvailableHelper>> {
+    let mut helpers = Vec::new();
+
+    // Common credential helpers by platform
+    #[cfg(target_os = "macos")]
+    {
+        helpers.push(AvailableHelper {
+            name: "osxkeychain".to_string(),
+            description: "macOS Keychain (recommended)".to_string(),
+            available: check_helper_available("osxkeychain"),
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        helpers.push(AvailableHelper {
+            name: "manager".to_string(),
+            description: "Git Credential Manager".to_string(),
+            available: check_helper_available("manager"),
+        });
+        helpers.push(AvailableHelper {
+            name: "wincred".to_string(),
+            description: "Windows Credential Store".to_string(),
+            available: check_helper_available("wincred"),
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        helpers.push(AvailableHelper {
+            name: "libsecret".to_string(),
+            description: "GNOME Keyring / libsecret".to_string(),
+            available: check_helper_available("libsecret"),
+        });
+        helpers.push(AvailableHelper {
+            name: "store".to_string(),
+            description: "Store credentials in plain text (not recommended)".to_string(),
+            available: true, // Always available as fallback
+        });
+    }
+
+    // Cross-platform helpers
+    helpers.push(AvailableHelper {
+        name: "cache".to_string(),
+        description: "Cache credentials in memory temporarily".to_string(),
+        available: true,
+    });
+
+    helpers.push(AvailableHelper {
+        name: "store".to_string(),
+        description: "Store credentials in plain text file".to_string(),
+        available: true,
+    });
+
+    Ok(helpers)
+}
+
+/// Check if a credential helper is available
+fn check_helper_available(helper: &str) -> bool {
+    Command::new("git")
+        .arg(format!("credential-{}", helper))
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+        || Command::new(format!("git-credential-{}", helper))
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+}
+
+/// Test credentials for a remote URL
+#[command]
+pub async fn test_credentials(path: String, remote_url: String) -> Result<CredentialTestResult> {
+    let repo_path = Path::new(&path);
+
+    // Determine protocol and host from URL
+    let (protocol, host) = if remote_url.starts_with("git@") || remote_url.starts_with("ssh://") {
+        ("ssh".to_string(), extract_host(&remote_url))
+    } else {
+        ("https".to_string(), extract_host(&remote_url))
+    };
+
+    if protocol == "ssh" {
+        // For SSH, test the connection
+        let output = Command::new("ssh")
+            .args([
+                "-T",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "BatchMode=yes",
+                &format!("git@{}", host),
+            ])
+            .output()
+            .map_err(|e| {
+                LeviathanError::OperationFailed(format!("Failed to test SSH connection: {}", e))
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = if stdout.is_empty() {
+            stderr.to_string()
+        } else {
+            stdout.to_string()
+        };
+
+        let success = message.contains("successfully authenticated")
+            || message.contains("Welcome")
+            || message.contains("logged in as");
+
+        let username = extract_ssh_username(&message);
+
+        Ok(CredentialTestResult {
+            success,
+            host,
+            protocol,
+            username,
+            message: message.trim().to_string(),
+        })
+    } else {
+        // For HTTPS, use git credential fill
+        let mut cmd = Command::new("git");
+        cmd.current_dir(repo_path);
+        cmd.args(["credential", "fill"]);
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to run git credential: {}", e))
+        })?;
+
+        // Send credential request
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let input = format!("protocol=https\nhost={}\n\n", host);
+            let _ = stdin.write_all(input.as_bytes());
+        }
+
+        let output = child.wait_with_output().map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to get credential output: {}", e))
+        })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Parse response
+        let mut username = None;
+        let mut has_password = false;
+
+        for line in stdout.lines() {
+            if let Some(u) = line.strip_prefix("username=") {
+                username = Some(u.to_string());
+            } else if line.starts_with("password=") {
+                has_password = true;
+            }
+        }
+
+        let success = username.is_some() && has_password;
+        let message = if success {
+            format!("Credentials found for {}", host)
+        } else if username.is_some() {
+            format!("Username found but no password for {}", host)
+        } else {
+            format!("No credentials found for {}", host)
+        };
+
+        Ok(CredentialTestResult {
+            success,
+            host,
+            protocol,
+            username,
+            message,
+        })
+    }
+}
+
+/// Extract host from URL
+fn extract_host(url: &str) -> String {
+    // Handle various URL formats:
+    // - https://github.com/user/repo.git
+    // - git@github.com:user/repo.git
+    // - ssh://git@github.com/user/repo.git
+
+    if let Some(rest) = url.strip_prefix("https://") {
+        rest.split('/').next().unwrap_or("").to_string()
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        rest.split('/').next().unwrap_or("").to_string()
+    } else if let Some(rest) = url.strip_prefix("ssh://") {
+        rest.split('@')
+            .next_back()
+            .and_then(|s| s.split('/').next())
+            .unwrap_or("")
+            .to_string()
+    } else if url.contains('@') && url.contains(':') {
+        // git@host:path format
+        url.split('@')
+            .next_back()
+            .and_then(|s| s.split(':').next())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        url.to_string()
+    }
+}
+
+/// Extract username from SSH response
+fn extract_ssh_username(message: &str) -> Option<String> {
+    if message.contains("Hi ") {
+        message
+            .split("Hi ")
+            .nth(1)
+            .and_then(|s| s.split('!').next())
+            .map(|s| s.to_string())
+    } else if message.contains("Welcome to GitLab, @") {
+        message
+            .split('@')
+            .nth(1)
+            .and_then(|s| s.split('!').next())
+            .map(|s| s.to_string())
+    } else if message.contains("logged in as ") {
+        message
+            .split("logged in as ")
+            .nth(1)
+            .and_then(|s| s.split('.').next())
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
+/// Erase stored credentials for a host
+#[command]
+pub async fn erase_credentials(path: String, host: String, protocol: String) -> Result<()> {
+    let repo_path = Path::new(&path);
+
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo_path);
+    cmd.args(["credential", "reject"]);
+    cmd.stdin(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to run git credential: {}", e))
+    })?;
+
+    // Send credential info to reject
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        let input = format!("protocol={}\nhost={}\n\n", protocol, host);
+        let _ = stdin.write_all(input.as_bytes());
+    }
+
+    let _ = child.wait();
+
+    Ok(())
+}

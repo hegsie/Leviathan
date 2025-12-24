@@ -15,7 +15,7 @@ import {
   type RenderData,
 } from '../../graph/virtual-scroll.ts';
 import { CanvasRenderer, getThemeFromCSS } from '../../graph/canvas-renderer.ts';
-import { getCommitHistory, getRefsByCommit, getCommitsStats } from '../../services/git.service.ts';
+import { getCommitHistory, getRefsByCommit, getCommitsStats, searchCommits } from '../../services/git.service.ts';
 import type { Commit, RefsByCommit, RefInfo } from '../../types/git.types.ts';
 
 export interface CommitSelectedEvent {
@@ -315,6 +315,16 @@ export class LvGraphCanvas extends LitElement {
     await this.loadCommits();
   }
 
+  private hasActiveSearch(): boolean {
+    if (!this.searchFilter) return false;
+    return !!(
+      this.searchFilter.query ||
+      this.searchFilter.author ||
+      this.searchFilter.dateFrom ||
+      this.searchFilter.dateTo
+    );
+  }
+
   private async loadCommits(): Promise<void> {
     if (!this.repositoryPath) {
       this.loadError = 'No repository path specified';
@@ -326,13 +336,28 @@ export class LvGraphCanvas extends LitElement {
     const startTime = performance.now();
 
     try {
+      // Determine if we should use search or regular history
+      const useSearch = this.hasActiveSearch();
+
       // Fetch commits and refs in parallel
       const [commitsResult, refsResult] = await Promise.all([
-        getCommitHistory({
-          path: this.repositoryPath,
-          limit: this.commitCount,
-          allBranches: true,
-        }),
+        useSearch
+          ? searchCommits(this.repositoryPath, {
+              query: this.searchFilter?.query || undefined,
+              author: this.searchFilter?.author || undefined,
+              dateFrom: this.searchFilter?.dateFrom
+                ? new Date(this.searchFilter.dateFrom).getTime() / 1000
+                : undefined,
+              dateTo: this.searchFilter?.dateTo
+                ? new Date(this.searchFilter.dateTo).getTime() / 1000
+                : undefined,
+              limit: this.commitCount,
+            })
+          : getCommitHistory({
+              path: this.repositoryPath,
+              limit: this.commitCount,
+              allBranches: true,
+            }),
         getRefsByCommit(this.repositoryPath),
       ]);
 
@@ -354,7 +379,8 @@ export class LvGraphCanvas extends LitElement {
       // Convert commits to GraphCommit format for layout
       this.commits = commitsResult.data.map(commitToGraphCommit);
       this.processLayout();
-      console.log(`Loaded ${this.commits.length} real commits in ${(performance.now() - startTime).toFixed(2)}ms`);
+      const searchInfo = useSearch ? ' (search results)' : '';
+      console.log(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
     } catch (err) {
       this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
     } finally {
@@ -800,6 +826,22 @@ export class LvGraphCanvas extends LitElement {
     } else if (currentIndex < this.sortedNodesByRow.length - 1) {
       this.selectByIndex(currentIndex + 1);
     }
+  }
+
+  /**
+   * Navigate to the first commit (top of the list)
+   */
+  public navigateFirst(): void {
+    if (this.sortedNodesByRow.length === 0) return;
+    this.selectByIndex(0);
+  }
+
+  /**
+   * Navigate to the last commit (bottom of the list)
+   */
+  public navigateLast(): void {
+    if (this.sortedNodesByRow.length === 0) return;
+    this.selectByIndex(this.sortedNodesByRow.length - 1);
   }
 
   /**
