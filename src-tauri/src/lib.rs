@@ -203,6 +203,18 @@ pub fn run() {
             commands::github::get_latest_release,
             commands::github::create_release,
             commands::github::delete_release,
+            // Azure DevOps integration
+            commands::azure_devops::store_ado_token,
+            commands::azure_devops::get_ado_token,
+            commands::azure_devops::delete_ado_token,
+            commands::azure_devops::check_ado_connection,
+            commands::azure_devops::detect_ado_repo,
+            commands::azure_devops::list_ado_pull_requests,
+            commands::azure_devops::get_ado_pull_request,
+            commands::azure_devops::create_ado_pull_request,
+            commands::azure_devops::get_ado_work_items,
+            commands::azure_devops::query_ado_work_items,
+            commands::azure_devops::list_ado_pipeline_runs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

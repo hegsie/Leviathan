@@ -1689,3 +1689,170 @@ export async function deleteRelease(
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>('delete_release', { owner, repo, releaseId });
 }
+
+// =======================
+// Azure DevOps Integration
+// =======================
+
+export interface AdoUser {
+  id: string;
+  displayName: string;
+  uniqueName: string;
+  imageUrl: string | null;
+}
+
+export interface AdoConnectionStatus {
+  connected: boolean;
+  user: AdoUser | null;
+  organization: string | null;
+}
+
+export interface DetectedAdoRepo {
+  organization: string;
+  project: string;
+  repository: string;
+  remoteName: string;
+}
+
+export interface AdoPullRequest {
+  pullRequestId: number;
+  title: string;
+  description: string | null;
+  status: string;
+  createdBy: AdoUser;
+  creationDate: string;
+  sourceRefName: string;
+  targetRefName: string;
+  isDraft: boolean;
+  url: string;
+  repositoryId: string;
+}
+
+export interface CreateAdoPullRequestInput {
+  title: string;
+  description?: string;
+  sourceRefName: string;
+  targetRefName: string;
+  isDraft?: boolean;
+}
+
+export interface AdoWorkItem {
+  id: number;
+  title: string;
+  workItemType: string;
+  state: string;
+  assignedTo: AdoUser | null;
+  createdDate: string;
+  url: string;
+}
+
+export interface AdoPipelineRun {
+  id: number;
+  name: string;
+  state: string;
+  result: string | null;
+  createdDate: string;
+  finishedDate: string | null;
+  sourceBranch: string;
+  url: string;
+}
+
+// Azure DevOps Token Management
+
+export async function storeAdoToken(token: string): Promise<CommandResult<void>> {
+  return invokeCommand<void>('store_ado_token', { token });
+}
+
+export async function getAdoToken(): Promise<CommandResult<string | null>> {
+  return invokeCommand<string | null>('get_ado_token', {});
+}
+
+export async function deleteAdoToken(): Promise<CommandResult<void>> {
+  return invokeCommand<void>('delete_ado_token', {});
+}
+
+// Azure DevOps Connection
+
+export async function checkAdoConnection(
+  organization: string
+): Promise<CommandResult<AdoConnectionStatus>> {
+  return invokeCommand<AdoConnectionStatus>('check_ado_connection', { organization });
+}
+
+export async function detectAdoRepo(
+  path: string
+): Promise<CommandResult<DetectedAdoRepo | null>> {
+  return invokeCommand<DetectedAdoRepo | null>('detect_ado_repo', { path });
+}
+
+// Azure DevOps Pull Requests
+
+export async function listAdoPullRequests(
+  organization: string,
+  project: string,
+  repository: string,
+  status?: string
+): Promise<CommandResult<AdoPullRequest[]>> {
+  return invokeCommand<AdoPullRequest[]>('list_ado_pull_requests', {
+    organization,
+    project,
+    repository,
+    status,
+  });
+}
+
+export async function getAdoPullRequest(
+  organization: string,
+  project: string,
+  repository: string,
+  pullRequestId: number
+): Promise<CommandResult<AdoPullRequest>> {
+  return invokeCommand<AdoPullRequest>('get_ado_pull_request', {
+    organization,
+    project,
+    repository,
+    pullRequestId,
+  });
+}
+
+export async function createAdoPullRequest(
+  organization: string,
+  project: string,
+  repository: string,
+  input: CreateAdoPullRequestInput
+): Promise<CommandResult<AdoPullRequest>> {
+  return invokeCommand<AdoPullRequest>('create_ado_pull_request', {
+    organization,
+    project,
+    repository,
+    input,
+  });
+}
+
+// Azure DevOps Work Items
+
+export async function getAdoWorkItems(
+  organization: string,
+  project: string,
+  ids: number[]
+): Promise<CommandResult<AdoWorkItem[]>> {
+  return invokeCommand<AdoWorkItem[]>('get_ado_work_items', { organization, project, ids });
+}
+
+export async function queryAdoWorkItems(
+  organization: string,
+  project: string,
+  state?: string
+): Promise<CommandResult<AdoWorkItem[]>> {
+  return invokeCommand<AdoWorkItem[]>('query_ado_work_items', { organization, project, state });
+}
+
+// Azure DevOps Pipelines
+
+export async function listAdoPipelineRuns(
+  organization: string,
+  project: string,
+  top?: number
+): Promise<CommandResult<AdoPipelineRun[]>> {
+  return invokeCommand<AdoPipelineRun[]>('list_ado_pipeline_runs', { organization, project, top });
+}

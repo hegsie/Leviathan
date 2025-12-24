@@ -25,6 +25,7 @@ export class LvToolbar extends LitElement {
         display: flex;
         align-items: center;
         height: 48px;
+        padding-left: 78px; /* Space for macOS traffic light buttons */
         background: var(--color-bg-secondary);
         border-bottom: 1px solid var(--color-border);
         -webkit-app-region: drag;

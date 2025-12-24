@@ -81,6 +81,11 @@
 - **Releases** - view releases, create releases with auto-generated notes
 - **Actions** - workflow run status, check runs for commits
 
+### Azure DevOps Integration
+- **Pull Requests** - view PRs, create PRs, PR status filtering
+- **Work Items** - browse and query work items by project
+- **Pipelines** - view pipeline/build run status
+
 ---
 
 ## Planned Features
@@ -97,11 +102,6 @@
 - Pull request support
 - Issue tracking
 - Pipelines status
-
-#### Azure DevOps Integration
-- Pull request support
-- Work item linking
-- Pipeline status
 
 ---
 

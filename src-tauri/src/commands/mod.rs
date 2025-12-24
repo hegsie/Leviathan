@@ -1,5 +1,6 @@
 //! Tauri command handlers
 
+pub mod azure_devops;
 pub mod bisect;
 pub mod branch;
 pub mod clean;
