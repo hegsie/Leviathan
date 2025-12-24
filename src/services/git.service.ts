@@ -1468,3 +1468,97 @@ export async function getCommitStatus(
 ): Promise<CommandResult<string>> {
   return invokeCommand<string>('get_commit_status', { owner, repo, commitSha });
 }
+
+// GitHub Issues
+
+export interface IssueSummary {
+  number: number;
+  title: string;
+  state: string;
+  user: GitHubUser;
+  labels: Label[];
+  assignees: GitHubUser[];
+  comments: number;
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+  htmlUrl: string;
+  body: string | null;
+}
+
+export interface IssueComment {
+  id: number;
+  user: GitHubUser;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  htmlUrl: string;
+}
+
+export interface CreateIssueInput {
+  title: string;
+  body?: string;
+  labels?: string[];
+  assignees?: string[];
+}
+
+export async function listIssues(
+  owner: string,
+  repo: string,
+  state?: string,
+  labels?: string,
+  perPage?: number
+): Promise<CommandResult<IssueSummary[]>> {
+  return invokeCommand<IssueSummary[]>('list_issues', { owner, repo, state, labels, perPage });
+}
+
+export async function getIssue(
+  owner: string,
+  repo: string,
+  number: number
+): Promise<CommandResult<IssueSummary>> {
+  return invokeCommand<IssueSummary>('get_issue', { owner, repo, number });
+}
+
+export async function createIssue(
+  owner: string,
+  repo: string,
+  input: CreateIssueInput
+): Promise<CommandResult<IssueSummary>> {
+  return invokeCommand<IssueSummary>('create_issue', { owner, repo, input });
+}
+
+export async function updateIssueState(
+  owner: string,
+  repo: string,
+  number: number,
+  state: string
+): Promise<CommandResult<IssueSummary>> {
+  return invokeCommand<IssueSummary>('update_issue_state', { owner, repo, number, state });
+}
+
+export async function getIssueComments(
+  owner: string,
+  repo: string,
+  number: number,
+  perPage?: number
+): Promise<CommandResult<IssueComment[]>> {
+  return invokeCommand<IssueComment[]>('get_issue_comments', { owner, repo, number, perPage });
+}
+
+export async function addIssueComment(
+  owner: string,
+  repo: string,
+  number: number,
+  body: string
+): Promise<CommandResult<IssueComment>> {
+  return invokeCommand<IssueComment>('add_issue_comment', { owner, repo, number, body });
+}
+
+export async function getRepoLabels(
+  owner: string,
+  repo: string,
+  perPage?: number
+): Promise<CommandResult<Label[]>> {
+  return invokeCommand<Label[]>('get_repo_labels', { owner, repo, perPage });
+}

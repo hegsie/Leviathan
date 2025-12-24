@@ -13,10 +13,13 @@ import type {
   PullRequestSummary,
   WorkflowRun,
   CreatePullRequestInput,
+  IssueSummary,
+  CreateIssueInput,
+  Label,
 } from '../../services/git.service.ts';
 import './lv-modal.ts';
 
-type TabType = 'connection' | 'pull-requests' | 'actions' | 'create-pr';
+type TabType = 'connection' | 'pull-requests' | 'issues' | 'actions' | 'create-pr' | 'create-issue';
 
 @customElement('lv-github-dialog')
 export class LvGitHubDialog extends LitElement {
@@ -248,6 +251,86 @@ export class LvGitHubDialog extends LitElement {
         color: var(--color-text-muted);
       }
 
+      /* Issue styles */
+      .issue-item {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--spacing-md);
+        padding: var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        transition: background var(--transition-fast);
+      }
+
+      .issue-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .issue-number {
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-primary);
+        min-width: 50px;
+      }
+
+      .issue-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .issue-title {
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+        margin-bottom: var(--spacing-xs);
+      }
+
+      .issue-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-sm);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
+      .issue-state {
+        padding: 2px 8px;
+        border-radius: var(--radius-full);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .issue-state.open {
+        background: var(--color-success-bg);
+        color: var(--color-success);
+      }
+
+      .issue-state.closed {
+        background: #8250df20;
+        color: #8250df;
+      }
+
+      .issue-labels {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: var(--spacing-xs);
+      }
+
+      .issue-label {
+        padding: 2px 6px;
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .issue-comments {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
       .pr-stats {
         display: flex;
         gap: var(--spacing-sm);
@@ -470,10 +553,13 @@ export class LvGitHubDialog extends LitElement {
   @state() private detectedRepo: DetectedGitHubRepo | null = null;
   @state() private pullRequests: PullRequestSummary[] = [];
   @state() private workflowRuns: WorkflowRun[] = [];
+  @state() private issues: IssueSummary[] = [];
+  @state() private repoLabels: Label[] = [];
   @state() private isLoading = false;
   @state() private error: string | null = null;
   @state() private tokenInput = '';
   @state() private prFilter: 'open' | 'closed' | 'all' = 'open';
+  @state() private issueFilter: 'open' | 'closed' | 'all' = 'open';
 
   // Create PR form
   @state() private createPrTitle = '';
@@ -481,6 +567,11 @@ export class LvGitHubDialog extends LitElement {
   @state() private createPrHead = '';
   @state() private createPrBase = '';
   @state() private createPrDraft = false;
+
+  // Create Issue form
+  @state() private createIssueTitle = '';
+  @state() private createIssueBody = '';
+  @state() private createIssueLabels: string[] = [];
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -527,10 +618,14 @@ export class LvGitHubDialog extends LitElement {
     const result = await gitService.detectGitHubRepo(this.repositoryPath);
     if (result.success && result.data) {
       this.detectedRepo = result.data;
-      // Auto-load PRs if connected
+      // Auto-load data if connected
       if (this.connectionStatus?.connected) {
-        await this.loadPullRequests();
-        await this.loadWorkflowRuns();
+        await Promise.all([
+          this.loadPullRequests(),
+          this.loadWorkflowRuns(),
+          this.loadIssues(),
+          this.loadLabels(),
+        ]);
       }
     }
   }
@@ -580,6 +675,43 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
+  private async loadIssues(): Promise<void> {
+    if (!this.detectedRepo || !this.connectionStatus?.connected) return;
+
+    try {
+      const result = await gitService.listIssues(
+        this.detectedRepo.owner,
+        this.detectedRepo.repo,
+        this.issueFilter,
+        undefined,
+        30
+      );
+
+      if (result.success && result.data) {
+        this.issues = result.data;
+      }
+    } catch {
+      // Silently fail for issues
+    }
+  }
+
+  private async loadLabels(): Promise<void> {
+    if (!this.detectedRepo || !this.connectionStatus?.connected) return;
+
+    try {
+      const result = await gitService.getRepoLabels(
+        this.detectedRepo.owner,
+        this.detectedRepo.repo
+      );
+
+      if (result.success && result.data) {
+        this.repoLabels = result.data;
+      }
+    } catch {
+      // Silently fail for labels
+    }
+  }
+
   private async handleSaveToken(): Promise<void> {
     if (!this.tokenInput.trim()) return;
 
@@ -592,8 +724,12 @@ export class LvGitHubDialog extends LitElement {
         this.tokenInput = '';
         await this.checkConnection();
         if (this.connectionStatus?.connected && this.detectedRepo) {
-          await this.loadPullRequests();
-          await this.loadWorkflowRuns();
+          await Promise.all([
+            this.loadPullRequests(),
+            this.loadWorkflowRuns(),
+            this.loadIssues(),
+            this.loadLabels(),
+          ]);
         }
       } else {
         this.error = result.error?.message ?? 'Failed to save token';
@@ -614,6 +750,8 @@ export class LvGitHubDialog extends LitElement {
       this.connectionStatus = { connected: false, user: null, scopes: [] };
       this.pullRequests = [];
       this.workflowRuns = [];
+      this.issues = [];
+      this.repoLabels = [];
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to disconnect';
     } finally {
@@ -665,6 +803,66 @@ export class LvGitHubDialog extends LitElement {
     const select = e.target as HTMLSelectElement;
     this.prFilter = select.value as 'open' | 'closed' | 'all';
     this.loadPullRequests();
+  }
+
+  private handleIssueFilterChange(e: Event): void {
+    const select = e.target as HTMLSelectElement;
+    this.issueFilter = select.value as 'open' | 'closed' | 'all';
+    this.loadIssues();
+  }
+
+  private async handleCreateIssue(): Promise<void> {
+    if (!this.detectedRepo || !this.createIssueTitle) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const input: CreateIssueInput = {
+        title: this.createIssueTitle,
+        body: this.createIssueBody || undefined,
+        labels: this.createIssueLabels.length > 0 ? this.createIssueLabels : undefined,
+      };
+
+      const result = await gitService.createIssue(
+        this.detectedRepo.owner,
+        this.detectedRepo.repo,
+        input
+      );
+
+      if (result.success && result.data) {
+        // Reset form and switch to issues list
+        this.createIssueTitle = '';
+        this.createIssueBody = '';
+        this.createIssueLabels = [];
+        this.activeTab = 'issues';
+        await this.loadIssues();
+      } else {
+        this.error = result.error?.message ?? 'Failed to create issue';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to create issue';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  private toggleIssueLabel(labelName: string): void {
+    if (this.createIssueLabels.includes(labelName)) {
+      this.createIssueLabels = this.createIssueLabels.filter(l => l !== labelName);
+    } else {
+      this.createIssueLabels = [...this.createIssueLabels, labelName];
+    }
+  }
+
+  private getLabelTextColor(bgColor: string): string {
+    // Simple luminance check to determine if text should be light or dark
+    const hex = bgColor.replace('#', '');
+    const r = parseInt(hex.substring(0, 2), 16);
+    const g = parseInt(hex.substring(2, 4), 16);
+    const b = parseInt(hex.substring(4, 6), 16);
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return luminance > 0.5 ? '#000000' : '#ffffff';
   }
 
   private handleClose(): void {
@@ -893,6 +1091,153 @@ export class LvGitHubDialog extends LitElement {
     `;
   }
 
+  private renderIssuesTab() {
+    if (!this.connectionStatus?.connected) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path>
+          </svg>
+          <p>Connect to GitHub to view issues</p>
+        </div>
+      `;
+    }
+
+    if (!this.detectedRepo) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+          <p>No GitHub repository detected</p>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="filter-row">
+        <select class="filter-select" @change=${this.handleIssueFilterChange}>
+          <option value="open" ?selected=${this.issueFilter === 'open'}>Open</option>
+          <option value="closed" ?selected=${this.issueFilter === 'closed'}>Closed</option>
+          <option value="all" ?selected=${this.issueFilter === 'all'}>All</option>
+        </select>
+        <button class="btn" @click=${() => this.activeTab = 'create-issue'}>
+          + New Issue
+        </button>
+      </div>
+
+      ${this.isLoading ? html`<div class="loading">Loading issues...</div>` : ''}
+
+      ${!this.isLoading && this.issues.length === 0 ? html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          <p>No ${this.issueFilter} issues</p>
+        </div>
+      ` : ''}
+
+      <div class="pr-list">
+        ${this.issues.map(issue => html`
+          <div class="issue-item" @click=${() => this.openInBrowser(issue.htmlUrl)}>
+            <span class="issue-number">#${issue.number}</span>
+            <div class="issue-info">
+              <div class="issue-title">${issue.title}</div>
+              <div class="issue-meta">
+                <span class="issue-state ${issue.state}">${issue.state}</span>
+                <span>by ${issue.user.login}</span>
+                <span>${this.formatDate(issue.createdAt)}</span>
+                ${issue.comments > 0 ? html`
+                  <span class="issue-comments">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    ${issue.comments}
+                  </span>
+                ` : ''}
+              </div>
+              ${issue.labels.length > 0 ? html`
+                <div class="issue-labels">
+                  ${issue.labels.map(label => html`
+                    <span
+                      class="issue-label"
+                      style="background: #${label.color}; color: ${this.getLabelTextColor(label.color)}"
+                    >
+                      ${label.name}
+                    </span>
+                  `)}
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        `)}
+      </div>
+    `;
+  }
+
+  private renderCreateIssueTab() {
+    return html`
+      <div class="token-form">
+        <div class="form-group">
+          <label>Title</label>
+          <input
+            type="text"
+            placeholder="Issue title"
+            .value=${this.createIssueTitle}
+            @input=${(e: Event) => this.createIssueTitle = (e.target as HTMLInputElement).value}
+          />
+        </div>
+
+        <div class="form-group">
+          <label>Description</label>
+          <textarea
+            placeholder="Describe the issue..."
+            .value=${this.createIssueBody}
+            @input=${(e: Event) => this.createIssueBody = (e.target as HTMLTextAreaElement).value}
+          ></textarea>
+        </div>
+
+        ${this.repoLabels.length > 0 ? html`
+          <div class="form-group">
+            <label>Labels</label>
+            <div class="issue-labels" style="cursor: pointer;">
+              ${this.repoLabels.map(label => html`
+                <span
+                  class="issue-label"
+                  style="
+                    background: ${this.createIssueLabels.includes(label.name) ? '#' + label.color : 'var(--color-bg-hover)'};
+                    color: ${this.createIssueLabels.includes(label.name) ? this.getLabelTextColor(label.color) : 'var(--color-text-secondary)'};
+                    border: 1px solid ${this.createIssueLabels.includes(label.name) ? 'transparent' : 'var(--color-border)'};
+                  "
+                  @click=${() => this.toggleIssueLabel(label.name)}
+                >
+                  ${label.name}
+                </span>
+              `)}
+            </div>
+          </div>
+        ` : ''}
+
+        <div class="btn-row">
+          <button class="btn" @click=${() => this.activeTab = 'issues'}>
+            Cancel
+          </button>
+          <button
+            class="btn btn-primary"
+            @click=${this.handleCreateIssue}
+            ?disabled=${this.isLoading || !this.createIssueTitle}
+          >
+            Create Issue
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   private renderCreatePrTab() {
     return html`
       <div class="token-form">
@@ -994,6 +1339,12 @@ export class LvGitHubDialog extends LitElement {
               Pull Requests
             </button>
             <button
+              class="tab ${this.activeTab === 'issues' ? 'active' : ''}"
+              @click=${() => this.activeTab = 'issues'}
+            >
+              Issues
+            </button>
+            <button
               class="tab ${this.activeTab === 'actions' ? 'active' : ''}"
               @click=${() => this.activeTab = 'actions'}
             >
@@ -1008,8 +1359,10 @@ export class LvGitHubDialog extends LitElement {
           <div class="tab-content">
             ${this.activeTab === 'connection' ? this.renderConnectionTab() : ''}
             ${this.activeTab === 'pull-requests' ? this.renderPullRequestsTab() : ''}
+            ${this.activeTab === 'issues' ? this.renderIssuesTab() : ''}
             ${this.activeTab === 'actions' ? this.renderActionsTab() : ''}
             ${this.activeTab === 'create-pr' ? this.renderCreatePrTab() : ''}
+            ${this.activeTab === 'create-issue' ? this.renderCreateIssueTab() : ''}
           </div>
         </div>
       </lv-modal>

@@ -1016,3 +1016,766 @@ pub async fn get_commit_status(owner: String, repo: String, commit_sha: String) 
 
     Ok(status.state)
 }
+
+// ============================================================================
+// Issue Types
+// ============================================================================
+
+/// Issue summary for listing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueSummary {
+    pub number: u32,
+    pub title: String,
+    pub state: String,
+    pub user: GitHubUser,
+    pub labels: Vec<Label>,
+    pub assignees: Vec<GitHubUser>,
+    pub comments: u32,
+    pub created_at: String,
+    pub updated_at: String,
+    pub closed_at: Option<String>,
+    pub html_url: String,
+    pub body: Option<String>,
+}
+
+/// Issue comment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueComment {
+    pub id: u64,
+    pub user: GitHubUser,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub html_url: String,
+}
+
+/// Create issue input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateIssueInput {
+    pub title: String,
+    pub body: Option<String>,
+    pub labels: Option<Vec<String>>,
+    pub assignees: Option<Vec<String>>,
+}
+
+// ============================================================================
+// Issue Commands
+// ============================================================================
+
+/// List issues for a repository
+#[command]
+pub async fn list_issues(
+    owner: String,
+    repo: String,
+    state: Option<String>,
+    labels: Option<String>,
+    per_page: Option<u32>,
+) -> Result<Vec<IssueSummary>> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    let state = state.unwrap_or_else(|| "open".to_string());
+    let per_page = per_page.unwrap_or(30);
+
+    let client = reqwest::Client::new();
+    let mut request = client
+        .get(format!(
+            "{}/repos/{}/{}/issues",
+            GITHUB_API_BASE, owner, repo
+        ))
+        .query(&[("state", &state), ("per_page", &per_page.to_string())])
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+
+    if let Some(labels) = labels {
+        request = request.query(&[("labels", labels)]);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch issues: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiIssue {
+        number: u32,
+        title: String,
+        state: String,
+        user: ApiUser,
+        labels: Vec<ApiLabel>,
+        assignees: Vec<ApiUser>,
+        comments: u32,
+        created_at: String,
+        updated_at: String,
+        closed_at: Option<String>,
+        html_url: String,
+        body: Option<String>,
+        pull_request: Option<serde_json::Value>, // Present if this is a PR
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiLabel {
+        id: u64,
+        name: String,
+        color: String,
+        description: Option<String>,
+    }
+
+    let issues: Vec<ApiIssue> = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse issues: {}", e)))?;
+
+    // Filter out pull requests (they appear in issues API)
+    Ok(issues
+        .into_iter()
+        .filter(|i| i.pull_request.is_none())
+        .map(|issue| IssueSummary {
+            number: issue.number,
+            title: issue.title,
+            state: issue.state,
+            user: GitHubUser {
+                login: issue.user.login,
+                id: issue.user.id,
+                avatar_url: issue.user.avatar_url,
+                name: issue.user.name,
+                email: issue.user.email,
+            },
+            labels: issue
+                .labels
+                .into_iter()
+                .map(|l| Label {
+                    id: l.id,
+                    name: l.name,
+                    color: l.color,
+                    description: l.description,
+                })
+                .collect(),
+            assignees: issue
+                .assignees
+                .into_iter()
+                .map(|u| GitHubUser {
+                    login: u.login,
+                    id: u.id,
+                    avatar_url: u.avatar_url,
+                    name: u.name,
+                    email: u.email,
+                })
+                .collect(),
+            comments: issue.comments,
+            created_at: issue.created_at,
+            updated_at: issue.updated_at,
+            closed_at: issue.closed_at,
+            html_url: issue.html_url,
+            body: issue.body,
+        })
+        .collect())
+}
+
+/// Get issue details
+#[command]
+pub async fn get_issue(owner: String, repo: String, number: u32) -> Result<IssueSummary> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "{}/repos/{}/{}/issues/{}",
+            GITHUB_API_BASE, owner, repo, number
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch issue: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiIssue {
+        number: u32,
+        title: String,
+        state: String,
+        user: ApiUser,
+        labels: Vec<ApiLabel>,
+        assignees: Vec<ApiUser>,
+        comments: u32,
+        created_at: String,
+        updated_at: String,
+        closed_at: Option<String>,
+        html_url: String,
+        body: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiLabel {
+        id: u64,
+        name: String,
+        color: String,
+        description: Option<String>,
+    }
+
+    let issue: ApiIssue = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse issue: {}", e)))?;
+
+    Ok(IssueSummary {
+        number: issue.number,
+        title: issue.title,
+        state: issue.state,
+        user: GitHubUser {
+            login: issue.user.login,
+            id: issue.user.id,
+            avatar_url: issue.user.avatar_url,
+            name: issue.user.name,
+            email: issue.user.email,
+        },
+        labels: issue
+            .labels
+            .into_iter()
+            .map(|l| Label {
+                id: l.id,
+                name: l.name,
+                color: l.color,
+                description: l.description,
+            })
+            .collect(),
+        assignees: issue
+            .assignees
+            .into_iter()
+            .map(|u| GitHubUser {
+                login: u.login,
+                id: u.id,
+                avatar_url: u.avatar_url,
+                name: u.name,
+                email: u.email,
+            })
+            .collect(),
+        comments: issue.comments,
+        created_at: issue.created_at,
+        updated_at: issue.updated_at,
+        closed_at: issue.closed_at,
+        html_url: issue.html_url,
+        body: issue.body,
+    })
+}
+
+/// Create a new issue
+#[command]
+pub async fn create_issue(
+    owner: String,
+    repo: String,
+    input: CreateIssueInput,
+) -> Result<IssueSummary> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    #[derive(Serialize)]
+    struct CreateIssueBody {
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        labels: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assignees: Option<Vec<String>>,
+    }
+
+    let body = CreateIssueBody {
+        title: input.title,
+        body: input.body,
+        labels: input.labels,
+        assignees: input.assignees,
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/repos/{}/{}/issues",
+            GITHUB_API_BASE, owner, repo
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to create issue: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiIssue {
+        number: u32,
+        title: String,
+        state: String,
+        user: ApiUser,
+        labels: Vec<ApiLabel>,
+        assignees: Vec<ApiUser>,
+        comments: u32,
+        created_at: String,
+        updated_at: String,
+        closed_at: Option<String>,
+        html_url: String,
+        body: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiLabel {
+        id: u64,
+        name: String,
+        color: String,
+        description: Option<String>,
+    }
+
+    let issue: ApiIssue = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse issue: {}", e)))?;
+
+    Ok(IssueSummary {
+        number: issue.number,
+        title: issue.title,
+        state: issue.state,
+        user: GitHubUser {
+            login: issue.user.login,
+            id: issue.user.id,
+            avatar_url: issue.user.avatar_url,
+            name: issue.user.name,
+            email: issue.user.email,
+        },
+        labels: issue
+            .labels
+            .into_iter()
+            .map(|l| Label {
+                id: l.id,
+                name: l.name,
+                color: l.color,
+                description: l.description,
+            })
+            .collect(),
+        assignees: issue
+            .assignees
+            .into_iter()
+            .map(|u| GitHubUser {
+                login: u.login,
+                id: u.id,
+                avatar_url: u.avatar_url,
+                name: u.name,
+                email: u.email,
+            })
+            .collect(),
+        comments: issue.comments,
+        created_at: issue.created_at,
+        updated_at: issue.updated_at,
+        closed_at: issue.closed_at,
+        html_url: issue.html_url,
+        body: issue.body,
+    })
+}
+
+/// Update issue state (open/close)
+#[command]
+pub async fn update_issue_state(
+    owner: String,
+    repo: String,
+    number: u32,
+    state: String,
+) -> Result<IssueSummary> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    #[derive(Serialize)]
+    struct UpdateBody {
+        state: String,
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .patch(format!(
+            "{}/repos/{}/{}/issues/{}",
+            GITHUB_API_BASE, owner, repo, number
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .json(&UpdateBody { state })
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to update issue: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiIssue {
+        number: u32,
+        title: String,
+        state: String,
+        user: ApiUser,
+        labels: Vec<ApiLabel>,
+        assignees: Vec<ApiUser>,
+        comments: u32,
+        created_at: String,
+        updated_at: String,
+        closed_at: Option<String>,
+        html_url: String,
+        body: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiLabel {
+        id: u64,
+        name: String,
+        color: String,
+        description: Option<String>,
+    }
+
+    let issue: ApiIssue = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse issue: {}", e)))?;
+
+    Ok(IssueSummary {
+        number: issue.number,
+        title: issue.title,
+        state: issue.state,
+        user: GitHubUser {
+            login: issue.user.login,
+            id: issue.user.id,
+            avatar_url: issue.user.avatar_url,
+            name: issue.user.name,
+            email: issue.user.email,
+        },
+        labels: issue
+            .labels
+            .into_iter()
+            .map(|l| Label {
+                id: l.id,
+                name: l.name,
+                color: l.color,
+                description: l.description,
+            })
+            .collect(),
+        assignees: issue
+            .assignees
+            .into_iter()
+            .map(|u| GitHubUser {
+                login: u.login,
+                id: u.id,
+                avatar_url: u.avatar_url,
+                name: u.name,
+                email: u.email,
+            })
+            .collect(),
+        comments: issue.comments,
+        created_at: issue.created_at,
+        updated_at: issue.updated_at,
+        closed_at: issue.closed_at,
+        html_url: issue.html_url,
+        body: issue.body,
+    })
+}
+
+/// Get issue comments
+#[command]
+pub async fn get_issue_comments(
+    owner: String,
+    repo: String,
+    number: u32,
+    per_page: Option<u32>,
+) -> Result<Vec<IssueComment>> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    let per_page = per_page.unwrap_or(30);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "{}/repos/{}/{}/issues/{}/comments",
+            GITHUB_API_BASE, owner, repo, number
+        ))
+        .query(&[("per_page", per_page.to_string())])
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch comments: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiComment {
+        id: u64,
+        user: ApiUser,
+        body: String,
+        created_at: String,
+        updated_at: String,
+        html_url: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    let comments: Vec<ApiComment> = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse comments: {}", e)))?;
+
+    Ok(comments
+        .into_iter()
+        .map(|c| IssueComment {
+            id: c.id,
+            user: GitHubUser {
+                login: c.user.login,
+                id: c.user.id,
+                avatar_url: c.user.avatar_url,
+                name: c.user.name,
+                email: c.user.email,
+            },
+            body: c.body,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+            html_url: c.html_url,
+        })
+        .collect())
+}
+
+/// Add a comment to an issue
+#[command]
+pub async fn add_issue_comment(
+    owner: String,
+    repo: String,
+    number: u32,
+    body: String,
+) -> Result<IssueComment> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    #[derive(Serialize)]
+    struct CommentBody {
+        body: String,
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/repos/{}/{}/issues/{}/comments",
+            GITHUB_API_BASE, owner, repo, number
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .json(&CommentBody { body })
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to add comment: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiComment {
+        id: u64,
+        user: ApiUser,
+        body: String,
+        created_at: String,
+        updated_at: String,
+        html_url: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        login: String,
+        id: u64,
+        avatar_url: String,
+        name: Option<String>,
+        email: Option<String>,
+    }
+
+    let comment: ApiComment = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse comment: {}", e)))?;
+
+    Ok(IssueComment {
+        id: comment.id,
+        user: GitHubUser {
+            login: comment.user.login,
+            id: comment.user.id,
+            avatar_url: comment.user.avatar_url,
+            name: comment.user.name,
+            email: comment.user.email,
+        },
+        body: comment.body,
+        created_at: comment.created_at,
+        updated_at: comment.updated_at,
+        html_url: comment.html_url,
+    })
+}
+
+/// Get repository labels
+#[command]
+pub async fn get_repo_labels(
+    owner: String,
+    repo: String,
+    per_page: Option<u32>,
+) -> Result<Vec<Label>> {
+    let token = get_github_token().await?.ok_or_else(|| {
+        LeviathanError::OperationFailed("GitHub token not configured".to_string())
+    })?;
+
+    let per_page = per_page.unwrap_or(100);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "{}/repos/{}/{}/labels",
+            GITHUB_API_BASE, owner, repo
+        ))
+        .query(&[("per_page", per_page.to_string())])
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch labels: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiLabel {
+        id: u64,
+        name: String,
+        color: String,
+        description: Option<String>,
+    }
+
+    let labels: Vec<ApiLabel> = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse labels: {}", e)))?;
+
+    Ok(labels
+        .into_iter()
+        .map(|l| Label {
+            id: l.id,
+            name: l.name,
+            color: l.color,
+            description: l.description,
+        })
+        .collect())
+}

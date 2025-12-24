@@ -189,6 +189,14 @@ pub fn run() {
             commands::github::get_workflow_runs,
             commands::github::get_check_runs,
             commands::github::get_commit_status,
+            // GitHub Issues
+            commands::github::list_issues,
+            commands::github::get_issue,
+            commands::github::create_issue,
+            commands::github::update_issue_state,
+            commands::github::get_issue_comments,
+            commands::github::add_issue_comment,
+            commands::github::get_repo_labels,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
