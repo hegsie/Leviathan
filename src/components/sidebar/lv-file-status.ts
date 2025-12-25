@@ -196,6 +196,7 @@ export class LvFileStatus extends LitElement {
         padding: var(--spacing-md);
         color: var(--color-text-muted);
         font-size: var(--font-size-sm);
+        min-height: 100px;
       }
 
       .error {
@@ -212,6 +213,7 @@ export class LvFileStatus extends LitElement {
         padding: var(--spacing-lg);
         color: var(--color-text-muted);
         text-align: center;
+        min-height: 100px;
       }
 
       .clean-state svg {
