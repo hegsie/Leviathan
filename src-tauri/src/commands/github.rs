@@ -58,9 +58,11 @@ pub struct PullRequestSummary {
     pub created_at: String,
     pub updated_at: String,
     pub head_ref: String,
+    pub head_sha: String,
     pub base_ref: String,
     pub draft: bool,
     pub mergeable: Option<bool>,
+    pub merged_at: Option<String>,
     pub html_url: String,
     pub additions: Option<u32>,
     pub deletions: Option<u32>,
@@ -407,6 +409,7 @@ pub async fn list_pull_requests(
         user: ApiUser,
         created_at: String,
         updated_at: String,
+        merged_at: Option<String>,
         head: ApiRef,
         base: ApiRef,
         draft: Option<bool>,
@@ -430,6 +433,7 @@ pub async fn list_pull_requests(
     struct ApiRef {
         #[serde(rename = "ref")]
         ref_name: String,
+        sha: String,
     }
 
     let prs: Vec<ApiPR> = response
@@ -452,7 +456,9 @@ pub async fn list_pull_requests(
             },
             created_at: pr.created_at,
             updated_at: pr.updated_at,
+            merged_at: pr.merged_at,
             head_ref: pr.head.ref_name,
+            head_sha: pr.head.sha,
             base_ref: pr.base.ref_name,
             draft: pr.draft.unwrap_or(false),
             mergeable: pr.mergeable,
@@ -701,6 +707,7 @@ pub async fn create_pull_request(
     struct ApiRef {
         #[serde(rename = "ref")]
         ref_name: String,
+        sha: String,
     }
 
     let pr: ApiPR = response
@@ -721,7 +728,9 @@ pub async fn create_pull_request(
         },
         created_at: pr.created_at,
         updated_at: pr.updated_at,
+        merged_at: None,
         head_ref: pr.head.ref_name,
+        head_sha: pr.head.sha,
         base_ref: pr.base.ref_name,
         draft: pr.draft.unwrap_or(false),
         mergeable: None,

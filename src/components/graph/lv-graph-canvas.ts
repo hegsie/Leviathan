@@ -435,11 +435,23 @@ export class LvGraphCanvas extends LitElement {
 
       const prsByCommit: Record<string, GraphPullRequest[]> = {};
 
+      // Build a set of all commit OIDs in the graph for fast lookup
+      const graphCommitOids = new Set(this.commits.map(c => c.oid));
+
       // Helper to add PR to commit map
-      const addPr = (headRef: string, pr: GraphPullRequest) => {
-        // Find the commit that matches this PR's head branch
-        // We need to look up by branch ref -> commit SHA
-        // For now, we'll match by checking refs
+      const addPr = (headSha: string, headRef: string, pr: GraphPullRequest) => {
+        // Primary: Match by commit SHA directly
+        if (graphCommitOids.has(headSha)) {
+          if (!prsByCommit[headSha]) {
+            prsByCommit[headSha] = [];
+          }
+          if (!prsByCommit[headSha].some(p => p.number === pr.number)) {
+            prsByCommit[headSha].push(pr);
+          }
+          return;
+        }
+
+        // Fallback: Match by branch ref name (for PRs whose commits aren't directly in graph)
         for (const [oid, refs] of Object.entries(this.refsByCommit)) {
           const hasMatchingRef = refs.some(ref =>
             ref.shorthand === headRef ||
@@ -449,7 +461,6 @@ export class LvGraphCanvas extends LitElement {
             if (!prsByCommit[oid]) {
               prsByCommit[oid] = [];
             }
-            // Avoid duplicates
             if (!prsByCommit[oid].some(p => p.number === pr.number)) {
               prsByCommit[oid].push(pr);
             }
@@ -461,7 +472,7 @@ export class LvGraphCanvas extends LitElement {
       // Process open PRs
       if (openPrs.success && openPrs.data) {
         for (const pr of openPrs.data) {
-          addPr(pr.headRef, {
+          addPr(pr.headSha, pr.headRef, {
             number: pr.number,
             state: pr.state,
             draft: pr.draft,
@@ -470,14 +481,12 @@ export class LvGraphCanvas extends LitElement {
         }
       }
 
-      // Process closed PRs
-      // Note: We can't determine merged vs closed from summary alone
-      // The state will be 'closed' for both - would need details API for merged_at
+      // Process closed PRs - use mergedAt to determine actual state
       if (closedPrs.success && closedPrs.data) {
         for (const pr of closedPrs.data) {
-          addPr(pr.headRef, {
+          addPr(pr.headSha, pr.headRef, {
             number: pr.number,
-            state: pr.state,
+            state: pr.mergedAt ? 'merged' : pr.state,
             draft: pr.draft,
             url: pr.htmlUrl,
           });

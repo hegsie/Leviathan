@@ -242,15 +242,9 @@ fn get_remote_status_internal(repo: &git2::Repository) -> Result<RemoteStatus, S
         }
     };
 
-    let upstream_name = upstream
-        .name()
-        .ok()
-        .flatten()
-        .map(|s| s.to_string());
+    let upstream_name = upstream.name().ok().flatten().map(|s| s.to_string());
 
-    let local_oid = head
-        .target()
-        .ok_or_else(|| "No local target".to_string())?;
+    let local_oid = head.target().ok_or_else(|| "No local target".to_string())?;
 
     let upstream_oid = upstream
         .get()

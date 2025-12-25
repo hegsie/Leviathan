@@ -76,13 +76,14 @@ pub async fn get_remote_status(path: String) -> Result<RemoteStatus> {
             .target()
             .ok_or_else(|| LeviathanError::OperationFailed("No local target".to_string()))?;
 
-        let upstream_oid = upstream.get().target().ok_or_else(|| {
-            LeviathanError::OperationFailed("No upstream target".to_string())
-        })?;
+        let upstream_oid = upstream
+            .get()
+            .target()
+            .ok_or_else(|| LeviathanError::OperationFailed("No upstream target".to_string()))?;
 
-        let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid).map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to compare: {}", e))
-        })?;
+        let (ahead, behind) = repo
+            .graph_ahead_behind(local_oid, upstream_oid)
+            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to compare: {}", e)))?;
 
         Ok(RemoteStatus {
             ahead,

@@ -111,10 +111,7 @@ pub async fn get_commit_template(path: String) -> Result<Option<String>> {
         let global_gitmessage = home.join(".gitmessage");
         if global_gitmessage.exists() {
             let content = fs::read_to_string(&global_gitmessage).map_err(|e| {
-                LeviathanError::OperationFailed(format!(
-                    "Failed to read global .gitmessage: {}",
-                    e
-                ))
+                LeviathanError::OperationFailed(format!("Failed to read global .gitmessage: {}", e))
             })?;
             return Ok(Some(content));
         }

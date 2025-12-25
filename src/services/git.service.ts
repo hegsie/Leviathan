@@ -1372,7 +1372,9 @@ export interface PullRequestSummary {
   user: GitHubUser;
   createdAt: string;
   updatedAt: string;
+  mergedAt: string | null;
   headRef: string;
+  headSha: string;
   baseRef: string;
   draft: boolean;
   mergeable: boolean | null;

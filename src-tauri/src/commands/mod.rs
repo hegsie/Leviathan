@@ -25,6 +25,6 @@ pub mod staging;
 pub mod stash;
 pub mod submodule;
 pub mod tags;
+pub mod templates;
 pub mod watcher;
 pub mod worktree;
-pub mod templates;
