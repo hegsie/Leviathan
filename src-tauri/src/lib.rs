@@ -8,7 +8,6 @@ pub mod error;
 pub mod models;
 pub mod services;
 
-#[cfg(debug_assertions)]
 use tauri::Manager;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
