@@ -146,7 +146,8 @@ async fn check_and_install_update(app: &tauri::AppHandle) -> Result<(), String> 
             update
                 .download_and_install(
                     |chunk_length, content_length| {
-                        let prev = downloaded.fetch_add(chunk_length as u64, std::sync::atomic::Ordering::Relaxed);
+                        let prev = downloaded
+                            .fetch_add(chunk_length as u64, std::sync::atomic::Ordering::Relaxed);
                         let current = prev + chunk_length as u64;
                         let progress = content_length
                             .map(|total| (current as f64 / total as f64) * 100.0)
