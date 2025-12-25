@@ -11,7 +11,7 @@ use tauri::{command, AppHandle, State};
 pub async fn check_for_update(app: AppHandle) -> Result<UpdateCheckEvent> {
     check_for_update_manual(&app)
         .await
-        .map_err(|e| crate::error::LeviathanError::OperationFailed(e))
+        .map_err(crate::error::LeviathanError::OperationFailed)
 }
 
 /// Download and install the available update
@@ -19,7 +19,7 @@ pub async fn check_for_update(app: AppHandle) -> Result<UpdateCheckEvent> {
 pub async fn download_and_install_update(app: AppHandle) -> Result<()> {
     install_update(&app)
         .await
-        .map_err(|e| crate::error::LeviathanError::OperationFailed(e))
+        .map_err(crate::error::LeviathanError::OperationFailed)
 }
 
 /// Start automatic update checking
