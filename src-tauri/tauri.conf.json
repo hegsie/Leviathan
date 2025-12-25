@@ -38,6 +38,7 @@
       "icons/icon.ico",
       "icons/icon.icns"
     ],
+    "createUpdaterArtifacts": "v1Compatible",
     "category": "DeveloperTool",
     "shortDescription": "Git GUI Client",
     "longDescription": "A fully-featured, open-source, cross-platform Git GUI client",
@@ -56,6 +57,12 @@
   "plugins": {
     "shell": {
       "open": true
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/hegsie/Leviathan/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlGRENEREYwMURBRThGNDYKUldSR2o2NGQ4TjNjbjl5a0xqekFvaFJUVlB1eXdncENBN3JoTHYzUFZPd3FqRUxDSk41NGY1Qm8K"
     }
   }
 }

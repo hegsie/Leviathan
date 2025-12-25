@@ -13,7 +13,7 @@ use tauri::Manager;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use commands::watcher::WatcherState;
-use services::create_autofetch_state;
+use services::{create_autofetch_state, create_update_state};
 
 /// Initialize the application
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -34,16 +34,26 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(WatcherState::default())
         .manage(create_autofetch_state())
-        .setup(|_app| {
+        .manage(create_update_state())
+        .setup(|app| {
             tracing::info!("Application setup complete");
 
             #[cfg(debug_assertions)]
             {
-                let window = _app.get_webview_window("main").unwrap();
+                let window = app.get_webview_window("main").unwrap();
                 window.open_devtools();
             }
+
+            // Start auto-update checking (every 24 hours)
+            let update_state = app.state::<services::UpdateState>();
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut service = update_state.write().await;
+                service.start_periodic_check(24, app_handle);
+            });
 
             Ok(())
         })
@@ -256,6 +266,13 @@ pub fn run() {
             commands::autofetch::stop_auto_fetch,
             commands::autofetch::is_auto_fetch_running,
             commands::autofetch::get_remote_status,
+            // Auto-update
+            commands::update::check_for_update,
+            commands::update::download_and_install_update,
+            commands::update::start_auto_update_check,
+            commands::update::stop_auto_update_check,
+            commands::update::is_auto_update_running,
+            commands::update::get_app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
