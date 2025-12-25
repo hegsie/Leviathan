@@ -48,7 +48,7 @@ pub fn run() {
             }
 
             // Start auto-update checking (every 24 hours)
-            let update_state = app.state::<services::UpdateState>();
+            let update_state = app.state::<services::UpdateState>().inner().clone();
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut service = update_state.write().await;

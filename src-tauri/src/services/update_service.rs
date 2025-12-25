@@ -139,21 +139,23 @@ async fn check_and_install_update(app: &tauri::AppHandle) -> Result<(), String> 
             tracing::info!("Downloading update...");
 
             let app_clone = app.clone();
-            let mut downloaded: u64 = 0;
+            let app_clone2 = app.clone();
 
             // Download and install the update
+            let downloaded = std::sync::atomic::AtomicU64::new(0);
             update
                 .download_and_install(
                     |chunk_length, content_length| {
-                        downloaded += chunk_length as u64;
+                        let prev = downloaded.fetch_add(chunk_length as u64, std::sync::atomic::Ordering::Relaxed);
+                        let current = prev + chunk_length as u64;
                         let progress = content_length
-                            .map(|total| (downloaded as f64 / total as f64) * 100.0)
+                            .map(|total| (current as f64 / total as f64) * 100.0)
                             .unwrap_or(0.0);
 
                         let _ = app_clone.emit(
                             "update-download-progress",
                             UpdateProgressEvent {
-                                downloaded,
+                                downloaded: current,
                                 total: content_length,
                                 progress_percent: progress,
                             },
@@ -161,7 +163,7 @@ async fn check_and_install_update(app: &tauri::AppHandle) -> Result<(), String> 
                     },
                     || {
                         tracing::info!("Update downloaded, preparing to install...");
-                        let _ = app_clone.emit("update-ready", ());
+                        let _ = app_clone2.emit("update-ready", ());
                     },
                 )
                 .await
@@ -192,9 +194,7 @@ async fn check_and_install_update(app: &tauri::AppHandle) -> Result<(), String> 
 }
 
 /// Manual check for updates (returns info without auto-installing)
-pub async fn check_for_update_manual(
-    app: &tauri::AppHandle,
-) -> Result<UpdateCheckEvent, String> {
+pub async fn check_for_update_manual(app: &tauri::AppHandle) -> Result<UpdateCheckEvent, String> {
     use tauri_plugin_updater::UpdaterExt;
 
     let current_version = env!("CARGO_PKG_VERSION").to_string();
