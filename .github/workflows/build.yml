@@ -83,12 +83,9 @@ jobs:
       # Build without release for non-tag pushes (skip updater signing)
       - name: Build Tauri app
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        uses: tauri-apps/tauri-action@v0
+        run: npm run tauri build -- --target ${{ matrix.target }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ""
-        with:
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.platform == 'macos-latest' && 'dmg' || matrix.platform == 'ubuntu-22.04' && 'deb,appimage' || 'msi,nsis' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       # Build with release for tagged pushes
       - name: Build Tauri app (Release)
