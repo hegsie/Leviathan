@@ -2259,3 +2259,239 @@ pub async fn delete_release(owner: String, repo: String, release_id: u64) -> Res
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Helper to set up a temporary token file for testing
+    fn setup_test_token_dir() -> (tempfile::TempDir, PathBuf) {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let token_path = temp_dir.path().join("github-token");
+        (temp_dir, token_path)
+    }
+
+    // ========================================================================
+    // Token Storage Tests
+    // ========================================================================
+
+    #[test]
+    fn test_token_file_write_and_read() {
+        let (_temp_dir, token_path) = setup_test_token_dir();
+        let test_token = "ghp_test1234567890abcdef";
+
+        // Write token
+        fs::write(&token_path, test_token).expect("Failed to write token");
+
+        // Read token back
+        let read_token = fs::read_to_string(&token_path).expect("Failed to read token");
+        assert_eq!(read_token.trim(), test_token);
+    }
+
+    #[test]
+    fn test_token_file_delete() {
+        let (_temp_dir, token_path) = setup_test_token_dir();
+        let test_token = "ghp_test1234567890abcdef";
+
+        // Write token
+        fs::write(&token_path, test_token).expect("Failed to write token");
+        assert!(token_path.exists());
+
+        // Delete token
+        fs::remove_file(&token_path).expect("Failed to delete token");
+        assert!(!token_path.exists());
+    }
+
+    #[test]
+    fn test_token_file_not_found_returns_none() {
+        let (_temp_dir, token_path) = setup_test_token_dir();
+
+        // File doesn't exist
+        assert!(!token_path.exists());
+    }
+
+    #[test]
+    fn test_empty_token_file() {
+        let (_temp_dir, token_path) = setup_test_token_dir();
+
+        // Write empty token
+        fs::write(&token_path, "").expect("Failed to write empty token");
+
+        let read_token = fs::read_to_string(&token_path).expect("Failed to read token");
+        assert!(read_token.trim().is_empty());
+    }
+
+    #[test]
+    fn test_token_with_whitespace_trimmed() {
+        let (_temp_dir, token_path) = setup_test_token_dir();
+        let test_token = "  ghp_test1234567890abcdef  \n";
+
+        fs::write(&token_path, test_token).expect("Failed to write token");
+
+        let read_token = fs::read_to_string(&token_path).expect("Failed to read token");
+        assert_eq!(read_token.trim(), "ghp_test1234567890abcdef");
+    }
+
+    // ========================================================================
+    // GitHubUser Parsing Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_github_user_full() {
+        let json = r#"{
+            "login": "octocat",
+            "id": 12345,
+            "avatar_url": "https://avatars.githubusercontent.com/u/12345",
+            "name": "The Octocat",
+            "email": "octocat@github.com"
+        }"#;
+
+        let user: GitHubUser = serde_json::from_str(json).expect("Failed to parse user");
+
+        assert_eq!(user.login, "octocat");
+        assert_eq!(user.id, 12345);
+        assert_eq!(user.avatar_url, "https://avatars.githubusercontent.com/u/12345");
+        assert_eq!(user.name, Some("The Octocat".to_string()));
+        assert_eq!(user.email, Some("octocat@github.com".to_string()));
+    }
+
+    #[test]
+    fn test_parse_github_user_minimal() {
+        let json = r#"{
+            "login": "octocat",
+            "id": 12345,
+            "avatar_url": "https://avatars.githubusercontent.com/u/12345"
+        }"#;
+
+        let user: GitHubUser = serde_json::from_str(json).expect("Failed to parse user");
+
+        assert_eq!(user.login, "octocat");
+        assert_eq!(user.id, 12345);
+        assert_eq!(user.avatar_url, "https://avatars.githubusercontent.com/u/12345");
+        assert_eq!(user.name, None);
+        assert_eq!(user.email, None);
+    }
+
+    #[test]
+    fn test_parse_github_user_null_optionals() {
+        let json = r#"{
+            "login": "octocat",
+            "id": 12345,
+            "avatar_url": "https://avatars.githubusercontent.com/u/12345",
+            "name": null,
+            "email": null
+        }"#;
+
+        let user: GitHubUser = serde_json::from_str(json).expect("Failed to parse user");
+
+        assert_eq!(user.login, "octocat");
+        assert_eq!(user.name, None);
+        assert_eq!(user.email, None);
+    }
+
+    #[test]
+    fn test_github_user_serializes_avatar_url_as_camel_case() {
+        let user = GitHubUser {
+            login: "octocat".to_string(),
+            id: 12345,
+            avatar_url: "https://example.com/avatar.png".to_string(),
+            name: Some("Test User".to_string()),
+            email: None,
+        };
+
+        let json = serde_json::to_string(&user).expect("Failed to serialize user");
+
+        // Should serialize as avatarUrl for frontend
+        assert!(json.contains("avatarUrl"));
+        assert!(!json.contains("avatar_url"));
+    }
+
+    // ========================================================================
+    // GitHubConnectionStatus Tests
+    // ========================================================================
+
+    #[test]
+    fn test_connection_status_connected() {
+        let status = GitHubConnectionStatus {
+            connected: true,
+            user: Some(GitHubUser {
+                login: "octocat".to_string(),
+                id: 12345,
+                avatar_url: "https://example.com/avatar.png".to_string(),
+                name: Some("The Octocat".to_string()),
+                email: None,
+            }),
+            scopes: vec!["repo".to_string(), "read:user".to_string()],
+        };
+
+        assert!(status.connected);
+        assert!(status.user.is_some());
+        assert_eq!(status.scopes.len(), 2);
+    }
+
+    #[test]
+    fn test_connection_status_disconnected() {
+        let status = GitHubConnectionStatus {
+            connected: false,
+            user: None,
+            scopes: vec![],
+        };
+
+        assert!(!status.connected);
+        assert!(status.user.is_none());
+        assert!(status.scopes.is_empty());
+    }
+
+    // ========================================================================
+    // GitHub URL Parsing Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_github_url_https() {
+        let result = parse_github_url("https://github.com/owner/repo.git");
+        assert!(result.is_some());
+        let (owner, repo) = result.unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_github_url_https_no_git_suffix() {
+        let result = parse_github_url("https://github.com/owner/repo");
+        assert!(result.is_some());
+        let (owner, repo) = result.unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_github_url_ssh() {
+        let result = parse_github_url("git@github.com:owner/repo.git");
+        assert!(result.is_some());
+        let (owner, repo) = result.unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_github_url_ssh_no_git_suffix() {
+        let result = parse_github_url("git@github.com:owner/repo");
+        assert!(result.is_some());
+        let (owner, repo) = result.unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_github_url_not_github() {
+        let result = parse_github_url("https://gitlab.com/owner/repo.git");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_github_url_invalid() {
+        let result = parse_github_url("not-a-valid-url");
+        assert!(result.is_none());
+    }
+}
