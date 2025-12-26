@@ -80,15 +80,15 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # Build without release for non-tag pushes
+      # Build without release for non-tag pushes (skip updater signing)
       - name: Build Tauri app
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI: true
+          TAURI_SIGNING_PRIVATE_KEY: ""
         with:
-          args: --target ${{ matrix.target }} --ci
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.platform == 'macos-latest' && 'dmg' || matrix.platform == 'ubuntu-22.04' && 'deb,appimage' || 'msi,nsis' }}
 
       # Build with release for tagged pushes
       - name: Build Tauri app (Release)
