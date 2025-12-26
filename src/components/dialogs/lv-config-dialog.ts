@@ -664,7 +664,7 @@ export class LvConfigDialog extends LitElement {
     if (!this.open) return null;
 
     return html`
-      <lv-modal title="Git Configuration" @close=${this.handleClose}>
+      <lv-modal modalTitle="Git Configuration" open @close=${this.handleClose}>
         <div class="content">
           ${this.error
             ? html`

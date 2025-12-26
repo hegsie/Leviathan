@@ -699,7 +699,7 @@ export class LvSshDialog extends LitElement {
     if (!this.open) return null;
 
     return html`
-      <lv-modal title="SSH Key Management" @close=${this.handleClose}>
+      <lv-modal modalTitle="SSH Key Management" open @close=${this.handleClose}>
         <div class="content">
           ${this.config && !this.config.sshAvailable
             ? html`

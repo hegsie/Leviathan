@@ -418,7 +418,9 @@ export class LvGraphCanvas extends LitElement {
    * Maps PRs to their head commit SHA for display
    */
   private async loadPullRequests(): Promise<void> {
-    if (!this.githubRepo) return;
+    if (!this.githubRepo) {
+      return;
+    }
 
     try {
       // Check if GitHub is connected
@@ -499,8 +501,8 @@ export class LvGraphCanvas extends LitElement {
       this.virtualScroll?.setPullRequests(this.pullRequestsByCommit);
       this.renderer?.markDirty();
       this.scheduleRender();
-    } catch (err) {
-      console.warn('Failed to load pull requests:', err);
+    } catch {
+      // Failed to load pull requests, continue without them
     }
   }
 
@@ -872,21 +874,14 @@ export class LvGraphCanvas extends LitElement {
    * Used by other components (like commit details panel) to navigate the graph
    */
   public selectCommit(oid: string): boolean {
-    console.log('[graph] selectCommit called with oid:', oid);
-
     if (!this.layout) {
-      console.log('[graph] selectCommit: no layout available');
       return false;
     }
 
     const node = this.layout.nodes.get(oid);
     if (!node) {
-      console.log('[graph] selectCommit: node not found for oid:', oid);
-      console.log('[graph] available nodes count:', this.layout.nodes.size);
       return false;
     }
-
-    console.log('[graph] selectCommit: found node at row', node.row, 'lane', node.lane);
 
     // Update selection state first
     this.selectedNode = node;
@@ -905,8 +900,6 @@ export class LvGraphCanvas extends LitElement {
     this.rebuildSpatialIndex();
     this.renderer?.markDirty();
     this.scheduleRender();
-
-    console.log('[graph] selectCommit: completed, viewport:', this.getViewport());
 
     return true;
   }
@@ -1023,13 +1016,6 @@ export class LvGraphCanvas extends LitElement {
       // Get refs for this commit
       refs = this.refsByCommit[this.selectedNode.oid] ?? [];
     }
-
-    console.log('[graph] dispatching commit-selected:', {
-      selectedNodeOid: this.selectedNode?.oid,
-      commitFound: !!commit,
-      commitOid: commit?.oid,
-      refsCount: refs.length,
-    });
 
     this.dispatchEvent(
       new CustomEvent<CommitSelectedEvent>('commit-selected', {

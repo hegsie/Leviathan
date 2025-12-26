@@ -611,7 +611,7 @@ export class LvGitHubDialog extends LitElement {
     `,
   ];
 
-  @property({ type: Boolean }) open = false;
+  @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
 
   @state() private activeTab: TabType = 'connection';
@@ -683,9 +683,17 @@ export class LvGitHubDialog extends LitElement {
   }
 
   private async checkConnection(): Promise<void> {
-    const result = await gitService.checkGitHubConnection();
-    if (result.success && result.data) {
-      this.connectionStatus = result.data;
+    try {
+      const result = await gitService.checkGitHubConnection();
+      if (result.success && result.data) {
+        this.connectionStatus = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to check connection';
+      } else {
+        this.error = 'Failed to verify connection';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to check connection';
     }
   }
 
@@ -813,26 +821,38 @@ export class LvGitHubDialog extends LitElement {
 
     this.isLoading = true;
     this.error = null;
+    const tokenToSave = this.tokenInput.trim();
 
     try {
-      const result = await gitService.storeGitHubToken(this.tokenInput.trim());
-      if (result.success) {
-        this.tokenInput = '';
-        await this.checkConnection();
-        if (this.connectionStatus?.connected && this.detectedRepo) {
-          await Promise.all([
-            this.loadPullRequests(),
-            this.loadWorkflowRuns(),
-            this.loadIssues(),
-            this.loadLabels(),
-            this.loadReleases(),
-          ]);
-        }
-      } else {
+      const result = await gitService.storeGitHubToken(tokenToSave);
+      if (!result.success) {
         this.error = result.error?.message ?? 'Failed to save token';
+        return;
+      }
+
+      // Token saved, now check connection
+      this.tokenInput = '';
+      await this.checkConnection();
+
+      // If connection failed, show error and restore token for retry
+      if (this.error) {
+        this.tokenInput = tokenToSave;
+        return;
+      }
+
+      // Load data if connected
+      if (this.connectionStatus?.connected && this.detectedRepo) {
+        await Promise.all([
+          this.loadPullRequests(),
+          this.loadWorkflowRuns(),
+          this.loadIssues(),
+          this.loadLabels(),
+          this.loadReleases(),
+        ]);
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to save token';
+      this.tokenInput = tokenToSave;
     } finally {
       this.isLoading = false;
     }
@@ -1052,7 +1072,7 @@ export class LvGitHubDialog extends LitElement {
               </div>
             ` : ''}
           </div>
-          <button class="btn btn-danger" @click=${this.handleDisconnect} ?disabled=${this.isLoading}>
+          <button class="btn btn-danger" @click=${() => this.handleDisconnect()} ?disabled=${this.isLoading}>
             Disconnect
           </button>
         </div>
@@ -1068,6 +1088,11 @@ export class LvGitHubDialog extends LitElement {
             placeholder="ghp_xxxxxxxxxxxx"
             .value=${this.tokenInput}
             @input=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
+            @change=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
+            @paste=${(e: Event) => {
+              const target = e.target as HTMLInputElement;
+              setTimeout(() => this.tokenInput = target.value, 0);
+            }}
           />
           <span class="help-text">
             Create a token at
@@ -1082,7 +1107,7 @@ export class LvGitHubDialog extends LitElement {
         <div class="btn-row">
           <button
             class="btn btn-primary"
-            @click=${this.handleSaveToken}
+            @click=${() => this.handleSaveToken()}
             ?disabled=${this.isLoading || !this.tokenInput.trim()}
           >
             Connect to GitHub
@@ -1606,7 +1631,7 @@ export class LvGitHubDialog extends LitElement {
     return html`
       <lv-modal
         ?open=${this.open}
-        title="GitHub"
+        modalTitle="GitHub"
         @close=${this.handleClose}
       >
         <div class="content">

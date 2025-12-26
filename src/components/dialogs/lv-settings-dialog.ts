@@ -10,15 +10,13 @@ export class LvSettingsDialog extends LitElement {
     css`
       :host {
         display: block;
+        width: 500px;
       }
 
       .settings-content {
         display: flex;
         flex-direction: column;
         gap: 24px;
-        padding: 16px 0;
-        max-height: 60vh;
-        overflow-y: auto;
       }
 
       .settings-section {
@@ -128,7 +126,6 @@ export class LvSettingsDialog extends LitElement {
         justify-content: flex-end;
         gap: 8px;
         padding-top: 16px;
-        border-top: 1px solid var(--border-color);
       }
 
       button {

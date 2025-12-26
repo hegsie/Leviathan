@@ -2,20 +2,33 @@
 //! Provides GitHub API integration for PRs, issues, and Actions
 
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
-const KEYRING_SERVICE: &str = "leviathan-github";
-const KEYRING_USER: &str = "github-token";
+const TOKEN_FILE_NAME: &str = "github-token";
+
+/// Get the path to the token file in app data directory
+fn get_token_file_path() -> Result<PathBuf> {
+    let data_dir = dirs::data_dir().ok_or_else(|| {
+        LeviathanError::OperationFailed("Could not find data directory".to_string())
+    })?;
+    let app_dir = data_dir.join("leviathan");
+    fs::create_dir_all(&app_dir).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to create app directory: {}", e))
+    })?;
+    Ok(app_dir.join(TOKEN_FILE_NAME))
+}
 
 /// GitHub user information
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GitHubUser {
     pub login: String,
     pub id: u64,
+    #[serde(alias = "avatar_url", rename = "avatarUrl")]
     pub avatar_url: String,
     pub name: Option<String>,
     pub email: Option<String>,
@@ -202,13 +215,11 @@ pub struct DetectedGitHubRepo {
 /// Store GitHub personal access token
 #[command]
 pub async fn store_github_token(token: String) -> Result<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to create keyring entry: {}", e))
-    })?;
+    let token_path = get_token_file_path()?;
 
-    entry
-        .set_password(&token)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to store token: {}", e)))?;
+    fs::write(&token_path, &token).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to store token: {}", e))
+    })?;
 
     Ok(())
 }
@@ -216,15 +227,23 @@ pub async fn store_github_token(token: String) -> Result<()> {
 /// Get stored GitHub token (returns None if not set)
 #[command]
 pub async fn get_github_token() -> Result<Option<String>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to create keyring entry: {}", e))
-    })?;
+    let token_path = get_token_file_path()?;
 
-    match entry.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(keyring::Error::NoEntry) => Ok(None),
+    if !token_path.exists() {
+        return Ok(None);
+    }
+
+    match fs::read_to_string(&token_path) {
+        Ok(token) => {
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(token))
+            }
+        }
         Err(e) => Err(LeviathanError::OperationFailed(format!(
-            "Failed to get token: {}",
+            "Failed to read token: {}",
             e
         ))),
     }
@@ -233,18 +252,15 @@ pub async fn get_github_token() -> Result<Option<String>> {
 /// Delete stored GitHub token
 #[command]
 pub async fn delete_github_token() -> Result<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to create keyring entry: {}", e))
-    })?;
+    let token_path = get_token_file_path()?;
 
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()), // Already deleted
-        Err(e) => Err(LeviathanError::OperationFailed(format!(
-            "Failed to delete token: {}",
-            e
-        ))),
+    if token_path.exists() {
+        fs::remove_file(&token_path).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to delete token: {}", e))
+        })?;
     }
+
+    Ok(())
 }
 
 /// Check GitHub connection and get user info
@@ -275,11 +291,13 @@ pub async fn check_github_connection() -> Result<GitHubConnectionStatus> {
         })?;
 
     if !response.status().is_success() {
-        return Ok(GitHubConnectionStatus {
-            connected: false,
-            user: None,
-            scopes: vec![],
-        });
+        let status = response.status();
+        let error_body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitHub API error ({}): {}",
+            status,
+            error_body
+        )));
     }
 
     // Get scopes from header

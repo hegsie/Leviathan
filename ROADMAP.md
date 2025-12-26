@@ -218,6 +218,33 @@
 
 ---
 
+### Distribution & Releases
+
+#### macOS Code Signing
+- Apple Developer Account setup
+- Developer ID Application certificate
+- Notarization for Gatekeeper
+- Hardened runtime entitlements
+- CI/CD integration for automated signing
+
+#### Windows Code Signing
+- EV code signing certificate
+- SmartScreen reputation building
+- CI/CD integration
+
+#### Linux Packaging
+- Flatpak distribution
+- Snap package
+- AppImage improvements
+- Debian/RPM packages
+
+#### Auto-Updates
+- Delta updates (smaller downloads)
+- Update channels (stable, beta)
+- Rollback support
+
+---
+
 ### Future Considerations
 
 - AI-assisted commit messages

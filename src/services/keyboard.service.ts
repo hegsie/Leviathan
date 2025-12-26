@@ -173,13 +173,21 @@ class KeyboardService {
     if (!this.enabled) return;
 
     // Don't handle shortcuts when typing in inputs
-    const target = e.target as HTMLElement;
-    if (
-      target.tagName === 'INPUT' ||
-      target.tagName === 'TEXTAREA' ||
-      target.isContentEditable
-    ) {
-      // Allow some shortcuts even in inputs
+    // Use composedPath() to find the actual target inside shadow DOM
+    const path = e.composedPath();
+    const isInInput = path.some((el) => {
+      if (el instanceof HTMLElement) {
+        return (
+          el.tagName === 'INPUT' ||
+          el.tagName === 'TEXTAREA' ||
+          el.isContentEditable
+        );
+      }
+      return false;
+    });
+
+    if (isInInput) {
+      // Allow some shortcuts even in inputs (ones with ctrl/meta)
       if (!e.ctrlKey && !e.metaKey) return;
     }
 

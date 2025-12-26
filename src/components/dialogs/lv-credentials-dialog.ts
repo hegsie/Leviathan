@@ -343,7 +343,7 @@ export class LvCredentialsDialog extends LitElement {
     `,
   ];
 
-  @property({ type: Boolean }) open = false;
+  @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
 
   @state() private activeTab: TabId = 'helpers';
@@ -699,7 +699,7 @@ export class LvCredentialsDialog extends LitElement {
     if (!this.open) return null;
 
     return html`
-      <lv-modal title="Credential Management" @close=${this.handleClose}>
+      <lv-modal modalTitle="Credential Management" open @close=${this.handleClose}>
         <div class="content">
           ${this.error
             ? html`

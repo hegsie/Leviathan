@@ -11,6 +11,7 @@ import './components/panels/lv-blame-view.ts';
 import './components/sidebar/lv-left-panel.ts';
 import './components/sidebar/lv-right-panel.ts';
 import './components/dialogs/lv-settings-dialog.ts';
+import './components/dialogs/lv-modal.ts';
 import './components/dialogs/lv-conflict-resolution-dialog.ts';
 import './components/dialogs/lv-command-palette.ts';
 import './components/dialogs/lv-reflog-dialog.ts';
@@ -370,6 +371,10 @@ export class AppShell extends LitElement {
   @state() private leftPanelWidth = 220;
   @state() private rightPanelWidth = 350;
 
+  // Panel visibility
+  @state() private leftPanelVisible = true;
+  @state() private rightPanelVisible = true;
+
   // Resize state
   private resizing: 'left' | 'right' | null = null;
   private resizeStartPos = 0;
@@ -378,6 +383,7 @@ export class AppShell extends LitElement {
   @query('lv-graph-canvas') private graphCanvas?: LvGraphCanvas;
 
   private unsubscribe?: () => void;
+  private unsubscribeUi?: () => void;
 
   // Bound event handlers for cleanup
   private boundHandleMouseMove = this.handleResizeMove.bind(this);
@@ -389,6 +395,10 @@ export class AppShell extends LitElement {
     super.connectedCallback();
     this.unsubscribe = repositoryStore.subscribe((state) => {
       this.activeRepository = state.getActiveRepository();
+    });
+    this.unsubscribeUi = uiStore.subscribe((state) => {
+      this.leftPanelVisible = state.panels.left.isVisible;
+      this.rightPanelVisible = state.panels.right.isVisible;
     });
     document.addEventListener('keydown', this.boundHandleKeyDown);
     document.addEventListener('click', this.handleDocumentClick);
@@ -425,6 +435,7 @@ export class AppShell extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribe?.();
+    this.unsubscribeUi?.();
     document.removeEventListener('mousemove', this.boundHandleMouseMove);
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
     document.removeEventListener('keydown', this.boundHandleKeyDown);
@@ -740,6 +751,20 @@ export class AppShell extends LitElement {
     this.showCommandPalette = true;
   }
 
+  private requiresRepository(action: () => void): () => void {
+    return () => {
+      if (!this.activeRepository) {
+        uiStore.getState().addToast({
+          type: 'warning',
+          message: 'Please open a repository first',
+          duration: 3000,
+        });
+        return;
+      }
+      action();
+    };
+  }
+
   private getPaletteCommands(): PaletteCommand[] {
     const isMac = navigator.platform.includes('Mac');
     const mod = isMac ? '⌘' : 'Ctrl';
@@ -794,49 +819,49 @@ export class AppShell extends LitElement {
         label: 'Manage remotes',
         category: 'action',
         icon: 'globe',
-        action: () => { this.showRemotes = true; },
+        action: this.requiresRepository(() => { this.showRemotes = true; }),
       },
       {
         id: 'clean',
         label: 'Clean working directory',
         category: 'action',
         icon: 'trash',
-        action: () => { this.showClean = true; },
+        action: this.requiresRepository(() => { this.showClean = true; }),
       },
       {
         id: 'bisect',
         label: 'Start bisect (find bug)',
         category: 'action',
         icon: 'search',
-        action: () => { this.showBisect = true; },
+        action: this.requiresRepository(() => { this.showBisect = true; }),
       },
       {
         id: 'submodules',
         label: 'Manage submodules',
         category: 'action',
         icon: 'folder',
-        action: () => { this.showSubmodules = true; },
+        action: this.requiresRepository(() => { this.showSubmodules = true; }),
       },
       {
         id: 'worktrees',
         label: 'Manage worktrees',
         category: 'action',
         icon: 'folder',
-        action: () => { this.showWorktrees = true; },
+        action: this.requiresRepository(() => { this.showWorktrees = true; }),
       },
       {
         id: 'lfs',
         label: 'Manage Git LFS',
         category: 'action',
         icon: 'folder',
-        action: () => { this.showLfs = true; },
+        action: this.requiresRepository(() => { this.showLfs = true; }),
       },
       {
         id: 'gpg',
         label: 'GPG Signing Settings',
         category: 'action',
         icon: 'key',
-        action: () => { this.showGpg = true; },
+        action: this.requiresRepository(() => { this.showGpg = true; }),
       },
       {
         id: 'ssh',
@@ -850,21 +875,21 @@ export class AppShell extends LitElement {
         label: 'Git Configuration',
         category: 'action',
         icon: 'settings',
-        action: () => { this.showConfig = true; },
+        action: this.requiresRepository(() => { this.showConfig = true; }),
       },
       {
         id: 'credentials',
         label: 'Credential Management',
         category: 'action',
         icon: 'key',
-        action: () => { this.showCredentials = true; },
+        action: this.requiresRepository(() => { this.showCredentials = true; }),
       },
       {
         id: 'github',
         label: 'GitHub Integration',
         category: 'action',
         icon: 'globe',
-        action: () => { this.showGitHub = true; },
+        action: this.requiresRepository(() => { this.showGitHub = true; }),
       },
       {
         id: 'search',
@@ -908,7 +933,7 @@ export class AppShell extends LitElement {
         category: 'action',
         icon: 'refresh',
         shortcut: `${mod}Z`,
-        action: () => { this.showReflog = true; },
+        action: this.requiresRepository(() => { this.showReflog = true; }),
       },
     ];
 
@@ -976,24 +1001,29 @@ export class AppShell extends LitElement {
 
   render() {
     return html`
-      <lv-toolbar></lv-toolbar>
+      <lv-toolbar
+        @open-settings=${() => { this.showSettings = true; }}
+        @open-command-palette=${() => { this.showCommandPalette = true; }}
+      ></lv-toolbar>
 
       ${this.activeRepository
         ? html`
             <div class="main-content">
-              <aside
-                class="left-panel"
-                style="width: ${this.leftPanelWidth}px"
-                @tag-selected=${this.handleTagSelected}
-                @branch-selected=${this.handleBranchSelected}
-              >
-                <lv-left-panel></lv-left-panel>
-              </aside>
+              ${this.leftPanelVisible ? html`
+                <aside
+                  class="left-panel"
+                  style="width: ${this.leftPanelWidth}px"
+                  @tag-selected=${this.handleTagSelected}
+                  @branch-selected=${this.handleBranchSelected}
+                >
+                  <lv-left-panel></lv-left-panel>
+                </aside>
 
-              <div
-                class="resize-handle-h ${this.resizing === 'left' ? 'dragging' : ''}"
-                @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'left')}
-              ></div>
+                <div
+                  class="resize-handle-h ${this.resizing === 'left' ? 'dragging' : ''}"
+                  @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'left')}
+                ></div>
+              ` : ''}
 
               <main class="center-panel">
                 <div class="graph-area">
@@ -1059,25 +1089,27 @@ export class AppShell extends LitElement {
                       : ''}
               </main>
 
-              <div
-                class="resize-handle-h ${this.resizing === 'right' ? 'dragging' : ''}"
-                @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'right')}
-              ></div>
+              ${this.rightPanelVisible ? html`
+                <div
+                  class="resize-handle-h ${this.resizing === 'right' ? 'dragging' : ''}"
+                  @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'right')}
+                ></div>
 
-              <aside
-                class="right-panel"
-                style="width: ${this.rightPanelWidth}px"
-                @file-selected=${this.handleFileSelected}
-                @select-commit=${this.handleSelectCommit}
-                @commit-file-selected=${this.handleCommitFileSelected}
-                @show-blame=${this.handleShowBlame}
-                @show-file-history=${this.handleShowFileHistory}
-              >
-                <lv-right-panel
-                  .commit=${this.selectedCommit}
-                  .refs=${this.selectedCommitRefs}
-                ></lv-right-panel>
-              </aside>
+                <aside
+                  class="right-panel"
+                  style="width: ${this.rightPanelWidth}px"
+                  @file-selected=${this.handleFileSelected}
+                  @select-commit=${this.handleSelectCommit}
+                  @commit-file-selected=${this.handleCommitFileSelected}
+                  @show-blame=${this.handleShowBlame}
+                  @show-file-history=${this.handleShowFileHistory}
+                >
+                  <lv-right-panel
+                    .commit=${this.selectedCommit}
+                    .refs=${this.selectedCommitRefs}
+                  ></lv-right-panel>
+                </aside>
+              ` : ''}
             </div>
 
             <footer class="status-bar">
@@ -1088,9 +1120,15 @@ export class AppShell extends LitElement {
 
       ${this.showSettings
         ? html`
-            <lv-settings-dialog
+            <lv-modal
+              open
+              modalTitle="Settings"
               @close=${this.handleCloseSettings}
-            ></lv-settings-dialog>
+            >
+              <lv-settings-dialog
+                @close=${this.handleCloseSettings}
+              ></lv-settings-dialog>
+            </lv-modal>
           `
         : ''}
 
