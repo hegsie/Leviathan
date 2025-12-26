@@ -86,8 +86,9 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI: true
         with:
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --ci
 
       # Build with release for tagged pushes
       - name: Build Tauri app (Release)
