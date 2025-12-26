@@ -217,9 +217,8 @@ pub struct DetectedGitHubRepo {
 pub async fn store_github_token(token: String) -> Result<()> {
     let token_path = get_token_file_path()?;
 
-    fs::write(&token_path, &token).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to store token: {}", e))
-    })?;
+    fs::write(&token_path, &token)
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to store token: {}", e)))?;
 
     Ok(())
 }
@@ -295,8 +294,7 @@ pub async fn check_github_connection() -> Result<GitHubConnectionStatus> {
         let error_body = response.text().await.unwrap_or_default();
         return Err(LeviathanError::OperationFailed(format!(
             "GitHub API error ({}): {}",
-            status,
-            error_body
+            status, error_body
         )));
     }
 
@@ -2351,7 +2349,10 @@ mod tests {
 
         assert_eq!(user.login, "octocat");
         assert_eq!(user.id, 12345);
-        assert_eq!(user.avatar_url, "https://avatars.githubusercontent.com/u/12345");
+        assert_eq!(
+            user.avatar_url,
+            "https://avatars.githubusercontent.com/u/12345"
+        );
         assert_eq!(user.name, Some("The Octocat".to_string()));
         assert_eq!(user.email, Some("octocat@github.com".to_string()));
     }
@@ -2368,7 +2369,10 @@ mod tests {
 
         assert_eq!(user.login, "octocat");
         assert_eq!(user.id, 12345);
-        assert_eq!(user.avatar_url, "https://avatars.githubusercontent.com/u/12345");
+        assert_eq!(
+            user.avatar_url,
+            "https://avatars.githubusercontent.com/u/12345"
+        );
         assert_eq!(user.name, None);
         assert_eq!(user.email, None);
     }
