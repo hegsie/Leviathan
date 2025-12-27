@@ -527,8 +527,11 @@ export class CanvasRenderer {
     this.avatarHitboxes = [];
     this.refLabelHitboxes = [];
 
-    // Draw column headers
-    this.renderColumnHeaders(data);
+    // Clip content area below header to prevent overlap
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, this.HEADER_HEIGHT, width, height - this.HEADER_HEIGHT);
+    ctx.clip();
 
     // Draw edges (behind nodes)
     this.renderEdges(data);
@@ -538,6 +541,12 @@ export class CanvasRenderer {
 
     // Draw ref labels (on top of nodes)
     this.renderRefLabels(data);
+
+    // Restore context (remove clipping)
+    ctx.restore();
+
+    // Draw column headers LAST (on top of everything)
+    this.renderColumnHeaders(data);
 
     // Draw FPS counter
     if (config.showFps) {
