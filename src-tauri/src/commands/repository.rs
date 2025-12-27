@@ -200,7 +200,9 @@ mod tests {
         let path = dir.path().join("clean-repo");
         std::fs::create_dir(&path).expect("Failed to create dir");
 
-        let result = init_repository(path.to_string_lossy().to_string(), None).await.unwrap();
+        let result = init_repository(path.to_string_lossy().to_string(), None)
+            .await
+            .unwrap();
         assert!(matches!(result.state, RepositoryState::Clean));
     }
 

@@ -510,8 +510,13 @@ mod tests {
         repo.create_commit("Modify README", &[("README.md", "# Updated")]);
         repo.create_commit("Modify again", &[("README.md", "# Updated again")]);
 
-        let result =
-            get_file_history(repo.path_str(), "README.md".to_string(), Some(100), Some(true)).await;
+        let result = get_file_history(
+            repo.path_str(),
+            "README.md".to_string(),
+            Some(100),
+            Some(true),
+        )
+        .await;
 
         assert!(result.is_ok());
         let commits = result.unwrap();
@@ -524,8 +529,13 @@ mod tests {
         repo.create_commit("Modify README", &[("README.md", "# Updated")]);
         repo.create_commit("Modify again", &[("README.md", "# Updated again")]);
 
-        let result =
-            get_file_history(repo.path_str(), "README.md".to_string(), Some(2), Some(true)).await;
+        let result = get_file_history(
+            repo.path_str(),
+            "README.md".to_string(),
+            Some(2),
+            Some(true),
+        )
+        .await;
 
         assert!(result.is_ok());
         let commits = result.unwrap();

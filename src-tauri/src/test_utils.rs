@@ -141,8 +141,14 @@ impl TestRepo {
         let head = repo.head().expect("Failed to get HEAD");
         let commit = head.peel_to_commit().expect("Failed to get commit");
         let sig = repo.signature().expect("Failed to get signature");
-        repo.tag(name, commit.as_object(), &sig, &format!("Tag {}", name), false)
-            .expect("Failed to create tag")
+        repo.tag(
+            name,
+            commit.as_object(),
+            &sig,
+            &format!("Tag {}", name),
+            false,
+        )
+        .expect("Failed to create tag")
     }
 
     /// Create a lightweight tag

@@ -271,13 +271,8 @@ mod tests {
     #[tokio::test]
     async fn test_create_branch_and_checkout() {
         let repo = TestRepo::with_initial_commit();
-        let result = create_branch(
-            repo.path_str(),
-            "new-feature".to_string(),
-            None,
-            Some(true),
-        )
-        .await;
+        let result =
+            create_branch(repo.path_str(), "new-feature".to_string(), None, Some(true)).await;
 
         assert!(result.is_ok());
         let branch = result.unwrap();
@@ -309,13 +304,8 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_branch("existing");
 
-        let result = create_branch(
-            repo.path_str(),
-            "existing".to_string(),
-            None,
-            Some(false),
-        )
-        .await;
+        let result =
+            create_branch(repo.path_str(), "existing".to_string(), None, Some(false)).await;
 
         assert!(result.is_err());
     }
@@ -356,8 +346,12 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_branch("old-name");
 
-        let result =
-            rename_branch(repo.path_str(), "old-name".to_string(), "new-name".to_string()).await;
+        let result = rename_branch(
+            repo.path_str(),
+            "old-name".to_string(),
+            "new-name".to_string(),
+        )
+        .await;
 
         assert!(result.is_ok());
         let branch = result.unwrap();
@@ -372,8 +366,12 @@ mod tests {
     #[tokio::test]
     async fn test_rename_branch_not_found() {
         let repo = TestRepo::with_initial_commit();
-        let result =
-            rename_branch(repo.path_str(), "nonexistent".to_string(), "new-name".to_string()).await;
+        let result = rename_branch(
+            repo.path_str(),
+            "nonexistent".to_string(),
+            "new-name".to_string(),
+        )
+        .await;
         assert!(result.is_err());
     }
 
