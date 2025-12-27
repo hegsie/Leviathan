@@ -2584,3 +2584,77 @@ export async function loadProfileForRepository(repoPath: string): Promise<void> 
     store.setActiveProfile(result.data ?? null);
   }
 }
+
+/**
+ * Repository hosting provider types
+ */
+export type RepositoryProvider = 'github' | 'ado' | 'gitlab' | 'bitbucket' | null;
+
+/**
+ * Integration suggestion result
+ */
+export interface IntegrationSuggestion {
+  provider: RepositoryProvider;
+  providerName: string;
+  isConfigured: boolean;
+  features: string[];
+}
+
+/**
+ * Detect repository hosting provider and check if integration is configured
+ */
+export async function detectRepositoryIntegration(repoPath: string): Promise<IntegrationSuggestion | null> {
+  // Try to detect each provider in parallel
+  const [githubResult, adoResult, gitlabResult, bitbucketResult] = await Promise.all([
+    detectGitHubRepo(repoPath),
+    detectAdoRepo(repoPath),
+    detectGitLabRepo(repoPath),
+    detectBitbucketRepo(repoPath),
+  ]);
+
+  // Check GitHub
+  if (githubResult.success && githubResult.data) {
+    const connectionResult = await checkGitHubConnection();
+    return {
+      provider: 'github',
+      providerName: 'GitHub',
+      isConfigured: connectionResult.success && connectionResult.data?.connected === true,
+      features: ['Pull request overlays', 'Create PRs from branches', 'Link issues'],
+    };
+  }
+
+  // Check Azure DevOps
+  if (adoResult.success && adoResult.data) {
+    const connectionResult = await checkAdoConnection(adoResult.data.organization);
+    return {
+      provider: 'ado',
+      providerName: 'Azure DevOps',
+      isConfigured: connectionResult.success && connectionResult.data?.connected === true,
+      features: ['Pull request overlays', 'Work item linking'],
+    };
+  }
+
+  // Check GitLab
+  if (gitlabResult.success && gitlabResult.data) {
+    const connectionResult = await checkGitLabConnection(gitlabResult.data.instanceUrl);
+    return {
+      provider: 'gitlab',
+      providerName: 'GitLab',
+      isConfigured: connectionResult.success && connectionResult.data?.connected === true,
+      features: ['Merge request overlays', 'Issue linking'],
+    };
+  }
+
+  // Check Bitbucket
+  if (bitbucketResult.success && bitbucketResult.data) {
+    const connectionResult = await checkBitbucketConnection();
+    return {
+      provider: 'bitbucket',
+      providerName: 'Bitbucket',
+      isConfigured: connectionResult.success && connectionResult.data?.connected === true,
+      features: ['Pull request overlays'],
+    };
+  }
+
+  return null;
+}

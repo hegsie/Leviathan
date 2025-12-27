@@ -392,6 +392,7 @@ export class AppShell extends LitElement {
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
   private updateUnlisteners: UnlistenFn[] = [];
+  private shownIntegrationSuggestions: Set<string> = new Set();
 
   // Bound event handlers for cleanup
   private boundHandleMouseMove = this.handleResizeMove.bind(this);
@@ -406,9 +407,10 @@ export class AppShell extends LitElement {
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
 
-      // Load profile for new repository
+      // Load profile for new repository and check integration
       if (repoChanged && newActiveRepo) {
         gitService.loadProfileForRepository(newActiveRepo.repository.path);
+        this.checkRepositoryIntegration(newActiveRepo.repository.path);
       }
     });
     this.unsubscribeUi = uiStore.subscribe((state) => {
@@ -498,6 +500,33 @@ export class AppShell extends LitElement {
       showToast(`Update failed: ${error.message}`, 'error', 8000);
     });
     this.updateUnlisteners.push(unlistenError);
+  }
+
+  /**
+   * Check if repository has integration configured and suggest if not
+   */
+  private async checkRepositoryIntegration(repoPath: string): Promise<void> {
+    // Don't show the same suggestion twice
+    if (this.shownIntegrationSuggestions.has(repoPath)) {
+      return;
+    }
+
+    try {
+      const suggestion = await gitService.detectRepositoryIntegration(repoPath);
+
+      if (suggestion && !suggestion.isConfigured) {
+        this.shownIntegrationSuggestions.add(repoPath);
+
+        const features = suggestion.features.slice(0, 2).join(', ');
+        showToast(
+          `${suggestion.providerName} repository detected. Connect to enable ${features}. Click the toolbar icon to configure.`,
+          'info',
+          12000
+        );
+      }
+    } catch {
+      // Silently fail - this is a nice-to-have feature
+    }
   }
 
   private handleKeyDown(e: KeyboardEvent): void {

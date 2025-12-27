@@ -277,6 +277,17 @@ export class CanvasRenderer {
     oid: string;
   }> = [];
 
+  // Ref label hitboxes for tooltip detection
+  private refLabelHitboxes: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    label: string;
+    fullName: string;
+    refType: string;
+  }> = [];
+
   constructor(
     canvas: HTMLCanvasElement,
     config: Partial<RenderConfig> = {},
@@ -428,8 +439,9 @@ export class CanvasRenderer {
     ctx.fillStyle = theme.background;
     ctx.fillRect(0, 0, width, height);
 
-    // Clear avatar hitboxes for this frame
+    // Clear hitboxes for this frame
     this.avatarHitboxes = [];
+    this.refLabelHitboxes = [];
 
     // Draw column headers
     this.renderColumnHeaders(data);
@@ -835,6 +847,17 @@ export class CanvasRenderer {
         ctx.fillStyle = bgColor;
         this.drawRoundedRect(currentX, y - labelHeight / 2, pillWidth, labelHeight, labelRadius);
 
+        // Store hitbox for tooltip detection
+        this.refLabelHitboxes.push({
+          x: currentX,
+          y: y - labelHeight / 2,
+          width: pillWidth,
+          height: labelHeight,
+          label: ref.shorthand,
+          fullName: ref.name,
+          refType: ref.refType,
+        });
+
         // Draw HEAD indicator
         if (ref.isHead) {
           ctx.strokeStyle = theme.refColors.head;
@@ -878,6 +901,17 @@ export class CanvasRenderer {
         // Draw PR pill background
         ctx.fillStyle = bgColor;
         this.drawRoundedRect(currentX, y - labelHeight / 2, prPillWidth, labelHeight, labelRadius);
+
+        // Store hitbox for tooltip detection
+        this.refLabelHitboxes.push({
+          x: currentX,
+          y: y - labelHeight / 2,
+          width: prPillWidth,
+          height: labelHeight,
+          label: prLabel,
+          fullName: pr.url ?? `Pull Request ${prLabel}`,
+          refType: 'pullRequest',
+        });
 
         // Draw PR icon (merge/pull request icon)
         ctx.strokeStyle = prTextColor;
@@ -1255,6 +1289,26 @@ export class CanvasRenderer {
           authorName: hitbox.authorName,
           authorEmail: hitbox.authorEmail,
           oid: hitbox.oid,
+        };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Check if a point is over a ref label and return label info
+   * @param x X coordinate relative to canvas
+   * @param y Y coordinate relative to canvas
+   * @returns Label info if hovering over ref label, null otherwise
+   */
+  getRefLabelAtPoint(x: number, y: number): { label: string; fullName: string; refType: string } | null {
+    for (const hitbox of this.refLabelHitboxes) {
+      if (x >= hitbox.x && x <= hitbox.x + hitbox.width &&
+          y >= hitbox.y && y <= hitbox.y + hitbox.height) {
+        return {
+          label: hitbox.label,
+          fullName: hitbox.fullName,
+          refType: hitbox.refType,
         };
       }
     }

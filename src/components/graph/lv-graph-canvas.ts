@@ -700,7 +700,7 @@ export class LvGraphCanvas extends LitElement {
       this.canvasEl.classList.remove('pointer');
     }
 
-    // Check for avatar hover for tooltip
+    // Check for avatar or ref label hover for tooltip
     if (this.renderer) {
       const rect = this.canvasEl.getBoundingClientRect();
 
@@ -708,6 +708,7 @@ export class LvGraphCanvas extends LitElement {
       const canvasX = e.clientX - rect.left;
       const canvasY = e.clientY - rect.top;
 
+      // Check avatars first
       const avatarHit = this.renderer.getAvatarAtPoint(canvasX, canvasY);
       if (avatarHit) {
         this.tooltipVisible = true;
@@ -716,7 +717,19 @@ export class LvGraphCanvas extends LitElement {
         this.tooltipAuthorName = avatarHit.authorName;
         this.tooltipAuthorEmail = avatarHit.authorEmail;
       } else {
-        this.tooltipVisible = false;
+        // Check ref labels
+        const refLabelHit = this.renderer.getRefLabelAtPoint(canvasX, canvasY);
+        if (refLabelHit) {
+          this.tooltipVisible = true;
+          this.tooltipX = e.clientX + 12;
+          this.tooltipY = e.clientY - 8;
+          this.tooltipAuthorName = refLabelHit.fullName;
+          this.tooltipAuthorEmail = refLabelHit.refType === 'pullRequest'
+            ? 'Click to open'
+            : this.getRefTypeLabel(refLabelHit.refType);
+        } else {
+          this.tooltipVisible = false;
+        }
       }
     }
 
@@ -1060,6 +1073,24 @@ export class LvGraphCanvas extends LitElement {
     }
 
     return { type: 'none', distance: Infinity };
+  }
+
+  /**
+   * Get human-readable label for ref type
+   */
+  private getRefTypeLabel(refType: string): string {
+    switch (refType) {
+      case 'localBranch':
+        return 'Local branch';
+      case 'remoteBranch':
+        return 'Remote branch';
+      case 'tag':
+        return 'Tag';
+      case 'pullRequest':
+        return 'Pull request';
+      default:
+        return 'Reference';
+    }
   }
 
   private dispatchSelectionEvent(): void {
