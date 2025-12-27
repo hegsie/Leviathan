@@ -73,8 +73,8 @@ export interface RenderTheme {
 }
 
 const DEFAULT_CONFIG: RenderConfig = {
-  rowHeight: 28,
-  laneWidth: 24,
+  rowHeight: 22,
+  laneWidth: 14,
   nodeRadius: 6,
   minNodeRadius: 5,
   maxNodeRadius: 10,

@@ -74,8 +74,8 @@ export interface RenderData {
 }
 
 const DEFAULT_CONFIG: VirtualScrollConfig = {
-  rowHeight: 28,
-  laneWidth: 24,
+  rowHeight: 22,
+  laneWidth: 14,
   padding: 20,
   overscanRows: 15,
 };

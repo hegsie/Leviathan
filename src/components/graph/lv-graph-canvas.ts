@@ -223,9 +223,9 @@ export class LvGraphCanvas extends LitElement {
   private lastRenderData: RenderData | null = null;
   private sortedNodesByRow: LayoutNode[] = [];
 
-  // Config - balanced size
-  private readonly ROW_HEIGHT = 28;
-  private readonly LANE_WIDTH = 24;
+  // Config - compact size
+  private readonly ROW_HEIGHT = 22;
+  private readonly LANE_WIDTH = 14;
   private readonly PADDING = 20;
   private readonly NODE_RADIUS = 6;
   private readonly HEADER_HEIGHT = 28; // Must match canvas-renderer.ts

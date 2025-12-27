@@ -40,8 +40,8 @@ export class SpatialIndex {
   // Coordinate transformation
   private offsetX: number = 0;
   private offsetY: number = 0;
-  private rowHeight: number = 28;
-  private laneWidth: number = 20;
+  private rowHeight: number = 22;
+  private laneWidth: number = 14;
   private maxLane: number = 0;
 
   constructor(options: SpatialIndexOptions = {}) {
