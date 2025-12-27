@@ -24,7 +24,7 @@ export class LvCommitDetails extends LitElement {
       }
 
       .header {
-        padding: var(--spacing-md);
+        padding: 6px 12px;
         border-bottom: 1px solid var(--color-border);
         background: var(--color-bg-secondary);
       }
@@ -40,7 +40,7 @@ export class LvCommitDetails extends LitElement {
       .content {
         flex: 1;
         overflow-y: auto;
-        padding: var(--spacing-md);
+        padding: 8px 12px;
       }
 
       .empty-state {
@@ -53,7 +53,7 @@ export class LvCommitDetails extends LitElement {
       }
 
       .section {
-        margin-bottom: var(--spacing-lg);
+        margin-bottom: 12px;
       }
 
       .section:last-child {
@@ -66,15 +66,15 @@ export class LvCommitDetails extends LitElement {
         color: var(--color-text-muted);
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        margin-bottom: var(--spacing-xs);
+        margin-bottom: 4px;
       }
 
       .commit-message {
         font-size: var(--font-size-md);
         font-weight: var(--font-weight-semibold);
         color: var(--color-text-primary);
-        margin-bottom: var(--spacing-sm);
-        line-height: 1.4;
+        margin-bottom: 4px;
+        line-height: 1.3;
       }
 
       .commit-body {
@@ -98,8 +98,8 @@ export class LvCommitDetails extends LitElement {
       .meta-row {
         display: flex;
         align-items: flex-start;
-        gap: var(--spacing-sm);
-        margin-bottom: var(--spacing-xs);
+        gap: 6px;
+        margin-bottom: 2px;
         font-size: var(--font-size-sm);
       }
 
@@ -187,9 +187,9 @@ export class LvCommitDetails extends LitElement {
       .file-item {
         display: flex;
         align-items: center;
-        gap: var(--spacing-xs);
-        padding: var(--spacing-xs) var(--spacing-sm);
-        margin: 0 calc(-1 * var(--spacing-sm));
+        gap: 4px;
+        padding: 2px 8px;
+        margin: 0 -8px;
         cursor: pointer;
         font-size: var(--font-size-sm);
         border-radius: var(--radius-sm);
