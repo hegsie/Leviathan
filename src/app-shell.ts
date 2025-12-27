@@ -35,6 +35,9 @@ import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.type
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
 import * as gitService from './services/git.service.ts';
+import * as updateService from './services/update.service.ts';
+import { showToast } from './services/notification.service.ts';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 
 /**
  * Main application shell component
@@ -388,6 +391,7 @@ export class AppShell extends LitElement {
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
+  private updateUnlisteners: UnlistenFn[] = [];
 
   // Bound event handlers for cleanup
   private boundHandleMouseMove = this.handleResizeMove.bind(this);
@@ -422,6 +426,9 @@ export class AppShell extends LitElement {
 
     // Load profiles
     gitService.loadProfiles();
+
+    // Set up update notification listeners
+    this.setupUpdateListeners();
 
     // Register keyboard shortcuts
     registerDefaultShortcuts({
@@ -458,6 +465,39 @@ export class AppShell extends LitElement {
     document.removeEventListener('keydown', this.boundHandleKeyDown);
     document.removeEventListener('click', this.handleDocumentClick);
     gitService.cleanupRemoteOperationListeners();
+    // Clean up update listeners
+    this.updateUnlisteners.forEach((unlisten) => unlisten());
+    this.updateUnlisteners = [];
+  }
+
+  private async setupUpdateListeners(): Promise<void> {
+    // Update available - show notification
+    const unlistenAvailable = await updateService.onUpdateAvailable((event) => {
+      showToast(
+        `Update available: v${event.latestVersion}`,
+        'info',
+        10000
+      );
+    });
+    this.updateUnlisteners.push(unlistenAvailable);
+
+    // Update downloading
+    const unlistenDownloading = await updateService.onUpdateDownloading(() => {
+      showToast('Downloading update...', 'info', 5000);
+    });
+    this.updateUnlisteners.push(unlistenDownloading);
+
+    // Update ready - will restart
+    const unlistenReady = await updateService.onUpdateReady(() => {
+      showToast('Update installed - restarting...', 'success', 3000);
+    });
+    this.updateUnlisteners.push(unlistenReady);
+
+    // Update error
+    const unlistenError = await updateService.onUpdateError((error) => {
+      showToast(`Update failed: ${error.message}`, 'error', 8000);
+    });
+    this.updateUnlisteners.push(unlistenError);
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
