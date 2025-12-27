@@ -122,6 +122,28 @@ export class LvToolbar extends LitElement {
         text-overflow: ellipsis;
       }
 
+      .provider-icon {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+      }
+
+      .provider-icon.github {
+        color: var(--color-text-secondary);
+      }
+
+      .provider-icon.ado {
+        color: #0078d4;
+      }
+
+      .provider-icon.gitlab {
+        color: #fc6d26;
+      }
+
+      .provider-icon.bitbucket {
+        color: #0052cc;
+      }
+
       .tab-close {
         display: flex;
         align-items: center;
@@ -396,6 +418,42 @@ export class LvToolbar extends LitElement {
     }));
   }
 
+  private detectProvider(repo: OpenRepository): 'github' | 'ado' | 'gitlab' | 'bitbucket' | null {
+    const originRemote = repo.remotes.find(r => r.name === 'origin') ?? repo.remotes[0];
+    if (!originRemote) return null;
+
+    const url = originRemote.url.toLowerCase();
+    if (url.includes('github.com') || url.includes('github.')) return 'github';
+    if (url.includes('dev.azure.com') || url.includes('visualstudio.com')) return 'ado';
+    if (url.includes('gitlab.com') || url.includes('gitlab.')) return 'gitlab';
+    if (url.includes('bitbucket.org') || url.includes('bitbucket.')) return 'bitbucket';
+    return null;
+  }
+
+  private renderProviderIcon(repo: OpenRepository) {
+    const provider = this.detectProvider(repo);
+    if (!provider) return null;
+
+    switch (provider) {
+      case 'github':
+        return html`<svg class="provider-icon github" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+        </svg>`;
+      case 'ado':
+        return html`<svg class="provider-icon ado" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M0 8.877L2.247 5.91l8.405-3.416V.022l7.37 5.393L2.966 8.338v8.225L0 15.707zm24-4.45v14.651l-5.753 4.9-9.303-3.057v3.056l-5.978-7.416 15.057 1.798V5.415z"/>
+        </svg>`;
+      case 'gitlab':
+        return html`<svg class="provider-icon gitlab" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.452.044 13.587a.924.924 0 00.331 1.023L12 23.054l11.625-8.443a.92.92 0 00.33-1.024"/>
+        </svg>`;
+      case 'bitbucket':
+        return html`<svg class="provider-icon bitbucket" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M.778 1.211a.768.768 0 00-.768.892l3.263 19.81c.084.5.515.868 1.022.873H19.95a.772.772 0 00.77-.646l3.27-20.03a.768.768 0 00-.768-.891zM14.52 15.53H9.522L8.17 8.466h7.561z"/>
+        </svg>`;
+    }
+  }
+
   private handleOpenSettings(): void {
     this.dispatchEvent(new CustomEvent('open-settings', {
       bubbles: true,
@@ -469,6 +527,7 @@ export class LvToolbar extends LitElement {
                   class="tab ${index === this.activeIndex ? 'active' : ''}"
                   @click=${() => this.handleTabClick(index)}
                 >
+                  ${this.renderProviderIcon(repo)}
                   <span class="tab-name">${repo.repository.name}</span>
                   <span
                     class="tab-close"

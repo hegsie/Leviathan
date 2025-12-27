@@ -1,10 +1,23 @@
 //! Repository command handlers
 
 use std::path::Path;
-use tauri::command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tauri::{command, AppHandle, Emitter};
 
 use crate::error::{LeviathanError, Result};
 use crate::models::{Repository, RepositoryState};
+
+/// Progress event payload for clone operations
+#[derive(Clone, serde::Serialize)]
+pub struct CloneProgress {
+    pub stage: String,
+    pub received_objects: usize,
+    pub total_objects: usize,
+    pub indexed_objects: usize,
+    pub received_bytes: usize,
+    pub percent: u8,
+}
 
 /// Open an existing repository
 #[command]
@@ -41,27 +54,91 @@ pub async fn open_repository(path: String) -> Result<Repository> {
     })
 }
 
-/// Clone a repository
+/// Clone a repository with progress reporting
 #[command]
 pub async fn clone_repository(
+    app: AppHandle,
     url: String,
     path: String,
     bare: Option<bool>,
     branch: Option<String>,
 ) -> Result<Repository> {
+    let dest_path = std::path::PathBuf::from(&path);
+    let url_clone = url.clone();
+    let bare = bare.unwrap_or(false);
+    let app_for_progress = app.clone();
+
+    // Run the blocking clone operation in a separate thread
+    let result = tokio::task::spawn_blocking(move || {
+        let mut builder = git2::build::RepoBuilder::new();
+
+        if bare {
+            builder.bare(true);
+        }
+
+        if let Some(ref branch) = branch {
+            builder.branch(branch);
+        }
+
+        // Set up fetch options with progress callbacks
+        let mut fetch_opts = git2::FetchOptions::new();
+        let mut callbacks = git2::RemoteCallbacks::new();
+
+        // Track last emitted percent to avoid spamming events
+        let last_percent = Arc::new(AtomicUsize::new(0));
+        let last_percent_clone = Arc::clone(&last_percent);
+        let app_clone = app_for_progress;
+
+        callbacks.transfer_progress(move |stats| {
+            let total = stats.total_objects();
+            let received = stats.received_objects();
+            let indexed = stats.indexed_objects();
+
+            // Calculate percent (receiving is 0-80%, indexing is 80-100%)
+            let percent = if total == 0 {
+                0
+            } else if received < total {
+                // Receiving phase: 0-80%
+                (received * 80 / total) as u8
+            } else {
+                // Indexing phase: 80-100%
+                80 + (indexed * 20 / total) as u8
+            };
+
+            // Only emit if percent changed
+            let prev = last_percent_clone.swap(percent as usize, Ordering::Relaxed);
+            if prev != percent as usize {
+                let stage = if received < total {
+                    "Receiving objects"
+                } else {
+                    "Indexing objects"
+                };
+
+                let progress = CloneProgress {
+                    stage: stage.to_string(),
+                    received_objects: received,
+                    total_objects: total,
+                    indexed_objects: indexed,
+                    received_bytes: stats.received_bytes(),
+                    percent,
+                };
+
+                let _ = app_clone.emit("clone-progress", progress);
+            }
+
+            true
+        });
+
+        fetch_opts.remote_callbacks(callbacks);
+        builder.fetch_options(fetch_opts);
+
+        builder.clone(&url_clone, &dest_path)
+    })
+    .await
+    .map_err(|e| LeviathanError::Custom(format!("Clone task failed: {}", e)))?;
+
+    let repo = result?;
     let path = Path::new(&path);
-
-    let mut builder = git2::build::RepoBuilder::new();
-
-    if bare.unwrap_or(false) {
-        builder.bare(true);
-    }
-
-    if let Some(ref branch) = branch {
-        builder.branch(branch);
-    }
-
-    let repo = builder.clone(&url, path)?;
 
     let name = path
         .file_name()
@@ -72,6 +149,19 @@ pub async fn clone_repository(
         .head()
         .ok()
         .map(|h| h.shorthand().map(|s| s.to_string()).unwrap_or_default());
+
+    // Emit completion
+    let _ = app.emit(
+        "clone-progress",
+        CloneProgress {
+            stage: "Complete".to_string(),
+            received_objects: 0,
+            total_objects: 0,
+            indexed_objects: 0,
+            received_bytes: 0,
+            percent: 100,
+        },
+    );
 
     Ok(Repository {
         path: path.display().to_string(),

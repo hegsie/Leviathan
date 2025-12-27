@@ -9,8 +9,18 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { cloneRepository } from '../../services/git.service.ts';
 import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
+
+interface CloneProgress {
+  stage: string;
+  received_objects: number;
+  total_objects: number;
+  indexed_objects: number;
+  received_bytes: number;
+  percent: number;
+}
 
 @customElement('lv-clone-dialog')
 export class LvCloneDialog extends LitElement {
@@ -176,6 +186,8 @@ export class LvCloneDialog extends LitElement {
 
   @query('lv-modal') private modal!: LvModal;
 
+  private unlistenProgress?: UnlistenFn;
+
   public open(): void {
     this.reset();
     this.modal.open = true;
@@ -183,6 +195,14 @@ export class LvCloneDialog extends LitElement {
 
   public close(): void {
     this.modal.open = false;
+    this.cleanupListener();
+  }
+
+  private cleanupListener(): void {
+    if (this.unlistenProgress) {
+      this.unlistenProgress();
+      this.unlistenProgress = undefined;
+    }
   }
 
   private reset(): void {
@@ -193,6 +213,7 @@ export class LvCloneDialog extends LitElement {
     this.progress = 0;
     this.progressText = '';
     this.error = '';
+    this.cleanupListener();
   }
 
   private handleUrlChange(e: Event): void {
@@ -240,6 +261,12 @@ export class LvCloneDialog extends LitElement {
     }
   }
 
+  private formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
   private async handleClone(): Promise<void> {
     if (!this.url.trim()) {
       this.error = 'Please enter a repository URL';
@@ -257,13 +284,24 @@ export class LvCloneDialog extends LitElement {
     this.error = '';
 
     try {
+      // Set up progress listener before starting clone
+      this.unlistenProgress = await listen<CloneProgress>('clone-progress', (event) => {
+        const { stage, received_objects, total_objects, received_bytes, percent } = event.payload;
+        this.progress = percent;
+
+        if (stage === 'Complete') {
+          this.progressText = 'Clone complete!';
+        } else if (total_objects > 0) {
+          this.progressText = `${stage}: ${received_objects}/${total_objects} (${this.formatBytes(received_bytes)})`;
+        } else {
+          this.progressText = stage;
+        }
+      });
+
       // Construct full path with repo name
       const fullPath = this.repoName
         ? `${this.destination}/${this.repoName}`
         : this.destination;
-
-      this.progressText = `Cloning to ${fullPath}...`;
-      this.progress = 10;
 
       const result = await cloneRepository({
         url: this.url.trim(),
@@ -285,10 +323,12 @@ export class LvCloneDialog extends LitElement {
       } else {
         this.error = result.error?.message ?? 'Failed to clone repository';
         this.isCloning = false;
+        this.cleanupListener();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Unknown error occurred';
       this.isCloning = false;
+      this.cleanupListener();
     }
   }
 
