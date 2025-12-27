@@ -2086,7 +2086,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leviathan"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
