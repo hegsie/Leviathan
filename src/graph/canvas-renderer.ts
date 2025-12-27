@@ -955,7 +955,12 @@ export class CanvasRenderer {
       // Render refs inline after message
       const messageWidth = ctx.measureText(displayMessage).width;
       let currentX = messageColumnX + messageWidth + 12;
-      for (const ref of refs) {
+      const maxLabelX = statsColumnX - 12; // Stop before stats column
+      let remainingRefs = 0;
+      let remainingPrs = 0;
+
+      for (let i = 0; i < refs.length; i++) {
+        const ref = refs[i];
         const label = ref.shorthand;
 
         ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
@@ -963,6 +968,13 @@ export class CanvasRenderer {
 
         const hasIcon = config.showRefIcons;
         const pillWidth = textWidth + labelPadding * 2 + (hasIcon ? iconSize + iconPadding : 0);
+
+        // Check if this label would overflow
+        if (currentX + pillWidth > maxLabelX) {
+          remainingRefs = refs.length - i;
+          remainingPrs = prs.length;
+          break;
+        }
 
         const { bgColor, textColor } = this.getRefColors(ref);
 
@@ -1009,46 +1021,78 @@ export class CanvasRenderer {
         currentX += pillWidth + labelGap;
       }
 
-      // Render PR badges after refs (prs already defined above)
-      for (const pr of prs) {
-        const { bgColor, textColor: prTextColor } = this.getPrColors(pr);
-        const prLabel = `#${pr.number}`;
+      // Render PR badges after refs (only if we haven't hit overflow yet)
+      if (remainingRefs === 0) {
+        for (let i = 0; i < prs.length; i++) {
+          const pr = prs[i];
+          const { bgColor, textColor: prTextColor } = this.getPrColors(pr);
+          const prLabel = `#${pr.number}`;
 
-        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
-        const prTextWidth = ctx.measureText(prLabel).width;
+          ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
+          const prTextWidth = ctx.measureText(prLabel).width;
 
-        // Add PR icon width
-        const prIconSize = 10;
-        const prPillWidth = prTextWidth + labelPadding * 2 + prIconSize + iconPadding;
+          // Add PR icon width
+          const prIconSize = 10;
+          const prPillWidth = prTextWidth + labelPadding * 2 + prIconSize + iconPadding;
 
-        // Draw PR pill background
-        ctx.fillStyle = bgColor;
-        this.drawRoundedRect(currentX, y - labelHeight / 2, prPillWidth, labelHeight, labelRadius);
+          // Check if this label would overflow
+          if (currentX + prPillWidth > maxLabelX) {
+            remainingPrs = prs.length - i;
+            break;
+          }
 
-        // Store hitbox for tooltip detection
-        this.refLabelHitboxes.push({
-          x: currentX,
-          y: y - labelHeight / 2,
-          width: prPillWidth,
-          height: labelHeight,
-          label: prLabel,
-          fullName: pr.url ?? `Pull Request ${prLabel}`,
-          refType: 'pullRequest',
-        });
+          // Draw PR pill background
+          ctx.fillStyle = bgColor;
+          this.drawRoundedRect(currentX, y - labelHeight / 2, prPillWidth, labelHeight, labelRadius);
 
-        // Draw PR icon (merge/pull request icon)
-        ctx.strokeStyle = prTextColor;
-        ctx.fillStyle = prTextColor;
-        this.drawPrIcon(currentX + labelPadding, y, prIconSize);
+          // Store hitbox for tooltip detection
+          this.refLabelHitboxes.push({
+            x: currentX,
+            y: y - labelHeight / 2,
+            width: prPillWidth,
+            height: labelHeight,
+            label: prLabel,
+            fullName: pr.url ?? `Pull Request ${prLabel}`,
+            refType: 'pullRequest',
+          });
 
-        // Draw PR number
-        ctx.fillStyle = prTextColor;
-        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(prLabel, currentX + labelPadding + prIconSize + iconPadding, y);
+          // Draw PR icon (merge/pull request icon)
+          ctx.strokeStyle = prTextColor;
+          ctx.fillStyle = prTextColor;
+          this.drawPrIcon(currentX + labelPadding, y, prIconSize);
 
-        currentX += prPillWidth + labelGap;
+          // Draw PR number
+          ctx.fillStyle = prTextColor;
+          ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(prLabel, currentX + labelPadding + prIconSize + iconPadding, y);
+
+          currentX += prPillWidth + labelGap;
+        }
+      }
+
+      // Show overflow indicator if there are hidden refs/PRs
+      const totalRemaining = remainingRefs + remainingPrs;
+      if (totalRemaining > 0 && currentX < maxLabelX) {
+        const moreText = `+${totalRemaining}`;
+        ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+        const moreWidth = ctx.measureText(moreText).width + labelPadding * 2;
+
+        // Only show if it fits
+        if (currentX + moreWidth <= maxLabelX) {
+          ctx.fillStyle = theme.textColor;
+          ctx.globalAlpha = 0.4;
+          this.drawRoundedRect(currentX, y - labelHeight / 2, moreWidth, labelHeight, labelRadius);
+          ctx.globalAlpha = 1.0;
+
+          ctx.fillStyle = theme.textColor;
+          ctx.globalAlpha = 0.7;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(moreText, currentX + moreWidth / 2, y);
+          ctx.globalAlpha = 1.0;
+        }
       }
 
       // Render stats column (right-aligned)
