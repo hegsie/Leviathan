@@ -1,10 +1,10 @@
 //! Remote command handlers
 
 use std::path::Path;
-use tauri::command;
+use tauri::{command, AppHandle, Emitter};
 
 use crate::error::{LeviathanError, Result};
-use crate::models::Remote;
+use crate::models::{Remote, RemoteOperationResult};
 use crate::services::credentials_service;
 
 /// Add a new remote
@@ -134,11 +134,16 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
 
 /// Fetch from remote
 #[command]
-pub async fn fetch(path: String, remote: Option<String>, prune: Option<bool>) -> Result<()> {
+pub async fn fetch(
+    app_handle: AppHandle,
+    path: String,
+    remote: Option<String>,
+    prune: Option<bool>,
+) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let remote_name = remote.as_deref().unwrap_or("origin");
-    let mut remote = repo
+    let mut git_remote = repo
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
@@ -148,7 +153,7 @@ pub async fn fetch(path: String, remote: Option<String>, prune: Option<bool>) ->
         fetch_opts.prune(git2::FetchPrune::On);
     }
 
-    let refspecs: Vec<String> = remote
+    let refspecs: Vec<String> = git_remote
         .fetch_refspecs()?
         .iter()
         .filter_map(|s| s.map(|s| s.to_string()))
@@ -156,7 +161,18 @@ pub async fn fetch(path: String, remote: Option<String>, prune: Option<bool>) ->
 
     let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
 
-    remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
+    git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
+
+    // Emit success event
+    let _ = app_handle.emit(
+        "remote-operation-completed",
+        RemoteOperationResult {
+            operation: "fetch".to_string(),
+            remote: remote_name.to_string(),
+            success: true,
+            message: "Fetch completed successfully".to_string(),
+        },
+    );
 
     Ok(())
 }
@@ -164,6 +180,7 @@ pub async fn fetch(path: String, remote: Option<String>, prune: Option<bool>) ->
 /// Pull from remote
 #[command]
 pub async fn pull(
+    app_handle: AppHandle,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
@@ -173,8 +190,8 @@ pub async fn pull(
 
     let remote_name = remote.as_deref().unwrap_or("origin");
 
-    // First fetch
-    fetch(path.clone(), Some(remote_name.to_string()), None).await?;
+    // First fetch (without emitting separate event)
+    fetch_internal(&path, remote_name, false)?;
 
     // Get the branch to merge
     let branch_name = if let Some(ref b) = branch {
@@ -188,26 +205,31 @@ pub async fn pull(
     let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
     let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
 
+    let message: String;
+
     if rebase.unwrap_or(false) {
         // Rebase onto remote
         let head = repo.head()?;
         let head_commit = repo.reference_to_annotated_commit(&head)?;
 
-        let mut rebase = repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
+        let mut rebase_obj = repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
 
-        while let Some(op) = rebase.next() {
+        let mut commit_count = 0;
+        while let Some(op) = rebase_obj.next() {
             let _op = op?;
             let signature = repo.signature()?;
-            rebase.commit(None, &signature, None)?;
+            rebase_obj.commit(None, &signature, None)?;
+            commit_count += 1;
         }
 
-        rebase.finish(Some(&repo.signature()?))?;
+        rebase_obj.finish(Some(&repo.signature()?))?;
+        message = format!("Rebased {} commit(s)", commit_count);
     } else {
         // Merge
         let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
 
         if analysis.is_up_to_date() {
-            // Nothing to do
+            message = "Already up to date".to_string();
         } else if analysis.is_fast_forward() {
             // Fast-forward
             let refname = format!("refs/heads/{}", branch_name);
@@ -215,6 +237,7 @@ pub async fn pull(
             reference.set_target(fetch_commit.id(), "Fast-forward")?;
             repo.set_head(&refname)?;
             repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+            message = "Fast-forward merge completed".to_string();
         } else {
             // Normal merge
             repo.merge(&[&fetch_commit], None, None)?;
@@ -240,8 +263,47 @@ pub async fn pull(
             )?;
 
             repo.cleanup_state()?;
+            message = "Merge completed".to_string();
         }
     }
+
+    // Emit success event
+    let _ = app_handle.emit(
+        "remote-operation-completed",
+        RemoteOperationResult {
+            operation: "pull".to_string(),
+            remote: remote_name.to_string(),
+            success: true,
+            message,
+        },
+    );
+
+    Ok(())
+}
+
+/// Internal fetch without event emission (used by pull)
+fn fetch_internal(path: &str, remote_name: &str, prune: bool) -> Result<()> {
+    let repo = git2::Repository::open(Path::new(path))?;
+
+    let mut git_remote = repo
+        .find_remote(remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
+
+    let mut fetch_opts = credentials_service::get_fetch_options();
+
+    if prune {
+        fetch_opts.prune(git2::FetchPrune::On);
+    }
+
+    let refspecs: Vec<String> = git_remote
+        .fetch_refspecs()?
+        .iter()
+        .filter_map(|s| s.map(|s| s.to_string()))
+        .collect();
+
+    let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
+
+    git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
 
     Ok(())
 }
@@ -249,6 +311,7 @@ pub async fn pull(
 /// Push to remote
 #[command]
 pub async fn push(
+    app_handle: AppHandle,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
@@ -258,7 +321,7 @@ pub async fn push(
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let remote_name = remote.as_deref().unwrap_or("origin");
-    let mut remote = repo
+    let mut git_remote = repo
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
@@ -277,7 +340,7 @@ pub async fn push(
         format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name)
     };
 
-    remote.push(&[&refspec], Some(&mut push_opts))?;
+    git_remote.push(&[&refspec], Some(&mut push_opts))?;
 
     // Set upstream if requested
     if set_upstream.unwrap_or(false) {
@@ -285,6 +348,17 @@ pub async fn push(
         let upstream_name = format!("{}/{}", remote_name, branch_name);
         local_branch.set_upstream(Some(&upstream_name))?;
     }
+
+    // Emit success event
+    let _ = app_handle.emit(
+        "remote-operation-completed",
+        RemoteOperationResult {
+            operation: "push".to_string(),
+            remote: remote_name.to_string(),
+            success: true,
+            message: format!("Pushed to {}/{}", remote_name, branch_name),
+        },
+    );
 
     Ok(())
 }

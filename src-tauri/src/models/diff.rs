@@ -90,3 +90,96 @@ impl From<char> for DiffLineOrigin {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_image_file_png() {
+        assert!(is_image_file("image.png"));
+        assert!(is_image_file("path/to/image.PNG"));
+    }
+
+    #[test]
+    fn test_is_image_file_jpeg() {
+        assert!(is_image_file("photo.jpg"));
+        assert!(is_image_file("photo.jpeg"));
+        assert!(is_image_file("photo.JPEG"));
+    }
+
+    #[test]
+    fn test_is_image_file_other_formats() {
+        assert!(is_image_file("icon.gif"));
+        assert!(is_image_file("logo.svg"));
+        assert!(is_image_file("image.webp"));
+        assert!(is_image_file("favicon.ico"));
+        assert!(is_image_file("bitmap.bmp"));
+        assert!(is_image_file("scan.tiff"));
+        assert!(is_image_file("scan.tif"));
+    }
+
+    #[test]
+    fn test_is_image_file_non_images() {
+        assert!(!is_image_file("script.js"));
+        assert!(!is_image_file("style.css"));
+        assert!(!is_image_file("data.json"));
+        assert!(!is_image_file("readme.md"));
+        assert!(!is_image_file("main.rs"));
+        assert!(!is_image_file("noextension"));
+    }
+
+    #[test]
+    fn test_get_image_type_returns_extension() {
+        assert_eq!(get_image_type("test.png"), Some("png".to_string()));
+        assert_eq!(get_image_type("test.JPG"), Some("jpg".to_string()));
+        assert_eq!(get_image_type("test.svg"), Some("svg".to_string()));
+    }
+
+    #[test]
+    fn test_get_image_type_returns_none_for_non_images() {
+        assert_eq!(get_image_type("test.txt"), None);
+        assert_eq!(get_image_type("test.rs"), None);
+        assert_eq!(get_image_type("noextension"), None);
+    }
+
+    #[test]
+    fn test_diff_line_origin_from_char() {
+        assert!(matches!(DiffLineOrigin::from(' '), DiffLineOrigin::Context));
+        assert!(matches!(
+            DiffLineOrigin::from('+'),
+            DiffLineOrigin::Addition
+        ));
+        assert!(matches!(
+            DiffLineOrigin::from('-'),
+            DiffLineOrigin::Deletion
+        ));
+        assert!(matches!(
+            DiffLineOrigin::from('='),
+            DiffLineOrigin::ContextEofnl
+        ));
+        assert!(matches!(
+            DiffLineOrigin::from('>'),
+            DiffLineOrigin::AddEofnl
+        ));
+        assert!(matches!(
+            DiffLineOrigin::from('<'),
+            DiffLineOrigin::DelEofnl
+        ));
+        assert!(matches!(
+            DiffLineOrigin::from('F'),
+            DiffLineOrigin::FileHeader
+        ));
+        assert!(matches!(
+            DiffLineOrigin::from('H'),
+            DiffLineOrigin::HunkHeader
+        ));
+        assert!(matches!(DiffLineOrigin::from('B'), DiffLineOrigin::Binary));
+    }
+
+    #[test]
+    fn test_diff_line_origin_unknown_defaults_to_context() {
+        assert!(matches!(DiffLineOrigin::from('X'), DiffLineOrigin::Context));
+        assert!(matches!(DiffLineOrigin::from('?'), DiffLineOrigin::Context));
+    }
+}

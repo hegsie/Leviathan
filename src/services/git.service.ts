@@ -3,8 +3,9 @@
  * Provides high-level Git operations via Tauri commands
  */
 
-import { invokeCommand } from './tauri-api.ts';
+import { invokeCommand, listenToEvent } from './tauri-api.ts';
 import { showToast } from './notification.service.ts';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Repository,
   Commit,
@@ -2382,4 +2383,53 @@ export async function isAutoFetchRunning(repoPath: string): Promise<CommandResul
  */
 export async function getRemoteStatus(repoPath: string): Promise<CommandResult<RemoteStatus>> {
   return invokeCommand<RemoteStatus>('get_remote_status', { path: repoPath });
+}
+
+// ============================================================================
+// Remote Operation Events
+// ============================================================================
+
+/**
+ * Result of a remote operation (fetch/pull/push) emitted by the backend
+ */
+export interface RemoteOperationResult {
+  operation: string;
+  remote: string;
+  success: boolean;
+  message: string;
+}
+
+let remoteOperationUnlisten: UnlistenFn | null = null;
+
+/**
+ * Set up listeners for remote operation events (fetch/pull/push completions).
+ * These are particularly useful for auto-fetch and other background operations.
+ * Call this once when the app starts.
+ */
+export async function setupRemoteOperationListeners(): Promise<void> {
+  // Only set up once
+  if (remoteOperationUnlisten) {
+    return;
+  }
+
+  remoteOperationUnlisten = await listenToEvent<RemoteOperationResult>(
+    'remote-operation-completed',
+    (result) => {
+      // For auto-fetch background operations, show a success toast
+      // Note: The inline toasts in fetch/pull/push handle user-initiated operations
+      if (result.operation === 'fetch' && result.success) {
+        showToast(result.message, 'success');
+      }
+    }
+  );
+}
+
+/**
+ * Clean up remote operation listeners (call on app unmount)
+ */
+export function cleanupRemoteOperationListeners(): void {
+  if (remoteOperationUnlisten) {
+    remoteOperationUnlisten();
+    remoteOperationUnlisten = null;
+  }
 }

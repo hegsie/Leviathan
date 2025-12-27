@@ -406,6 +406,9 @@ export class AppShell extends LitElement {
     // Load vim mode from keyboard service
     this.vimMode = keyboardService.isVimMode();
 
+    // Set up remote operation event listeners (for auto-fetch notifications)
+    gitService.setupRemoteOperationListeners();
+
     // Register keyboard shortcuts
     registerDefaultShortcuts({
       navigateUp: () => this.graphCanvas?.navigatePrevious?.(),
@@ -440,6 +443,7 @@ export class AppShell extends LitElement {
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
     document.removeEventListener('keydown', this.boundHandleKeyDown);
     document.removeEventListener('click', this.handleDocumentClick);
+    gitService.cleanupRemoteOperationListeners();
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
