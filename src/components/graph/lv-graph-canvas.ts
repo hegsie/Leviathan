@@ -19,6 +19,7 @@ import {
   getCommitHistory,
   getRefsByCommit,
   getCommitsStats,
+  getCommitsSignatures,
   searchCommits,
   detectGitHubRepo,
   listPullRequests,
@@ -571,8 +572,9 @@ export class LvGraphCanvas extends LitElement {
     this.renderer?.markDirty();
     this.scheduleRender();
 
-    // Fetch real commit stats asynchronously (don't block initial render)
+    // Fetch real commit stats and signatures asynchronously (don't block initial render)
     this.fetchCommitStats();
+    this.fetchCommitSignatures();
   }
 
   private async fetchCommitStats(): Promise<void> {
@@ -582,7 +584,7 @@ export class LvGraphCanvas extends LitElement {
 
     // Fetch in batches to avoid overwhelming the backend
     const batchSize = 100;
-    const allStats = new Map<string, number>();
+    const allStats = new Map<string, { additions: number; deletions: number }>();
 
     for (let i = 0; i < commitOids.length; i += batchSize) {
       const batch = commitOids.slice(i, i + batchSize);
@@ -590,8 +592,7 @@ export class LvGraphCanvas extends LitElement {
 
       if (result.success && result.data) {
         for (const stat of result.data) {
-          // Total changes = additions + deletions
-          allStats.set(stat.oid, stat.additions + stat.deletions);
+          allStats.set(stat.oid, { additions: stat.additions, deletions: stat.deletions });
         }
       }
     }
@@ -599,6 +600,34 @@ export class LvGraphCanvas extends LitElement {
     // Update renderer with real stats
     if (allStats.size > 0) {
       this.renderer?.setCommitStats(allStats);
+      this.renderer?.markDirty();
+      this.scheduleRender();
+    }
+  }
+
+  private async fetchCommitSignatures(): Promise<void> {
+    if (!this.repositoryPath || this.realCommits.size === 0) return;
+
+    const commitOids = [...this.realCommits.keys()];
+
+    // Fetch in batches to avoid overwhelming the backend
+    const batchSize = 50;
+    const allSignatures = new Map<string, { signed: boolean; valid: boolean }>();
+
+    for (let i = 0; i < commitOids.length; i += batchSize) {
+      const batch = commitOids.slice(i, i + batchSize);
+      const result = await getCommitsSignatures(this.repositoryPath, batch);
+
+      if (result.success && result.data) {
+        for (const [oid, sig] of result.data) {
+          allSignatures.set(oid, { signed: sig.signed, valid: sig.valid });
+        }
+      }
+    }
+
+    // Update renderer with signatures
+    if (allSignatures.size > 0) {
+      this.renderer?.setCommitSignatures(allSignatures);
       this.renderer?.markDirty();
       this.scheduleRender();
     }

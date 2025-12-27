@@ -1098,6 +1098,16 @@ export async function getCommitSignature(
   });
 }
 
+export async function getCommitsSignatures(
+  repoPath: string,
+  commitOids: string[]
+): Promise<CommandResult<Array<[string, CommitSignature]>>> {
+  return invokeCommand<Array<[string, CommitSignature]>>('get_commits_signatures', {
+    path: repoPath,
+    commitOids,
+  });
+}
+
 // ============================================================================
 // SSH Key Management
 // ============================================================================

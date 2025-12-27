@@ -264,8 +264,17 @@ export class CanvasRenderer {
   private avatarCache: Map<string, HTMLImageElement | null> = new Map();
   private avatarLoadingSet: Set<string> = new Set();
 
-  // Commit stats for size scaling (oid -> number of changes)
-  private commitStats: Map<string, number> = new Map();
+  // Commit stats for size scaling and display (oid -> {additions, deletions})
+  private commitStats: Map<string, { additions: number; deletions: number }> = new Map();
+
+  // Commit signatures (oid -> {signed, valid})
+  private commitSignatures: Map<string, { signed: boolean; valid: boolean }> = new Map();
+
+  // CI status (oid -> status: 'success' | 'failure' | 'pending' | 'error')
+  private ciStatuses: Map<string, string> = new Map();
+
+  // Header height for offsetting content
+  private readonly HEADER_HEIGHT = 28;
 
   // Avatar hitboxes for tooltip detection
   private avatarHitboxes: Array<{
@@ -332,10 +341,18 @@ export class CanvasRenderer {
   }
 
   /**
-   * Set commit stats for size-based node scaling
+   * Set commit stats for size-based node scaling and display
    */
-  setCommitStats(stats: Map<string, number>): void {
+  setCommitStats(stats: Map<string, { additions: number; deletions: number }>): void {
     this.commitStats = stats;
+    this.markDirty();
+  }
+
+  /**
+   * Set commit signatures for verified badge display
+   */
+  setCommitSignatures(signatures: Map<string, { signed: boolean; valid: boolean }>): void {
+    this.commitSignatures = signatures;
     this.markDirty();
   }
 
@@ -383,12 +400,79 @@ export class CanvasRenderer {
     }
 
     // Scale based on number of changes (log scale to prevent huge nodes)
+    const totalChanges = stats.additions + stats.deletions;
     const minRadius = this.config.minNodeRadius;
     const maxRadius = this.config.maxNodeRadius;
-    const logStats = Math.log10(stats + 1);
+    const logStats = Math.log10(totalChanges + 1);
     const normalizedSize = Math.min(logStats / 4, 1); // 10000 changes = max size
 
     return minRadius + (maxRadius - minRadius) * normalizedSize;
+  }
+
+  /**
+   * Format a timestamp as relative time (e.g., "2h ago", "3 days ago")
+   */
+  private formatRelativeTime(timestamp: number): string {
+    const now = Date.now() / 1000; // Convert to seconds
+    const diff = now - timestamp;
+
+    if (diff < 60) {
+      return 'now';
+    } else if (diff < 3600) {
+      const mins = Math.floor(diff / 60);
+      return `${mins}m`;
+    } else if (diff < 86400) {
+      const hours = Math.floor(diff / 3600);
+      return `${hours}h`;
+    } else if (diff < 604800) {
+      const days = Math.floor(diff / 86400);
+      return `${days}d`;
+    } else if (diff < 2592000) {
+      const weeks = Math.floor(diff / 604800);
+      return `${weeks}w`;
+    } else if (diff < 31536000) {
+      const months = Math.floor(diff / 2592000);
+      return `${months}mo`;
+    } else {
+      const years = Math.floor(diff / 31536000);
+      return `${years}y`;
+    }
+  }
+
+  /**
+   * Format commit stats as "+N -M" string
+   */
+  private formatStats(oid: string): string | null {
+    const stats = this.commitStats.get(oid);
+    if (!stats || (stats.additions === 0 && stats.deletions === 0)) {
+      return null;
+    }
+    return `+${stats.additions} -${stats.deletions}`;
+  }
+
+  /**
+   * Draw a verified signature badge (checkmark icon)
+   */
+  private drawVerifiedBadge(x: number, y: number, isValid: boolean): void {
+    const { ctx } = this;
+    const size = 12;
+
+    // Badge background
+    ctx.fillStyle = isValid ? '#238636' : '#8b949e'; // Green for verified, gray for unverified
+    ctx.beginPath();
+    ctx.arc(x, y, size / 2 + 1, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Checkmark icon
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x - 3, y);
+    ctx.lineTo(x - 1, y + 2);
+    ctx.lineTo(x + 3, y - 2);
+    ctx.stroke();
   }
 
   /**
@@ -464,20 +548,31 @@ export class CanvasRenderer {
   }
 
   /**
-   * Render column headers (GRAPH, COMMIT MESSAGE)
+   * Render column headers (GRAPH, COMMIT MESSAGE, STATS, TIME)
    */
   private renderColumnHeaders(data: RenderData): void {
     const { ctx, config, theme } = this;
     const { offsetX, maxLane } = data;
 
-    const headerHeight = 24;
-    const headerY = 8;
+    const headerY = this.HEADER_HEIGHT / 2;
+    const canvasWidth = this.canvas.width / this.dpr;
+    const rightPadding = 16;
 
     // Calculate column positions
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
     const avatarColumnX = graphEndX + 12;
     const avatarSize = 22;
     const messageColumnX = avatarColumnX + avatarSize + 12;
+
+    // Right-aligned columns
+    const timeColumnWidth = 40;
+    const statsColumnWidth = 80;
+    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
+    const statsColumnX = timeColumnX - statsColumnWidth - 8;
+
+    // Draw header background
+    ctx.fillStyle = theme.background;
+    ctx.fillRect(0, 0, canvasWidth, this.HEADER_HEIGHT);
 
     ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.fillStyle = theme.textColor;
@@ -493,15 +588,22 @@ export class CanvasRenderer {
     ctx.textAlign = 'left';
     ctx.fillText('COMMIT', messageColumnX, headerY);
 
+    // Stats header - center aligned in its column
+    ctx.textAlign = 'center';
+    ctx.fillText('CHANGES', statsColumnX + statsColumnWidth / 2, headerY);
+
+    // Time header - center aligned in its column
+    ctx.fillText('TIME', timeColumnX + timeColumnWidth / 2, headerY);
+
     ctx.globalAlpha = 1.0;
 
     // Draw subtle separator line under headers
     ctx.strokeStyle = theme.textColor;
-    ctx.globalAlpha = 0.1;
+    ctx.globalAlpha = 0.15;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, headerHeight);
-    ctx.lineTo(this.canvas.width / this.dpr, headerHeight);
+    ctx.moveTo(0, this.HEADER_HEIGHT - 0.5);
+    ctx.lineTo(canvasWidth, this.HEADER_HEIGHT - 0.5);
     ctx.stroke();
     ctx.globalAlpha = 1.0;
   }
@@ -522,9 +624,9 @@ export class CanvasRenderer {
 
     for (const edge of edges) {
       const fromX = graphEndX - (edge.fromLane + 1) * config.laneWidth + config.laneWidth / 2;
-      const fromY = offsetY + edge.fromRow * config.rowHeight;
+      const fromY = offsetY + edge.fromRow * config.rowHeight + this.HEADER_HEIGHT;
       const toX = graphEndX - (edge.toLane + 1) * config.laneWidth + config.laneWidth / 2;
-      const toY = offsetY + edge.toRow * config.rowHeight;
+      const toY = offsetY + edge.toRow * config.rowHeight + this.HEADER_HEIGHT;
 
       ctx.strokeStyle = this.getLaneColor(edge.fromLane);
       ctx.beginPath();
@@ -595,7 +697,7 @@ export class CanvasRenderer {
 
     for (const node of nodes) {
       const x = graphEndX - (node.lane + 1) * config.laneWidth + config.laneWidth / 2;
-      const y = offsetY + node.row * config.rowHeight;
+      const y = offsetY + node.row * config.rowHeight + this.HEADER_HEIGHT;
       const color = this.getLaneColor(node.lane);
       const radius = this.getNodeRadius(node.oid);
 
@@ -727,11 +829,17 @@ export class CanvasRenderer {
     const avatarSize = 22;
     const messageColumnX = avatarColumnX + avatarSize + 12;
 
-    // Message column fills remaining space
-    const availableMessageWidth = canvasWidth - messageColumnX - rightPadding;
+    // Right-aligned columns
+    const timeColumnWidth = 40;
+    const statsColumnWidth = 80;
+    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
+    const statsColumnX = timeColumnX - statsColumnWidth - 8;
+
+    // Message column fills space up to stats column
+    const availableMessageWidth = statsColumnX - messageColumnX - 16;
 
     for (const node of nodes) {
-      const y = offsetY + node.row * config.rowHeight;
+      const y = offsetY + node.row * config.rowHeight + this.HEADER_HEIGHT;
       const refs = refsByCommit?.[node.oid] ?? [];
       const hasRefs = refs.length > 0;
       const laneColor = this.getLaneColor(node.lane);
@@ -789,6 +897,12 @@ export class CanvasRenderer {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(initials, avatarCenterX, y + 1);
+      }
+
+      // Draw signature badge if commit is signed
+      const signature = this.commitSignatures.get(node.oid);
+      if (signature?.signed) {
+        this.drawVerifiedBadge(avatarCenterX + avatarRadius - 2, y + avatarRadius - 2, signature.valid);
       }
 
       // Calculate ref labels width first (to know how much space message gets)
@@ -927,6 +1041,40 @@ export class CanvasRenderer {
 
         currentX += prPillWidth + labelGap;
       }
+
+      // Render stats column (right-aligned)
+      const statsText = this.formatStats(node.oid);
+      if (statsText) {
+        ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+
+        // Split into additions and deletions for colored display
+        const stats = this.commitStats.get(node.oid);
+        if (stats) {
+          const addText = `+${stats.additions}`;
+          const delText = `-${stats.deletions}`;
+
+          // Draw deletions first (further right)
+          ctx.fillStyle = '#f85149'; // Red for deletions
+          const delWidth = ctx.measureText(delText).width;
+          ctx.fillText(delText, statsColumnX + statsColumnWidth, y);
+
+          // Draw additions
+          ctx.fillStyle = '#3fb950'; // Green for additions
+          ctx.fillText(addText + ' ', statsColumnX + statsColumnWidth - delWidth - 4, y);
+        }
+      }
+
+      // Render timestamp column (right-aligned)
+      const relativeTime = this.formatRelativeTime(node.commit.timestamp);
+      ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.fillStyle = theme.textColor;
+      ctx.globalAlpha = 0.6;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(relativeTime, timeColumnX + timeColumnWidth, y);
+      ctx.globalAlpha = 1.0;
     }
   }
 
