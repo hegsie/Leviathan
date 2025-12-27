@@ -114,3 +114,120 @@ pub async fn init_repository(path: String, bare: Option<bool>) -> Result<Reposit
 pub async fn get_repository_info(path: String) -> Result<Repository> {
     open_repository(path).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_open_repository_valid() {
+        let repo = TestRepo::with_initial_commit();
+        let result = open_repository(repo.path_str()).await;
+        assert!(result.is_ok());
+        let repo_info = result.unwrap();
+        assert!(repo_info.is_valid);
+        assert!(!repo_info.is_bare);
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_gets_name() {
+        let repo = TestRepo::with_initial_commit();
+        let result = open_repository(repo.path_str()).await.unwrap();
+        // The name should be the directory name
+        assert!(!result.name.is_empty());
+        assert_ne!(result.name, "Unknown");
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_gets_head_ref() {
+        let repo = TestRepo::with_initial_commit();
+        let result = open_repository(repo.path_str()).await.unwrap();
+        // Should have a head ref after initial commit
+        assert!(result.head_ref.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_nonexistent() {
+        let result = open_repository("/nonexistent/path/to/repo".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_not_a_repo() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let result = open_repository(dir.path().to_string_lossy().to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_init_repository() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("new-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        let result = init_repository(path.to_string_lossy().to_string(), None).await;
+        assert!(result.is_ok());
+        let repo_info = result.unwrap();
+        assert!(repo_info.is_valid);
+        assert!(!repo_info.is_bare);
+        assert_eq!(repo_info.name, "new-repo");
+
+        // Verify .git directory exists
+        assert!(path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_bare() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("bare-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        let result = init_repository(path.to_string_lossy().to_string(), Some(true)).await;
+        assert!(result.is_ok());
+        let repo_info = result.unwrap();
+        assert!(repo_info.is_valid);
+        assert!(repo_info.is_bare);
+
+        // Bare repos have HEAD directly in the path, no .git directory
+        assert!(path.join("HEAD").exists());
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_state_is_clean() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("clean-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        let result = init_repository(path.to_string_lossy().to_string(), None).await.unwrap();
+        assert!(matches!(result.state, RepositoryState::Clean));
+    }
+
+    #[tokio::test]
+    async fn test_get_repository_info() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_repository_info(repo.path_str()).await;
+        assert!(result.is_ok());
+        let repo_info = result.unwrap();
+        assert!(repo_info.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_state_clean() {
+        let repo = TestRepo::with_initial_commit();
+        let result = open_repository(repo.path_str()).await.unwrap();
+        assert!(matches!(result.state, RepositoryState::Clean));
+    }
+
+    #[tokio::test]
+    async fn test_open_empty_repository() {
+        let repo = TestRepo::new(); // No initial commit
+        let result = open_repository(repo.path_str()).await;
+        assert!(result.is_ok());
+        let repo_info = result.unwrap();
+        assert!(repo_info.is_valid);
+        // Empty repo has no head_ref
+        assert!(repo_info.head_ref.is_none());
+    }
+}

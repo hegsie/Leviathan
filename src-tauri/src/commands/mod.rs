@@ -15,6 +15,7 @@ pub mod gitlab;
 pub mod gpg;
 pub mod lfs;
 pub mod merge;
+pub mod profiles;
 pub mod reflog;
 pub mod refs;
 pub mod remote;

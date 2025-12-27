@@ -8,6 +8,9 @@ pub mod error;
 pub mod models;
 pub mod services;
 
+#[cfg(test)]
+mod test_utils;
+
 use tauri::Manager;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -185,6 +188,17 @@ pub fn run() {
             commands::config::set_alias,
             commands::config::delete_alias,
             commands::config::get_common_settings,
+            // Git profiles
+            commands::profiles::get_profiles,
+            commands::profiles::get_profiles_config,
+            commands::profiles::save_profile,
+            commands::profiles::delete_profile,
+            commands::profiles::apply_profile,
+            commands::profiles::detect_profile_for_repository,
+            commands::profiles::get_assigned_profile,
+            commands::profiles::assign_profile_to_repository,
+            commands::profiles::unassign_profile_from_repository,
+            commands::profiles::get_current_identity,
             commands::credentials::get_credential_helpers,
             commands::credentials::set_credential_helper,
             commands::credentials::unset_credential_helper,

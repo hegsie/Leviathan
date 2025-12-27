@@ -211,3 +211,230 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    #[tokio::test]
+    async fn test_get_branches_empty_repo() {
+        let repo = TestRepo::new();
+        // Empty repo has no branches until first commit
+        let result = get_branches(repo.path_str()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_branches_with_initial_commit() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_branches(repo.path_str()).await;
+        assert!(result.is_ok());
+        let branches = result.unwrap();
+        assert_eq!(branches.len(), 1);
+        // Default branch name may vary (main, master, etc.)
+        assert!(branches[0].is_head);
+        assert!(!branches[0].is_remote);
+    }
+
+    #[tokio::test]
+    async fn test_get_branches_multiple() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature-1");
+        repo.create_branch("feature-2");
+
+        let result = get_branches(repo.path_str()).await;
+        assert!(result.is_ok());
+        let branches = result.unwrap();
+        assert_eq!(branches.len(), 3); // main + 2 features
+    }
+
+    #[tokio::test]
+    async fn test_create_branch() {
+        let repo = TestRepo::with_initial_commit();
+        let result = create_branch(
+            repo.path_str(),
+            "new-feature".to_string(),
+            None,
+            Some(false),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let branch = result.unwrap();
+        assert_eq!(branch.name, "new-feature");
+        assert!(!branch.is_head); // checkout was false
+        assert!(!branch.is_remote);
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_and_checkout() {
+        let repo = TestRepo::with_initial_commit();
+        let result = create_branch(
+            repo.path_str(),
+            "new-feature".to_string(),
+            None,
+            Some(true),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let branch = result.unwrap();
+        assert_eq!(branch.name, "new-feature");
+        assert!(branch.is_head); // checkout was true
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_from_commit() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_oid = repo.head_oid();
+        repo.create_commit("Second commit", &[("file2.txt", "content2")]);
+
+        let result = create_branch(
+            repo.path_str(),
+            "from-initial".to_string(),
+            Some(initial_oid.to_string()),
+            Some(false),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let branch = result.unwrap();
+        assert_eq!(branch.target_oid, initial_oid.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_duplicate_fails() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("existing");
+
+        let result = create_branch(
+            repo.path_str(),
+            "existing".to_string(),
+            None,
+            Some(false),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_branch() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("to-delete");
+
+        let result = delete_branch(repo.path_str(), "to-delete".to_string(), Some(true)).await;
+        assert!(result.is_ok());
+
+        // Verify branch is gone
+        let git_repo = repo.repo();
+        let branch = git_repo.find_branch("to-delete", git2::BranchType::Local);
+        assert!(branch.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_branch_not_found() {
+        let repo = TestRepo::with_initial_commit();
+        let result = delete_branch(repo.path_str(), "nonexistent".to_string(), Some(true)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_current_branch_fails() {
+        let repo = TestRepo::with_initial_commit();
+        let current = repo.current_branch();
+
+        let result = delete_branch(repo.path_str(), current, Some(true)).await;
+        // Should fail because you can't delete the checked out branch
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rename_branch() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("old-name");
+
+        let result =
+            rename_branch(repo.path_str(), "old-name".to_string(), "new-name".to_string()).await;
+
+        assert!(result.is_ok());
+        let branch = result.unwrap();
+        assert_eq!(branch.name, "new-name");
+
+        // Verify old name is gone
+        let git_repo = repo.repo();
+        let old_branch = git_repo.find_branch("old-name", git2::BranchType::Local);
+        assert!(old_branch.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rename_branch_not_found() {
+        let repo = TestRepo::with_initial_commit();
+        let result =
+            rename_branch(repo.path_str(), "nonexistent".to_string(), "new-name".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_checkout_branch() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+
+        let result = checkout(repo.path_str(), "feature".to_string(), Some(false)).await;
+        assert!(result.is_ok());
+        assert_eq!(repo.current_branch(), "feature");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_commit_detached() {
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+        repo.create_commit("Second", &[("file.txt", "content")]);
+
+        let result = checkout(repo.path_str(), oid.to_string(), Some(false)).await;
+        assert!(result.is_ok());
+
+        // HEAD should be detached
+        let git_repo = repo.repo();
+        assert!(git_repo.head_detached().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_checkout_nonexistent_fails() {
+        let repo = TestRepo::with_initial_commit();
+        let result = checkout(repo.path_str(), "nonexistent".to_string(), Some(false)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_checkout_force() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+
+        // Create uncommitted changes
+        repo.create_file("uncommitted.txt", "changes");
+
+        // Force checkout should work
+        let result = checkout(repo.path_str(), "feature".to_string(), Some(true)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_branch_with_slash_in_name() {
+        let repo = TestRepo::with_initial_commit();
+        let result = create_branch(
+            repo.path_str(),
+            "feature/my-feature".to_string(),
+            None,
+            Some(false),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let branch = result.unwrap();
+        assert_eq!(branch.name, "feature/my-feature");
+        assert_eq!(branch.shorthand, "feature/my-feature");
+    }
+}

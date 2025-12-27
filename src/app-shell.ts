@@ -27,6 +27,7 @@ import './components/dialogs/lv-ssh-dialog.ts';
 import './components/dialogs/lv-config-dialog.ts';
 import './components/dialogs/lv-credentials-dialog.ts';
 import './components/dialogs/lv-github-dialog.ts';
+import './components/dialogs/lv-profile-manager-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import './components/common/lv-toast-container.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
@@ -367,6 +368,9 @@ export class AppShell extends LitElement {
   // GitHub dialog
   @state() private showGitHub = false;
 
+  // Profile Manager dialog
+  @state() private showProfileManager = false;
+
   // Panel dimensions
   @state() private leftPanelWidth = 220;
   @state() private rightPanelWidth = 350;
@@ -394,7 +398,14 @@ export class AppShell extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     this.unsubscribe = repositoryStore.subscribe((state) => {
-      this.activeRepository = state.getActiveRepository();
+      const newActiveRepo = state.getActiveRepository();
+      const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
+      this.activeRepository = newActiveRepo;
+
+      // Load profile for new repository
+      if (repoChanged && newActiveRepo) {
+        gitService.loadProfileForRepository(newActiveRepo.repository.path);
+      }
     });
     this.unsubscribeUi = uiStore.subscribe((state) => {
       this.leftPanelVisible = state.panels.left.isVisible;
@@ -408,6 +419,9 @@ export class AppShell extends LitElement {
 
     // Set up remote operation event listeners (for auto-fetch notifications)
     gitService.setupRemoteOperationListeners();
+
+    // Load profiles
+    gitService.loadProfiles();
 
     // Register keyboard shortcuts
     registerDefaultShortcuts({
@@ -896,6 +910,13 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => { this.showGitHub = true; }),
       },
       {
+        id: 'profiles',
+        label: 'Git Profiles',
+        category: 'action',
+        icon: 'user',
+        action: () => { this.showProfileManager = true; },
+      },
+      {
         id: 'search',
         label: 'Search commits',
         category: 'action',
@@ -1008,6 +1029,7 @@ export class AppShell extends LitElement {
       <lv-toolbar
         @open-settings=${() => { this.showSettings = true; }}
         @open-command-palette=${() => { this.showCommandPalette = true; }}
+        @open-profile-manager=${() => { this.showProfileManager = true; }}
       ></lv-toolbar>
 
       ${this.activeRepository
@@ -1306,6 +1328,12 @@ export class AppShell extends LitElement {
           @close=${() => { this.showGitHub = false; }}
         ></lv-github-dialog>
       ` : ''}
+
+      <lv-profile-manager-dialog
+        ?open=${this.showProfileManager}
+        .repoPath=${this.activeRepository?.repository.path ?? ''}
+        @close=${() => { this.showProfileManager = false; }}
+      ></lv-profile-manager-dialog>
 
       <lv-toast-container></lv-toast-container>
     `;

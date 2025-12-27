@@ -12,6 +12,7 @@ import { openRepositoryDialog } from '../../services/dialog.service.ts';
 import '../dialogs/lv-clone-dialog.ts';
 import '../dialogs/lv-init-dialog.ts';
 import './lv-search-bar.ts';
+import './lv-profile-selector.ts';
 import type { LvCloneDialog } from '../dialogs/lv-clone-dialog.ts';
 import type { LvInitDialog } from '../dialogs/lv-init-dialog.ts';
 import type { LvSearchBar, SearchFilter } from './lv-search-bar.ts';
@@ -409,6 +410,13 @@ export class LvToolbar extends LitElement {
     }));
   }
 
+  private handleOpenProfileManager(): void {
+    this.dispatchEvent(new CustomEvent('open-profile-manager', {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   render() {
     return html`
       <lv-clone-dialog></lv-clone-dialog>
@@ -480,6 +488,10 @@ export class LvToolbar extends LitElement {
 
       <div class="toolbar-section">
         ${this.activeRepo ? html`
+          <lv-profile-selector
+            .repoPath=${this.activeRepo.repository.path}
+            @open-profile-manager=${this.handleOpenProfileManager}
+          ></lv-profile-selector>
           <button
             class="menu-btn ${this.showSearch ? 'active' : ''}"
             title="Search commits (Ctrl+F)"

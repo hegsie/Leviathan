@@ -2433,3 +2433,154 @@ export function cleanupRemoteOperationListeners(): void {
     remoteOperationUnlisten = null;
   }
 }
+
+// ============================================================================
+// Git Profiles
+// ============================================================================
+
+import type { GitProfile, ProfilesConfig } from '../types/workflow.types.ts';
+import { workflowStore } from '../stores/workflow.store.ts';
+
+/**
+ * Current identity for a repository
+ */
+export interface CurrentIdentityInfo {
+  name: string | null;
+  email: string | null;
+  signingKey: string | null;
+}
+
+/**
+ * Get all saved profiles
+ */
+export async function getProfiles(): Promise<CommandResult<GitProfile[]>> {
+  return invokeCommand<GitProfile[]>('get_profiles', {});
+}
+
+/**
+ * Get profiles config including repository assignments
+ */
+export async function getProfilesConfig(): Promise<CommandResult<ProfilesConfig>> {
+  return invokeCommand<ProfilesConfig>('get_profiles_config', {});
+}
+
+/**
+ * Save a profile (create or update)
+ */
+export async function saveProfile(profile: GitProfile): Promise<CommandResult<GitProfile>> {
+  const result = await invokeCommand<GitProfile>('save_profile', { profile });
+  if (result.success && result.data) {
+    // Update store
+    const store = workflowStore.getState();
+    const existing = store.profiles.find((p) => p.id === profile.id);
+    if (existing) {
+      store.updateProfile(result.data);
+    } else {
+      store.addProfile(result.data);
+    }
+  }
+  return result;
+}
+
+/**
+ * Delete a profile
+ */
+export async function deleteProfile(profileId: string): Promise<CommandResult<void>> {
+  const result = await invokeCommand<void>('delete_profile', { profileId });
+  if (result.success) {
+    workflowStore.getState().removeProfile(profileId);
+  }
+  return result;
+}
+
+/**
+ * Apply a profile to a repository (sets git config)
+ */
+export async function applyProfile(
+  repoPath: string,
+  profileId: string
+): Promise<CommandResult<void>> {
+  const result = await invokeCommand<void>('apply_profile', { path: repoPath, profileId });
+  if (result.success) {
+    const profile = workflowStore.getState().profiles.find((p) => p.id === profileId);
+    if (profile) {
+      workflowStore.getState().setActiveProfile(profile);
+    }
+    showToast('Profile applied successfully', 'success');
+  }
+  return result;
+}
+
+/**
+ * Detect which profile should be used for a repository based on URL patterns
+ */
+export async function detectProfileForRepository(
+  repoPath: string
+): Promise<CommandResult<GitProfile | null>> {
+  return invokeCommand<GitProfile | null>('detect_profile_for_repository', { path: repoPath });
+}
+
+/**
+ * Get the assigned profile for a repository
+ */
+export async function getAssignedProfile(
+  repoPath: string
+): Promise<CommandResult<GitProfile | null>> {
+  return invokeCommand<GitProfile | null>('get_assigned_profile', { path: repoPath });
+}
+
+/**
+ * Manually assign a profile to a repository (without applying git config)
+ */
+export async function assignProfileToRepository(
+  repoPath: string,
+  profileId: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('assign_profile_to_repository', { path: repoPath, profileId });
+}
+
+/**
+ * Remove profile assignment from a repository
+ */
+export async function unassignProfileFromRepository(
+  repoPath: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('unassign_profile_from_repository', { path: repoPath });
+}
+
+/**
+ * Get the current git identity for a repository
+ */
+export async function getCurrentIdentity(
+  repoPath: string
+): Promise<CommandResult<CurrentIdentityInfo>> {
+  return invokeCommand<CurrentIdentityInfo>('get_current_identity', { path: repoPath });
+}
+
+/**
+ * Load profiles from backend and update store
+ */
+export async function loadProfiles(): Promise<void> {
+  const store = workflowStore.getState();
+  store.setLoadingProfiles(true);
+
+  const result = await getProfiles();
+  if (result.success && result.data) {
+    store.setProfiles(result.data);
+  } else {
+    store.setProfileError(result.error?.message ?? 'Failed to load profiles');
+  }
+}
+
+/**
+ * Load and detect profile for a repository
+ */
+export async function loadProfileForRepository(repoPath: string): Promise<void> {
+  const store = workflowStore.getState();
+  store.setCurrentRepositoryPath(repoPath);
+
+  const result = await getAssignedProfile(repoPath);
+  if (result.success) {
+    store.setActiveProfile(result.data ?? null);
+  }
+}
