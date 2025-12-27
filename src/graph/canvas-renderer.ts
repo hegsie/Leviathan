@@ -253,7 +253,8 @@ export class CanvasRenderer {
   private perfMonitor = new PerformanceMonitor();
 
   // Selection state
-  private selectedOid: string | null = null;
+  private selectedOid: string | null = null; // Single selection (for backward compat)
+  private selectedOids: Set<string> = new Set(); // Multi-selection
   private hoveredOid: string | null = null;
 
   // Dirty tracking
@@ -272,6 +273,9 @@ export class CanvasRenderer {
 
   // CI status (oid -> status: 'success' | 'failure' | 'pending' | 'error')
   private ciStatuses: Map<string, string> = new Map();
+
+  // Highlighted commits for search result dimming
+  private highlightedOids: Set<string> = new Set();
 
   // Header height for offsetting content
   private readonly HEADER_HEIGHT = 28;
@@ -295,6 +299,15 @@ export class CanvasRenderer {
     label: string;
     fullName: string;
     refType: string;
+  }> = [];
+
+  // Overflow indicator hitboxes for showing hidden labels
+  private overflowHitboxes: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    hiddenLabels: string[];
   }> = [];
 
   constructor(
@@ -330,14 +343,28 @@ export class CanvasRenderer {
   }
 
   /**
-   * Set selection state
+   * Set selection state (single selection - backward compat)
    */
   setSelection(selectedOid: string | null, hoveredOid: string | null): void {
     if (this.selectedOid !== selectedOid || this.hoveredOid !== hoveredOid) {
       this.selectedOid = selectedOid;
+      this.selectedOids.clear();
+      if (selectedOid) {
+        this.selectedOids.add(selectedOid);
+      }
       this.hoveredOid = hoveredOid;
       this.markDirty();
     }
+  }
+
+  /**
+   * Set multi-selection state
+   */
+  setMultiSelection(selectedOids: Set<string>, hoveredOid: string | null): void {
+    this.selectedOids = new Set(selectedOids);
+    this.selectedOid = selectedOids.size > 0 ? Array.from(selectedOids)[selectedOids.size - 1] : null;
+    this.hoveredOid = hoveredOid;
+    this.markDirty();
   }
 
   /**
@@ -353,6 +380,15 @@ export class CanvasRenderer {
    */
   setCommitSignatures(signatures: Map<string, { signed: boolean; valid: boolean }>): void {
     this.commitSignatures = signatures;
+    this.markDirty();
+  }
+
+  /**
+   * Set highlighted commits for search result display
+   * When set, non-highlighted commits will be dimmed
+   */
+  setHighlightedCommits(oids: Set<string>): void {
+    this.highlightedOids = oids;
     this.markDirty();
   }
 
@@ -526,6 +562,7 @@ export class CanvasRenderer {
     // Clear hitboxes for this frame
     this.avatarHitboxes = [];
     this.refLabelHitboxes = [];
+    this.overflowHitboxes = [];
 
     // Clip content area below header to prevent overlap
     ctx.save();
@@ -704,14 +741,23 @@ export class CanvasRenderer {
     // Graph is mirrored: lane 0 is on the right, higher lanes extend left
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
 
+    // Check if search highlighting is active
+    const hasHighlighting = this.highlightedOids.size > 0;
+
     for (const node of nodes) {
       const x = graphEndX - (node.lane + 1) * config.laneWidth + config.laneWidth / 2;
       const y = offsetY + node.row * config.rowHeight + this.HEADER_HEIGHT;
       const color = this.getLaneColor(node.lane);
       const radius = this.getNodeRadius(node.oid);
 
-      const isSelected = node.oid === this.selectedOid;
+      const isSelected = this.selectedOids.has(node.oid);
       const isHovered = node.oid === this.hoveredOid;
+      const isHighlighted = !hasHighlighting || this.highlightedOids.has(node.oid);
+
+      // Dim non-matching commits during search (but don't dim selected/hovered)
+      if (hasHighlighting && !isHighlighted && !isSelected && !isHovered) {
+        ctx.globalAlpha = 0.25;
+      }
 
       // Get author email for avatar
       const authorEmail = authorEmails?.[node.oid];
@@ -799,6 +845,9 @@ export class CanvasRenderer {
         ctx.textBaseline = 'middle';
         ctx.fillText(node.oid.substring(0, 7), x - radius - 6, y);
       }
+
+      // Reset alpha for next node
+      ctx.globalAlpha = 1.0;
     }
   }
 
@@ -847,11 +896,23 @@ export class CanvasRenderer {
     // Message column fills space up to stats column
     const availableMessageWidth = statsColumnX - messageColumnX - 16;
 
+    // Check if search highlighting is active
+    const hasHighlighting = this.highlightedOids.size > 0;
+
     for (const node of nodes) {
       const y = offsetY + node.row * config.rowHeight + this.HEADER_HEIGHT;
       const refs = refsByCommit?.[node.oid] ?? [];
       const hasRefs = refs.length > 0;
       const laneColor = this.getLaneColor(node.lane);
+
+      const isSelected = this.selectedOids.has(node.oid);
+      const isHovered = node.oid === this.hoveredOid;
+      const isHighlighted = !hasHighlighting || this.highlightedOids.has(node.oid);
+
+      // Dim non-matching commits during search (but don't dim selected/hovered)
+      if (hasHighlighting && !isHighlighted && !isSelected && !isHovered) {
+        ctx.globalAlpha = 0.25;
+      }
 
       // Render avatar in avatar column
       const authorEmail = data.authorEmails?.[node.oid];
@@ -958,6 +1019,7 @@ export class CanvasRenderer {
       const maxLabelX = statsColumnX - 12; // Stop before stats column
       let remainingRefs = 0;
       let remainingPrs = 0;
+      const hiddenLabels: string[] = []; // Track hidden label names for tooltip
 
       for (let i = 0; i < refs.length; i++) {
         const ref = refs[i];
@@ -973,6 +1035,10 @@ export class CanvasRenderer {
         if (currentX + pillWidth > maxLabelX) {
           remainingRefs = refs.length - i;
           remainingPrs = prs.length;
+          // Collect hidden ref names
+          for (let j = i; j < refs.length; j++) {
+            hiddenLabels.push(refs[j].shorthand);
+          }
           break;
         }
 
@@ -1038,6 +1104,10 @@ export class CanvasRenderer {
           // Check if this label would overflow
           if (currentX + prPillWidth > maxLabelX) {
             remainingPrs = prs.length - i;
+            // Collect hidden PR labels
+            for (let j = i; j < prs.length; j++) {
+              hiddenLabels.push(`#${prs[j].number}`);
+            }
             break;
           }
 
@@ -1092,6 +1162,15 @@ export class CanvasRenderer {
           ctx.textBaseline = 'middle';
           ctx.fillText(moreText, currentX + moreWidth / 2, y);
           ctx.globalAlpha = 1.0;
+
+          // Store hitbox for tooltip
+          this.overflowHitboxes.push({
+            x: currentX,
+            y: y - labelHeight / 2,
+            width: moreWidth,
+            height: labelHeight,
+            hiddenLabels,
+          });
         }
       }
 
@@ -1510,6 +1589,24 @@ export class CanvasRenderer {
           label: hitbox.label,
           fullName: hitbox.fullName,
           refType: hitbox.refType,
+        };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Check if a point is over an overflow indicator and return hidden labels
+   * @param x X coordinate relative to canvas
+   * @param y Y coordinate relative to canvas
+   * @returns Hidden labels if hovering over overflow indicator, null otherwise
+   */
+  getOverflowAtPoint(x: number, y: number): { hiddenLabels: string[] } | null {
+    for (const hitbox of this.overflowHitboxes) {
+      if (x >= hitbox.x && x <= hitbox.x + hitbox.width &&
+          y >= hitbox.y && y <= hitbox.y + hitbox.height) {
+        return {
+          hiddenLabels: hitbox.hiddenLabels,
         };
       }
     }

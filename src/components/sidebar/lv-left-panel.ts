@@ -31,8 +31,8 @@ export class LvLeftPanel extends LitElement {
       .section-header {
         display: flex;
         align-items: center;
-        gap: var(--spacing-sm);
-        padding: var(--spacing-sm) var(--spacing-md);
+        gap: 6px;
+        padding: 4px 12px;
         font-size: var(--font-size-sm);
         font-weight: var(--font-weight-medium);
         color: var(--color-text-secondary);

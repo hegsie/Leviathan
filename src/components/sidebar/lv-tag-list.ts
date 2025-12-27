@@ -37,8 +37,8 @@ export class LvTagList extends LitElement {
       .tag-item {
         display: flex;
         align-items: center;
-        gap: var(--spacing-sm);
-        padding: var(--spacing-sm) var(--spacing-md);
+        gap: 6px;
+        padding: 2px 12px;
         cursor: pointer;
         font-size: var(--font-size-sm);
       }
@@ -71,7 +71,7 @@ export class LvTagList extends LitElement {
       }
 
       .empty {
-        padding: var(--spacing-sm);
+        padding: 4px 8px;
         color: var(--color-text-muted);
         font-size: var(--font-size-sm);
         text-align: center;

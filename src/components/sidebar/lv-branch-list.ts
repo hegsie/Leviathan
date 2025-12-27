@@ -60,8 +60,8 @@ export class LvBranchList extends LitElement {
       .group-header {
         display: flex;
         align-items: center;
-        gap: var(--spacing-xs);
-        padding: var(--spacing-xs) var(--spacing-sm);
+        gap: 4px;
+        padding: 2px 8px;
         cursor: pointer;
         user-select: none;
         font-size: var(--font-size-sm);
@@ -108,20 +108,20 @@ export class LvBranchList extends LitElement {
       }
 
       .local-section {
-        padding: var(--spacing-xs) 0;
+        padding: 2px 0;
       }
 
       .branch-item {
         display: flex;
         align-items: center;
-        gap: var(--spacing-sm);
-        padding: var(--spacing-sm) var(--spacing-md);
+        gap: 6px;
+        padding: 2px 12px;
         cursor: pointer;
         font-size: var(--font-size-sm);
       }
 
       .branch-item.nested {
-        padding-left: calc(var(--spacing-md) + 20px);
+        padding-left: 32px;
       }
 
       .subgroup {
@@ -131,8 +131,8 @@ export class LvBranchList extends LitElement {
       .subgroup-header {
         display: flex;
         align-items: center;
-        gap: var(--spacing-sm);
-        padding: var(--spacing-sm) var(--spacing-md);
+        gap: 6px;
+        padding: 2px 12px;
         cursor: pointer;
         user-select: none;
         font-size: var(--font-size-sm);
@@ -472,7 +472,8 @@ export class LvBranchList extends LitElement {
           branches: prefixMap.get(prefix)!.sort((a, b) => a.shorthand.localeCompare(b.shorthand)),
         }));
 
-        // Auto-expand remote prefix groups
+        // Auto-expand remote groups and prefix subgroups
+        this.expandedGroups.add(`remote-${name}`);
         for (const prefix of sortedPrefixes) {
           if (prefix !== null) {
             this.expandedGroups.add(`remote-${name}-${prefix}`);
@@ -483,7 +484,7 @@ export class LvBranchList extends LitElement {
           name,
           branches,
           subgroups,
-          expanded: this.expandedGroups.has(`remote-${name}`),
+          expanded: true,
         };
       });
 
@@ -1050,6 +1051,15 @@ export class LvBranchList extends LitElement {
         return html`<svg class="prefix-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3"></circle>
           <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"></path>
+        </svg>`;
+      case 'copilot':
+      case 'ai':
+      case 'claude':
+        // Sparkles icon for AI-generated branches
+        return html`<svg class="prefix-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z"></path>
+          <path d="M5 16l1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3z"></path>
+          <path d="M19 13l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5.5-1.5z"></path>
         </svg>`;
       default:
         return html`<svg class="prefix-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

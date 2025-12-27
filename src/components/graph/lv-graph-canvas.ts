@@ -30,6 +30,7 @@ import type { GraphPullRequest } from '../../graph/virtual-scroll.ts';
 
 export interface CommitSelectedEvent {
   commit: Commit | null;
+  commits: Commit[]; // All selected commits for multi-select
   refs: RefInfo[];
 }
 
@@ -183,10 +184,12 @@ export class LvGraphCanvas extends LitElement {
 
   @property({ type: Number }) commitCount = 1000;
   @property({ type: String }) repositoryPath = '';
-  @property({ type: Object }) searchFilter: { query: string; author: string; dateFrom: string; dateTo: string } | null = null;
+  @property({ type: Object }) searchFilter: { query: string; author: string; dateFrom: string; dateTo: string; filePath: string } | null = null;
 
   @state() private layout: GraphLayout | null = null;
-  @state() private selectedNode: LayoutNode | null = null;
+  @state() private selectedNode: LayoutNode | null = null; // Primary selection (for details panel)
+  @state() private selectedNodes: Set<string> = new Set(); // All selected OIDs (for multi-select)
+  @state() private lastClickedNode: LayoutNode | null = null; // For Shift-click range selection
   @state() private hoveredNode: LayoutNode | null = null;
   @state() private fps = 0;
   @state() private renderTimeMs = 0;
@@ -205,6 +208,7 @@ export class LvGraphCanvas extends LitElement {
 
   private commits: GraphCommit[] = [];
   private realCommits: Map<string, Commit> = new Map();
+  private matchedCommitOids: Set<string> = new Set(); // For search highlighting
   private refsByCommit: RefsByCommit = {};
   private pullRequestsByCommit: Record<string, GraphPullRequest[]> = {};
   private githubRepo: { owner: string; repo: string } | null = null;
@@ -224,6 +228,7 @@ export class LvGraphCanvas extends LitElement {
   private readonly LANE_WIDTH = 24;
   private readonly PADDING = 20;
   private readonly NODE_RADIUS = 6;
+  private readonly HEADER_HEIGHT = 28; // Must match canvas-renderer.ts
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -368,7 +373,8 @@ export class LvGraphCanvas extends LitElement {
       this.searchFilter.query ||
       this.searchFilter.author ||
       this.searchFilter.dateFrom ||
-      this.searchFilter.dateTo
+      this.searchFilter.dateTo ||
+      this.searchFilter.filePath
     );
   }
 
@@ -383,28 +389,15 @@ export class LvGraphCanvas extends LitElement {
     const startTime = performance.now();
 
     try {
-      // Determine if we should use search or regular history
-      const useSearch = this.hasActiveSearch();
+      const hasSearch = this.hasActiveSearch();
 
-      // Fetch commits and refs in parallel
+      // Always fetch all commits first
       const [commitsResult, refsResult, githubRepoResult] = await Promise.all([
-        useSearch
-          ? searchCommits(this.repositoryPath, {
-              query: this.searchFilter?.query || undefined,
-              author: this.searchFilter?.author || undefined,
-              dateFrom: this.searchFilter?.dateFrom
-                ? new Date(this.searchFilter.dateFrom).getTime() / 1000
-                : undefined,
-              dateTo: this.searchFilter?.dateTo
-                ? new Date(this.searchFilter.dateTo).getTime() / 1000
-                : undefined,
-              limit: this.commitCount,
-            })
-          : getCommitHistory({
-              path: this.repositoryPath,
-              limit: this.commitCount,
-              allBranches: true,
-            }),
+        getCommitHistory({
+          path: this.repositoryPath,
+          limit: this.commitCount,
+          allBranches: true,
+        }),
         getRefsByCommit(this.repositoryPath),
         detectGitHubRepo(this.repositoryPath),
       ]);
@@ -437,10 +430,34 @@ export class LvGraphCanvas extends LitElement {
       // Store refs
       this.refsByCommit = refsResult.success && refsResult.data ? refsResult.data : {};
 
+      // If search is active, also fetch matching commits for highlighting
+      this.matchedCommitOids.clear();
+      if (hasSearch) {
+        const matchResult = await searchCommits(this.repositoryPath, {
+          query: this.searchFilter?.query || undefined,
+          author: this.searchFilter?.author || undefined,
+          dateFrom: this.searchFilter?.dateFrom
+            ? new Date(this.searchFilter.dateFrom).getTime() / 1000
+            : undefined,
+          dateTo: this.searchFilter?.dateTo
+            ? new Date(this.searchFilter.dateTo).getTime() / 1000
+            : undefined,
+          filePath: this.searchFilter?.filePath || undefined,
+          limit: this.commitCount,
+        });
+
+        if (matchResult.success && matchResult.data) {
+          for (const commit of matchResult.data) {
+            this.matchedCommitOids.add(commit.oid);
+          }
+          console.log(`Search matched ${this.matchedCommitOids.size} commits`);
+        }
+      }
+
       // Convert commits to GraphCommit format for layout
       this.commits = commitsResult.data.map(commitToGraphCommit);
       this.processLayout();
-      const searchInfo = useSearch ? ' (search results)' : '';
+      const searchInfo = hasSearch ? ` (${this.matchedCommitOids.size} matches highlighted)` : '';
       console.log(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
     } catch (err) {
       this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
@@ -567,6 +584,9 @@ export class LvGraphCanvas extends LitElement {
 
     // Rebuild spatial index
     this.rebuildSpatialIndex();
+
+    // Set highlighted commits for search results
+    this.renderer?.setHighlightedCommits(this.matchedCommitOids);
 
     // Mark dirty and render
     this.renderer?.markDirty();
@@ -757,13 +777,23 @@ export class LvGraphCanvas extends LitElement {
             ? 'Click to open'
             : this.getRefTypeLabel(refLabelHit.refType);
         } else {
-          this.tooltipVisible = false;
+          // Check overflow indicator
+          const overflowHit = this.renderer.getOverflowAtPoint(canvasX, canvasY);
+          if (overflowHit) {
+            this.tooltipVisible = true;
+            this.tooltipX = e.clientX + 12;
+            this.tooltipY = e.clientY - 8;
+            this.tooltipAuthorName = 'Hidden labels:';
+            this.tooltipAuthorEmail = overflowHit.hiddenLabels.join(', ');
+          } else {
+            this.tooltipVisible = false;
+          }
         }
       }
     }
 
-    this.renderer?.setSelection(
-      this.selectedNode?.oid ?? null,
+    this.renderer?.setMultiSelection(
+      this.selectedNodes,
       this.hoveredNode?.oid ?? null
     );
     this.renderer?.markDirty();
@@ -771,12 +801,74 @@ export class LvGraphCanvas extends LitElement {
   }
 
   private handleClick(e: MouseEvent): void {
+    // Check for ref label click first (checkout on branch label click)
+    if (this.renderer) {
+      const rect = this.canvasEl.getBoundingClientRect();
+      const canvasX = e.clientX - rect.left;
+      const canvasY = e.clientY - rect.top;
+
+      const refLabelHit = this.renderer.getRefLabelAtPoint(canvasX, canvasY);
+      if (refLabelHit && refLabelHit.refType === 'localBranch') {
+        // Dispatch checkout event for local branches
+        this.dispatchEvent(
+          new CustomEvent('checkout-branch', {
+            detail: { branchName: refLabelHit.label },
+            bubbles: true,
+            composed: true,
+          })
+        );
+        return;
+      }
+
+      // Handle PR label click - open in browser
+      if (refLabelHit && refLabelHit.refType === 'pullRequest') {
+        const prUrl = refLabelHit.fullName;
+        if (prUrl && prUrl.startsWith('http')) {
+          window.open(prUrl, '_blank');
+        }
+        return;
+      }
+    }
+
     const result = this.hitTest(e);
 
     if (result.type === 'node' && result.node) {
-      this.selectedNode = result.node;
+      const clickedOid = result.node.oid;
+
+      if (e.shiftKey && this.lastClickedNode) {
+        // Shift+click: Range selection between last clicked and current
+        this.handleRangeSelect(result.node);
+        this.selectedNode = result.node;
+      } else if (e.ctrlKey || e.metaKey) {
+        // Ctrl/Cmd+click: Toggle individual selection
+        if (this.selectedNodes.has(clickedOid)) {
+          this.selectedNodes.delete(clickedOid);
+          // If we removed the primary selection, pick another
+          if (this.selectedNode?.oid === clickedOid) {
+            const remaining = Array.from(this.selectedNodes);
+            this.selectedNode = remaining.length > 0
+              ? this.sortedNodesByRow.find(n => n.oid === remaining[remaining.length - 1]) ?? null
+              : null;
+          }
+        } else {
+          this.selectedNodes.add(clickedOid);
+          this.selectedNode = result.node;
+        }
+        this.lastClickedNode = result.node;
+      } else {
+        // Regular click: Clear selection and select single node
+        this.selectedNodes.clear();
+        this.selectedNodes.add(clickedOid);
+        this.selectedNode = result.node;
+        this.lastClickedNode = result.node;
+      }
     } else {
-      this.selectedNode = null;
+      // Click on empty space: Clear selection (unless Ctrl/Cmd held)
+      if (!e.ctrlKey && !e.metaKey) {
+        this.selectedNodes.clear();
+        this.selectedNode = null;
+        this.lastClickedNode = null;
+      }
     }
 
     // Focus canvas for keyboard navigation
@@ -785,19 +877,35 @@ export class LvGraphCanvas extends LitElement {
     // Dispatch selection event
     this.dispatchSelectionEvent();
 
-    this.renderer?.setSelection(
-      this.selectedNode?.oid ?? null,
+    this.renderer?.setMultiSelection(
+      this.selectedNodes,
       this.hoveredNode?.oid ?? null
     );
     this.renderer?.markDirty();
     this.scheduleRender();
   }
 
+  private handleRangeSelect(endNode: LayoutNode): void {
+    if (!this.lastClickedNode) return;
+
+    const startRow = this.lastClickedNode.row;
+    const endRow = endNode.row;
+    const minRow = Math.min(startRow, endRow);
+    const maxRow = Math.max(startRow, endRow);
+
+    // Select all nodes in the row range
+    for (const node of this.sortedNodesByRow) {
+      if (node.row >= minRow && node.row <= maxRow) {
+        this.selectedNodes.add(node.oid);
+      }
+    }
+  }
+
   private handleMouseLeave(): void {
     this.hoveredNode = null;
     this.tooltipVisible = false;
     this.canvasEl.classList.remove('pointer');
-    this.renderer?.setSelection(this.selectedNode?.oid ?? null, null);
+    this.renderer?.setMultiSelection(this.selectedNodes, null);
     this.renderer?.markDirty();
     this.scheduleRender();
   }
@@ -831,8 +939,8 @@ export class LvGraphCanvas extends LitElement {
           })
         );
 
-        this.renderer?.setSelection(
-          this.selectedNode?.oid ?? null,
+        this.renderer?.setMultiSelection(
+          this.selectedNodes,
           this.hoveredNode?.oid ?? null
         );
         this.renderer?.markDirty();
@@ -903,10 +1011,28 @@ export class LvGraphCanvas extends LitElement {
       case 'Escape':
         e.preventDefault();
         this.selectedNode = null;
+        this.selectedNodes.clear();
+        this.lastClickedNode = null;
         this.dispatchSelectionEvent();
-        this.renderer?.setSelection(null, this.hoveredNode?.oid ?? null);
+        this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
         this.renderer?.markDirty();
         this.scheduleRender();
+        return;
+
+      case 'c':
+        // Copy commit SHA to clipboard (Ctrl/Cmd+C)
+        if ((e.ctrlKey || e.metaKey) && this.selectedNode) {
+          e.preventDefault();
+          navigator.clipboard.writeText(this.selectedNode.oid);
+          // Dispatch event for toast notification
+          this.dispatchEvent(
+            new CustomEvent('copy-sha', {
+              detail: { sha: this.selectedNode.oid.substring(0, 7) },
+              bubbles: true,
+              composed: true,
+            })
+          );
+        }
         return;
 
       default:
@@ -915,9 +1041,13 @@ export class LvGraphCanvas extends LitElement {
 
     if (newIndex >= 0 && newIndex !== currentIndex) {
       this.selectedNode = this.sortedNodesByRow[newIndex];
+      // Keyboard nav clears multi-select unless Shift is held
+      this.selectedNodes.clear();
+      this.selectedNodes.add(this.selectedNode.oid);
+      this.lastClickedNode = this.selectedNode;
       this.dispatchSelectionEvent();
       this.scrollToNode(this.selectedNode);
-      this.renderer?.setSelection(this.selectedNode.oid, this.hoveredNode?.oid ?? null);
+      this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
       this.renderer?.markDirty();
       this.scheduleRender();
     }
@@ -983,7 +1113,10 @@ export class LvGraphCanvas extends LitElement {
 
     // Update selection state first
     this.selectedNode = node;
-    this.renderer?.setSelection(this.selectedNode.oid, this.hoveredNode?.oid ?? null);
+    this.selectedNodes.clear();
+    this.selectedNodes.add(node.oid);
+    this.lastClickedNode = node;
+    this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
 
     // Scroll to node - this updates scroll state
     this.scrollToNode(node);
@@ -1063,9 +1196,12 @@ export class LvGraphCanvas extends LitElement {
     if (index < 0 || index >= this.sortedNodesByRow.length) return;
 
     this.selectedNode = this.sortedNodesByRow[index];
+    this.selectedNodes.clear();
+    this.selectedNodes.add(this.selectedNode.oid);
+    this.lastClickedNode = this.selectedNode;
     this.dispatchSelectionEvent();
     this.scrollToNode(this.selectedNode);
-    this.renderer?.setSelection(this.selectedNode.oid, this.hoveredNode?.oid ?? null);
+    this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
     this.renderer?.markDirty();
     this.scheduleRender();
   }
@@ -1074,9 +1210,9 @@ export class LvGraphCanvas extends LitElement {
     const rect = this.canvasEl.getBoundingClientRect();
     const viewport = this.getViewport();
 
-    // Convert screen coords to graph coords
+    // Convert screen coords to graph coords, accounting for header offset
     const graphX = e.clientX - rect.left + viewport.scrollLeft;
-    const graphY = e.clientY - rect.top + viewport.scrollTop;
+    const graphY = e.clientY - rect.top + viewport.scrollTop - this.HEADER_HEIGHT;
 
     // First check spatial index for node hits
     if (this.spatialIndex) {
@@ -1125,9 +1261,18 @@ export class LvGraphCanvas extends LitElement {
   private dispatchSelectionEvent(): void {
     let commit: Commit | null = null;
     let refs: RefInfo[] = [];
+    const commits: Commit[] = [];
+
+    // Get all selected commits
+    for (const oid of this.selectedNodes) {
+      const c = this.realCommits.get(oid);
+      if (c) {
+        commits.push(c);
+      }
+    }
 
     if (this.selectedNode) {
-      // Get real commit data if available
+      // Get real commit data if available (primary selection for details panel)
       commit = this.realCommits.get(this.selectedNode.oid) ?? null;
       // Get refs for this commit
       refs = this.refsByCommit[this.selectedNode.oid] ?? [];
@@ -1135,7 +1280,7 @@ export class LvGraphCanvas extends LitElement {
 
     this.dispatchEvent(
       new CustomEvent<CommitSelectedEvent>('commit-selected', {
-        detail: { commit, refs },
+        detail: { commit, commits, refs },
         bubbles: true,
         composed: true,
       })

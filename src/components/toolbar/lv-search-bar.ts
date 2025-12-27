@@ -7,6 +7,7 @@ export interface SearchFilter {
   author: string;
   dateFrom: string;
   dateTo: string;
+  filePath: string;
 }
 
 @customElement('lv-search-bar')
@@ -189,6 +190,7 @@ export class LvSearchBar extends LitElement {
   @state() private author = '';
   @state() private dateFrom = '';
   @state() private dateTo = '';
+  @state() private filePath = '';
   @state() private showFilters = false;
 
   @query('input[type="text"]') private inputEl!: HTMLInputElement;
@@ -218,6 +220,7 @@ export class LvSearchBar extends LitElement {
     this.author = '';
     this.dateFrom = '';
     this.dateTo = '';
+    this.filePath = '';
     this.emitSearch();
     this.inputEl?.focus();
   }
@@ -238,6 +241,10 @@ export class LvSearchBar extends LitElement {
     this.dateTo = (e.target as HTMLInputElement).value;
   }
 
+  private handleFilePathChange(e: Event): void {
+    this.filePath = (e.target as HTMLInputElement).value;
+  }
+
   private applyFilters(): void {
     this.showFilters = false;
     this.emitSearch();
@@ -247,6 +254,7 @@ export class LvSearchBar extends LitElement {
     this.author = '';
     this.dateFrom = '';
     this.dateTo = '';
+    this.filePath = '';
     this.emitSearch();
   }
 
@@ -256,6 +264,7 @@ export class LvSearchBar extends LitElement {
       author: this.author,
       dateFrom: this.dateFrom,
       dateTo: this.dateTo,
+      filePath: this.filePath,
     };
 
     this.dispatchEvent(
@@ -268,7 +277,7 @@ export class LvSearchBar extends LitElement {
   }
 
   private hasActiveFilters(): boolean {
-    return !!(this.author || this.dateFrom || this.dateTo);
+    return !!(this.author || this.dateFrom || this.dateTo || this.filePath);
   }
 
   render() {
@@ -346,6 +355,17 @@ export class LvSearchBar extends LitElement {
                     class="filter-input"
                     .value=${this.dateTo}
                     @change=${this.handleDateToChange}
+                  />
+                </div>
+
+                <div class="filter-row">
+                  <span class="filter-label">Path</span>
+                  <input
+                    type="text"
+                    class="filter-input"
+                    placeholder="*.ts, src/**, or file path"
+                    .value=${this.filePath}
+                    @input=${this.handleFilePathChange}
                   />
                 </div>
 

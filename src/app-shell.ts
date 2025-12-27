@@ -708,6 +708,24 @@ export class AppShell extends LitElement {
     this.graphCanvas?.selectCommit(e.detail.oid);
   }
 
+  private async handleCheckoutBranchFromGraph(e: CustomEvent<{ branchName: string }>): Promise<void> {
+    if (!this.activeRepository) return;
+
+    const branchName = e.detail.branchName;
+    const result = await gitService.checkout(this.activeRepository.repository.path, { ref: branchName });
+
+    if (result.success) {
+      this.handleRefresh();
+    } else {
+      console.error('Failed to checkout branch:', result.error);
+    }
+  }
+
+  private handleCopySha(e: CustomEvent<{ sha: string }>): void {
+    // Show brief feedback that SHA was copied
+    console.log(`Copied ${e.detail.sha} to clipboard`);
+  }
+
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry }>): void {
     // Close blame if open
     this.showBlame = false;
@@ -1126,6 +1144,8 @@ export class AppShell extends LitElement {
                     repositoryPath=${this.activeRepository.repository.path}
                     @commit-selected=${this.handleCommitSelected}
                     @commit-context-menu=${this.handleCommitContextMenu}
+                    @checkout-branch=${this.handleCheckoutBranchFromGraph}
+                    @copy-sha=${this.handleCopySha}
                   ></lv-graph-canvas>
                 </div>
 
