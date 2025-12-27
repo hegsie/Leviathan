@@ -418,6 +418,9 @@ export class CanvasRenderer {
     ctx.fillStyle = theme.background;
     ctx.fillRect(0, 0, width, height);
 
+    // Draw column headers
+    this.renderColumnHeaders(data);
+
     // Draw edges (behind nodes)
     this.renderEdges(data);
 
@@ -436,7 +439,50 @@ export class CanvasRenderer {
   }
 
   /**
-   * Render edges
+   * Render column headers (GRAPH, COMMIT MESSAGE)
+   */
+  private renderColumnHeaders(data: RenderData): void {
+    const { ctx, config, theme } = this;
+    const { offsetX, maxLane } = data;
+
+    const headerHeight = 24;
+    const headerY = 8;
+
+    // Calculate column positions
+    const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
+    const avatarColumnX = graphEndX + 12;
+    const avatarSize = 22;
+    const messageColumnX = avatarColumnX + avatarSize + 12;
+
+    ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = theme.textColor;
+    ctx.globalAlpha = 0.5;
+    ctx.textBaseline = 'middle';
+
+    // Graph header - centered over graph area
+    const graphCenterX = offsetX + ((maxLane + 1) * config.laneWidth) / 2;
+    ctx.textAlign = 'center';
+    ctx.fillText('GRAPH', graphCenterX, headerY);
+
+    // Commit message header
+    ctx.textAlign = 'left';
+    ctx.fillText('COMMIT', messageColumnX, headerY);
+
+    ctx.globalAlpha = 1.0;
+
+    // Draw subtle separator line under headers
+    ctx.strokeStyle = theme.textColor;
+    ctx.globalAlpha = 0.1;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, headerHeight);
+    ctx.lineTo(this.canvas.width / this.dpr, headerHeight);
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+  }
+
+  /**
+   * Render edges with smooth bezier curves (GitKraken style)
    */
   private renderEdges(data: RenderData): void {
     const { ctx, config } = this;
@@ -459,48 +505,52 @@ export class CanvasRenderer {
       ctx.beginPath();
 
       if (edge.fromLane === edge.toLane) {
-        // Straight line
+        // Straight line for same lane
         ctx.moveTo(fromX, fromY);
         ctx.lineTo(toX, toY);
       } else {
-        // Angular elbow curve (like GitKraken)
-        const cornerRadius = 5;
-        const goingRight = toX > fromX;
+        // Smooth bezier curve for lane changes (GitKraken style)
+        const rowDiff = Math.abs(edge.toRow - edge.fromRow);
         const goingDown = toY > fromY;
 
         ctx.moveTo(fromX, fromY);
 
-        if (goingDown) {
-          // Going down: vertical first, then horizontal
-          const turnY = toY - cornerRadius;
+        if (rowDiff === 1) {
+          // Single row difference: simple S-curve
+          const midY = (fromY + toY) / 2;
+          ctx.bezierCurveTo(
+            fromX, midY,      // Control point 1: straight down from start
+            toX, midY,        // Control point 2: straight up from end
+            toX, toY          // End point
+          );
+        } else if (goingDown) {
+          // Multiple rows going down: curve out then straight down then curve in
+          const curveHeight = config.rowHeight * 0.8;
+          const midY = fromY + curveHeight;
 
-          // Vertical segment
-          ctx.lineTo(fromX, turnY);
+          // First curve: from start going down and sideways
+          ctx.bezierCurveTo(
+            fromX, fromY + curveHeight * 0.5,  // Control 1
+            toX, midY - curveHeight * 0.5,     // Control 2
+            toX, midY                           // End of curve
+          );
 
-          // Rounded corner
-          if (goingRight) {
-            ctx.arcTo(fromX, toY, fromX + cornerRadius, toY, cornerRadius);
-          } else {
-            ctx.arcTo(fromX, toY, fromX - cornerRadius, toY, cornerRadius);
-          }
-
-          // Horizontal segment to target
+          // Straight line to near the end
           ctx.lineTo(toX, toY);
         } else {
-          // Going up: horizontal first, then vertical
-          const turnY = fromY;
+          // Multiple rows going up: straight then curve
+          const curveHeight = config.rowHeight * 0.8;
+          const startCurveY = toY + curveHeight;
 
-          // Horizontal segment
-          if (goingRight) {
-            ctx.lineTo(toX - cornerRadius, turnY);
-            ctx.arcTo(toX, turnY, toX, turnY - cornerRadius, cornerRadius);
-          } else {
-            ctx.lineTo(toX + cornerRadius, turnY);
-            ctx.arcTo(toX, turnY, toX, turnY - cornerRadius, cornerRadius);
-          }
+          // Straight line from start
+          ctx.lineTo(fromX, startCurveY);
 
-          // Vertical segment to target
-          ctx.lineTo(toX, toY);
+          // Curve to end
+          ctx.bezierCurveTo(
+            fromX, startCurveY - curveHeight * 0.5,
+            toX, toY + curveHeight * 0.5,
+            toX, toY
+          );
         }
       }
 
@@ -549,6 +599,9 @@ export class CanvasRenderer {
         }
       }
 
+      // Check if this is a merge commit (has multiple parents)
+      const isMergeCommit = node.commit.parentIds.length > 1;
+
       // Draw node circle (border or full if no avatar)
       ctx.beginPath();
       ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -570,6 +623,15 @@ export class CanvasRenderer {
         }
         ctx.strokeStyle = theme.hoveredColor;
         ctx.lineWidth = 3;
+        ctx.stroke();
+      } else if (isMergeCommit) {
+        // Merge commit: hollow circle with thick border (GitKraken style)
+        if (!avatarDrawn) {
+          ctx.fillStyle = theme.background;
+          ctx.fill();
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
         ctx.stroke();
       } else {
         // Normal: colored fill or border around avatar
@@ -617,6 +679,7 @@ export class CanvasRenderer {
 
   /**
    * Render ref labels and commit messages in fixed columns
+   * Layout: [Branch Labels] | [Graph] | [Avatar] | [Message + Refs]
    */
   private renderRefLabels(data: RenderData): void {
     const { ctx, config, theme } = this;
@@ -629,13 +692,18 @@ export class CanvasRenderer {
     const iconSize = 12;
     const iconPadding = 3;
 
-    // Fixed column positions based on global maxLane - tight spacing
+    // Get canvas width for responsive layout
+    const canvasWidth = this.canvas.width / this.dpr;
+    const rightPadding = 16;
+
+    // Calculate column positions (left to right)
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
-    const avatarColumnX = graphEndX + 10;
+    const avatarColumnX = graphEndX + 12;
     const avatarSize = 22;
-    const messageColumnX = avatarColumnX + avatarSize + 10;
-    const messageColumnWidth = 360;  // Fixed width for message column
-    const labelColumnX = messageColumnX + messageColumnWidth + 10;
+    const messageColumnX = avatarColumnX + avatarSize + 12;
+
+    // Message column fills remaining space
+    const availableMessageWidth = canvasWidth - messageColumnX - rightPadding;
 
     for (const node of nodes) {
       const y = offsetY + node.row * config.rowHeight;
@@ -688,29 +756,47 @@ export class CanvasRenderer {
         ctx.fillText(initials, avatarCenterX, y + 1);
       }
 
-      // Render commit message (in message column)
-      // Use the lane color for the message text (like GitKraken)
+      // Calculate ref labels width first (to know how much space message gets)
+      let totalRefWidth = 0;
+      const prs = data.pullRequestsByCommit?.[node.oid] ?? [];
+
+      if (hasRefs || prs.length > 0) {
+        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
+        for (const ref of refs) {
+          const textWidth = ctx.measureText(ref.shorthand).width;
+          const hasIcon = config.showRefIcons;
+          totalRefWidth += textWidth + labelPadding * 2 + (hasIcon ? iconSize + iconPadding : 0) + labelGap;
+        }
+        for (const pr of prs) {
+          const prLabel = `#${pr.number}`;
+          const prTextWidth = ctx.measureText(prLabel).width;
+          totalRefWidth += prTextWidth + labelPadding * 2 + 10 + iconPadding + labelGap;
+        }
+      }
+
+      // Message gets remaining space after refs
+      const messageMaxWidth = Math.max(100, availableMessageWidth - totalRefWidth - 8);
+
+      // Render commit message
       const message = node.commit.message;
       ctx.font = '13px -apple-system, BlinkMacSystemFont, sans-serif';
       ctx.fillStyle = laneColor;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
 
-      // Allow message to extend into label column if no refs
-      const maxWidth = hasRefs ? messageColumnWidth - 8 : messageColumnWidth + 300;
-
       // Truncate message to fit available space
       let displayMessage = message;
-      if (ctx.measureText(displayMessage).width > maxWidth) {
-        while (ctx.measureText(displayMessage + '…').width > maxWidth && displayMessage.length > 0) {
+      if (ctx.measureText(displayMessage).width > messageMaxWidth) {
+        while (ctx.measureText(displayMessage + '…').width > messageMaxWidth && displayMessage.length > 0) {
           displayMessage = displayMessage.slice(0, -1);
         }
         displayMessage += '…';
       }
       ctx.fillText(displayMessage, messageColumnX, y);
 
-      // Render refs in label column (after message)
-      let currentX = labelColumnX;
+      // Render refs inline after message
+      const messageWidth = ctx.measureText(displayMessage).width;
+      let currentX = messageColumnX + messageWidth + 12;
       for (const ref of refs) {
         const label = ref.shorthand;
 
@@ -754,8 +840,7 @@ export class CanvasRenderer {
         currentX += pillWidth + labelGap;
       }
 
-      // Render PR badges after refs
-      const prs = data.pullRequestsByCommit?.[node.oid] ?? [];
+      // Render PR badges after refs (prs already defined above)
       for (const pr of prs) {
         const { bgColor, textColor: prTextColor } = this.getPrColors(pr);
         const prLabel = `#${pr.number}`;
