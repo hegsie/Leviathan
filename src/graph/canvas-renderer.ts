@@ -267,6 +267,16 @@ export class CanvasRenderer {
   // Commit stats for size scaling (oid -> number of changes)
   private commitStats: Map<string, number> = new Map();
 
+  // Avatar hitboxes for tooltip detection
+  private avatarHitboxes: Array<{
+    x: number;
+    y: number;
+    radius: number;
+    authorName: string;
+    authorEmail: string;
+    oid: string;
+  }> = [];
+
   constructor(
     canvas: HTMLCanvasElement,
     config: Partial<RenderConfig> = {},
@@ -417,6 +427,9 @@ export class CanvasRenderer {
     // Clear canvas
     ctx.fillStyle = theme.background;
     ctx.fillRect(0, 0, width, height);
+
+    // Clear avatar hitboxes for this frame
+    this.avatarHitboxes = [];
 
     // Draw column headers
     this.renderColumnHeaders(data);
@@ -715,6 +728,16 @@ export class CanvasRenderer {
       const authorEmail = data.authorEmails?.[node.oid];
       const avatarRadius = avatarSize / 2;
       const avatarCenterX = avatarColumnX + avatarRadius;
+
+      // Store avatar hitbox for tooltip detection
+      this.avatarHitboxes.push({
+        x: avatarCenterX,
+        y,
+        radius: avatarRadius,
+        authorName: node.commit.author,
+        authorEmail: authorEmail ?? '',
+        oid: node.oid,
+      });
 
       if (authorEmail) {
         const avatar = this.avatarCache.get(authorEmail);
@@ -1214,6 +1237,28 @@ export class CanvasRenderer {
    */
   getPerformanceStats(): ReturnType<PerformanceMonitor['getStats']> {
     return this.perfMonitor.getStats();
+  }
+
+  /**
+   * Check if a point is over an avatar and return author info
+   * @param x X coordinate relative to canvas (accounting for scroll)
+   * @param y Y coordinate relative to canvas (accounting for scroll)
+   * @returns Author info if hovering over avatar, null otherwise
+   */
+  getAvatarAtPoint(x: number, y: number): { authorName: string; authorEmail: string; oid: string } | null {
+    for (const hitbox of this.avatarHitboxes) {
+      const dx = x - hitbox.x;
+      const dy = y - hitbox.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance <= hitbox.radius) {
+        return {
+          authorName: hitbox.authorName,
+          authorEmail: hitbox.authorEmail,
+          oid: hitbox.oid,
+        };
+      }
+    }
+    return null;
   }
 
   /**

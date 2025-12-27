@@ -147,6 +147,36 @@ export class LvGraphCanvas extends LitElement {
         font-size: var(--font-size-xs);
         color: var(--color-text-secondary);
       }
+
+      .avatar-tooltip {
+        position: fixed;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-sm);
+        color: var(--color-text-primary);
+        box-shadow: var(--shadow-md);
+        pointer-events: none;
+        z-index: var(--z-tooltip, 1000);
+        white-space: nowrap;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+      }
+
+      .avatar-tooltip.visible {
+        opacity: 1;
+      }
+
+      .avatar-tooltip .author-name {
+        font-weight: var(--font-weight-medium);
+      }
+
+      .avatar-tooltip .author-email {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+        margin-top: 2px;
+      }
     `,
   ];
 
@@ -162,6 +192,11 @@ export class LvGraphCanvas extends LitElement {
   @state() private visibleNodes = 0;
   @state() private isLoading = false;
   @state() private loadError: string | null = null;
+  @state() private tooltipVisible = false;
+  @state() private tooltipX = 0;
+  @state() private tooltipY = 0;
+  @state() private tooltipAuthorName = '';
+  @state() private tooltipAuthorEmail = '';
 
   @query('.canvas-container') private containerEl!: HTMLDivElement;
   @query('canvas') private canvasEl!: HTMLCanvasElement;
@@ -665,6 +700,26 @@ export class LvGraphCanvas extends LitElement {
       this.canvasEl.classList.remove('pointer');
     }
 
+    // Check for avatar hover for tooltip
+    if (this.renderer) {
+      const rect = this.canvasEl.getBoundingClientRect();
+
+      // Convert screen coords to canvas coords (hitboxes are in canvas space)
+      const canvasX = e.clientX - rect.left;
+      const canvasY = e.clientY - rect.top;
+
+      const avatarHit = this.renderer.getAvatarAtPoint(canvasX, canvasY);
+      if (avatarHit) {
+        this.tooltipVisible = true;
+        this.tooltipX = e.clientX + 12;
+        this.tooltipY = e.clientY - 8;
+        this.tooltipAuthorName = avatarHit.authorName;
+        this.tooltipAuthorEmail = avatarHit.authorEmail;
+      } else {
+        this.tooltipVisible = false;
+      }
+    }
+
     this.renderer?.setSelection(
       this.selectedNode?.oid ?? null,
       this.hoveredNode?.oid ?? null
@@ -698,6 +753,7 @@ export class LvGraphCanvas extends LitElement {
 
   private handleMouseLeave(): void {
     this.hoveredNode = null;
+    this.tooltipVisible = false;
     this.canvasEl.classList.remove('pointer');
     this.renderer?.setSelection(this.selectedNode?.oid ?? null, null);
     this.renderer?.markDirty();
@@ -1070,6 +1126,16 @@ export class LvGraphCanvas extends LitElement {
                 </div>
               `
             : ''}
+
+          <div
+            class="avatar-tooltip ${this.tooltipVisible ? 'visible' : ''}"
+            style="left: ${this.tooltipX}px; top: ${this.tooltipY}px;"
+          >
+            <div class="author-name">${this.tooltipAuthorName}</div>
+            ${this.tooltipAuthorEmail
+              ? html`<div class="author-email">${this.tooltipAuthorEmail}</div>`
+              : ''}
+          </div>
         </div>
       </div>
     `;
