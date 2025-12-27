@@ -80,13 +80,10 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # Build without release for non-tag pushes
+      # Build without release for non-tag pushes (skip signing)
       - name: Build Tauri app
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: npm run tauri build -- --target ${{ matrix.target }}
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --target ${{ matrix.target }} --no-sign
 
       # Build with release for tagged pushes
       - name: Build Tauri app (Release)
