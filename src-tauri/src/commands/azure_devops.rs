@@ -222,7 +222,9 @@ pub async fn check_ado_connection(organization: String) -> Result<AdoConnectionS
                 match status.as_u16() {
                     401 => "Invalid or expired token. Please check your PAT.".to_string(),
                     403 => "Access denied. Ensure your PAT has the required scopes.".to_string(),
-                    404 => "Organization not found. Please check the organization name.".to_string(),
+                    404 => {
+                        "Organization not found. Please check the organization name.".to_string()
+                    }
                     _ => "Unknown error".to_string(),
                 }
             } else {
