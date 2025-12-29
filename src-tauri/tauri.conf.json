@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Leviathan",
-  "version": "0.2.19",
+  "version": "0.2.20",
   "identifier": "com.leviathan.app",
   "build": {
     "beforeBuildCommand": "npm run build",

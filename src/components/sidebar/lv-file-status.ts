@@ -298,6 +298,7 @@ export class LvFileStatus extends LitElement {
 
   private unsubscribeWatcher: (() => void) | null = null;
   private statusRefreshTimeout: ReturnType<typeof setTimeout> | null = null;
+  private hasInitiallyLoaded = false;
   private static readonly STATUS_REFRESH_DEBOUNCE_MS = 300;
 
   async connectedCallback(): Promise<void> {
@@ -350,7 +351,6 @@ export class LvFileStatus extends LitElement {
   /**
    * Debounced version of loadStatus to prevent excessive refreshes
    * when multiple file changes occur in rapid succession.
-   * Uses delta update (no loading indicator) for smooth UI.
    */
   private debouncedLoadStatus(): void {
     if (this.statusRefreshTimeout) {
@@ -358,12 +358,14 @@ export class LvFileStatus extends LitElement {
     }
     this.statusRefreshTimeout = setTimeout(() => {
       this.statusRefreshTimeout = null;
-      this.loadStatus(false); // Don't show loading indicator on file watcher refreshes
+      this.loadStatus();
     }, LvFileStatus.STATUS_REFRESH_DEBOUNCE_MS);
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+      // Reset for new repository so we show loading on first load
+      this.hasInitiallyLoaded = false;
       // Start watching the new repository
       try {
         await watcherService.startWatching(this.repositoryPath);
@@ -374,11 +376,11 @@ export class LvFileStatus extends LitElement {
     }
   }
 
-  async loadStatus(showLoading = true): Promise<void> {
+  async loadStatus(): Promise<void> {
     if (!this.repositoryPath) return;
 
-    // Only show loading indicator on initial load, not on refreshes
-    if (showLoading && this.stagedFiles.length === 0 && this.unstagedFiles.length === 0) {
+    // Only show loading indicator on the very first load
+    if (!this.hasInitiallyLoaded) {
       this.loading = true;
     }
     this.error = null;
@@ -421,6 +423,7 @@ export class LvFileStatus extends LitElement {
       this.error = err instanceof Error ? err.message : 'Unknown error';
     } finally {
       this.loading = false;
+      this.hasInitiallyLoaded = true;
     }
   }
 
