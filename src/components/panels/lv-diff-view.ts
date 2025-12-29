@@ -277,7 +277,6 @@ export class LvDiffView extends LitElement {
         flex: 1;
         padding: 0 var(--spacing-sm);
         white-space: pre;
-        overflow-x: auto;
       }
 
       .line.addition {
@@ -358,7 +357,6 @@ export class LvDiffView extends LitElement {
         flex: 1;
         padding: 0 var(--spacing-sm);
         white-space: pre;
-        overflow-x: auto;
       }
 
       .split-line.empty {

@@ -89,8 +89,9 @@ export class LvRightPanel extends LitElement {
       }
 
       .changes-section {
-        flex: 0 0 auto;
-        max-height: 40%;
+        flex: 0 1 auto;
+        max-height: 35%;
+        min-height: 100px;
       }
 
       .commit-section {
