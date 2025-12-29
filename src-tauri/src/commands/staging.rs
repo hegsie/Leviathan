@@ -163,8 +163,12 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
     let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
     let index = repo.index()?;
 
-    // Separate files into categories
-    let mut tracked_paths: Vec<&str> = Vec::new();
+    // Separate files into three categories:
+    // 1. In HEAD: checkout from HEAD tree
+    // 2. In index but not in HEAD: checkout from index
+    // 3. Untracked: delete
+    let mut head_paths: Vec<&str> = Vec::new();
+    let mut index_only_paths: Vec<&str> = Vec::new();
     let mut untracked_paths: Vec<&str> = Vec::new();
 
     for file_path in &paths {
@@ -179,32 +183,45 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
         // Check if file exists in index
         let in_index = index.get_path(path_obj, 0).is_some();
 
-        if in_head || in_index {
-            // File is tracked - will checkout from HEAD or index
-            tracked_paths.push(file_path);
+        if in_head {
+            // File is in HEAD - checkout from HEAD tree
+            head_paths.push(file_path);
+        } else if in_index {
+            // File is staged but not in HEAD - checkout from index
+            index_only_paths.push(file_path);
         } else {
             // File is untracked - need to delete it
             untracked_paths.push(file_path);
         }
     }
 
-    // Checkout tracked files from HEAD (or index if not in HEAD)
-    if !tracked_paths.is_empty() {
+    // Checkout files from HEAD tree
+    if !head_paths.is_empty() {
+        if let Some(ref tree) = head_tree {
+            let mut checkout_opts = git2::build::CheckoutBuilder::new();
+            checkout_opts.force();
+            checkout_opts.remove_untracked(false);
+
+            for file_path in &head_paths {
+                checkout_opts.path(file_path);
+            }
+
+            repo.checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
+        }
+    }
+
+    // Checkout files from index (staged but not in HEAD)
+    if !index_only_paths.is_empty() {
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.force();
         checkout_opts.remove_untracked(false);
 
-        for file_path in &tracked_paths {
+        for file_path in &index_only_paths {
             checkout_opts.path(file_path);
         }
 
-        if let Some(ref tree) = head_tree {
-            repo.checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
-        } else {
-            // No HEAD yet (initial commit scenario) - checkout from index
-            let mut fresh_index = repo.index()?;
-            repo.checkout_index(Some(&mut fresh_index), Some(&mut checkout_opts))?;
-        }
+        let mut fresh_index = repo.index()?;
+        repo.checkout_index(Some(&mut fresh_index), Some(&mut checkout_opts))?;
     }
 
     // Delete untracked files
