@@ -121,6 +121,8 @@ pub async fn get_ssh_config() -> Result<SshConfig> {
 
     // Get git's SSH command if configured
     let git_ssh_command = Command::new("git")
+        // Prevent credential popup dialogs on Windows
+        .env("GIT_TERMINAL_PROMPT", "0")
         .args(["config", "--get", "core.sshCommand"])
         .output()
         .ok()

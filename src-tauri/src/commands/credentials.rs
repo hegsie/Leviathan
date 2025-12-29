@@ -53,6 +53,9 @@ pub struct AvailableHelper {
 fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("git");
 
+    // Prevent credential popup dialogs on Windows
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+
     if let Some(path) = repo_path {
         cmd.current_dir(path);
     }
@@ -282,12 +285,14 @@ pub async fn get_available_helpers() -> Result<Vec<AvailableHelper>> {
 /// Check if a credential helper is available
 fn check_helper_available(helper: &str) -> bool {
     Command::new("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .arg(format!("credential-{}", helper))
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
         || Command::new(format!("git-credential-{}", helper))
+            .env("GIT_TERMINAL_PROMPT", "0")
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -347,6 +352,8 @@ pub async fn test_credentials(path: String, remote_url: String) -> Result<Creden
         // For HTTPS, use git credential fill
         let mut cmd = Command::new("git");
         cmd.current_dir(repo_path);
+        // Prevent credential popup dialogs on Windows
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
         cmd.args(["credential", "fill"]);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
@@ -461,6 +468,8 @@ pub async fn erase_credentials(path: String, host: String, protocol: String) -> 
 
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_path);
+    // Prevent credential popup dialogs on Windows
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.args(["credential", "reject"]);
     cmd.stdin(std::process::Stdio::piped());
 

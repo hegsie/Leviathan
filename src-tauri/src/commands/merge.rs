@@ -249,6 +249,8 @@ pub async fn execute_interactive_rebase(path: String, onto: String, todo: String
     let output = Command::new("git")
         .current_dir(&path)
         .env("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap_or(""))
+        // Prevent credential popup dialogs on Windows
+        .env("GIT_TERMINAL_PROMPT", "0")
         .args(["rebase", "-i", &onto])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;

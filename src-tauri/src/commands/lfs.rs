@@ -51,6 +51,8 @@ pub struct LfsStatus {
 fn run_lfs_command(repo_path: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .current_dir(repo_path)
+        // Prevent credential popup dialogs on Windows
+        .env("GIT_TERMINAL_PROMPT", "0")
         .arg("lfs")
         .args(args)
         .output()
@@ -73,6 +75,7 @@ fn run_lfs_command(repo_path: &Path, args: &[&str]) -> Result<String> {
 /// Check if Git LFS is installed
 fn is_lfs_installed() -> bool {
     Command::new("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .arg("lfs")
         .arg("version")
         .output()
@@ -83,6 +86,7 @@ fn is_lfs_installed() -> bool {
 /// Get LFS version
 fn get_lfs_version() -> Option<String> {
     Command::new("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .arg("lfs")
         .arg("version")
         .output()

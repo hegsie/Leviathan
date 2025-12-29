@@ -94,6 +94,8 @@ fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
 fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .current_dir(repo_path)
+        // Prevent credential popup dialogs on Windows
+        .env("GIT_TERMINAL_PROMPT", "0")
         .args(args)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;

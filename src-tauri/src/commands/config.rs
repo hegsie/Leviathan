@@ -49,6 +49,9 @@ pub struct UserIdentity {
 fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("git");
 
+    // Prevent credential popup dialogs on Windows
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+
     if let Some(path) = repo_path {
         cmd.current_dir(path);
     }

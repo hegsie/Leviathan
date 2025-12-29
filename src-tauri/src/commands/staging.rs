@@ -189,6 +189,8 @@ pub async fn stage_hunk(repo_path: String, patch: String) -> Result<()> {
 
     // Apply the patch to the index
     let output = Command::new("git")
+        // Prevent credential popup dialogs on Windows
+        .env("GIT_TERMINAL_PROMPT", "0")
         .args(["apply", "--cached", "--unidiff-zero"])
         .arg(&patch_file)
         .current_dir(&repo_path)
@@ -225,6 +227,8 @@ pub async fn unstage_hunk(repo_path: String, patch: String) -> Result<()> {
 
     // Apply the patch in reverse to unstage
     let output = Command::new("git")
+        // Prevent credential popup dialogs on Windows
+        .env("GIT_TERMINAL_PROMPT", "0")
         .args(["apply", "--cached", "--reverse", "--unidiff-zero"])
         .arg(&patch_file)
         .current_dir(&repo_path)
