@@ -183,6 +183,7 @@ export class LvDiffView extends LitElement {
         color: var(--color-text-muted);
         font-style: italic;
         border-bottom: 1px solid var(--color-border);
+        min-width: max-content;
       }
 
       .hunk-header-text {
@@ -241,6 +242,7 @@ export class LvDiffView extends LitElement {
         display: flex;
         min-height: 20px;
         line-height: 20px;
+        min-width: max-content;
       }
 
       .line:hover {
@@ -336,6 +338,7 @@ export class LvDiffView extends LitElement {
         display: flex;
         min-height: 20px;
         line-height: 20px;
+        min-width: max-content;
       }
 
       .split-line:hover {
