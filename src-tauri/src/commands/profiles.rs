@@ -3,10 +3,10 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::create_command;
 use crate::models::{GitProfile, ProfilesConfig};
 
 /// Get the path to the profiles config file
@@ -60,10 +60,7 @@ fn save_profiles_config(config: &ProfilesConfig) -> Result<()> {
 
 /// Run git config command
 fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new("git");
-
-    // Prevent credential popup dialogs on Windows
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    let mut cmd = create_command("git");
 
     if let Some(path) = repo_path {
         cmd.current_dir(path);

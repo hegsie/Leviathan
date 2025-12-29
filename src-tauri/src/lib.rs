@@ -7,6 +7,7 @@ pub mod commands;
 pub mod error;
 pub mod models;
 pub mod services;
+pub mod utils;
 
 #[cfg(test)]
 mod test_utils;

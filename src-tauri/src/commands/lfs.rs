@@ -2,10 +2,10 @@
 //! Manage large files with Git Large File Storage
 
 use std::path::Path;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::create_command;
 
 /// LFS file tracking pattern
 #[derive(Debug, Clone, serde::Serialize)]
@@ -49,10 +49,8 @@ pub struct LfsStatus {
 
 /// Helper to run git-lfs commands
 fn run_lfs_command(repo_path: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let output = create_command("git")
         .current_dir(repo_path)
-        // Prevent credential popup dialogs on Windows
-        .env("GIT_TERMINAL_PROMPT", "0")
         .arg("lfs")
         .args(args)
         .output()
@@ -74,8 +72,7 @@ fn run_lfs_command(repo_path: &Path, args: &[&str]) -> Result<String> {
 
 /// Check if Git LFS is installed
 fn is_lfs_installed() -> bool {
-    Command::new("git")
-        .env("GIT_TERMINAL_PROMPT", "0")
+    create_command("git")
         .arg("lfs")
         .arg("version")
         .output()
@@ -85,8 +82,7 @@ fn is_lfs_installed() -> bool {
 
 /// Get LFS version
 fn get_lfs_version() -> Option<String> {
-    Command::new("git")
-        .env("GIT_TERMINAL_PROMPT", "0")
+    create_command("git")
         .arg("lfs")
         .arg("version")
         .output()

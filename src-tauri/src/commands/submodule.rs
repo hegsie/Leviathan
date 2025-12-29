@@ -2,10 +2,10 @@
 //! Manage git submodules
 
 use std::path::Path;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::create_command;
 
 /// Information about a submodule
 #[derive(Debug, Clone, serde::Serialize)]
@@ -45,10 +45,8 @@ pub enum SubmoduleStatus {
 
 /// Helper to run git commands
 fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let output = create_command("git")
         .current_dir(repo_path)
-        // Prevent credential popup dialogs on Windows
-        .env("GIT_TERMINAL_PROMPT", "0")
         .args(args)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;

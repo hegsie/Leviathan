@@ -2,10 +2,10 @@
 //! Manage global and repository-level git settings
 
 use std::path::Path;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::create_command;
 
 /// Git configuration entry
 #[derive(Debug, Clone, serde::Serialize)]
@@ -47,10 +47,7 @@ pub struct UserIdentity {
 
 /// Run git config command
 fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new("git");
-
-    // Prevent credential popup dialogs on Windows
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    let mut cmd = create_command("git");
 
     if let Some(path) = repo_path {
         cmd.current_dir(path);

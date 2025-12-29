@@ -1,10 +1,10 @@
 //! Merge and rebase command handlers
 
 use std::path::Path;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::create_command;
 use crate::models::{ConflictEntry, ConflictFile};
 
 /// Represents a commit in the interactive rebase todo list
@@ -246,11 +246,9 @@ pub async fn execute_interactive_rebase(path: String, onto: String, todo: String
     }
 
     // Run git rebase -i with our custom editor
-    let output = Command::new("git")
+    let output = create_command("git")
         .current_dir(&path)
         .env("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap_or(""))
-        // Prevent credential popup dialogs on Windows
-        .env("GIT_TERMINAL_PROMPT", "0")
         .args(["rebase", "-i", &onto])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;

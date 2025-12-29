@@ -2,10 +2,10 @@
 //! Manage GPG signing for commits and tags
 
 use std::path::Path;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::create_command;
 
 /// GPG key information
 #[derive(Debug, Clone, serde::Serialize)]
@@ -71,7 +71,7 @@ pub struct CommitSignature {
 
 /// Run a command and capture output
 fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(cmd)
+    let output = create_command(cmd)
         .args(args)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run {}: {}", cmd, e)))?;
@@ -92,10 +92,8 @@ fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
 
 /// Run git command in a repository
 fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let output = create_command("git")
         .current_dir(repo_path)
-        // Prevent credential popup dialogs on Windows
-        .env("GIT_TERMINAL_PROMPT", "0")
         .args(args)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;
@@ -116,7 +114,7 @@ fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
 
 /// Check if GPG is available
 fn is_gpg_available() -> bool {
-    Command::new("gpg")
+    create_command("gpg")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -125,7 +123,7 @@ fn is_gpg_available() -> bool {
 
 /// Get GPG version
 fn get_gpg_version() -> Option<String> {
-    Command::new("gpg")
+    create_command("gpg")
         .arg("--version")
         .output()
         .ok()

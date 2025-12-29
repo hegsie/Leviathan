@@ -2,10 +2,10 @@
 //! Manage git credential helpers and stored credentials
 
 use std::path::Path;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::create_command;
 
 /// Credential helper configuration
 #[derive(Debug, Clone, serde::Serialize)]
@@ -51,10 +51,7 @@ pub struct AvailableHelper {
 
 /// Run git config command
 fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new("git");
-
-    // Prevent credential popup dialogs on Windows
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    let mut cmd = create_command("git");
 
     if let Some(path) = repo_path {
         cmd.current_dir(path);
@@ -284,15 +281,13 @@ pub async fn get_available_helpers() -> Result<Vec<AvailableHelper>> {
 
 /// Check if a credential helper is available
 fn check_helper_available(helper: &str) -> bool {
-    Command::new("git")
-        .env("GIT_TERMINAL_PROMPT", "0")
+    create_command("git")
         .arg(format!("credential-{}", helper))
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-        || Command::new(format!("git-credential-{}", helper))
-            .env("GIT_TERMINAL_PROMPT", "0")
+        || create_command(&format!("git-credential-{}", helper))
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -313,7 +308,7 @@ pub async fn test_credentials(path: String, remote_url: String) -> Result<Creden
 
     if protocol == "ssh" {
         // For SSH, test the connection
-        let output = Command::new("ssh")
+        let output = create_command("ssh")
             .args([
                 "-T",
                 "-o",
@@ -350,10 +345,8 @@ pub async fn test_credentials(path: String, remote_url: String) -> Result<Creden
         })
     } else {
         // For HTTPS, use git credential fill
-        let mut cmd = Command::new("git");
+        let mut cmd = create_command("git");
         cmd.current_dir(repo_path);
-        // Prevent credential popup dialogs on Windows
-        cmd.env("GIT_TERMINAL_PROMPT", "0");
         cmd.args(["credential", "fill"]);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
@@ -466,10 +459,8 @@ fn extract_ssh_username(message: &str) -> Option<String> {
 pub async fn erase_credentials(path: String, host: String, protocol: String) -> Result<()> {
     let repo_path = Path::new(&path);
 
-    let mut cmd = Command::new("git");
+    let mut cmd = create_command("git");
     cmd.current_dir(repo_path);
-    // Prevent credential popup dialogs on Windows
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.args(["credential", "reject"]);
     cmd.stdin(std::process::Stdio::piped());
 

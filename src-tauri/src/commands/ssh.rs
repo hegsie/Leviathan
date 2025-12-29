@@ -3,10 +3,10 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::create_command;
 
 /// SSH key information
 #[derive(Debug, Clone, serde::Serialize)]
@@ -65,7 +65,7 @@ fn get_ssh_dir() -> PathBuf {
 
 /// Check if SSH is available
 fn is_ssh_available() -> bool {
-    Command::new("ssh")
+    create_command("ssh")
         .arg("-V")
         .output()
         .map(|o| o.status.success() || !o.stderr.is_empty()) // ssh -V outputs to stderr
@@ -74,7 +74,7 @@ fn is_ssh_available() -> bool {
 
 /// Get SSH version
 fn get_ssh_version() -> Option<String> {
-    Command::new("ssh")
+    create_command("ssh")
         .arg("-V")
         .output()
         .ok()
@@ -91,7 +91,7 @@ fn get_ssh_version() -> Option<String> {
 
 /// Get SSH key fingerprint
 fn get_key_fingerprint(public_key_path: &str) -> Option<String> {
-    Command::new("ssh-keygen")
+    create_command("ssh-keygen")
         .args(["-l", "-f", public_key_path])
         .output()
         .ok()
@@ -120,9 +120,7 @@ pub async fn get_ssh_config() -> Result<SshConfig> {
     let ssh_dir = get_ssh_dir();
 
     // Get git's SSH command if configured
-    let git_ssh_command = Command::new("git")
-        // Prevent credential popup dialogs on Windows
-        .env("GIT_TERMINAL_PROMPT", "0")
+    let git_ssh_command = create_command("git")
         .args(["config", "--get", "core.sshCommand"])
         .output()
         .ok()
@@ -234,7 +232,7 @@ pub async fn generate_ssh_key(
     }
 
     // Build ssh-keygen command
-    let mut cmd = Command::new("ssh-keygen");
+    let mut cmd = create_command("ssh-keygen");
     cmd.args([
         "-t",
         &key_type.to_lowercase(),
@@ -303,7 +301,7 @@ pub async fn test_ssh_connection(host: String) -> Result<SshTestResult> {
     };
 
     // Run ssh -T to test connection
-    let output = Command::new("ssh")
+    let output = create_command("ssh")
         .args([
             "-T",
             "-o",
@@ -369,7 +367,7 @@ pub async fn test_ssh_connection(host: String) -> Result<SshTestResult> {
 /// Add SSH key to ssh-agent
 #[command]
 pub async fn add_key_to_agent(key_path: String) -> Result<()> {
-    let output = Command::new("ssh-add")
+    let output = create_command("ssh-add")
         .arg(&key_path)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run ssh-add: {}", e)))?;
@@ -388,7 +386,7 @@ pub async fn add_key_to_agent(key_path: String) -> Result<()> {
 /// List keys loaded in ssh-agent
 #[command]
 pub async fn list_agent_keys() -> Result<Vec<String>> {
-    let output = Command::new("ssh-add")
+    let output = create_command("ssh-add")
         .arg("-l")
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run ssh-add: {}", e)))?;
