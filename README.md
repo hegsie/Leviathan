@@ -12,7 +12,6 @@ Leviathan aims to be a fast, privacy-first alternative to existing Git clients l
 
 ## Screenshots
 
-<!-- Add screenshots here -->
 <p align="center">
   <img src="docs/screenshots/main-window.png" alt="Main Window" width="800">
 </p>
@@ -26,9 +25,6 @@ Leviathan aims to be a fast, privacy-first alternative to existing Git clients l
 ### Diff Viewer
 <img src="docs/screenshots/diff-viewer.png" alt="Diff Viewer" width="800">
 
-### Merge Conflict Resolution
-<img src="docs/screenshots/merge-conflict.png" alt="Merge Conflict Resolution" width="800">
-
 </details>
 
 ## Features
@@ -36,18 +32,35 @@ Leviathan aims to be a fast, privacy-first alternative to existing Git clients l
 ### Core Git Operations
 - **Repository Management** - Open, clone, and initialize repositories with multi-tab support
 - **Commit History** - Interactive graph visualization with branch topology
-- **Staging** - Stage/unstage files and individual hunks
+- **Staging** - Stage/unstage files and individual hunks with tree or flat view
 - **Branching** - Create, delete, rename, and checkout branches
 - **Merging** - Fast-forward, squash, and no-ff merge strategies
 - **Rebasing** - Standard and interactive rebase with action editor
+- **Cherry-pick & Revert** - Apply or undo specific commits
+- **Reset** - Soft, mixed, and hard reset modes
 - **Conflict Resolution** - 3-way merge editor for resolving conflicts
+
+### Productivity
+- **Command Palette** - Fuzzy finder for all actions (Ctrl/Cmd+P)
+- **Keyboard Navigation** - Vim-style shortcuts throughout
+- **File History** - View all commits that modified a file
+- **Commit Search** - Search by message, author, SHA, or date range
+- **Undo/Redo** - Visual reflog browser for recovering previous states
+
+### Platform Integrations
+- **GitHub** - Pull requests, issues, releases, and Actions status
+- **GitLab** - Merge requests, issues, and CI/CD pipelines
+- **Azure DevOps** - Pull requests, work items, and pipelines
+- **Bitbucket** - Pull requests, issues, and pipelines
 
 ### Additional Features
 - **Remote Operations** - Fetch, pull, push with force push support
-- **Tags** - Create, delete, and push tags
-- **Stashes** - Create, apply, pop, and drop stashes
+- **Tags & Stashes** - Full tag and stash management
 - **Diff Viewer** - Syntax-highlighted diffs powered by Shiki
 - **Blame View** - Line-by-line author attribution
+- **Submodules & Worktrees** - Manage submodules and multiple working directories
+- **Git LFS** - Track and manage large files
+- **GPG Signing** - Sign commits and tags
 - **File Watching** - Auto-refresh on file system changes
 
 ## Installation
@@ -180,12 +193,12 @@ leviathan/
 
 See [ROADMAP.md](ROADMAP.md) for planned features including:
 
-- Cherry-pick, revert, and reset operations
-- Command palette with keyboard shortcuts
-- Submodule and Git LFS support
-- GitHub/GitLab/Bitbucket integration
-- Custom themes and light mode
+- Inline file editing in diff view
+- Image diff comparison
+- Commit message templates
 - Git Flow workflow support
+- Local AI-assisted commit messages (Ollama)
+- Custom themes and light mode
 
 ## Contributing
 
