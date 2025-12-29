@@ -371,10 +371,7 @@ mod tests {
         assert_eq!(content, "Modified content");
 
         // Discard changes
-        let result = discard_changes(
-            repo.path_str(),
-            vec!["README.md".to_string()],
-        ).await;
+        let result = discard_changes(repo.path_str(), vec!["README.md".to_string()]).await;
 
         assert!(result.is_ok());
 
@@ -394,10 +391,7 @@ mod tests {
         assert!(repo.path.join("untracked.txt").exists());
 
         // Discard changes (should delete the file)
-        let result = discard_changes(
-            repo.path_str(),
-            vec!["untracked.txt".to_string()],
-        ).await;
+        let result = discard_changes(repo.path_str(), vec!["untracked.txt".to_string()]).await;
 
         assert!(result.is_ok());
 
@@ -420,10 +414,7 @@ mod tests {
 
         // Discard changes - this should restore from index since file is staged
         // but the working tree file should match the staged version
-        let result = discard_changes(
-            repo.path_str(),
-            vec!["newfile.txt".to_string()],
-        ).await;
+        let result = discard_changes(repo.path_str(), vec!["newfile.txt".to_string()]).await;
 
         assert!(result.is_ok());
 
@@ -442,10 +433,7 @@ mod tests {
         assert!(!repo.path.join("README.md").exists());
 
         // Discard changes (should restore the file)
-        let result = discard_changes(
-            repo.path_str(),
-            vec!["README.md".to_string()],
-        ).await;
+        let result = discard_changes(repo.path_str(), vec!["README.md".to_string()]).await;
 
         assert!(result.is_ok());
 
@@ -468,10 +456,7 @@ mod tests {
         assert!(repo.path.join("untracked_dir").is_dir());
 
         // Discard changes (should delete the directory)
-        let result = discard_changes(
-            repo.path_str(),
-            vec!["untracked_dir".to_string()],
-        ).await;
+        let result = discard_changes(repo.path_str(), vec!["untracked_dir".to_string()]).await;
 
         assert!(result.is_ok());
 
@@ -492,11 +477,9 @@ mod tests {
         // Discard all changes
         let result = discard_changes(
             repo.path_str(),
-            vec![
-                "README.md".to_string(),
-                "untracked.txt".to_string(),
-            ],
-        ).await;
+            vec!["README.md".to_string(), "untracked.txt".to_string()],
+        )
+        .await;
 
         assert!(result.is_ok());
 
@@ -552,10 +535,7 @@ mod tests {
         // Create and stage a file
         repo.create_file("new.txt", "Content");
 
-        let result = stage_files(
-            repo.path_str(),
-            vec!["new.txt".to_string()],
-        ).await;
+        let result = stage_files(repo.path_str(), vec!["new.txt".to_string()]).await;
         assert!(result.is_ok());
 
         // Verify file is staged
@@ -564,10 +544,7 @@ mod tests {
         assert!(staged.is_some());
 
         // Unstage the file
-        let result = unstage_files(
-            repo.path_str(),
-            vec!["new.txt".to_string()],
-        ).await;
+        let result = unstage_files(repo.path_str(), vec!["new.txt".to_string()]).await;
         assert!(result.is_ok());
 
         // Verify file is no longer staged

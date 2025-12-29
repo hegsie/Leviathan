@@ -62,7 +62,7 @@ pub struct StatusEntry {
 }
 
 /// File status in the working directory
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FileStatus {
     New,
