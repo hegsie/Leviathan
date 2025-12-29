@@ -188,11 +188,9 @@ pub async fn check_ado_connection(organization: String) -> Result<AdoConnectionS
     let token = match get_ado_token().await? {
         Some(t) => t,
         None => {
-            return Ok(AdoConnectionStatus {
-                connected: false,
-                user: None,
-                organization: None,
-            })
+            return Err(LeviathanError::OperationFailed(
+                "No token stored. Please enter your Personal Access Token.".to_string(),
+            ))
         }
     };
 

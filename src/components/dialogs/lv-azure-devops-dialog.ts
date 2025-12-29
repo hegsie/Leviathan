@@ -443,6 +443,50 @@ export class LvAzureDevOpsDialog extends LitElement {
         justify-content: flex-end;
       }
 
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-sm) var(--spacing-md);
+        border-radius: var(--radius-md);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        transition: all var(--transition-fast);
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-primary);
+        border: 1px solid var(--color-border);
+      }
+
+      .btn:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-primary {
+        background: var(--color-primary);
+        color: white;
+        border-color: var(--color-primary);
+      }
+
+      .btn-primary:hover:not(:disabled) {
+        background: var(--color-primary-hover);
+      }
+
+      .btn-danger {
+        background: var(--color-error);
+        color: white;
+        border-color: var(--color-error);
+      }
+
+      .btn-danger:hover:not(:disabled) {
+        opacity: 0.9;
+      }
+
       .empty-state {
         display: flex;
         flex-direction: column;
@@ -1093,7 +1137,7 @@ export class LvAzureDevOpsDialog extends LitElement {
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
         </svg>
         <div>
-          <div class="repo-name">${this.detectedRepo.organization}/${this.detectedRepo.project}/${this.detectedRepo.repository}</div>
+          <div class="repo-name">${decodeURIComponent(this.detectedRepo.organization)}/${decodeURIComponent(this.detectedRepo.project)}/${decodeURIComponent(this.detectedRepo.repository)}</div>
           <div class="repo-remote">via ${this.detectedRepo.remoteName}</div>
         </div>
       </div>
