@@ -40,7 +40,7 @@ export class LvCommitDetails extends LitElement {
       .content {
         flex: 1;
         overflow-y: auto;
-        padding: 8px 12px;
+        padding: 8px 0 8px 12px;
       }
 
       .empty-state {
@@ -54,6 +54,7 @@ export class LvCommitDetails extends LitElement {
 
       .section {
         margin-bottom: 12px;
+        padding-right: 12px;
       }
 
       .section:last-child {

@@ -157,16 +157,66 @@ pub async fn unstage_files(path: String, paths: Vec<String>) -> Result<()> {
 #[command]
 pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    let repo_path = Path::new(&path);
 
-    let mut checkout_opts = git2::build::CheckoutBuilder::new();
-    checkout_opts.force();
+    // Get HEAD tree (may not exist for initial commit)
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let index = repo.index()?;
+
+    // Separate files into categories
+    let mut tracked_paths: Vec<&str> = Vec::new();
+    let mut untracked_paths: Vec<&str> = Vec::new();
 
     for file_path in &paths {
-        checkout_opts.path(file_path);
+        let path_obj = Path::new(file_path);
+
+        // Check if file exists in HEAD
+        let in_head = head_tree
+            .as_ref()
+            .map(|t| t.get_path(path_obj).is_ok())
+            .unwrap_or(false);
+
+        // Check if file exists in index
+        let in_index = index.get_path(path_obj, 0).is_some();
+
+        if in_head || in_index {
+            // File is tracked - will checkout from HEAD or index
+            tracked_paths.push(file_path);
+        } else {
+            // File is untracked - need to delete it
+            untracked_paths.push(file_path);
+        }
     }
 
-    let head = repo.head()?.peel_to_tree()?;
-    repo.checkout_tree(head.as_object(), Some(&mut checkout_opts))?;
+    // Checkout tracked files from HEAD (or index if not in HEAD)
+    if !tracked_paths.is_empty() {
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        checkout_opts.force();
+        checkout_opts.remove_untracked(false);
+
+        for file_path in &tracked_paths {
+            checkout_opts.path(file_path);
+        }
+
+        if let Some(ref tree) = head_tree {
+            repo.checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
+        } else {
+            // No HEAD yet (initial commit scenario) - checkout from index
+            repo.checkout_index(Some(&mut index.clone()), Some(&mut checkout_opts))?;
+        }
+    }
+
+    // Delete untracked files
+    for file_path in untracked_paths {
+        let full_path = repo_path.join(file_path);
+        if full_path.exists() {
+            if full_path.is_dir() {
+                std::fs::remove_dir_all(&full_path)?;
+            } else {
+                std::fs::remove_file(&full_path)?;
+            }
+        }
+    }
 
     Ok(())
 }
