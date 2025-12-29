@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { settingsStore, type Theme, type FontSize } from '../../stores/settings.store.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
+import { getAppVersion, checkForUpdate, type UpdateCheckEvent } from '../../services/update.service.ts';
 
 @customElement('lv-settings-dialog')
 export class LvSettingsDialog extends LitElement {
@@ -155,10 +156,44 @@ export class LvSettingsDialog extends LitElement {
       button.danger {
         color: var(--error-color);
       }
+
+      .version-info {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .version-text {
+        font-size: 13px;
+        color: var(--text-secondary);
+      }
+
+      .version-number {
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+
+      .update-status {
+        font-size: 12px;
+        color: var(--text-secondary);
+      }
+
+      .update-status.available {
+        color: var(--accent-color);
+      }
+
+      .check-update-btn {
+        padding: 4px 8px;
+        font-size: 12px;
+        min-width: auto;
+      }
     `,
   ];
 
   @state() private theme: Theme = 'dark';
+  @state() private appVersion = '';
+  @state() private updateStatus: 'idle' | 'checking' | 'available' | 'up-to-date' = 'idle';
+  @state() private latestVersion = '';
   @state() private fontSize: FontSize = 'medium';
   @state() private defaultBranchName = 'main';
   @state() private showAvatars = true;
@@ -169,6 +204,26 @@ export class LvSettingsDialog extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     this.loadSettings();
+    this.loadVersion();
+  }
+
+  private async loadVersion(): Promise<void> {
+    this.appVersion = await getAppVersion();
+  }
+
+  private async handleCheckForUpdate(): Promise<void> {
+    this.updateStatus = 'checking';
+    const result = await checkForUpdate();
+    if (result) {
+      if (result.updateAvailable) {
+        this.updateStatus = 'available';
+        this.latestVersion = result.latestVersion ?? '';
+      } else {
+        this.updateStatus = 'up-to-date';
+      }
+    } else {
+      this.updateStatus = 'idle';
+    }
   }
 
   private loadSettings(): void {
@@ -335,6 +390,32 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-description">Ask for confirmation when discarding changes</span>
             </div>
             ${this.renderToggle(this.confirmBeforeDiscard, 'confirmBeforeDiscard')}
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-title">About</div>
+
+          <div class="setting-row">
+            <div class="version-info">
+              <span class="version-text">
+                Version: <span class="version-number">${this.appVersion || 'Loading...'}</span>
+              </span>
+              ${this.updateStatus === 'checking' ? html`
+                <span class="update-status">Checking for updates...</span>
+              ` : this.updateStatus === 'available' ? html`
+                <span class="update-status available">Update available: v${this.latestVersion}</span>
+              ` : this.updateStatus === 'up-to-date' ? html`
+                <span class="update-status">You're up to date!</span>
+              ` : ''}
+            </div>
+            <button
+              class="check-update-btn"
+              @click=${this.handleCheckForUpdate}
+              ?disabled=${this.updateStatus === 'checking'}
+            >
+              ${this.updateStatus === 'checking' ? 'Checking...' : 'Check for Updates'}
+            </button>
           </div>
         </div>
       </div>
