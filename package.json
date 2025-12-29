@@ -1,6 +1,6 @@
 {
   "name": "leviathan",
-  "version": "0.2.23",
+  "version": "0.2.24",
   "description": "A fully-featured, open-source, cross-platform Git GUI client",
   "type": "module",
   "scripts": {
@@ -23,6 +23,7 @@
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.4.2",
     "@tauri-apps/plugin-notification": "^2.3.3",
+    "@tauri-apps/plugin-stronghold": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.0.0",
     "@vaadin/router": "^1.7.5",
     "lit": "^3.3.2",

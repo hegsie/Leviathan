@@ -231,20 +231,30 @@ fn build_api_url_with_params(
 
 /// Check Azure DevOps connection status
 #[command]
-pub async fn check_ado_connection(organization: String) -> Result<AdoConnectionStatus> {
+pub async fn check_ado_connection(
+    organization: String,
+    token: Option<String>,
+) -> Result<AdoConnectionStatus> {
     info!("Checking Azure DevOps connection for org: {}", organization);
 
-    let token = match get_ado_token().await? {
-        Some(t) => {
-            debug!("Found stored token (length: {})", t.len());
+    // Use provided token, or fall back to stored token
+    let token = match token {
+        Some(t) if !t.is_empty() => {
+            debug!("Using provided token (length: {})", t.len());
             t
         }
-        None => {
-            error!("No Azure DevOps token found");
-            return Err(LeviathanError::OperationFailed(
-                "No token stored. Please enter your Personal Access Token.".to_string(),
-            ));
-        }
+        _ => match get_ado_token().await? {
+            Some(t) => {
+                debug!("Found stored token (length: {})", t.len());
+                t
+            }
+            None => {
+                error!("No Azure DevOps token found");
+                return Err(LeviathanError::OperationFailed(
+                    "No token stored. Please enter your Personal Access Token.".to_string(),
+                ));
+            }
+        },
     };
 
     let client = reqwest::Client::new();

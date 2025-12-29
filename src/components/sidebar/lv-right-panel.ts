@@ -8,9 +8,11 @@ import './lv-commit-panel.ts';
 import '../panels/lv-commit-details.ts';
 import type { Commit, RefInfo } from '../../types/git.types.ts';
 
+type TabType = 'changes' | 'details';
+
 /**
  * Right panel container component
- * Contains file status, commit panel, and commit details
+ * Contains file status, commit panel, and commit details in a unified tabbed interface
  */
 @customElement('lv-right-panel')
 export class LvRightPanel extends LitElement {
@@ -24,88 +26,105 @@ export class LvRightPanel extends LitElement {
         overflow: hidden;
       }
 
-      .section {
+      .tab-bar {
         display: flex;
-        flex-direction: column;
-        min-height: 0;
-      }
-
-      .section-header {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        padding: var(--spacing-sm) var(--spacing-md);
-        font-size: var(--font-size-sm);
-        font-weight: var(--font-weight-medium);
-        color: var(--color-text-secondary);
-        background: var(--color-bg-tertiary);
         border-bottom: 1px solid var(--color-border);
-        user-select: none;
-        cursor: pointer;
-      }
-
-      .section-header:hover {
-        background: var(--color-bg-hover);
-      }
-
-      .section-header .chevron {
-        width: 14px;
-        height: 14px;
-        transition: transform var(--transition-fast);
+        background: var(--color-bg-secondary);
         flex-shrink: 0;
       }
 
-      .section-header .chevron.expanded {
-        transform: rotate(90deg);
-      }
-
-      .section-header .title {
+      .tab {
         flex: 1;
-      }
-
-      .section-header .count {
+        padding: 6px 12px;
         font-size: var(--font-size-xs);
-        color: var(--color-text-muted);
-        background: var(--color-bg-secondary);
-        padding: 1px 6px;
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-secondary);
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid transparent;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        transition: all var(--transition-fast);
+        user-select: none;
+      }
+
+      .tab:hover {
+        color: var(--color-text-primary);
+        background: var(--color-bg-hover);
+      }
+
+      .tab.active {
+        color: var(--color-primary);
+        border-bottom-color: var(--color-primary);
+        background: var(--color-bg-primary);
+      }
+
+      .tab .badge {
+        font-size: 10px;
+        padding: 1px 5px;
         border-radius: var(--radius-full);
-        font-weight: var(--font-weight-normal);
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-muted);
       }
 
-      .section.collapsed .section-content {
-        display: none;
+      .tab.active .badge {
+        background: var(--color-primary-bg);
+        color: var(--color-primary);
       }
 
-      .section.collapsed {
-        flex: 0 0 auto;
-        max-height: none;
+      .tab .indicator {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--color-warning);
       }
 
-      .section-content {
+      .tab-content {
         flex: 1;
-        overflow-y: auto;
-        overflow-x: hidden;
-        scrollbar-gutter: stable;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        min-height: 0;
       }
 
-      .changes-section {
-        flex: 0 1 auto;
-        max-height: 35%;
+      .tab-panel {
+        display: none;
+        flex-direction: column;
+        flex: 1;
+        overflow: hidden;
+        min-height: 0;
+      }
+
+      .tab-panel.active {
+        display: flex;
+      }
+
+      /* Changes panel layout */
+      .changes-panel {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        overflow: hidden;
+      }
+
+      .file-status-container {
+        flex: 1;
+        overflow: auto;
         min-height: 100px;
       }
 
-      .commit-section {
-        flex: 0 0 auto;
+      .commit-panel-container {
+        flex-shrink: 0;
         border-top: 1px solid var(--color-border);
       }
 
-      .commit-section .section-content {
-        overflow: visible;
-      }
-
-      .details-section {
+      /* Details panel layout */
+      .details-panel {
         flex: 1;
-        border-top: 1px solid var(--color-border);
+        overflow: auto;
       }
 
       .placeholder {
@@ -118,6 +137,24 @@ export class LvRightPanel extends LitElement {
         font-size: var(--font-size-sm);
         text-align: center;
       }
+
+      .shortcut-hint {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        padding: 4px 8px;
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-sm);
+        margin-left: auto;
+      }
+
+      kbd {
+        font-family: var(--font-family-mono);
+        font-size: 10px;
+        padding: 1px 4px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: 3px;
+      }
     `,
   ];
 
@@ -127,11 +164,13 @@ export class LvRightPanel extends LitElement {
   @state() private repositoryPath: string | null = null;
   @state() private stagedCount: number = 0;
   @state() private changesCount: number = 0;
-  @state() private expandedSections = new Set<string>(['changes', 'details']);
+  @state() private activeTab: TabType = 'changes';
   @state() private githubOwner: string = '';
   @state() private githubRepo: string = '';
+  @state() private hasUnseenChanges: boolean = false;
 
   private unsubscribe?: () => void;
+  private previousCommitOid: string | null = null;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -154,6 +193,9 @@ export class LvRightPanel extends LitElement {
         }
       }
     });
+
+    // Listen for keyboard shortcuts
+    this.addEventListener('keydown', this.handleKeyDown);
   }
 
   private async detectGitHubRepo(): Promise<void> {
@@ -177,6 +219,51 @@ export class LvRightPanel extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribe?.();
+    this.removeEventListener('keydown', this.handleKeyDown);
+  }
+
+  updated(changedProperties: Map<string, unknown>): void {
+    // Auto-switch to details tab when a new commit is selected
+    if (changedProperties.has('commit')) {
+      const newOid = this.commit?.oid ?? null;
+      if (newOid && newOid !== this.previousCommitOid) {
+        this.activeTab = 'details';
+      }
+      this.previousCommitOid = newOid;
+    }
+  }
+
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    // Tab switching shortcuts
+    if (e.key === '1' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      this.switchTab('changes');
+    } else if (e.key === '2' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      this.switchTab('details');
+    }
+  };
+
+  private switchTab(tab: TabType): void {
+    this.activeTab = tab;
+    if (tab === 'changes') {
+      this.hasUnseenChanges = false;
+    }
+    this.dispatchEvent(new CustomEvent('tab-changed', {
+      detail: { tab },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
+  /** Public method to switch to changes tab from outside */
+  public showChanges(): void {
+    this.switchTab('changes');
+  }
+
+  /** Public method to switch to details tab from outside */
+  public showDetails(): void {
+    this.switchTab('details');
   }
 
   render() {
@@ -184,88 +271,77 @@ export class LvRightPanel extends LitElement {
       return html`<div class="placeholder">No repository open</div>`;
     }
 
-    const changesExpanded = this.expandedSections.has('changes');
-    const commitExpanded = this.expandedSections.has('commit');
-    const detailsExpanded = this.expandedSections.has('details');
-
     return html`
-      <!-- Changes Section -->
-      <section class="section changes-section ${changesExpanded ? '' : 'collapsed'}">
-        <header class="section-header" @click=${() => this.toggleSection('changes')}>
-          ${this.renderChevron(changesExpanded)}
-          <span class="title">Changes</span>
-          ${this.changesCount > 0 ? html`<span class="count">${this.changesCount}</span>` : nothing}
-        </header>
-        <div class="section-content">
-          <lv-file-status
-            .repositoryPath=${this.repositoryPath}
-            @status-changed=${this.handleStatusChanged}
-          ></lv-file-status>
-        </div>
-      </section>
+      <div class="tab-bar">
+        <button
+          class="tab ${this.activeTab === 'changes' ? 'active' : ''}"
+          @click=${() => this.switchTab('changes')}
+          title="Working Changes (Ctrl+1)"
+        >
+          <span>Changes</span>
+          ${this.changesCount > 0 ? html`<span class="badge">${this.changesCount}</span>` : nothing}
+          ${this.hasUnseenChanges && this.activeTab !== 'changes' ? html`<span class="indicator"></span>` : nothing}
+        </button>
+        <button
+          class="tab ${this.activeTab === 'details' ? 'active' : ''}"
+          @click=${() => this.switchTab('details')}
+          title="Commit Details (Ctrl+2)"
+        >
+          <span>Details</span>
+          ${this.commit ? html`<span class="badge">${this.commit.oid.slice(0, 7)}</span>` : nothing}
+        </button>
+      </div>
 
-      <!-- Commit Section -->
-      <section class="section commit-section ${commitExpanded ? '' : 'collapsed'}">
-        <header class="section-header" @click=${() => this.toggleSection('commit')}>
-          ${this.renderChevron(commitExpanded)}
-          <span class="title">Commit</span>
-          ${this.stagedCount > 0 ? html`<span class="count">${this.stagedCount} staged</span>` : nothing}
-        </header>
-        <div class="section-content">
-          <lv-commit-panel
-            .repositoryPath=${this.repositoryPath}
-            .stagedCount=${this.stagedCount}
-            @commit-created=${this.handleCommitCreated}
-          ></lv-commit-panel>
+      <div class="tab-content">
+        <!-- Changes Panel -->
+        <div class="tab-panel ${this.activeTab === 'changes' ? 'active' : ''}">
+          <div class="changes-panel">
+            <div class="file-status-container">
+              <lv-file-status
+                .repositoryPath=${this.repositoryPath}
+                @status-changed=${this.handleStatusChanged}
+              ></lv-file-status>
+            </div>
+            <div class="commit-panel-container">
+              <lv-commit-panel
+                .repositoryPath=${this.repositoryPath}
+                .stagedCount=${this.stagedCount}
+                @commit-created=${this.handleCommitCreated}
+              ></lv-commit-panel>
+            </div>
+          </div>
         </div>
-      </section>
 
-      <!-- Commit Details Section -->
-      <section class="section details-section ${detailsExpanded ? '' : 'collapsed'}">
-        <header class="section-header" @click=${() => this.toggleSection('details')}>
-          ${this.renderChevron(detailsExpanded)}
-          <span class="title">Commit Details</span>
-        </header>
-        <div class="section-content">
-          <lv-commit-details
-            .repositoryPath=${this.repositoryPath}
-            .commit=${this.commit}
-            .refs=${this.refs}
-            .githubOwner=${this.githubOwner}
-            .githubRepo=${this.githubRepo}
-          ></lv-commit-details>
+        <!-- Details Panel -->
+        <div class="tab-panel ${this.activeTab === 'details' ? 'active' : ''}">
+          <div class="details-panel">
+            <lv-commit-details
+              .repositoryPath=${this.repositoryPath}
+              .commit=${this.commit}
+              .refs=${this.refs}
+              .githubOwner=${this.githubOwner}
+              .githubRepo=${this.githubRepo}
+            ></lv-commit-details>
+          </div>
         </div>
-      </section>
+      </div>
     `;
   }
 
   private handleStatusChanged(e: CustomEvent<{ stagedCount: number; totalCount?: number }>): void {
     this.stagedCount = e.detail.stagedCount;
     if (e.detail.totalCount !== undefined) {
+      const previousCount = this.changesCount;
       this.changesCount = e.detail.totalCount;
+      // Show indicator if changes happened while on details tab
+      if (this.activeTab === 'details' && this.changesCount > previousCount) {
+        this.hasUnseenChanges = true;
+      }
     }
   }
 
   private handleCommitCreated(): void {
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-  }
-
-  private toggleSection(section: string): void {
-    const newExpanded = new Set(this.expandedSections);
-    if (newExpanded.has(section)) {
-      newExpanded.delete(section);
-    } else {
-      newExpanded.add(section);
-    }
-    this.expandedSections = newExpanded;
-  }
-
-  private renderChevron(expanded: boolean) {
-    return html`
-      <svg class="chevron ${expanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polyline points="9 18 15 12 9 6"></polyline>
-      </svg>
-    `;
   }
 }
 

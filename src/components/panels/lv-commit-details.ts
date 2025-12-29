@@ -24,6 +24,7 @@ export class LvCommitDetails extends LitElement {
       }
 
       .header {
+        display: none; /* Hidden - using tabbed interface now */
         padding: 6px 12px;
         border-bottom: 1px solid var(--color-border);
         background: var(--color-bg-secondary);
@@ -40,7 +41,7 @@ export class LvCommitDetails extends LitElement {
       .content {
         flex: 1;
         overflow-y: auto;
-        padding: 8px 0 8px 12px;
+        padding: 6px 0 6px 10px;
       }
 
       .empty-state {
@@ -53,8 +54,8 @@ export class LvCommitDetails extends LitElement {
       }
 
       .section {
-        margin-bottom: 12px;
-        padding-right: 12px;
+        margin-bottom: 8px;
+        padding-right: 10px;
       }
 
       .section:last-child {
@@ -189,11 +190,12 @@ export class LvCommitDetails extends LitElement {
         display: flex;
         align-items: center;
         gap: 4px;
-        padding: 2px 8px;
-        margin: 0 -8px;
-        cursor: pointer;
-        font-size: var(--font-size-sm);
+        padding: 2px 6px;
+        margin: 0 -6px;
+        cursor: default;
+        font-size: var(--font-size-xs);
         border-radius: var(--radius-sm);
+        min-height: 20px;
       }
 
       .file-item:hover {
@@ -205,12 +207,12 @@ export class LvCommitDetails extends LitElement {
       }
 
       .file-status {
-        width: 16px;
-        height: 16px;
+        width: 14px;
+        height: 14px;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 10px;
+        font-size: 9px;
         font-weight: var(--font-weight-bold);
         border-radius: 2px;
         flex-shrink: 0;
@@ -243,7 +245,9 @@ export class LvCommitDetails extends LitElement {
         text-overflow: ellipsis;
         white-space: nowrap;
         font-family: var(--font-family-mono);
-        font-size: var(--font-size-xs);
+        font-size: 11px;
+        direction: rtl;
+        text-align: left;
       }
 
       .file-stats {

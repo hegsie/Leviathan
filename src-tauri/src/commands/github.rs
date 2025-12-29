@@ -264,16 +264,20 @@ pub async fn delete_github_token() -> Result<()> {
 
 /// Check GitHub connection and get user info
 #[command]
-pub async fn check_github_connection() -> Result<GitHubConnectionStatus> {
-    let token = match get_github_token().await? {
-        Some(t) => t,
-        None => {
-            return Ok(GitHubConnectionStatus {
-                connected: false,
-                user: None,
-                scopes: vec![],
-            })
-        }
+pub async fn check_github_connection(token: Option<String>) -> Result<GitHubConnectionStatus> {
+    // Use provided token, or fall back to stored token
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => match get_github_token().await? {
+            Some(t) => t,
+            None => {
+                return Ok(GitHubConnectionStatus {
+                    connected: false,
+                    user: None,
+                    scopes: vec![],
+                })
+            }
+        },
     };
 
     let client = reqwest::Client::new();

@@ -1,6 +1,8 @@
 //! GitLab Integration Commands
 //!
 //! Provides integration with GitLab for merge requests, issues, and pipelines.
+//! Token storage is handled by the frontend using Stronghold.
+//! All API functions accept an optional token parameter from the frontend.
 
 use crate::error::{LeviathanError, Result};
 use serde::{Deserialize, Serialize};
@@ -9,55 +11,36 @@ use tauri::command;
 const GITLAB_API_VERSION: &str = "v4";
 
 // ============================================================================
-// Token Management
+// Token Management (handled by frontend Stronghold - these are stubs)
 // ============================================================================
 
-const GITLAB_SERVICE: &str = "leviathan-gitlab";
-const GITLAB_ACCOUNT: &str = "pat";
-
-/// Store GitLab PAT in system keyring
+/// Store GitLab PAT - handled by frontend Stronghold
 #[command]
-pub async fn store_gitlab_token(token: String) -> Result<()> {
-    let entry = keyring::Entry::new(GITLAB_SERVICE, GITLAB_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
-
-    entry
-        .set_password(&token)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to store token: {}", e)))?;
-
+pub async fn store_gitlab_token(_token: String) -> Result<()> {
+    // Token storage is now handled by frontend Stronghold
     Ok(())
 }
 
-/// Get GitLab PAT from system keyring
+/// Get GitLab PAT - handled by frontend Stronghold
 #[command]
 pub async fn get_gitlab_token() -> Result<Option<String>> {
-    let entry = keyring::Entry::new(GITLAB_SERVICE, GITLAB_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
-
-    match entry.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(LeviathanError::OperationFailed(format!(
-            "Failed to retrieve token: {}",
-            e
-        ))),
-    }
+    // Token storage is now handled by frontend Stronghold
+    // Return None - tokens should be passed from frontend
+    Ok(None)
 }
 
-/// Delete GitLab PAT from system keyring
+/// Delete GitLab PAT - handled by frontend Stronghold
 #[command]
 pub async fn delete_gitlab_token() -> Result<()> {
-    let entry = keyring::Entry::new(GITLAB_SERVICE, GITLAB_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
+    // Token storage is now handled by frontend Stronghold
+    Ok(())
+}
 
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(LeviathanError::OperationFailed(format!(
-            "Failed to delete token: {}",
-            e
-        ))),
-    }
+/// Helper to get token from optional parameter
+fn resolve_token(token: Option<String>) -> Result<String> {
+    token
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| LeviathanError::OperationFailed("GitLab token not configured".to_string()))
 }
 
 // ============================================================================
@@ -179,16 +162,23 @@ fn url_encode(s: &str) -> String {
 
 /// Check GitLab connection status
 #[command]
-pub async fn check_gitlab_connection(instance_url: String) -> Result<GitLabConnectionStatus> {
-    let token = match get_gitlab_token().await? {
-        Some(t) => t,
-        None => {
-            return Ok(GitLabConnectionStatus {
-                connected: false,
-                user: None,
-                instance_url,
-            })
-        }
+pub async fn check_gitlab_connection(
+    instance_url: String,
+    token: Option<String>,
+) -> Result<GitLabConnectionStatus> {
+    // Use provided token, or fall back to stored token
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => match get_gitlab_token().await? {
+            Some(t) => t,
+            None => {
+                return Ok(GitLabConnectionStatus {
+                    connected: false,
+                    user: None,
+                    instance_url,
+                })
+            }
+        },
     };
 
     let client = reqwest::Client::new();
@@ -320,10 +310,9 @@ pub async fn list_gitlab_merge_requests(
     instance_url: String,
     project_path: String,
     state: Option<String>,
+    token: Option<String>,
 ) -> Result<Vec<GitLabMergeRequest>> {
-    let token = get_gitlab_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitLab token not configured".to_string())
-    })?;
+    let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let state_param = state.unwrap_or_else(|| "opened".to_string());
@@ -413,10 +402,9 @@ pub async fn get_gitlab_merge_request(
     instance_url: String,
     project_path: String,
     mr_iid: u64,
+    token: Option<String>,
 ) -> Result<GitLabMergeRequest> {
-    let token = get_gitlab_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitLab token not configured".to_string())
-    })?;
+    let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let url = build_api_url(
@@ -498,10 +486,9 @@ pub async fn create_gitlab_merge_request(
     instance_url: String,
     project_path: String,
     input: CreateMergeRequestInput,
+    token: Option<String>,
 ) -> Result<GitLabMergeRequest> {
-    let token = get_gitlab_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitLab token not configured".to_string())
-    })?;
+    let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let url = build_api_url(
@@ -611,10 +598,9 @@ pub async fn list_gitlab_issues(
     project_path: String,
     state: Option<String>,
     labels: Option<String>,
+    token: Option<String>,
 ) -> Result<Vec<GitLabIssue>> {
-    let token = get_gitlab_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitLab token not configured".to_string())
-    })?;
+    let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let state_param = state.unwrap_or_else(|| "opened".to_string());
@@ -710,10 +696,9 @@ pub async fn create_gitlab_issue(
     instance_url: String,
     project_path: String,
     input: CreateGitLabIssueInput,
+    token: Option<String>,
 ) -> Result<GitLabIssue> {
-    let token = get_gitlab_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitLab token not configured".to_string())
-    })?;
+    let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let url = build_api_url(&instance_url, &format!("projects/{}/issues", encoded_path));
@@ -818,10 +803,9 @@ pub async fn list_gitlab_pipelines(
     instance_url: String,
     project_path: String,
     status: Option<String>,
+    token: Option<String>,
 ) -> Result<Vec<GitLabPipeline>> {
-    let token = get_gitlab_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitLab token not configured".to_string())
-    })?;
+    let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let mut url = format!(
@@ -891,10 +875,12 @@ pub async fn list_gitlab_pipelines(
 
 /// Get project labels
 #[command]
-pub async fn get_gitlab_labels(instance_url: String, project_path: String) -> Result<Vec<String>> {
-    let token = get_gitlab_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitLab token not configured".to_string())
-    })?;
+pub async fn get_gitlab_labels(
+    instance_url: String,
+    project_path: String,
+    token: Option<String>,
+) -> Result<Vec<String>> {
+    let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let url = format!(

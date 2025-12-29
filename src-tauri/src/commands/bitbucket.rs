@@ -1,6 +1,8 @@
 //! Bitbucket Integration Commands
 //!
 //! Provides integration with Bitbucket Cloud for pull requests, issues, and pipelines.
+//! Credential storage is handled by the frontend using Stronghold.
+//! All API functions accept optional credentials from the frontend.
 
 use crate::error::{LeviathanError, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -10,81 +12,42 @@ use tauri::command;
 const BITBUCKET_API_BASE: &str = "https://api.bitbucket.org/2.0";
 
 // ============================================================================
-// Token Management
+// Credential Management (handled by frontend Stronghold - these are stubs)
 // ============================================================================
 
-const BITBUCKET_SERVICE: &str = "leviathan-bitbucket";
-const BITBUCKET_USERNAME_ACCOUNT: &str = "username";
-const BITBUCKET_PASSWORD_ACCOUNT: &str = "app_password";
-
-/// Store Bitbucket credentials in system keyring
+/// Store Bitbucket credentials - handled by frontend Stronghold
 #[command]
-pub async fn store_bitbucket_credentials(username: String, app_password: String) -> Result<()> {
-    let username_entry = keyring::Entry::new(BITBUCKET_SERVICE, BITBUCKET_USERNAME_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
-
-    username_entry
-        .set_password(&username)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to store username: {}", e)))?;
-
-    let password_entry = keyring::Entry::new(BITBUCKET_SERVICE, BITBUCKET_PASSWORD_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
-
-    password_entry.set_password(&app_password).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to store app password: {}", e))
-    })?;
-
+pub async fn store_bitbucket_credentials(_username: String, _app_password: String) -> Result<()> {
+    // Credential storage is now handled by frontend Stronghold
     Ok(())
 }
 
-/// Get Bitbucket credentials from system keyring
+/// Get Bitbucket credentials - handled by frontend Stronghold
 #[command]
 pub async fn get_bitbucket_credentials() -> Result<Option<(String, String)>> {
-    let username_entry = keyring::Entry::new(BITBUCKET_SERVICE, BITBUCKET_USERNAME_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
-
-    let username = match username_entry.get_password() {
-        Ok(u) => u,
-        Err(keyring::Error::NoEntry) => return Ok(None),
-        Err(e) => {
-            return Err(LeviathanError::OperationFailed(format!(
-                "Failed to retrieve username: {}",
-                e
-            )))
-        }
-    };
-
-    let password_entry = keyring::Entry::new(BITBUCKET_SERVICE, BITBUCKET_PASSWORD_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
-
-    let password = match password_entry.get_password() {
-        Ok(p) => p,
-        Err(keyring::Error::NoEntry) => return Ok(None),
-        Err(e) => {
-            return Err(LeviathanError::OperationFailed(format!(
-                "Failed to retrieve app password: {}",
-                e
-            )))
-        }
-    };
-
-    Ok(Some((username, password)))
+    // Credential storage is now handled by frontend Stronghold
+    // Return None - credentials should be passed from frontend
+    Ok(None)
 }
 
-/// Delete Bitbucket credentials from system keyring
+/// Delete Bitbucket credentials - handled by frontend Stronghold
 #[command]
 pub async fn delete_bitbucket_credentials() -> Result<()> {
-    let username_entry = keyring::Entry::new(BITBUCKET_SERVICE, BITBUCKET_USERNAME_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
-
-    let _ = username_entry.delete_credential();
-
-    let password_entry = keyring::Entry::new(BITBUCKET_SERVICE, BITBUCKET_PASSWORD_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
-
-    let _ = password_entry.delete_credential();
-
+    // Credential storage is now handled by frontend Stronghold
     Ok(())
+}
+
+/// Helper to resolve credentials from optional parameters
+fn resolve_credentials(
+    username: Option<String>,
+    app_password: Option<String>,
+) -> Result<(String, String)> {
+    match (username, app_password) {
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => Ok((u, p)),
+        _ => Err(LeviathanError::OperationFailed(
+            "Bitbucket credentials not configured".to_string(),
+        )),
+    }
 }
 
 // ============================================================================
@@ -189,15 +152,22 @@ fn get_auth_header(username: &str, password: &str) -> String {
 
 /// Check Bitbucket connection status
 #[command]
-pub async fn check_bitbucket_connection() -> Result<BitbucketConnectionStatus> {
-    let credentials = match get_bitbucket_credentials().await? {
-        Some(c) => c,
-        None => {
-            return Ok(BitbucketConnectionStatus {
-                connected: false,
-                user: None,
-            })
-        }
+pub async fn check_bitbucket_connection(
+    username: Option<String>,
+    app_password: Option<String>,
+) -> Result<BitbucketConnectionStatus> {
+    // Use provided credentials, or fall back to stored credentials
+    let credentials = match (username, app_password) {
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => (u, p),
+        _ => match get_bitbucket_credentials().await? {
+            Some(c) => c,
+            None => {
+                return Ok(BitbucketConnectionStatus {
+                    connected: false,
+                    user: None,
+                })
+            }
+        },
     };
 
     let client = reqwest::Client::new();
@@ -323,10 +293,10 @@ pub async fn list_bitbucket_pull_requests(
     workspace: String,
     repo_slug: String,
     state: Option<String>,
+    username: Option<String>,
+    app_password: Option<String>,
 ) -> Result<Vec<BitbucketPullRequest>> {
-    let credentials = get_bitbucket_credentials().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Bitbucket credentials not configured".to_string())
-    })?;
+    let credentials = resolve_credentials(username, app_password)?;
 
     let state_param = state.unwrap_or_else(|| "OPEN".to_string());
     let url = format!(
@@ -439,10 +409,10 @@ pub async fn get_bitbucket_pull_request(
     workspace: String,
     repo_slug: String,
     pr_id: u64,
+    username: Option<String>,
+    app_password: Option<String>,
 ) -> Result<BitbucketPullRequest> {
-    let credentials = get_bitbucket_credentials().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Bitbucket credentials not configured".to_string())
-    })?;
+    let credentials = resolve_credentials(username, app_password)?;
 
     let url = format!(
         "{}/repositories/{}/{}/pullrequests/{}",
@@ -545,10 +515,10 @@ pub async fn create_bitbucket_pull_request(
     workspace: String,
     repo_slug: String,
     input: CreateBitbucketPullRequestInput,
+    username: Option<String>,
+    app_password: Option<String>,
 ) -> Result<BitbucketPullRequest> {
-    let credentials = get_bitbucket_credentials().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Bitbucket credentials not configured".to_string())
-    })?;
+    let credentials = resolve_credentials(username, app_password)?;
 
     let url = format!(
         "{}/repositories/{}/{}/pullrequests",
@@ -694,10 +664,10 @@ pub async fn list_bitbucket_issues(
     workspace: String,
     repo_slug: String,
     state: Option<String>,
+    username: Option<String>,
+    app_password: Option<String>,
 ) -> Result<Vec<BitbucketIssue>> {
-    let credentials = get_bitbucket_credentials().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Bitbucket credentials not configured".to_string())
-    })?;
+    let credentials = resolve_credentials(username, app_password)?;
 
     let mut url = format!(
         "{}/repositories/{}/{}/issues?pagelen=30",
@@ -813,10 +783,10 @@ pub async fn list_bitbucket_issues(
 pub async fn list_bitbucket_pipelines(
     workspace: String,
     repo_slug: String,
+    username: Option<String>,
+    app_password: Option<String>,
 ) -> Result<Vec<BitbucketPipeline>> {
-    let credentials = get_bitbucket_credentials().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Bitbucket credentials not configured".to_string())
-    })?;
+    let credentials = resolve_credentials(username, app_password)?;
 
     let url = format!(
         "{}/repositories/{}/{}/pipelines/?pagelen=20&sort=-created_on",

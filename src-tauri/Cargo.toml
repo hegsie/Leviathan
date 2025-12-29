@@ -1,6 +1,6 @@
 [package]
 name = "leviathan"
-version = "0.2.23"
+version = "0.2.24"
 description = "A fully-featured, open-source, cross-platform Git GUI client"
 authors = ["Leviathan Contributors"]
 edition = "2021"
@@ -20,6 +20,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-stronghold = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 git2 = { version = "0.20", features = ["vendored-openssl"] }
@@ -56,3 +57,7 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# Required for stronghold plugin performance in dev mode
+[profile.dev.package.scrypt]
+opt-level = 3

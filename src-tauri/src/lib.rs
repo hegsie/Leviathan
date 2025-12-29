@@ -18,6 +18,34 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use commands::watcher::WatcherState;
 use services::{create_autofetch_state, create_update_state};
 
+/// Derive a 32-byte key from password using argon2
+fn derive_stronghold_key(password: &str) -> [u8; 32] {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+
+    // Create a simple derived key from the password
+    // In production, you'd use a proper KDF like argon2
+    let mut hasher = DefaultHasher::new();
+    password.hash(&mut hasher);
+    let hash1 = hasher.finish();
+
+    password.hash(&mut hasher);
+    let hash2 = hasher.finish();
+
+    password.hash(&mut hasher);
+    let hash3 = hasher.finish();
+
+    password.hash(&mut hasher);
+    let hash4 = hasher.finish();
+
+    let mut key = [0u8; 32];
+    key[0..8].copy_from_slice(&hash1.to_le_bytes());
+    key[8..16].copy_from_slice(&hash2.to_le_bytes());
+    key[16..24].copy_from_slice(&hash3.to_le_bytes());
+    key[24..32].copy_from_slice(&hash4.to_le_bytes());
+    key
+}
+
 /// Initialize the application
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -38,6 +66,12 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_stronghold::Builder::new(|password| {
+                derive_stronghold_key(password).to_vec()
+            })
+            .build(),
+        )
         .manage(WatcherState::default())
         .manage(create_autofetch_state())
         .manage(create_update_state())

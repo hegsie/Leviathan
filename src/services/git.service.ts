@@ -1473,21 +1473,42 @@ export interface CreatePullRequestInput {
   draft?: boolean;
 }
 
-// Authentication
+// Authentication (using Stronghold secure storage)
 export async function storeGitHubToken(token: string): Promise<CommandResult<void>> {
-  return invokeCommand<void>('store_github_token', { token });
+  try {
+    const { GitHubCredentials } = await import('./credential.service.ts');
+    await GitHubCredentials.setToken(token);
+    return { success: true, data: undefined };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 export async function getGitHubToken(): Promise<CommandResult<string | null>> {
-  return invokeCommand<string | null>('get_github_token', {});
+  try {
+    const { GitHubCredentials } = await import('./credential.service.ts');
+    const token = await GitHubCredentials.getToken();
+    return { success: true, data: token };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 export async function deleteGitHubToken(): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_github_token', {});
+  try {
+    const { GitHubCredentials } = await import('./credential.service.ts');
+    await GitHubCredentials.deleteToken();
+    return { success: true, data: undefined };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 export async function checkGitHubConnection(): Promise<CommandResult<GitHubConnectionStatus>> {
-  return invokeCommand<GitHubConnectionStatus>('check_github_connection', {});
+  // Get token from Stronghold and pass to backend
+  const tokenResult = await getGitHubToken();
+  const token = tokenResult.success ? tokenResult.data : null;
+  return invokeCommand<GitHubConnectionStatus>('check_github_connection', { token });
 }
 
 // Repository Detection
@@ -1843,18 +1864,36 @@ export interface AdoPipelineRun {
   url: string;
 }
 
-// Azure DevOps Token Management
+// Azure DevOps Token Management (using Stronghold secure storage)
 
 export async function storeAdoToken(token: string): Promise<CommandResult<void>> {
-  return invokeCommand<void>('store_ado_token', { token });
+  try {
+    const { AzureDevOpsCredentials } = await import('./credential.service.ts');
+    await AzureDevOpsCredentials.setToken(token);
+    return { success: true, data: undefined };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 export async function getAdoToken(): Promise<CommandResult<string | null>> {
-  return invokeCommand<string | null>('get_ado_token', {});
+  try {
+    const { AzureDevOpsCredentials } = await import('./credential.service.ts');
+    const token = await AzureDevOpsCredentials.getToken();
+    return { success: true, data: token };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 export async function deleteAdoToken(): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_ado_token', {});
+  try {
+    const { AzureDevOpsCredentials } = await import('./credential.service.ts');
+    await AzureDevOpsCredentials.deleteToken();
+    return { success: true, data: undefined };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 // Azure DevOps Connection
@@ -1862,7 +1901,10 @@ export async function deleteAdoToken(): Promise<CommandResult<void>> {
 export async function checkAdoConnection(
   organization: string
 ): Promise<CommandResult<AdoConnectionStatus>> {
-  return invokeCommand<AdoConnectionStatus>('check_ado_connection', { organization });
+  // Get token from Stronghold and pass to backend
+  const tokenResult = await getAdoToken();
+  const token = tokenResult.success ? tokenResult.data : null;
+  return invokeCommand<AdoConnectionStatus>('check_ado_connection', { organization, token });
 }
 
 export async function detectAdoRepo(
@@ -2019,18 +2061,35 @@ export interface GitLabPipeline {
   webUrl: string;
 }
 
-// GitLab Token Management
-
+// GitLab Token Management (using Stronghold secure storage)
 export async function storeGitLabToken(token: string): Promise<CommandResult<void>> {
-  return invokeCommand<void>('store_gitlab_token', { token });
+  try {
+    const { GitLabCredentials } = await import('./credential.service.ts');
+    await GitLabCredentials.setToken(token);
+    return { success: true, data: undefined };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 export async function getGitLabToken(): Promise<CommandResult<string | null>> {
-  return invokeCommand<string | null>('get_gitlab_token', {});
+  try {
+    const { GitLabCredentials } = await import('./credential.service.ts');
+    const token = await GitLabCredentials.getToken();
+    return { success: true, data: token };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 export async function deleteGitLabToken(): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_gitlab_token', {});
+  try {
+    const { GitLabCredentials } = await import('./credential.service.ts');
+    await GitLabCredentials.deleteToken();
+    return { success: true, data: undefined };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 // GitLab Connection
@@ -2038,7 +2097,10 @@ export async function deleteGitLabToken(): Promise<CommandResult<void>> {
 export async function checkGitLabConnection(
   instanceUrl: string
 ): Promise<CommandResult<GitLabConnectionStatus>> {
-  return invokeCommand<GitLabConnectionStatus>('check_gitlab_connection', { instanceUrl });
+  // Get token from Stronghold and pass to backend
+  const tokenResult = await getGitLabToken();
+  const token = tokenResult.success ? tokenResult.data : null;
+  return invokeCommand<GitLabConnectionStatus>('check_gitlab_connection', { instanceUrl, token });
 }
 
 export async function detectGitLabRepo(
@@ -2200,27 +2262,55 @@ export interface BitbucketPipeline {
   url: string;
 }
 
-// Bitbucket Credential Management
+// Bitbucket Credential Management (using Stronghold secure storage)
 
 export async function storeBitbucketCredentials(
   username: string,
   appPassword: string
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('store_bitbucket_credentials', { username, appPassword });
+  try {
+    const { BitbucketCredentials } = await import('./credential.service.ts');
+    await BitbucketCredentials.setCredentials(username, appPassword);
+    return { success: true, data: undefined };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 export async function getBitbucketCredentials(): Promise<CommandResult<[string, string] | null>> {
-  return invokeCommand<[string, string] | null>('get_bitbucket_credentials', {});
+  try {
+    const { BitbucketCredentials } = await import('./credential.service.ts');
+    const creds = await BitbucketCredentials.getCredentials();
+    if (creds) {
+      return { success: true, data: [creds.username, creds.password] };
+    }
+    return { success: true, data: null };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 export async function deleteBitbucketCredentials(): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_bitbucket_credentials', {});
+  try {
+    const { BitbucketCredentials } = await import('./credential.service.ts');
+    await BitbucketCredentials.deleteCredentials();
+    return { success: true, data: undefined };
+  } catch (error) {
+    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+  }
 }
 
 // Bitbucket Connection
 
 export async function checkBitbucketConnection(): Promise<CommandResult<BitbucketConnectionStatus>> {
-  return invokeCommand<BitbucketConnectionStatus>('check_bitbucket_connection', {});
+  // Get credentials from Stronghold and pass to backend
+  const credsResult = await getBitbucketCredentials();
+  let username: string | null = null;
+  let appPassword: string | null = null;
+  if (credsResult.success && credsResult.data) {
+    [username, appPassword] = credsResult.data;
+  }
+  return invokeCommand<BitbucketConnectionStatus>('check_bitbucket_connection', { username, appPassword });
 }
 
 export async function detectBitbucketRepo(
