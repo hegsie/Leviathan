@@ -286,9 +286,7 @@ pub async fn check_ado_connection(
             match status.as_u16() {
                 401 => "Invalid or expired token. Please check your PAT.".to_string(),
                 403 => "Access denied. Ensure your PAT has the required scopes.".to_string(),
-                404 => {
-                    "Organization not found. Please check the organization name.".to_string()
-                }
+                404 => "Organization not found. Please check the organization name.".to_string(),
                 _ => "Unknown error".to_string(),
             }
         } else {
@@ -329,7 +327,9 @@ pub async fn check_ado_connection(
         user: Some(AdoUser {
             id: data.id.clone(),
             display_name: data.display_name.clone(),
-            unique_name: data.email_address.unwrap_or_else(|| data.display_name.clone()),
+            unique_name: data
+                .email_address
+                .unwrap_or_else(|| data.display_name.clone()),
             image_url: None,
         }),
         organization: Some(organization),

@@ -245,9 +245,27 @@
 
 ---
 
+### Phase 10: AI Integration
+
+#### Local AI Commit Messages (Ollama)
+- Auto-detect Ollama running locally (`localhost:11434`)
+- "Generate" button in commit panel when Ollama available
+- Send staged diff to model for commit message generation
+- Generate conventional commit format (feat/fix/chore + summary + body)
+- Configurable model selection in settings
+- Support alternative backends (LM Studio `localhost:1234/v1`)
+- Cache available models from `/api/tags`
+
+#### AI-Assisted Features (Future)
+- Code review suggestions
+- Commit message improvements
+- Branch naming suggestions
+- PR description generation
+
+---
+
 ### Future Considerations
 
-- AI-assisted commit messages
 - Code review tools
 - Team collaboration features
 - Repository analytics & statistics

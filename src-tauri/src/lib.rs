@@ -20,8 +20,8 @@ use services::{create_autofetch_state, create_update_state};
 
 /// Derive a 32-byte key from password using argon2
 fn derive_stronghold_key(password: &str) -> [u8; 32] {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     // Create a simple derived key from the password
     // In production, you'd use a proper KDF like argon2
