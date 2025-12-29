@@ -4,8 +4,8 @@ use std::path::Path;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-use crate::utils::create_command;
 use crate::models::{ConflictEntry, ConflictFile};
+use crate::utils::create_command;
 
 /// Represents a commit in the interactive rebase todo list
 #[derive(Debug, Clone, serde::Serialize)]

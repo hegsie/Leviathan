@@ -6,8 +6,8 @@ use std::path::Path;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-use crate::utils::create_command;
 use crate::models::{GitProfile, ProfilesConfig};
+use crate::utils::create_command;
 
 /// Get the path to the profiles config file
 fn get_profiles_path() -> Result<std::path::PathBuf> {

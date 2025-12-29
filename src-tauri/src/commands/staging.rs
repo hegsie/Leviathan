@@ -5,8 +5,8 @@ use std::path::Path;
 use tauri::command;
 
 use crate::error::Result;
-use crate::utils::create_command;
 use crate::models::{FileStatus, StatusEntry};
+use crate::utils::create_command;
 
 /// Get repository status
 #[command]
