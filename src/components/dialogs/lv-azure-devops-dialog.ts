@@ -655,15 +655,19 @@ export class LvAzureDevOpsDialog extends LitElement {
         return;
       }
 
-      await this.checkConnection();
+      const connectionResult = await gitService.checkAdoConnection(this.organizationInput);
 
-      if (this.connectionStatus?.connected) {
+      if (connectionResult.success && connectionResult.data?.connected) {
+        this.connectionStatus = connectionResult.data;
         this.tokenInput = '';
         if (this.detectedRepo) {
           await this.loadAllData();
         }
       } else {
-        this.error = 'Failed to connect. Please check your token and organization.';
+        // Show the actual error from the API
+        this.error = connectionResult.error?.message ?? 'Failed to connect. Please check your token and organization.';
+        // Clear the stored token since it didn't work
+        await gitService.deleteAdoToken();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to connect';
@@ -816,8 +820,8 @@ export class LvAzureDevOpsDialog extends LitElement {
               class="help-link"
               href="https://dev.azure.com/${this.organizationInput || '{org}'}/_usersSettings/tokens"
               target="_blank"
-            >Azure DevOps Settings</a>
-            with <code>Code (Read & Write)</code>, <code>Work Items (Read)</code>, and <code>Build (Read)</code> scopes.
+            >Azure DevOps Settings</a>.
+            Required scopes: <strong>Code (Read & Write)</strong>, <strong>Work Items (Read)</strong>, <strong>Build (Read)</strong>, and <strong>User Profile (Read)</strong>.
           </span>
         </div>
         <div class="btn-row">

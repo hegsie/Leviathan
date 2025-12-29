@@ -213,11 +213,22 @@ pub async fn check_ado_connection(organization: String) -> Result<AdoConnectionS
         })?;
 
     if !response.status().is_success() {
-        return Ok(AdoConnectionStatus {
-            connected: false,
-            user: None,
-            organization: None,
-        });
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "Azure DevOps connection failed ({}): {}",
+            status,
+            if body.is_empty() {
+                match status.as_u16() {
+                    401 => "Invalid or expired token. Please check your PAT.".to_string(),
+                    403 => "Access denied. Ensure your PAT has the required scopes.".to_string(),
+                    404 => "Organization not found. Please check the organization name.".to_string(),
+                    _ => "Unknown error".to_string(),
+                }
+            } else {
+                body
+            }
+        )));
     }
 
     #[derive(Deserialize)]
