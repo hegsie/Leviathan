@@ -349,7 +349,8 @@ export class LvFileStatus extends LitElement {
 
   /**
    * Debounced version of loadStatus to prevent excessive refreshes
-   * when multiple file changes occur in rapid succession
+   * when multiple file changes occur in rapid succession.
+   * Uses delta update (no loading indicator) for smooth UI.
    */
   private debouncedLoadStatus(): void {
     if (this.statusRefreshTimeout) {
@@ -357,7 +358,7 @@ export class LvFileStatus extends LitElement {
     }
     this.statusRefreshTimeout = setTimeout(() => {
       this.statusRefreshTimeout = null;
-      this.loadStatus();
+      this.loadStatus(false); // Don't show loading indicator on file watcher refreshes
     }, LvFileStatus.STATUS_REFRESH_DEBOUNCE_MS);
   }
 
@@ -373,10 +374,13 @@ export class LvFileStatus extends LitElement {
     }
   }
 
-  async loadStatus(): Promise<void> {
+  async loadStatus(showLoading = true): Promise<void> {
     if (!this.repositoryPath) return;
 
-    this.loading = true;
+    // Only show loading indicator on initial load, not on refreshes
+    if (showLoading && this.stagedFiles.length === 0 && this.unstagedFiles.length === 0) {
+      this.loading = true;
+    }
     this.error = null;
 
     try {
@@ -388,23 +392,53 @@ export class LvFileStatus extends LitElement {
       }
 
       const entries = result.data!;
-      this.stagedFiles = entries.filter((e) => e.isStaged);
-      this.unstagedFiles = entries.filter((e) => !e.isStaged);
+      const newStagedFiles = entries.filter((e) => e.isStaged);
+      const newUnstagedFiles = entries.filter((e) => !e.isStaged);
 
-      // Emit status changed event
-      this.dispatchEvent(new CustomEvent('status-changed', {
-        detail: {
-          stagedCount: this.stagedFiles.length,
-          totalCount: this.stagedFiles.length + this.unstagedFiles.length,
-        },
-        bubbles: true,
-        composed: true,
-      }));
+      // Only update if there are actual changes (delta update)
+      const stagedChanged = !this.areStatusEntriesEqual(this.stagedFiles, newStagedFiles);
+      const unstagedChanged = !this.areStatusEntriesEqual(this.unstagedFiles, newUnstagedFiles);
+
+      if (stagedChanged) {
+        this.stagedFiles = newStagedFiles;
+      }
+      if (unstagedChanged) {
+        this.unstagedFiles = newUnstagedFiles;
+      }
+
+      // Emit status changed event only if something changed
+      if (stagedChanged || unstagedChanged) {
+        this.dispatchEvent(new CustomEvent('status-changed', {
+          detail: {
+            stagedCount: this.stagedFiles.length,
+            totalCount: this.stagedFiles.length + this.unstagedFiles.length,
+          },
+          bubbles: true,
+          composed: true,
+        }));
+      }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Unknown error';
     } finally {
       this.loading = false;
     }
+  }
+
+  /**
+   * Compare two arrays of status entries for equality
+   */
+  private areStatusEntriesEqual(a: StatusEntry[], b: StatusEntry[]): boolean {
+    if (a.length !== b.length) return false;
+
+    for (let i = 0; i < a.length; i++) {
+      if (a[i].path !== b[i].path ||
+          a[i].status !== b[i].status ||
+          a[i].isStaged !== b[i].isStaged ||
+          a[i].isConflicted !== b[i].isConflicted) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private getStatusLabel(status: FileStatus): string {
