@@ -297,15 +297,17 @@ export class LvFileStatus extends LitElement {
   @state() private dropTargetSection: 'staged' | 'unstaged' | null = null;
 
   private unsubscribeWatcher: (() => void) | null = null;
+  private statusRefreshTimeout: ReturnType<typeof setTimeout> | null = null;
+  private static readonly STATUS_REFRESH_DEBOUNCE_MS = 300;
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
 
-    // Subscribe to file change events
+    // Subscribe to file change events with debouncing
     this.unsubscribeWatcher = watcherService.onFileChange((event) => {
       // Refresh status on workdir or index changes
       if (event.eventType === 'workdir-changed' || event.eventType === 'index-changed') {
-        this.loadStatus();
+        this.debouncedLoadStatus();
       }
     });
 
@@ -324,6 +326,12 @@ export class LvFileStatus extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
 
+    // Clear debounce timeout
+    if (this.statusRefreshTimeout) {
+      clearTimeout(this.statusRefreshTimeout);
+      this.statusRefreshTimeout = null;
+    }
+
     // Unsubscribe from file changes
     if (this.unsubscribeWatcher) {
       this.unsubscribeWatcher();
@@ -337,6 +345,20 @@ export class LvFileStatus extends LitElement {
     if (this.boundHandleUnstageAllEvent) {
       window.removeEventListener('unstage-all', this.boundHandleUnstageAllEvent);
     }
+  }
+
+  /**
+   * Debounced version of loadStatus to prevent excessive refreshes
+   * when multiple file changes occur in rapid succession
+   */
+  private debouncedLoadStatus(): void {
+    if (this.statusRefreshTimeout) {
+      clearTimeout(this.statusRefreshTimeout);
+    }
+    this.statusRefreshTimeout = setTimeout(() => {
+      this.statusRefreshTimeout = null;
+      this.loadStatus();
+    }, LvFileStatus.STATUS_REFRESH_DEBOUNCE_MS);
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {

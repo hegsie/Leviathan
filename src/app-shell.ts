@@ -27,6 +27,9 @@ import './components/dialogs/lv-ssh-dialog.ts';
 import './components/dialogs/lv-config-dialog.ts';
 import './components/dialogs/lv-credentials-dialog.ts';
 import './components/dialogs/lv-github-dialog.ts';
+import './components/dialogs/lv-gitlab-dialog.ts';
+import './components/dialogs/lv-bitbucket-dialog.ts';
+import './components/dialogs/lv-azure-devops-dialog.ts';
 import './components/dialogs/lv-profile-manager-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import './components/common/lv-toast-container.ts';
@@ -370,6 +373,15 @@ export class AppShell extends LitElement {
 
   // GitHub dialog
   @state() private showGitHub = false;
+
+  // GitLab dialog
+  @state() private showGitLab = false;
+
+  // Bitbucket dialog
+  @state() private showBitbucket = false;
+
+  // Azure DevOps dialog
+  @state() private showAzureDevOps = false;
 
   // Profile Manager dialog
   @state() private showProfileManager = false;
@@ -997,6 +1009,27 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => { this.showGitHub = true; }),
       },
       {
+        id: 'gitlab',
+        label: 'GitLab Integration',
+        category: 'action',
+        icon: 'globe',
+        action: this.requiresRepository(() => { this.showGitLab = true; }),
+      },
+      {
+        id: 'bitbucket',
+        label: 'Bitbucket Integration',
+        category: 'action',
+        icon: 'globe',
+        action: this.requiresRepository(() => { this.showBitbucket = true; }),
+      },
+      {
+        id: 'azure-devops',
+        label: 'Azure DevOps Integration',
+        category: 'action',
+        icon: 'globe',
+        action: this.requiresRepository(() => { this.showAzureDevOps = true; }),
+      },
+      {
         id: 'profiles',
         label: 'Git Profiles',
         category: 'action',
@@ -1416,6 +1449,30 @@ export class AppShell extends LitElement {
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGitHub = false; }}
         ></lv-github-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-gitlab-dialog
+          ?open=${this.showGitLab}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showGitLab = false; }}
+        ></lv-gitlab-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-bitbucket-dialog
+          ?open=${this.showBitbucket}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showBitbucket = false; }}
+        ></lv-bitbucket-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-azure-devops-dialog
+          ?open=${this.showAzureDevOps}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showAzureDevOps = false; }}
+        ></lv-azure-devops-dialog>
       ` : ''}
 
       <lv-profile-manager-dialog
