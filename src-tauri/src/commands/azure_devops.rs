@@ -6,6 +6,7 @@ use crate::error::{LeviathanError, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use tauri::command;
+use tracing::{debug, error, info};
 
 const AZURE_DEVOPS_API_VERSION: &str = "7.1";
 
@@ -13,52 +14,98 @@ const AZURE_DEVOPS_API_VERSION: &str = "7.1";
 // Token Management
 // ============================================================================
 
-const ADO_SERVICE: &str = "leviathan-azure-devops";
-const ADO_ACCOUNT: &str = "pat";
+const ADO_TOKEN_FILE: &str = "ado_token.dat";
 
-/// Store Azure DevOps PAT in system keyring
+/// Get the path to the token storage file
+fn get_token_file_path() -> Result<std::path::PathBuf> {
+    let data_dir = dirs::data_local_dir()
+        .ok_or_else(|| LeviathanError::OperationFailed("Cannot find app data directory".into()))?;
+    let app_dir = data_dir.join("leviathan");
+    Ok(app_dir.join(ADO_TOKEN_FILE))
+}
+
+/// Simple obfuscation for the token (not cryptographically secure, but prevents casual reading)
+fn obfuscate(data: &str) -> String {
+    use base64::Engine;
+    let key: u8 = 0x5A; // Simple XOR key
+    let obfuscated: Vec<u8> = data.bytes().map(|b| b ^ key).collect();
+    BASE64.encode(&obfuscated)
+}
+
+/// Reverse the obfuscation
+fn deobfuscate(data: &str) -> Result<String> {
+    use base64::Engine;
+    let key: u8 = 0x5A;
+    let decoded = BASE64
+        .decode(data)
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to decode token: {}", e)))?;
+    let original: Vec<u8> = decoded.iter().map(|b| b ^ key).collect();
+    String::from_utf8(original)
+        .map_err(|e| LeviathanError::OperationFailed(format!("Invalid token data: {}", e)))
+}
+
+/// Store Azure DevOps PAT
 #[command]
 pub async fn store_ado_token(token: String) -> Result<()> {
-    let entry = keyring::Entry::new(ADO_SERVICE, ADO_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
+    info!("Storing Azure DevOps PAT token (length: {})", token.len());
 
-    entry
-        .set_password(&token)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to store token: {}", e)))?;
+    let file_path = get_token_file_path()?;
+    debug!("Token file path: {:?}", file_path);
 
+    // Ensure the directory exists
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            error!("Failed to create app data directory: {}", e);
+            LeviathanError::OperationFailed(format!("Failed to create directory: {}", e))
+        })?;
+    }
+
+    // Obfuscate and store
+    let obfuscated = obfuscate(&token);
+    std::fs::write(&file_path, &obfuscated).map_err(|e| {
+        error!("Failed to write token file: {}", e);
+        LeviathanError::OperationFailed(format!("Failed to store token: {}", e))
+    })?;
+
+    info!("Successfully stored Azure DevOps PAT token");
     Ok(())
 }
 
-/// Get Azure DevOps PAT from system keyring
+/// Get Azure DevOps PAT
 #[command]
 pub async fn get_ado_token() -> Result<Option<String>> {
-    let entry = keyring::Entry::new(ADO_SERVICE, ADO_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
+    let file_path = get_token_file_path()?;
+    debug!("Looking for token at: {:?}", file_path);
 
-    match entry.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(LeviathanError::OperationFailed(format!(
-            "Failed to retrieve token: {}",
-            e
-        ))),
+    if !file_path.exists() {
+        debug!("Token file does not exist");
+        return Ok(None);
     }
+
+    let obfuscated = std::fs::read_to_string(&file_path).map_err(|e| {
+        error!("Failed to read token file: {}", e);
+        LeviathanError::OperationFailed(format!("Failed to read token: {}", e))
+    })?;
+
+    let token = deobfuscate(&obfuscated)?;
+    debug!("Retrieved token (length: {})", token.len());
+    Ok(Some(token))
 }
 
-/// Delete Azure DevOps PAT from system keyring
+/// Delete Azure DevOps PAT
 #[command]
 pub async fn delete_ado_token() -> Result<()> {
-    let entry = keyring::Entry::new(ADO_SERVICE, ADO_ACCOUNT)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to access keyring: {}", e)))?;
+    let file_path = get_token_file_path()?;
 
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(LeviathanError::OperationFailed(format!(
-            "Failed to delete token: {}",
-            e
-        ))),
+    if file_path.exists() {
+        std::fs::remove_file(&file_path).map_err(|e| {
+            error!("Failed to delete token file: {}", e);
+            LeviathanError::OperationFailed(format!("Failed to delete token: {}", e))
+        })?;
+        info!("Deleted Azure DevOps PAT token");
     }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -185,80 +232,94 @@ fn build_api_url_with_params(
 /// Check Azure DevOps connection status
 #[command]
 pub async fn check_ado_connection(organization: String) -> Result<AdoConnectionStatus> {
+    info!("Checking Azure DevOps connection for org: {}", organization);
+
     let token = match get_ado_token().await? {
-        Some(t) => t,
+        Some(t) => {
+            debug!("Found stored token (length: {})", t.len());
+            t
+        }
         None => {
+            error!("No Azure DevOps token found");
             return Err(LeviathanError::OperationFailed(
                 "No token stored. Please enter your Personal Access Token.".to_string(),
-            ))
+            ));
         }
     };
 
     let client = reqwest::Client::new();
 
-    // Get the current user's profile
+    // Use the profile endpoint to verify connection and get user info
+    let url = format!(
+        "https://vssps.dev.azure.com/{}/_apis/profile/profiles/me?api-version={}",
+        organization, AZURE_DEVOPS_API_VERSION
+    );
+    debug!("Requesting: {}", url);
+
     let response = client
-        .get(format!(
-            "https://dev.azure.com/{}/_apis/connectionData?api-version={}",
-            organization, AZURE_DEVOPS_API_VERSION
-        ))
+        .get(&url)
         .header("Authorization", get_auth_header(&token))
         .header("Content-Type", "application/json")
         .send()
         .await
         .map_err(|e| {
+            error!("HTTP request failed: {}", e);
             LeviathanError::OperationFailed(format!("Failed to check connection: {}", e))
         })?;
+
+    debug!("Response status: {}", response.status());
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        let error_msg = if body.is_empty() {
+            match status.as_u16() {
+                401 => "Invalid or expired token. Please check your PAT.".to_string(),
+                403 => "Access denied. Ensure your PAT has the required scopes.".to_string(),
+                404 => {
+                    "Organization not found. Please check the organization name.".to_string()
+                }
+                _ => "Unknown error".to_string(),
+            }
+        } else {
+            body.clone()
+        };
+        error!(
+            "Azure DevOps API error: status={}, body={}",
+            status,
+            if body.is_empty() { "<empty>" } else { &body }
+        );
         return Err(LeviathanError::OperationFailed(format!(
             "Azure DevOps connection failed ({}): {}",
-            status,
-            if body.is_empty() {
-                match status.as_u16() {
-                    401 => "Invalid or expired token. Please check your PAT.".to_string(),
-                    403 => "Access denied. Ensure your PAT has the required scopes.".to_string(),
-                    404 => {
-                        "Organization not found. Please check the organization name.".to_string()
-                    }
-                    _ => "Unknown error".to_string(),
-                }
-            } else {
-                body
-            }
+            status, error_msg
         )));
     }
 
     #[derive(Deserialize)]
-    struct ConnectionData {
-        #[serde(rename = "authenticatedUser")]
-        authenticated_user: AuthenticatedUser,
-    }
-
-    #[derive(Deserialize)]
-    struct AuthenticatedUser {
+    struct ProfileData {
         id: String,
-        #[serde(rename = "providerDisplayName")]
-        provider_display_name: String,
-        #[serde(rename = "customDisplayName")]
-        custom_display_name: Option<String>,
+        #[serde(rename = "displayName")]
+        display_name: String,
+        #[serde(rename = "emailAddress")]
+        email_address: Option<String>,
     }
 
-    let data: ConnectionData = response.json().await.map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to parse connection data: {}", e))
+    let data: ProfileData = response.json().await.map_err(|e| {
+        error!("Failed to parse profile data: {}", e);
+        LeviathanError::OperationFailed(format!("Failed to parse profile data: {}", e))
     })?;
+
+    info!(
+        "Successfully connected to Azure DevOps as: {}",
+        data.display_name
+    );
 
     Ok(AdoConnectionStatus {
         connected: true,
         user: Some(AdoUser {
-            id: data.authenticated_user.id,
-            display_name: data
-                .authenticated_user
-                .custom_display_name
-                .unwrap_or(data.authenticated_user.provider_display_name.clone()),
-            unique_name: data.authenticated_user.provider_display_name,
+            id: data.id.clone(),
+            display_name: data.display_name.clone(),
+            unique_name: data.email_address.unwrap_or_else(|| data.display_name.clone()),
             image_url: None,
         }),
         organization: Some(organization),
