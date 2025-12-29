@@ -35,6 +35,9 @@ export interface SettingsState {
   confirmBeforeDiscard: boolean;
   openLastRepository: boolean;
 
+  // Branch settings
+  staleBranchDays: number; // Days without commits before a branch is considered stale (0 = disabled)
+
   // Recent repositories
   recentRepositories: string[];
   maxRecentRepositories: number;
@@ -55,6 +58,7 @@ export interface SettingsState {
   setFetchOnFocus: (enabled: boolean) => void;
   setConfirmBeforeDiscard: (confirm: boolean) => void;
   setOpenLastRepository: (open: boolean) => void;
+  setStaleBranchDays: (days: number) => void;
   addRecentRepository: (path: string) => void;
   removeRecentRepository: (path: string) => void;
   clearRecentRepositories: () => void;
@@ -77,6 +81,7 @@ const defaultSettings = {
   fetchOnFocus: false,
   confirmBeforeDiscard: true,
   openLastRepository: true,
+  staleBranchDays: 90,
   recentRepositories: [] as string[],
   maxRecentRepositories: 10,
 };
@@ -121,6 +126,8 @@ export const settingsStore = createStore<SettingsState>()(
       setConfirmBeforeDiscard: (confirmBeforeDiscard) => set({ confirmBeforeDiscard }),
 
       setOpenLastRepository: (openLastRepository) => set({ openLastRepository }),
+
+      setStaleBranchDays: (staleBranchDays) => set({ staleBranchDays }),
 
       addRecentRepository: (path) => {
         const { recentRepositories, maxRecentRepositories } = get();

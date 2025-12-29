@@ -4,6 +4,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { dragDropService, type DragItem } from '../../services/drag-drop.service.ts';
+import { settingsStore } from '../../stores/settings.store.ts';
 import '../dialogs/lv-create-branch-dialog.ts';
 import type { LvCreateBranchDialog } from '../dialogs/lv-create-branch-dialog.ts';
 import '../dialogs/lv-interactive-rebase-dialog.ts';
@@ -784,8 +785,29 @@ export class LvBranchList extends LitElement {
     `;
   }
 
+  /**
+   * Check if a branch is stale based on user's staleBranchDays setting
+   */
+  private isBranchStale(branch: Branch): boolean {
+    const { staleBranchDays } = settingsStore.getState();
+
+    // If staleBranchDays is 0, feature is disabled
+    if (staleBranchDays === 0) return false;
+
+    // HEAD branch is never stale
+    if (branch.isHead) return false;
+
+    // Check if lastCommitTimestamp exists
+    if (!branch.lastCommitTimestamp) return false;
+
+    const nowSeconds = Date.now() / 1000;
+    const staleThresholdSeconds = staleBranchDays * 24 * 60 * 60;
+
+    return branch.lastCommitTimestamp < nowSeconds - staleThresholdSeconds;
+  }
+
   private renderStaleIndicator(branch: Branch) {
-    if (!branch.isStale) return nothing;
+    if (!this.isBranchStale(branch)) return nothing;
 
     // Calculate how long ago the last commit was
     const lastCommit = branch.lastCommitTimestamp;
@@ -820,7 +842,7 @@ export class LvBranchList extends LitElement {
     const isDragging = this.draggingBranch?.name === branch.name;
     const isDropTarget = this.dropTargetBranch?.name === branch.name;
     const dropClass = isDropTarget ? `drop-target drop-target-${this.dropAction}` : '';
-    const staleClass = branch.isStale ? 'stale' : '';
+    const staleClass = this.isBranchStale(branch) ? 'stale' : '';
 
     return html`
       <li

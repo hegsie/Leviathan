@@ -200,6 +200,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private showCommitSize = true;
   @state() private wordWrap = true;
   @state() private confirmBeforeDiscard = true;
+  @state() private staleBranchDays = 90;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -235,6 +236,7 @@ export class LvSettingsDialog extends LitElement {
     this.showCommitSize = settings.showCommitSize;
     this.wordWrap = settings.wordWrap;
     this.confirmBeforeDiscard = settings.confirmBeforeDiscard;
+    this.staleBranchDays = settings.staleBranchDays;
   }
 
   private handleThemeChange(e: Event): void {
@@ -253,6 +255,13 @@ export class LvSettingsDialog extends LitElement {
     const input = e.target as HTMLInputElement;
     this.defaultBranchName = input.value;
     settingsStore.getState().setDefaultBranchName(this.defaultBranchName);
+  }
+
+  private handleStaleBranchDaysChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    const value = Math.max(0, parseInt(input.value, 10) || 0);
+    this.staleBranchDays = value;
+    settingsStore.getState().setStaleBranchDays(value);
   }
 
   private handleToggle(setting: string, e: Event): void {
@@ -390,6 +399,20 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-description">Ask for confirmation when discarding changes</span>
             </div>
             ${this.renderToggle(this.confirmBeforeDiscard, 'confirmBeforeDiscard')}
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Stale Branch Threshold</span>
+              <span class="setting-description">Days without commits before a branch is marked stale (0 to disable)</span>
+            </div>
+            <input
+              type="number"
+              min="0"
+              .value=${String(this.staleBranchDays)}
+              @change=${this.handleStaleBranchDaysChange}
+              style="width: 80px;"
+            />
           </div>
         </div>
 
