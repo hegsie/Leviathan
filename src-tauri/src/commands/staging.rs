@@ -202,7 +202,8 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
             repo.checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
         } else {
             // No HEAD yet (initial commit scenario) - checkout from index
-            repo.checkout_index(Some(&mut index.clone()), Some(&mut checkout_opts))?;
+            let mut fresh_index = repo.index()?;
+            repo.checkout_index(Some(&mut fresh_index), Some(&mut checkout_opts))?;
         }
     }
 
