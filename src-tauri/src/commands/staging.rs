@@ -352,3 +352,226 @@ pub async fn read_file_content(
         Ok(content)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    #[tokio::test]
+    async fn test_discard_changes_modified_tracked_file() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Modify an existing tracked file
+        repo.create_file("README.md", "Modified content");
+
+        // Verify file is modified
+        let content = std::fs::read_to_string(repo.path.join("README.md")).unwrap();
+        assert_eq!(content, "Modified content");
+
+        // Discard changes
+        let result = discard_changes(
+            repo.path_str(),
+            vec!["README.md".to_string()],
+        ).await;
+
+        assert!(result.is_ok());
+
+        // File should be restored to original content
+        let content = std::fs::read_to_string(repo.path.join("README.md")).unwrap();
+        assert_eq!(content, "# Test Repo");
+    }
+
+    #[tokio::test]
+    async fn test_discard_changes_untracked_file() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create an untracked file
+        repo.create_file("untracked.txt", "Untracked content");
+
+        // Verify file exists
+        assert!(repo.path.join("untracked.txt").exists());
+
+        // Discard changes (should delete the file)
+        let result = discard_changes(
+            repo.path_str(),
+            vec!["untracked.txt".to_string()],
+        ).await;
+
+        assert!(result.is_ok());
+
+        // File should be deleted
+        assert!(!repo.path.join("untracked.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_discard_changes_staged_new_file() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create and stage a new file (not yet committed)
+        repo.create_file("newfile.txt", "New file content");
+        repo.stage_file("newfile.txt");
+
+        // Verify file is staged
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(index.get_path(Path::new("newfile.txt"), 0).is_some());
+
+        // Discard changes - this should restore from index since file is staged
+        // but the working tree file should match the staged version
+        let result = discard_changes(
+            repo.path_str(),
+            vec!["newfile.txt".to_string()],
+        ).await;
+
+        assert!(result.is_ok());
+
+        // File should still exist (it's in the index)
+        assert!(repo.path.join("newfile.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_discard_changes_deleted_tracked_file() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Delete a tracked file
+        std::fs::remove_file(repo.path.join("README.md")).unwrap();
+
+        // Verify file is deleted
+        assert!(!repo.path.join("README.md").exists());
+
+        // Discard changes (should restore the file)
+        let result = discard_changes(
+            repo.path_str(),
+            vec!["README.md".to_string()],
+        ).await;
+
+        assert!(result.is_ok());
+
+        // File should be restored
+        assert!(repo.path.join("README.md").exists());
+        let content = std::fs::read_to_string(repo.path.join("README.md")).unwrap();
+        assert_eq!(content, "# Test Repo");
+    }
+
+    #[tokio::test]
+    async fn test_discard_changes_untracked_directory() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create an untracked directory with files
+        repo.create_file("untracked_dir/file1.txt", "Content 1");
+        repo.create_file("untracked_dir/file2.txt", "Content 2");
+
+        // Verify directory exists
+        assert!(repo.path.join("untracked_dir").exists());
+        assert!(repo.path.join("untracked_dir").is_dir());
+
+        // Discard changes (should delete the directory)
+        let result = discard_changes(
+            repo.path_str(),
+            vec!["untracked_dir".to_string()],
+        ).await;
+
+        assert!(result.is_ok());
+
+        // Directory should be deleted
+        assert!(!repo.path.join("untracked_dir").exists());
+    }
+
+    #[tokio::test]
+    async fn test_discard_changes_multiple_files() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create various changes
+        repo.create_file("README.md", "Modified readme");
+        repo.create_file("untracked.txt", "Untracked");
+        repo.create_file("another.txt", "Another file");
+        repo.stage_file("another.txt");
+
+        // Discard all changes
+        let result = discard_changes(
+            repo.path_str(),
+            vec![
+                "README.md".to_string(),
+                "untracked.txt".to_string(),
+            ],
+        ).await;
+
+        assert!(result.is_ok());
+
+        // README should be restored
+        let content = std::fs::read_to_string(repo.path.join("README.md")).unwrap();
+        assert_eq!(content, "# Test Repo");
+
+        // Untracked file should be deleted
+        assert!(!repo.path.join("untracked.txt").exists());
+
+        // Staged file should still exist (wasn't in discard list)
+        assert!(repo.path.join("another.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_get_status_shows_untracked() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create an untracked file
+        repo.create_file("untracked.txt", "Content");
+
+        let result = get_status(repo.path_str()).await;
+        assert!(result.is_ok());
+
+        let entries = result.unwrap();
+        let untracked = entries.iter().find(|e| e.path == "untracked.txt");
+        assert!(untracked.is_some());
+        assert_eq!(untracked.unwrap().status, FileStatus::Untracked);
+        assert!(!untracked.unwrap().is_staged);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_shows_modified() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Modify a tracked file
+        repo.create_file("README.md", "Modified");
+
+        let result = get_status(repo.path_str()).await;
+        assert!(result.is_ok());
+
+        let entries = result.unwrap();
+        let modified = entries.iter().find(|e| e.path == "README.md");
+        assert!(modified.is_some());
+        assert_eq!(modified.unwrap().status, FileStatus::Modified);
+        assert!(!modified.unwrap().is_staged);
+    }
+
+    #[tokio::test]
+    async fn test_stage_and_unstage_files() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create and stage a file
+        repo.create_file("new.txt", "Content");
+
+        let result = stage_files(
+            repo.path_str(),
+            vec!["new.txt".to_string()],
+        ).await;
+        assert!(result.is_ok());
+
+        // Verify file is staged
+        let status = get_status(repo.path_str()).await.unwrap();
+        let staged = status.iter().find(|e| e.path == "new.txt" && e.is_staged);
+        assert!(staged.is_some());
+
+        // Unstage the file
+        let result = unstage_files(
+            repo.path_str(),
+            vec!["new.txt".to_string()],
+        ).await;
+        assert!(result.is_ok());
+
+        // Verify file is no longer staged
+        let status = get_status(repo.path_str()).await.unwrap();
+        let staged = status.iter().find(|e| e.path == "new.txt" && e.is_staged);
+        assert!(staged.is_none());
+    }
+}

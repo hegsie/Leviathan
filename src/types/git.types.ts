@@ -49,6 +49,10 @@ export interface Branch {
   upstream: string | null;
   targetOid: string;
   aheadBehind?: AheadBehind;
+  /** Unix timestamp of the last commit on this branch */
+  lastCommitTimestamp?: number;
+  /** Whether this branch is considered stale (no commits in 90+ days) */
+  isStale: boolean;
 }
 
 export interface AheadBehind {

@@ -13,6 +13,10 @@ pub struct Branch {
     pub upstream: Option<String>,
     pub target_oid: String,
     pub ahead_behind: Option<AheadBehind>,
+    /// Unix timestamp of the last commit on this branch
+    pub last_commit_timestamp: Option<i64>,
+    /// Whether this branch is considered stale (no commits in threshold days)
+    pub is_stale: bool,
 }
 
 /// Ahead/behind counts relative to upstream

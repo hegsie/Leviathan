@@ -173,7 +173,7 @@ describe('repository.store', () => {
     });
 
     it('sets branches on active repository', () => {
-      repositoryStore.getState().setBranches([{ name: 'main', shorthand: 'main', isHead: true, isRemote: false, targetOid: 'abc123', upstream: null }]);
+      repositoryStore.getState().setBranches([{ name: 'main', shorthand: 'main', isHead: true, isRemote: false, targetOid: 'abc123', upstream: null, isStale: false }]);
 
       const active = repositoryStore.getState().getActiveRepository();
       expect(active?.branches.length).to.equal(1);

@@ -6,6 +6,9 @@ use tauri::command;
 use crate::error::{LeviathanError, Result};
 use crate::models::{AheadBehind, Branch};
 
+/// Default stale threshold in days
+const STALE_THRESHOLD_DAYS: i64 = 90;
+
 /// Get all branches in the repository
 #[command]
 pub async fn get_branches(path: String) -> Result<Vec<Branch>> {
@@ -14,6 +17,13 @@ pub async fn get_branches(path: String) -> Result<Vec<Branch>> {
 
     let head = repo.head().ok();
     let _head_oid = head.as_ref().and_then(|h| h.target());
+
+    // Calculate stale threshold (90 days ago in seconds since epoch)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let stale_threshold = now - (STALE_THRESHOLD_DAYS * 24 * 60 * 60);
 
     for branch_result in repo.branches(None)? {
         let (branch, branch_type) = branch_result?;
@@ -30,6 +40,19 @@ pub async fn get_branches(path: String) -> Result<Vec<Branch>> {
             .target()
             .map(|oid| oid.to_string())
             .unwrap_or_default();
+
+        // Get the last commit timestamp for this branch
+        let last_commit_timestamp = reference.target().and_then(|oid| {
+            repo.find_commit(oid)
+                .ok()
+                .map(|commit| commit.time().seconds())
+        });
+
+        // Branch is stale if it's not HEAD and hasn't been updated in threshold days
+        let is_stale = !is_head
+            && last_commit_timestamp
+                .map(|ts| ts < stale_threshold)
+                .unwrap_or(false);
 
         let upstream = branch
             .upstream()
@@ -71,6 +94,8 @@ pub async fn get_branches(path: String) -> Result<Vec<Branch>> {
             upstream,
             target_oid,
             ahead_behind,
+            last_commit_timestamp,
+            is_stale,
         });
     }
 
@@ -111,6 +136,8 @@ pub async fn create_branch(
         upstream: None,
         target_oid: commit.id().to_string(),
         ahead_behind: None,
+        last_commit_timestamp: Some(commit.time().seconds()),
+        is_stale: false, // Newly created branches are never stale
     })
 }
 
@@ -174,6 +201,24 @@ pub async fn rename_branch(path: String, old_name: String, new_name: String) -> 
         .ok()
         .and_then(|u| u.name().ok().flatten().map(|n| n.to_string()));
 
+    // Get the last commit timestamp
+    let last_commit_timestamp = reference.target().and_then(|oid| {
+        repo.find_commit(oid)
+            .ok()
+            .map(|commit| commit.time().seconds())
+    });
+
+    // Calculate if stale (if not HEAD)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let stale_threshold = now - (STALE_THRESHOLD_DAYS * 24 * 60 * 60);
+    let is_stale = !is_head
+        && last_commit_timestamp
+            .map(|ts| ts < stale_threshold)
+            .unwrap_or(false);
+
     Ok(Branch {
         name: new_name.clone(),
         shorthand: new_name,
@@ -182,6 +227,8 @@ pub async fn rename_branch(path: String, old_name: String, new_name: String) -> 
         upstream,
         target_oid,
         ahead_behind: None,
+        last_commit_timestamp,
+        is_stale,
     })
 }
 

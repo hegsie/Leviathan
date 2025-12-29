@@ -201,6 +201,26 @@ export class LvBranchList extends LitElement {
         color: var(--color-warning);
       }
 
+      .stale-indicator {
+        display: flex;
+        align-items: center;
+        color: var(--color-text-muted);
+        opacity: 0.7;
+      }
+
+      .stale-indicator svg {
+        width: 12px;
+        height: 12px;
+      }
+
+      .branch-item.stale .branch-name {
+        color: var(--color-text-muted);
+      }
+
+      .branch-item.stale .branch-icon {
+        opacity: 0.6;
+      }
+
       .loading {
         display: flex;
         align-items: center;
@@ -764,6 +784,32 @@ export class LvBranchList extends LitElement {
     `;
   }
 
+  private renderStaleIndicator(branch: Branch) {
+    if (!branch.isStale) return nothing;
+
+    // Calculate how long ago the last commit was
+    const lastCommit = branch.lastCommitTimestamp;
+    let title = 'Stale branch';
+    if (lastCommit) {
+      const daysAgo = Math.floor((Date.now() / 1000 - lastCommit) / (24 * 60 * 60));
+      const months = Math.floor(daysAgo / 30);
+      if (months >= 1) {
+        title = `Last commit ${months} month${months > 1 ? 's' : ''} ago`;
+      } else {
+        title = `Last commit ${daysAgo} days ago`;
+      }
+    }
+
+    return html`
+      <span class="stale-indicator" title="${title}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+      </span>
+    `;
+  }
+
   private renderBranchItem(branch: Branch, nested = false, stripPrefix: string | null = null) {
     // Determine display name: strip prefix if provided
     let displayName = branch.shorthand;
@@ -774,10 +820,11 @@ export class LvBranchList extends LitElement {
     const isDragging = this.draggingBranch?.name === branch.name;
     const isDropTarget = this.dropTargetBranch?.name === branch.name;
     const dropClass = isDropTarget ? `drop-target drop-target-${this.dropAction}` : '';
+    const staleClass = branch.isStale ? 'stale' : '';
 
     return html`
       <li
-        class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''} ${isDragging ? 'dragging' : ''} ${dropClass}"
+        class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''} ${isDragging ? 'dragging' : ''} ${dropClass} ${staleClass}"
         draggable=${!branch.isHead ? 'true' : 'false'}
         @click=${() => this.handleBranchClick(branch)}
         @dblclick=${() => this.handleCheckout(branch)}
@@ -793,6 +840,7 @@ export class LvBranchList extends LitElement {
         ${this.renderBranchIcon(branch.isHead)}
         <span class="branch-name">${displayName}</span>
         ${this.renderAheadBehind(branch)}
+        ${this.renderStaleIndicator(branch)}
         ${isDropTarget ? html`
           <span class="drop-indicator ${this.dropAction}">${this.dropAction === 'merge' ? 'Merge' : 'Rebase'}</span>
         ` : nothing}
