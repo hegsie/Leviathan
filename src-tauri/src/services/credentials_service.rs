@@ -91,8 +91,8 @@ impl CredentialsHelper {
                 // First, check if this is an Azure DevOps URL and try the stored ADO token
                 if let Some(token) = get_ado_token_for_git(url) {
                     tracing::debug!("Using stored Azure DevOps PAT for: {}", url);
-                    // Azure DevOps accepts any username with PAT as password
-                    return Cred::userpass_plaintext("", &token);
+                    // Azure DevOps ignores username, but libgit2 requires non-empty value
+                    return Cred::userpass_plaintext("PersonalAccessToken", &token);
                 }
 
                 if let Some((username, password)) = get_stored_credentials(url) {
