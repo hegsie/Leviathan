@@ -507,6 +507,9 @@ export class LvCommitPanel extends LitElement {
           composed: true,
         }));
 
+        // Trigger file status refresh immediately
+        window.dispatchEvent(new CustomEvent('status-refresh'));
+
         // Clear success message after a delay
         setTimeout(() => {
           this.success = null;

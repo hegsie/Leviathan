@@ -88,6 +88,7 @@ export class LvGraphCanvas extends LitElement {
         left: 0;
         cursor: default;
         outline: none;
+        z-index: 2; /* Above scroll container but scrollbar is outside canvas bounds */
       }
 
       canvas:focus {
@@ -102,10 +103,31 @@ export class LvGraphCanvas extends LitElement {
       .scroll-container {
         position: absolute;
         top: 0;
-        left: 0;
         right: 0;
         bottom: 0;
-        overflow: auto;
+        width: 12px;
+        overflow-y: scroll;
+        overflow-x: hidden;
+        z-index: 3; /* Above canvas for scrollbar interaction */
+      }
+
+      .scroll-container::-webkit-scrollbar {
+        width: 12px;
+      }
+
+      .scroll-container::-webkit-scrollbar-track {
+        background: var(--color-bg-secondary);
+        border-left: 1px solid var(--color-border);
+      }
+
+      .scroll-container::-webkit-scrollbar-thumb {
+        background: var(--color-text-muted);
+        border-radius: 6px;
+        border: 3px solid var(--color-bg-secondary);
+      }
+
+      .scroll-container::-webkit-scrollbar-thumb:hover {
+        background: var(--color-text-secondary);
       }
 
       .scroll-content {
@@ -335,8 +357,11 @@ export class LvGraphCanvas extends LitElement {
       return;
     }
 
-    // Wheel scrolling
-    this.containerEl.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
+    // Wheel scrolling on canvas
+    this.canvasEl.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
+
+    // Native scroll on scrollbar container - sync with internal state
+    this.scrollEl.addEventListener('scroll', this.handleNativeScroll.bind(this));
 
     // Mouse interactions
     this.canvasEl.addEventListener('mousemove', this.handleMouseMove.bind(this));
@@ -707,7 +732,8 @@ export class LvGraphCanvas extends LitElement {
   private onResize(): void {
     if (!this.containerEl || !this.renderer) return;
 
-    const width = this.containerEl.clientWidth;
+    const scrollbarWidth = 12; // Match CSS scrollbar width
+    const width = this.containerEl.clientWidth - scrollbarWidth;
     const height = this.containerEl.clientHeight;
 
     this.renderer.resize(width, height);
@@ -736,6 +762,39 @@ export class LvGraphCanvas extends LitElement {
     const maxScrollY = Math.max(0, size.height - viewport.height);
 
     this.scrollState.handleWheel(e.deltaX, e.deltaY, maxScrollX, maxScrollY);
+
+    // Sync the native scrollbar position
+    this.syncScrollbarPosition();
+  }
+
+  private handleNativeScroll(): void {
+    if (!this.scrollEl || !this.scrollState || this.isSyncingScroll) {
+      return;
+    }
+
+    // Update internal scroll state from native scrollbar
+    const scrollTop = this.scrollEl.scrollTop;
+    const scrollLeft = this.scrollEl.scrollLeft;
+
+    this.scrollState.setScroll(scrollTop, scrollLeft);
+  }
+
+  private isSyncingScroll = false;
+
+  private syncScrollbarPosition(): void {
+    if (!this.scrollEl || !this.scrollState) return;
+
+    const scroll = this.scrollState.getScroll();
+
+    // Prevent feedback loop
+    this.isSyncingScroll = true;
+    this.scrollEl.scrollTop = scroll.scrollTop;
+    this.scrollEl.scrollLeft = scroll.scrollLeft;
+
+    // Reset flag after scroll event processes
+    requestAnimationFrame(() => {
+      this.isSyncingScroll = false;
+    });
   }
 
   private handleMouseMove(e: MouseEvent): void {
@@ -1094,6 +1153,7 @@ export class LvGraphCanvas extends LitElement {
     // Apply scroll if needed
     if (targetScrollTop !== viewport.scrollTop || targetScrollLeft !== viewport.scrollLeft) {
       this.scrollState.setScroll(targetScrollTop, targetScrollLeft);
+      this.syncScrollbarPosition();
     }
   }
 

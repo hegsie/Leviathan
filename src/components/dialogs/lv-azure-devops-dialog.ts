@@ -3,7 +3,7 @@
  * Manage Azure DevOps connection, view PRs, work items, and pipelines
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
@@ -15,7 +15,12 @@ import type {
   AdoPipelineRun,
   CreateAdoPullRequestInput,
 } from '../../services/git.service.ts';
+import { integrationAccountsStore } from '../../stores/integration-accounts.store.ts';
+import * as accountsService from '../../services/integration-accounts.service.ts';
+import type { IntegrationAccount } from '../../types/integration-accounts.types.ts';
+import { safeGetOrganization, safeSetOrganization } from '../../types/integration-accounts.types.ts';
 import './lv-modal.ts';
+import './lv-account-selector.ts';
 
 type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr';
 
@@ -549,6 +554,12 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private prFilter: 'active' | 'completed' | 'abandoned' | 'all' = 'active';
   @state() private workItemFilter: string = '';
 
+  // Multi-account support
+  @state() private accounts: IntegrationAccount[] = [];
+  @state() private selectedAccountId: string | null = null;
+
+  private unsubscribeStore?: () => void;
+
   // Create PR form
   @state() private createPrTitle = '';
   @state() private createPrDescription = '';
@@ -558,9 +569,54 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+
+    // Subscribe to accounts store
+    this.unsubscribeStore = integrationAccountsStore.subscribe((state) => {
+      this.accounts = state.accounts.filter((a) => a.integrationType === 'azure-devops');
+      // If no account selected, try to select the active one or default
+      if (!this.selectedAccountId && this.accounts.length > 0) {
+        const activeAccount = state.activeAccounts['azure-devops'];
+        if (activeAccount) {
+          this.selectedAccountId = activeAccount.id;
+          // Update organization from account config
+          const org = safeGetOrganization(activeAccount);
+          if (org) {
+            this.organizationInput = org;
+          }
+        } else {
+          const defaultAccount = this.accounts.find((a) => a.isDefault);
+          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+          const org = defaultAccount ? safeGetOrganization(defaultAccount) : null;
+          if (org) {
+            this.organizationInput = org;
+          }
+        }
+      }
+    });
+
+    // Initialize store with accounts
+    const state = integrationAccountsStore.getState();
+    this.accounts = state.accounts.filter((a) => a.integrationType === 'azure-devops');
+    if (this.accounts.length > 0 && !this.selectedAccountId) {
+      const activeAccount = state.activeAccounts['azure-devops'];
+      const account = activeAccount ?? this.accounts.find((a) => a.isDefault) ?? this.accounts[0];
+      if (account) {
+        this.selectedAccountId = account.id;
+        const org = safeGetOrganization(account);
+        if (org) {
+          this.organizationInput = org;
+        }
+      }
+    }
+
     if (this.open) {
       await this.loadInitialData();
     }
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.unsubscribeStore?.();
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -596,10 +652,76 @@ export class LvAzureDevOpsDialog extends LitElement {
     const org = this.detectedRepo?.organization || this.organizationInput;
     if (!org) return;
 
-    const result = await gitService.checkAdoConnection(org);
+    // Get token for selected account (or legacy token if no account)
+    const token = await this.getSelectedAccountToken();
+    const result = await gitService.checkAdoConnectionWithToken(org, token);
     if (result.success && result.data) {
       this.connectionStatus = result.data;
+      // Update cached user in account if connected
+      if (this.selectedAccountId && result.data.connected && result.data.user) {
+        await accountsService.updateAccountCachedUser(this.selectedAccountId, {
+          username: result.data.user.displayName,
+          displayName: result.data.user.displayName,
+          email: null, // ADO API doesn't return email in this context
+          avatarUrl: result.data.user.imageUrl ?? null,
+        });
+      }
     }
+  }
+
+  /**
+   * Get the token for the currently selected account
+   */
+  private async getSelectedAccountToken(): Promise<string | null> {
+    if (this.selectedAccountId) {
+      return accountsService.getAccountToken('azure-devops', this.selectedAccountId);
+    }
+    // Fall back to legacy token if no account selected
+    const result = await gitService.getAdoToken();
+    return result.success ? (result.data ?? null) : null;
+  }
+
+  /**
+   * Handle account selection change
+   */
+  private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
+    const { account } = e.detail;
+    this.selectedAccountId = account.id;
+    this.connectionStatus = null;
+    this.error = null;
+
+    // Update organization from account config
+    const org = safeGetOrganization(account);
+    if (org) {
+      this.organizationInput = org;
+    }
+
+    // Update active account in store
+    integrationAccountsStore.getState().setActiveAccount('azure-devops', account);
+
+    // Re-check connection with new account
+    await this.loadInitialData();
+  }
+
+  /**
+   * Handle add account request
+   */
+  private handleAddAccount(): void {
+    this.activeTab = 'connection';
+    this.connectionStatus = null;
+  }
+
+  /**
+   * Handle manage accounts request
+   */
+  private handleManageAccounts(): void {
+    this.dispatchEvent(
+      new CustomEvent('manage-accounts', {
+        detail: { integrationType: 'azure-devops' },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private async detectRepo(): Promise<void> {
@@ -691,30 +813,65 @@ export class LvAzureDevOpsDialog extends LitElement {
 
     this.isLoading = true;
     this.error = null;
+    const tokenToSave = this.tokenInput.trim();
+    const organization = this.organizationInput.trim();
 
     try {
-      const storeResult = await gitService.storeAdoToken(this.tokenInput);
-      if (!storeResult.success) {
-        this.error = storeResult.error?.message ?? 'Failed to save token';
+      // First verify the token works by checking connection
+      const verifyResult = await gitService.checkAdoConnectionWithToken(organization, tokenToSave);
+      if (!verifyResult.success || !verifyResult.data?.connected) {
+        this.error = verifyResult.error?.message ?? 'Invalid token or connection failed';
         return;
       }
 
-      const connectionResult = await gitService.checkAdoConnection(this.organizationInput);
+      const user = verifyResult.data.user;
 
-      if (connectionResult.success && connectionResult.data?.connected) {
-        this.connectionStatus = connectionResult.data;
-        this.tokenInput = '';
-        if (this.detectedRepo) {
-          await this.loadAllData();
+      // If we have a selected account, save token to that account
+      if (this.selectedAccountId) {
+        await accountsService.storeAccountToken('azure-devops', this.selectedAccountId, tokenToSave);
+        // Update account's organization if different
+        const account = this.accounts.find((a) => a.id === this.selectedAccountId);
+        if (account) {
+          const currentOrg = safeGetOrganization(account);
+          if (currentOrg !== organization) {
+            safeSetOrganization(account, organization);
+            await accountsService.saveIntegrationAccount(account);
+          }
         }
       } else {
-        // Show the actual error from the API
-        this.error = connectionResult.error?.message ?? 'Failed to connect. Please check your token and organization.';
-        // Clear the stored token since it didn't work
-        await gitService.deleteAdoToken();
+        // No account selected - create a new account for this token
+        const accountName = user?.displayName ? `Azure DevOps (${user.displayName})` : `Azure DevOps (${organization})`;
+        const { createAzureDevOpsAccount } = await import('../../types/integration-accounts.types.ts');
+        const newAccount = createAzureDevOpsAccount(accountName, organization);
+        newAccount.isDefault = this.accounts.length === 0;
+        newAccount.cachedUser = user ? {
+          username: user.displayName,
+          displayName: user.displayName,
+          email: null, // ADO API doesn't return email in this context
+          avatarUrl: user.imageUrl ?? null,
+        } : null;
+
+        const saveResult = await accountsService.saveIntegrationAccount(newAccount);
+        if (saveResult.success && saveResult.data) {
+          await accountsService.storeAccountToken('azure-devops', saveResult.data.id, tokenToSave);
+          this.selectedAccountId = saveResult.data.id;
+        } else {
+          // Fallback to legacy token storage
+          await gitService.storeAdoToken(tokenToSave);
+        }
+      }
+
+      // Token saved, update state
+      this.tokenInput = '';
+      this.connectionStatus = verifyResult.data;
+
+      // Load data if connected and repo detected
+      if (this.connectionStatus?.connected && this.detectedRepo) {
+        await this.loadAllData();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to connect';
+      this.tokenInput = tokenToSave;
     } finally {
       this.isLoading = false;
     }
@@ -724,7 +881,13 @@ export class LvAzureDevOpsDialog extends LitElement {
     this.isLoading = true;
 
     try {
-      await gitService.deleteAdoToken();
+      // Delete token for selected account or legacy token
+      if (this.selectedAccountId) {
+        await accountsService.deleteAccountToken('azure-devops', this.selectedAccountId);
+      } else {
+        await gitService.deleteAdoToken();
+      }
+
       this.connectionStatus = null;
       this.pullRequests = [];
       this.workItems = [];
@@ -1153,6 +1316,16 @@ export class LvAzureDevOpsDialog extends LitElement {
       >
         <div class="content">
           ${this.renderDetectedRepo()}
+
+          ${this.accounts.length > 0 || this.connectionStatus?.connected ? html`
+            <lv-account-selector
+              integrationType="azure-devops"
+              .selectedAccountId=${this.selectedAccountId}
+              @account-change=${this.handleAccountChange}
+              @add-account=${this.handleAddAccount}
+              @manage-accounts=${this.handleManageAccounts}
+            ></lv-account-selector>
+          ` : nothing}
 
           <div class="tabs">
             <button

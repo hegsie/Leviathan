@@ -419,10 +419,30 @@ export class AppShell extends LitElement {
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
 
-      // Load profile for new repository and check integration
-      if (repoChanged && newActiveRepo) {
-        gitService.loadProfileForRepository(newActiveRepo.repository.path);
-        this.checkRepositoryIntegration(newActiveRepo.repository.path);
+      // Clear view state when switching repositories
+      if (repoChanged) {
+        // Clear selected commit and refs
+        this.selectedCommit = null;
+        this.selectedCommitRefs = [];
+
+        // Close any open overlays
+        this.showDiff = false;
+        this.diffFile = null;
+        this.diffCommitFile = null;
+        this.showBlame = false;
+        this.blameFile = null;
+        this.blameCommitOid = null;
+        this.showFileHistory = false;
+        this.fileHistoryPath = null;
+
+        // Clear search filter
+        this.searchFilter = null;
+
+        // Load profile for new repository and check integration
+        if (newActiveRepo) {
+          gitService.loadProfileForRepository(newActiveRepo.repository.path);
+          this.checkRepositoryIntegration(newActiveRepo.repository.path);
+        }
       }
     });
     this.unsubscribeUi = uiStore.subscribe((state) => {
@@ -440,6 +460,9 @@ export class AppShell extends LitElement {
 
     // Load profiles
     gitService.loadProfiles();
+
+    // Restore previously open repositories
+    this.restorePersistedRepositories();
 
     // Set up update notification listeners
     this.setupUpdateListeners();
@@ -1085,6 +1108,25 @@ export class AppShell extends LitElement {
     return commands;
   }
 
+  private async restorePersistedRepositories(): Promise<void> {
+    const persistedRepos = repositoryStore.getState().getPersistedOpenRepos();
+    if (persistedRepos.length === 0) return;
+
+    // Open each persisted repository
+    for (const persisted of persistedRepos) {
+      try {
+        const result = await gitService.openRepository({ path: persisted.path });
+        if (result.success && result.data) {
+          repositoryStore.getState().addRepository(result.data);
+        }
+      } catch (error) {
+        console.warn(`Failed to restore repository: ${persisted.path}`, error);
+      }
+    }
+
+    // Restore active index (already persisted, will be set from storage)
+  }
+
   private async handleFetch(): Promise<void> {
     if (!this.activeRepository) return;
     await gitService.fetch({ path: this.activeRepository.repository.path });
@@ -1150,6 +1192,7 @@ export class AppShell extends LitElement {
         @open-settings=${() => { this.showSettings = true; }}
         @open-command-palette=${() => { this.showCommandPalette = true; }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
+        @repository-refresh=${() => this.handleRefresh()}
       ></lv-toolbar>
 
       ${this.activeRepository
@@ -1161,6 +1204,7 @@ export class AppShell extends LitElement {
                   style="width: ${this.leftPanelWidth}px"
                   @tag-selected=${this.handleTagSelected}
                   @branch-selected=${this.handleBranchSelected}
+                  @repository-changed=${() => this.handleRefresh()}
                 >
                   <lv-left-panel></lv-left-panel>
                 </aside>
@@ -1251,6 +1295,7 @@ export class AppShell extends LitElement {
                   @commit-file-selected=${this.handleCommitFileSelected}
                   @show-blame=${this.handleShowBlame}
                   @show-file-history=${this.handleShowFileHistory}
+                  @repository-changed=${() => this.handleRefresh()}
                 >
                   <lv-right-panel
                     .commit=${this.selectedCommit}

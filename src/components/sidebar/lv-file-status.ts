@@ -424,11 +424,13 @@ export class LvFileStatus extends LitElement {
       }
     });
 
-    // Listen for global stage-all and unstage-all events
+    // Listen for global stage-all, unstage-all, and refresh events
     this.boundHandleStageAllEvent = () => this.handleStageAll();
     this.boundHandleUnstageAllEvent = () => this.handleUnstageAll();
+    this.boundHandleRefreshEvent = () => this.refresh();
     window.addEventListener('stage-all', this.boundHandleStageAllEvent);
     window.addEventListener('unstage-all', this.boundHandleUnstageAllEvent);
+    window.addEventListener('status-refresh', this.boundHandleRefreshEvent);
 
     // Listen for keyboard events
     this.addEventListener('keydown', this.handleKeyDown);
@@ -521,6 +523,7 @@ export class LvFileStatus extends LitElement {
 
   private boundHandleStageAllEvent: (() => void) | null = null;
   private boundHandleUnstageAllEvent: (() => void) | null = null;
+  private boundHandleRefreshEvent: (() => void) | null = null;
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
@@ -543,6 +546,9 @@ export class LvFileStatus extends LitElement {
     }
     if (this.boundHandleUnstageAllEvent) {
       window.removeEventListener('unstage-all', this.boundHandleUnstageAllEvent);
+    }
+    if (this.boundHandleRefreshEvent) {
+      window.removeEventListener('status-refresh', this.boundHandleRefreshEvent);
     }
 
     // Remove keyboard listener
@@ -626,6 +632,14 @@ export class LvFileStatus extends LitElement {
       this.loading = false;
       this.hasInitiallyLoaded = true;
     }
+  }
+
+  /**
+   * Public method to refresh the status
+   * Can be called from outside the component
+   */
+  public refresh(): void {
+    this.loadStatus();
   }
 
   /**

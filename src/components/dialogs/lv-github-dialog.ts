@@ -3,7 +3,7 @@
  * Manage GitHub connection, view PRs, and check Actions status
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
@@ -19,7 +19,11 @@ import type {
   ReleaseSummary,
   CreateReleaseInput,
 } from '../../services/git.service.ts';
+import { integrationAccountsStore } from '../../stores/integration-accounts.store.ts';
+import * as accountsService from '../../services/integration-accounts.service.ts';
+import type { IntegrationAccount } from '../../types/integration-accounts.types.ts';
 import './lv-modal.ts';
+import './lv-account-selector.ts';
 
 type TabType = 'connection' | 'pull-requests' | 'issues' | 'releases' | 'actions' | 'create-pr' | 'create-issue' | 'create-release';
 
@@ -627,6 +631,12 @@ export class LvGitHubDialog extends LitElement {
   @state() private prFilter: 'open' | 'closed' | 'all' = 'open';
   @state() private issueFilter: 'open' | 'closed' | 'all' = 'open';
 
+  // Multi-account support
+  @state() private accounts: IntegrationAccount[] = [];
+  @state() private selectedAccountId: string | null = null;
+
+  private unsubscribeStore?: () => void;
+
   // Create PR form
   @state() private createPrTitle = '';
   @state() private createPrBody = '';
@@ -652,9 +662,38 @@ export class LvGitHubDialog extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+
+    // Subscribe to accounts store
+    this.unsubscribeStore = integrationAccountsStore.subscribe((state) => {
+      this.accounts = state.accounts.filter((a) => a.integrationType === 'github');
+      // If no account selected, try to select the active one or default
+      if (!this.selectedAccountId && this.accounts.length > 0) {
+        const activeAccount = state.activeAccounts['github'];
+        if (activeAccount) {
+          this.selectedAccountId = activeAccount.id;
+        } else {
+          const defaultAccount = this.accounts.find((a) => a.isDefault);
+          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+        }
+      }
+    });
+
+    // Initialize store with accounts
+    const state = integrationAccountsStore.getState();
+    this.accounts = state.accounts.filter((a) => a.integrationType === 'github');
+    if (this.accounts.length > 0 && !this.selectedAccountId) {
+      const activeAccount = state.activeAccounts['github'];
+      this.selectedAccountId = activeAccount?.id ?? this.accounts.find((a) => a.isDefault)?.id ?? this.accounts[0]?.id ?? null;
+    }
+
     if (this.open) {
       await this.loadInitialData();
     }
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.unsubscribeStore?.();
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -684,9 +723,20 @@ export class LvGitHubDialog extends LitElement {
 
   private async checkConnection(): Promise<void> {
     try {
-      const result = await gitService.checkGitHubConnection();
+      // Get token for selected account (or legacy token if no account)
+      const token = await this.getSelectedAccountToken();
+      const result = await gitService.checkGitHubConnectionWithToken(token);
       if (result.success && result.data) {
         this.connectionStatus = result.data;
+        // Update cached user in account if connected
+        if (this.selectedAccountId && result.data.connected && result.data.user) {
+          await accountsService.updateAccountCachedUser(this.selectedAccountId, {
+            username: result.data.user.login,
+            displayName: result.data.user.name ?? null,
+            email: result.data.user.email ?? null,
+            avatarUrl: result.data.user.avatarUrl ?? null,
+          });
+        }
       } else if (!result.success) {
         this.error = result.error?.message ?? 'Failed to check connection';
       } else {
@@ -695,6 +745,59 @@ export class LvGitHubDialog extends LitElement {
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to check connection';
     }
+  }
+
+  /**
+   * Get the token for the currently selected account
+   */
+  private async getSelectedAccountToken(): Promise<string | null> {
+    if (this.selectedAccountId) {
+      return accountsService.getAccountToken('github', this.selectedAccountId);
+    }
+    // Fall back to legacy token if no account selected
+    const result = await gitService.getGitHubToken();
+    return result.success ? (result.data ?? null) : null;
+  }
+
+  /**
+   * Handle account selection change
+   */
+  private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
+    const { account } = e.detail;
+    this.selectedAccountId = account.id;
+    this.connectionStatus = null;
+    this.error = null;
+
+    // Update active account in store
+    integrationAccountsStore.getState().setActiveAccount('github', account);
+
+    // Re-check connection with new account
+    await this.loadInitialData();
+  }
+
+  /**
+   * Handle add account request
+   */
+  private handleAddAccount(): void {
+    // Switch to connection tab to add token for new account
+    this.activeTab = 'connection';
+    this.connectionStatus = null;
+    // For now, we'll create a new account when saving a token
+    // In a more complete implementation, this would open an account creation dialog
+  }
+
+  /**
+   * Handle manage accounts request
+   */
+  private handleManageAccounts(): void {
+    // Dispatch event to open accounts management
+    this.dispatchEvent(
+      new CustomEvent('manage-accounts', {
+        detail: { integrationType: 'github' },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private async detectRepo(): Promise<void> {
@@ -824,23 +927,46 @@ export class LvGitHubDialog extends LitElement {
     const tokenToSave = this.tokenInput.trim();
 
     try {
-      const result = await gitService.storeGitHubToken(tokenToSave);
-      if (!result.success) {
-        this.error = result.error?.message ?? 'Failed to save token';
+      // First verify the token works by checking connection
+      const verifyResult = await gitService.checkGitHubConnectionWithToken(tokenToSave);
+      if (!verifyResult.success || !verifyResult.data?.connected) {
+        this.error = verifyResult.error?.message ?? 'Invalid token or connection failed';
         return;
       }
 
-      // Token saved, now check connection
+      const user = verifyResult.data.user;
+
+      // If we have a selected account, save token to that account
+      if (this.selectedAccountId) {
+        await accountsService.storeAccountToken('github', this.selectedAccountId, tokenToSave);
+      } else {
+        // No account selected - create a new account for this token
+        const accountName = user?.login ? `GitHub (${user.login})` : 'GitHub Account';
+        const { createGitHubAccount } = await import('../../types/integration-accounts.types.ts');
+        const newAccount = createGitHubAccount(accountName);
+        newAccount.isDefault = this.accounts.length === 0;
+        newAccount.cachedUser = user ? {
+          username: user.login,
+          displayName: user.name ?? null,
+          email: user.email ?? null,
+          avatarUrl: user.avatarUrl ?? null,
+        } : null;
+
+        const saveResult = await accountsService.saveIntegrationAccount(newAccount);
+        if (saveResult.success && saveResult.data) {
+          await accountsService.storeAccountToken('github', saveResult.data.id, tokenToSave);
+          this.selectedAccountId = saveResult.data.id;
+        } else {
+          // Fallback to legacy token storage
+          await gitService.storeGitHubToken(tokenToSave);
+        }
+      }
+
+      // Token saved, update state
       this.tokenInput = '';
-      await this.checkConnection();
+      this.connectionStatus = verifyResult.data;
 
-      // If connection failed, show error and restore token for retry
-      if (this.error) {
-        this.tokenInput = tokenToSave;
-        return;
-      }
-
-      // Load data if connected
+      // Load data if connected and repo detected
       if (this.connectionStatus?.connected && this.detectedRepo) {
         await Promise.all([
           this.loadPullRequests(),
@@ -863,7 +989,13 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
-      await gitService.deleteGitHubToken();
+      // Delete token for selected account or legacy token
+      if (this.selectedAccountId) {
+        await accountsService.deleteAccountToken('github', this.selectedAccountId);
+      } else {
+        await gitService.deleteGitHubToken();
+      }
+
       this.connectionStatus = { connected: false, user: null, scopes: [] };
       this.pullRequests = [];
       this.workflowRuns = [];
@@ -1644,6 +1776,16 @@ export class LvGitHubDialog extends LitElement {
               <span class="repo-remote">(${this.detectedRepo.remoteName})</span>
             </div>
           ` : ''}
+
+          ${this.accounts.length > 0 || this.connectionStatus?.connected ? html`
+            <lv-account-selector
+              integrationType="github"
+              .selectedAccountId=${this.selectedAccountId}
+              @account-change=${this.handleAccountChange}
+              @add-account=${this.handleAddAccount}
+              @manage-accounts=${this.handleManageAccounts}
+            ></lv-account-selector>
+          ` : nothing}
 
           <div class="tabs">
             <button

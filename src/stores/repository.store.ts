@@ -20,10 +20,19 @@ export interface OpenRepository {
   unstagedFiles: StatusEntry[];
 }
 
+// Persisted state for open repositories (just paths, not full data)
+export interface PersistedOpenRepo {
+  path: string;
+  name: string;
+}
+
 export interface RepositoryState {
   // Open repositories (tabs)
   openRepositories: OpenRepository[];
   activeIndex: number;
+
+  // Persisted open repos (restored on startup)
+  persistedOpenRepos: PersistedOpenRepo[];
 
   // Loading state
   isLoading: boolean;
@@ -55,6 +64,7 @@ export interface RepositoryState {
 
   // Getters
   getActiveRepository: () => OpenRepository | null;
+  getPersistedOpenRepos: () => PersistedOpenRepo[];
   reset: () => void;
 }
 
@@ -63,6 +73,7 @@ const MAX_RECENT = 10;
 const initialState = {
   openRepositories: [] as OpenRepository[],
   activeIndex: -1,
+  persistedOpenRepos: [] as PersistedOpenRepo[],
   isLoading: false,
   error: null,
   recentRepositories: [] as RecentRepository[],
@@ -87,6 +98,8 @@ export const repositoryStore = createStore<RepositoryState>()(
 
       // Repository management
       addRepository: (repo) => {
+        const name = repo.name || repo.path.split('/').pop() || repo.path;
+
         set((state) => {
           const existingIndex = state.openRepositories.findIndex(
             (r) => r.repository.path === repo.path
@@ -97,15 +110,19 @@ export const repositoryStore = createStore<RepositoryState>()(
           }
 
           const newRepos = [...state.openRepositories, createEmptyRepoData(repo)];
+          const newPersistedRepos = state.persistedOpenRepos.some((r) => r.path === repo.path)
+            ? state.persistedOpenRepos
+            : [...state.persistedOpenRepos, { path: repo.path, name }];
+
           return {
             openRepositories: newRepos,
             activeIndex: newRepos.length - 1,
+            persistedOpenRepos: newPersistedRepos,
             error: null,
           };
         });
 
         // Add to recent
-        const name = repo.name || repo.path.split('/').pop() || repo.path;
         get().addRecentRepository(repo.path, name);
       },
 
@@ -119,6 +136,9 @@ export const repositoryStore = createStore<RepositoryState>()(
           const newRepos = state.openRepositories.filter(
             (r) => r.repository.path !== path
           );
+          const newPersistedRepos = state.persistedOpenRepos.filter(
+            (r) => r.path !== path
+          );
           let newActiveIndex = state.activeIndex;
 
           if (newRepos.length === 0) {
@@ -129,6 +149,7 @@ export const repositoryStore = createStore<RepositoryState>()(
 
           return {
             openRepositories: newRepos,
+            persistedOpenRepos: newPersistedRepos,
             activeIndex: newActiveIndex,
           };
         });
@@ -267,12 +288,18 @@ export const repositoryStore = createStore<RepositoryState>()(
         return state.openRepositories[state.activeIndex];
       },
 
+      getPersistedOpenRepos: () => {
+        return get().persistedOpenRepos;
+      },
+
       reset: () => set(initialState),
     }),
     {
       name: 'leviathan-repositories',
       partialize: (state) => ({
         recentRepositories: state.recentRepositories,
+        persistedOpenRepos: state.persistedOpenRepos,
+        activeIndex: state.activeIndex,
       }),
     }
   )

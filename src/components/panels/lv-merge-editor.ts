@@ -263,6 +263,70 @@ export class LvMergeEditor extends LitElement {
         outline: none;
       }
 
+      /* Syntax-highlighted editable view */
+      .editable-code-container {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        overflow: auto;
+      }
+
+      .editable-code-backdrop {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        min-height: 100%;
+        font-family: var(--font-mono);
+        font-size: var(--font-size-sm);
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-all;
+        pointer-events: none;
+        padding: 0;
+        margin: 0;
+        background: var(--color-bg-primary);
+      }
+
+      .editable-code-backdrop .code-view {
+        width: 100%;
+      }
+
+      .editable-code-textarea {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        font-family: var(--font-mono);
+        font-size: var(--font-size-sm);
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-all;
+        padding: 0;
+        margin: 0;
+        border: none;
+        background: transparent;
+        color: transparent;
+        caret-color: var(--color-text-primary);
+        resize: none;
+        overflow: hidden;
+        z-index: 1;
+      }
+
+      .editable-code-textarea:focus {
+        outline: none;
+      }
+
+      .editable-code-textarea::selection {
+        background: rgba(var(--color-primary-rgb, 59, 130, 246), 0.3);
+      }
+
+      /* Line highlighting for conflict markers */
+      .line-conflict-marker {
+        background: rgba(var(--color-warning-rgb, 234, 179, 8), 0.3);
+      }
+
       .loading {
         display: flex;
         align-items: center;
@@ -508,6 +572,58 @@ export class LvMergeEditor extends LitElement {
     `;
   }
 
+  /**
+   * Render an editable code view with syntax highlighting
+   * Uses a transparent textarea over a highlighted backdrop
+   */
+  private renderEditableCodeView(content: string): ReturnType<typeof html> {
+    const lines = content.split('\n');
+
+    // Check for conflict markers to highlight those lines
+    const conflictPatterns = ['<<<<<<<', '=======', '>>>>>>>'];
+
+    return html`
+      <div class="editable-code-container">
+        <div class="editable-code-backdrop">
+          <div class="code-view">
+            ${lines.map((line, index) => {
+              const isConflictMarker = conflictPatterns.some(p => line.startsWith(p));
+              return html`
+                <div class="code-line ${isConflictMarker ? 'line-conflict-marker' : ''}">
+                  <span class="line-number">${index + 1}</span>
+                  <span class="line-content">${this.renderHighlightedContent(line) || ' '}</span>
+                </div>
+              `;
+            })}
+          </div>
+        </div>
+        <textarea
+          class="editable-code-textarea"
+          .value=${content}
+          @input=${this.handleOutputChange}
+          @scroll=${this.handleEditableScroll}
+          spellcheck="false"
+        ></textarea>
+      </div>
+    `;
+  }
+
+  /**
+   * Sync scroll position between textarea and backdrop
+   */
+  private handleEditableScroll(e: Event): void {
+    const textarea = e.target as HTMLTextAreaElement;
+    const container = textarea.closest('.editable-code-container');
+    if (container) {
+      const backdrop = container.querySelector('.editable-code-backdrop') as HTMLElement;
+      if (backdrop) {
+        backdrop.style.transform = `translateY(-${textarea.scrollTop}px)`;
+      }
+      // Sync horizontal scroll too
+      container.scrollLeft = textarea.scrollLeft;
+    }
+  }
+
   private getLineCount(content: string): number {
     return content ? content.split('\n').length : 0;
   }
@@ -605,11 +721,7 @@ export class LvMergeEditor extends LitElement {
             <span class="panel-stats">${this.getLineCount(this.outputContent)} lines</span>
           </div>
           <div class="panel-content">
-            <textarea
-              .value=${this.outputContent}
-              @input=${this.handleOutputChange}
-              spellcheck="false"
-            ></textarea>
+            ${this.renderEditableCodeView(this.outputContent)}
           </div>
         </div>
       </div>

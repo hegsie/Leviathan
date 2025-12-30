@@ -226,3 +226,168 @@ export const AzureDevOpsCredentials = {
     return hasCredential(CredentialKeys.AZURE_DEVOPS_TOKEN);
   },
 };
+
+// =============================================================================
+// Multi-Account Credential Support
+// =============================================================================
+
+import type { IntegrationType } from '../types/integration-accounts.types.ts';
+
+/**
+ * Generate a namespaced credential key for an account
+ */
+export function getAccountCredentialKey(
+  integrationType: IntegrationType,
+  accountId: string
+): string {
+  return `${integrationType}_token_${accountId}`;
+}
+
+/**
+ * Store a credential for a specific account (using dynamic key)
+ */
+async function storeAccountCredentialInternal(key: string, value: string): Promise<void> {
+  try {
+    const client = await ensureInitialized();
+    const store = client.getStore();
+
+    const encoder = new TextEncoder();
+    const data = Array.from(encoder.encode(value));
+
+    await store.insert(key, data);
+    await strongholdInstance?.save();
+
+    console.log(`[CredentialService] Stored account credential: ${key}`);
+  } catch (error) {
+    console.error(`[CredentialService] Failed to store account credential ${key}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Get a credential for a specific account (using dynamic key)
+ */
+async function getAccountCredentialInternal(key: string): Promise<string | null> {
+  try {
+    const client = await ensureInitialized();
+    const store = client.getStore();
+
+    const data = await store.get(key);
+
+    if (!data || data.length === 0) {
+      console.log(`[CredentialService] No account credential found for: ${key}`);
+      return null;
+    }
+
+    const decoder = new TextDecoder();
+    const value = decoder.decode(new Uint8Array(data));
+
+    console.log(`[CredentialService] Retrieved account credential: ${key}`);
+    return value;
+  } catch {
+    console.log(`[CredentialService] Account credential not found: ${key}`);
+    return null;
+  }
+}
+
+/**
+ * Delete a credential for a specific account (using dynamic key)
+ */
+async function deleteAccountCredentialInternal(key: string): Promise<void> {
+  try {
+    const client = await ensureInitialized();
+    const store = client.getStore();
+
+    await store.remove(key);
+    await strongholdInstance?.save();
+
+    console.log(`[CredentialService] Deleted account credential: ${key}`);
+  } catch {
+    console.log(`[CredentialService] Account credential not found for deletion: ${key}`);
+  }
+}
+
+/**
+ * Check if a credential exists for a specific account (using dynamic key)
+ */
+async function hasAccountCredentialInternal(key: string): Promise<boolean> {
+  const value = await getAccountCredentialInternal(key);
+  return value !== null && value.length > 0;
+}
+
+/**
+ * Account-based credential management
+ * Use these for the new multi-account system
+ */
+export const AccountCredentials = {
+  /**
+   * Get a token for a specific account
+   */
+  async getToken(integrationType: IntegrationType, accountId: string): Promise<string | null> {
+    const key = getAccountCredentialKey(integrationType, accountId);
+    return getAccountCredentialInternal(key);
+  },
+
+  /**
+   * Store a token for a specific account
+   */
+  async setToken(
+    integrationType: IntegrationType,
+    accountId: string,
+    token: string
+  ): Promise<void> {
+    const key = getAccountCredentialKey(integrationType, accountId);
+    return storeAccountCredentialInternal(key, token);
+  },
+
+  /**
+   * Delete a token for a specific account
+   */
+  async deleteToken(integrationType: IntegrationType, accountId: string): Promise<void> {
+    const key = getAccountCredentialKey(integrationType, accountId);
+    return deleteAccountCredentialInternal(key);
+  },
+
+  /**
+   * Check if a token exists for a specific account
+   */
+  async hasToken(integrationType: IntegrationType, accountId: string): Promise<boolean> {
+    const key = getAccountCredentialKey(integrationType, accountId);
+    return hasAccountCredentialInternal(key);
+  },
+
+  /**
+   * Migrate a legacy token to an account
+   * Copies the legacy token to the new namespaced key
+   */
+  async migrateLegacyToken(
+    integrationType: IntegrationType,
+    accountId: string
+  ): Promise<boolean> {
+    // Map integration type to legacy credential key
+    let legacyKey: CredentialKey;
+    switch (integrationType) {
+      case 'github':
+        legacyKey = CredentialKeys.GITHUB_TOKEN;
+        break;
+      case 'gitlab':
+        legacyKey = CredentialKeys.GITLAB_TOKEN;
+        break;
+      case 'azure-devops':
+        legacyKey = CredentialKeys.AZURE_DEVOPS_TOKEN;
+        break;
+      default:
+        return false;
+    }
+
+    const legacyToken = await getCredential(legacyKey);
+    if (!legacyToken) {
+      return false;
+    }
+
+    // Store the token with the new namespaced key
+    await this.setToken(integrationType, accountId, legacyToken);
+    console.log(`[CredentialService] Migrated legacy ${integrationType} token to account ${accountId}`);
+    return true;
+  },
+};

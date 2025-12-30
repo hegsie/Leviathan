@@ -193,6 +193,12 @@ export class LvProfileSelector extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
+    // Get initial state
+    const initialState = workflowStore.getState();
+    this.profiles = initialState.profiles;
+    this.activeProfile = initialState.activeProfile;
+
+    // Subscribe to store changes
     this.unsubscribe = workflowStore.subscribe((state) => {
       this.profiles = state.profiles;
       this.activeProfile = state.activeProfile;

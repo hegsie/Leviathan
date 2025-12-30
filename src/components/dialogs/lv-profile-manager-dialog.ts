@@ -88,6 +88,50 @@ export class LvProfileManagerDialog extends LitElement {
         color: var(--color-text-primary);
       }
 
+      /* Button styles */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-sm) var(--spacing-md);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-secondary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .btn:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-primary {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
+      .btn-primary:hover:not(:disabled) {
+        background: var(--color-primary-hover);
+      }
+
+      .btn-secondary {
+        background: var(--color-bg-tertiary);
+        border-color: var(--color-border);
+        color: var(--color-text-primary);
+      }
+
+      .btn-secondary:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+      }
+
       /* Profile list */
       .profile-list {
         display: flex;
@@ -312,13 +356,25 @@ export class LvProfileManagerDialog extends LitElement {
   @state() private isLoading = false;
   @state() private isSaving = false;
 
+  private unsubscribeStore?: () => void;
+
   connectedCallback(): void {
     super.connectedCallback();
+    // Get initial state
+    const initialState = workflowStore.getState();
+    this.profiles = initialState.profiles;
+    this.isLoading = initialState.isLoadingProfiles;
+
     // Subscribe to store changes
-    workflowStore.subscribe((state) => {
+    this.unsubscribeStore = workflowStore.subscribe((state) => {
       this.profiles = state.profiles;
       this.isLoading = state.isLoadingProfiles;
     });
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.unsubscribeStore?.();
   }
 
   updated(changedProperties: Map<string, unknown>): void {

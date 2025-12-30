@@ -3,7 +3,7 @@
  * Manage GitLab connection, view MRs, issues, and pipelines
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
@@ -16,7 +16,12 @@ import type {
   CreateMergeRequestInput,
   CreateGitLabIssueInput,
 } from '../../services/git.service.ts';
+import { integrationAccountsStore } from '../../stores/integration-accounts.store.ts';
+import * as accountsService from '../../services/integration-accounts.service.ts';
+import type { IntegrationAccount } from '../../types/integration-accounts.types.ts';
+import { safeGetInstanceUrl, safeSetInstanceUrl } from '../../types/integration-accounts.types.ts';
 import './lv-modal.ts';
+import './lv-account-selector.ts';
 
 type TabType = 'connection' | 'merge-requests' | 'issues' | 'pipelines' | 'create-mr' | 'create-issue';
 
@@ -60,6 +65,59 @@ export class LvGitLabDialog extends LitElement {
         background: var(--color-primary-bg);
         color: var(--color-primary);
         font-weight: var(--font-weight-medium);
+      }
+
+      /* Button styles */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-sm) var(--spacing-md);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-secondary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .btn:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-primary {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
+      .btn-primary:hover:not(:disabled) {
+        background: var(--color-primary-hover);
+      }
+
+      .btn-secondary {
+        background: var(--color-bg-tertiary);
+        border-color: var(--color-border);
+        color: var(--color-text-primary);
+      }
+
+      .btn-secondary:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+      }
+
+      .btn-danger {
+        color: var(--color-error);
+        border-color: var(--color-error);
+      }
+
+      .btn-danger:hover:not(:disabled) {
+        background: var(--color-error-bg);
       }
 
       .tab-content {
@@ -436,6 +494,12 @@ export class LvGitLabDialog extends LitElement {
   @state() private mrFilter: 'opened' | 'merged' | 'closed' | 'all' = 'opened';
   @state() private issueFilter: 'opened' | 'closed' | 'all' = 'opened';
 
+  // Multi-account support
+  @state() private accounts: IntegrationAccount[] = [];
+  @state() private selectedAccountId: string | null = null;
+
+  private unsubscribeStore?: () => void;
+
   // Create MR form
   @state() private createMrTitle = '';
   @state() private createMrDescription = '';
@@ -450,9 +514,54 @@ export class LvGitLabDialog extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+
+    // Subscribe to accounts store
+    this.unsubscribeStore = integrationAccountsStore.subscribe((state) => {
+      this.accounts = state.accounts.filter((a) => a.integrationType === 'gitlab');
+      // If no account selected, try to select the active one or default
+      if (!this.selectedAccountId && this.accounts.length > 0) {
+        const activeAccount = state.activeAccounts['gitlab'];
+        if (activeAccount) {
+          this.selectedAccountId = activeAccount.id;
+          // Update instance URL from account config
+          const instanceUrl = safeGetInstanceUrl(activeAccount);
+          if (instanceUrl) {
+            this.instanceUrlInput = instanceUrl;
+          }
+        } else {
+          const defaultAccount = this.accounts.find((a) => a.isDefault);
+          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+          const instanceUrl = defaultAccount ? safeGetInstanceUrl(defaultAccount) : null;
+          if (instanceUrl) {
+            this.instanceUrlInput = instanceUrl;
+          }
+        }
+      }
+    });
+
+    // Initialize store with accounts
+    const state = integrationAccountsStore.getState();
+    this.accounts = state.accounts.filter((a) => a.integrationType === 'gitlab');
+    if (this.accounts.length > 0 && !this.selectedAccountId) {
+      const activeAccount = state.activeAccounts['gitlab'];
+      const account = activeAccount ?? this.accounts.find((a) => a.isDefault) ?? this.accounts[0];
+      if (account) {
+        this.selectedAccountId = account.id;
+        const instanceUrl = safeGetInstanceUrl(account);
+        if (instanceUrl) {
+          this.instanceUrlInput = instanceUrl;
+        }
+      }
+    }
+
     if (this.open) {
       await this.loadInitialData();
     }
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.unsubscribeStore?.();
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -486,10 +595,76 @@ export class LvGitLabDialog extends LitElement {
     const instanceUrl = this.detectedRepo?.instanceUrl || this.instanceUrlInput;
     if (!instanceUrl) return;
 
-    const result = await gitService.checkGitLabConnection(instanceUrl);
+    // Get token for selected account (or legacy token if no account)
+    const token = await this.getSelectedAccountToken();
+    const result = await gitService.checkGitLabConnectionWithToken(instanceUrl, token);
     if (result.success && result.data) {
       this.connectionStatus = result.data;
+      // Update cached user in account if connected
+      if (this.selectedAccountId && result.data.connected && result.data.user) {
+        await accountsService.updateAccountCachedUser(this.selectedAccountId, {
+          username: result.data.user.username,
+          displayName: result.data.user.name ?? null,
+          email: null, // GitLab API doesn't return email in user object
+          avatarUrl: result.data.user.avatarUrl ?? null,
+        });
+      }
     }
+  }
+
+  /**
+   * Get the token for the currently selected account
+   */
+  private async getSelectedAccountToken(): Promise<string | null> {
+    if (this.selectedAccountId) {
+      return accountsService.getAccountToken('gitlab', this.selectedAccountId);
+    }
+    // Fall back to legacy token if no account selected
+    const result = await gitService.getGitLabToken();
+    return result.success ? (result.data ?? null) : null;
+  }
+
+  /**
+   * Handle account selection change
+   */
+  private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
+    const { account } = e.detail;
+    this.selectedAccountId = account.id;
+    this.connectionStatus = null;
+    this.error = null;
+
+    // Update instance URL from account config
+    const instanceUrl = safeGetInstanceUrl(account);
+    if (instanceUrl) {
+      this.instanceUrlInput = instanceUrl;
+    }
+
+    // Update active account in store
+    integrationAccountsStore.getState().setActiveAccount('gitlab', account);
+
+    // Re-check connection with new account
+    await this.loadInitialData();
+  }
+
+  /**
+   * Handle add account request
+   */
+  private handleAddAccount(): void {
+    this.activeTab = 'connection';
+    this.connectionStatus = null;
+  }
+
+  /**
+   * Handle manage accounts request
+   */
+  private handleManageAccounts(): void {
+    this.dispatchEvent(
+      new CustomEvent('manage-accounts', {
+        detail: { integrationType: 'gitlab' },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private async detectRepo(): Promise<void> {
@@ -596,26 +771,65 @@ export class LvGitLabDialog extends LitElement {
 
     this.isLoading = true;
     this.error = null;
+    const tokenToSave = this.tokenInput.trim();
+    const instanceUrl = this.instanceUrlInput.trim();
 
     try {
-      const storeResult = await gitService.storeGitLabToken(this.tokenInput);
-      if (!storeResult.success) {
-        this.error = storeResult.error?.message ?? 'Failed to save token';
+      // First verify the token works by checking connection
+      const verifyResult = await gitService.checkGitLabConnectionWithToken(instanceUrl, tokenToSave);
+      if (!verifyResult.success || !verifyResult.data?.connected) {
+        this.error = verifyResult.error?.message ?? 'Invalid token or connection failed';
         return;
       }
 
-      await this.checkConnection();
+      const user = verifyResult.data.user;
 
-      if (this.connectionStatus?.connected) {
-        this.tokenInput = '';
-        if (this.detectedRepo) {
-          await this.loadAllData();
+      // If we have a selected account, save token to that account
+      if (this.selectedAccountId) {
+        await accountsService.storeAccountToken('gitlab', this.selectedAccountId, tokenToSave);
+        // Update account's instance URL if different
+        const account = this.accounts.find((a) => a.id === this.selectedAccountId);
+        if (account) {
+          const currentUrl = safeGetInstanceUrl(account);
+          if (currentUrl !== instanceUrl) {
+            safeSetInstanceUrl(account, instanceUrl);
+            await accountsService.saveIntegrationAccount(account);
+          }
         }
       } else {
-        this.error = 'Failed to connect. Please check your token and instance URL.';
+        // No account selected - create a new account for this token
+        const accountName = user?.username ? `GitLab (${user.username})` : 'GitLab Account';
+        const { createGitLabAccount } = await import('../../types/integration-accounts.types.ts');
+        const newAccount = createGitLabAccount(accountName, instanceUrl);
+        newAccount.isDefault = this.accounts.length === 0;
+        newAccount.cachedUser = user ? {
+          username: user.username,
+          displayName: user.name ?? null,
+          email: null, // GitLab API doesn't return email in user object
+          avatarUrl: user.avatarUrl ?? null,
+        } : null;
+
+        const saveResult = await accountsService.saveIntegrationAccount(newAccount);
+        if (saveResult.success && saveResult.data) {
+          await accountsService.storeAccountToken('gitlab', saveResult.data.id, tokenToSave);
+          this.selectedAccountId = saveResult.data.id;
+        } else {
+          // Fallback to legacy token storage
+          await gitService.storeGitLabToken(tokenToSave);
+        }
+      }
+
+      // Token saved, update state
+      this.tokenInput = '';
+      this.connectionStatus = verifyResult.data;
+
+      // Load data if connected and repo detected
+      if (this.connectionStatus?.connected && this.detectedRepo) {
+        await this.loadAllData();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to connect';
+      this.tokenInput = tokenToSave;
     } finally {
       this.isLoading = false;
     }
@@ -625,7 +839,13 @@ export class LvGitLabDialog extends LitElement {
     this.isLoading = true;
 
     try {
-      await gitService.deleteGitLabToken();
+      // Delete token for selected account or legacy token
+      if (this.selectedAccountId) {
+        await accountsService.deleteAccountToken('gitlab', this.selectedAccountId);
+      } else {
+        await gitService.deleteGitLabToken();
+      }
+
       this.connectionStatus = null;
       this.mergeRequests = [];
       this.issues = [];
@@ -1115,6 +1335,16 @@ export class LvGitLabDialog extends LitElement {
       >
         <div class="content">
           ${this.renderDetectedRepo()}
+
+          ${this.accounts.length > 0 || this.connectionStatus?.connected ? html`
+            <lv-account-selector
+              integrationType="gitlab"
+              .selectedAccountId=${this.selectedAccountId}
+              @account-change=${this.handleAccountChange}
+              @add-account=${this.handleAddAccount}
+              @manage-accounts=${this.handleManageAccounts}
+            ></lv-account-selector>
+          ` : nothing}
 
           <div class="tabs">
             <button

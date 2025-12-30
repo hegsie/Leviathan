@@ -13,6 +13,7 @@ pub mod diff;
 pub mod github;
 pub mod gitlab;
 pub mod gpg;
+pub mod integration_accounts;
 pub mod lfs;
 pub mod merge;
 pub mod profiles;

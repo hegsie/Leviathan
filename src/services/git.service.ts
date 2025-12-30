@@ -1511,6 +1511,16 @@ export async function checkGitHubConnection(): Promise<CommandResult<GitHubConne
   return invokeCommand<GitHubConnectionStatus>('check_github_connection', { token });
 }
 
+/**
+ * Check GitHub connection with a specific token
+ * Used for multi-account support where token is retrieved from account-specific storage
+ */
+export async function checkGitHubConnectionWithToken(
+  token: string | null
+): Promise<CommandResult<GitHubConnectionStatus>> {
+  return invokeCommand<GitHubConnectionStatus>('check_github_connection', { token });
+}
+
 // Repository Detection
 export async function detectGitHubRepo(path: string): Promise<CommandResult<DetectedGitHubRepo | null>> {
   return invokeCommand<DetectedGitHubRepo | null>('detect_github_repo', { path });
@@ -1907,6 +1917,17 @@ export async function checkAdoConnection(
   return invokeCommand<AdoConnectionStatus>('check_ado_connection', { organization, token });
 }
 
+/**
+ * Check Azure DevOps connection with a specific token
+ * Used for multi-account support where token is retrieved from account-specific storage
+ */
+export async function checkAdoConnectionWithToken(
+  organization: string,
+  token: string | null
+): Promise<CommandResult<AdoConnectionStatus>> {
+  return invokeCommand<AdoConnectionStatus>('check_ado_connection', { organization, token });
+}
+
 export async function detectAdoRepo(
   path: string
 ): Promise<CommandResult<DetectedAdoRepo | null>> {
@@ -2100,6 +2121,17 @@ export async function checkGitLabConnection(
   // Get token from Stronghold and pass to backend
   const tokenResult = await getGitLabToken();
   const token = tokenResult.success ? tokenResult.data : null;
+  return invokeCommand<GitLabConnectionStatus>('check_gitlab_connection', { instanceUrl, token });
+}
+
+/**
+ * Check GitLab connection with a specific token
+ * Used for multi-account support where token is retrieved from account-specific storage
+ */
+export async function checkGitLabConnectionWithToken(
+  instanceUrl: string,
+  token: string | null
+): Promise<CommandResult<GitLabConnectionStatus>> {
   return invokeCommand<GitLabConnectionStatus>('check_gitlab_connection', { instanceUrl, token });
 }
 
@@ -2664,11 +2696,15 @@ export async function loadProfiles(): Promise<void> {
   const store = workflowStore.getState();
   store.setLoadingProfiles(true);
 
-  const result = await getProfiles();
-  if (result.success && result.data) {
-    store.setProfiles(result.data);
-  } else {
-    store.setProfileError(result.error?.message ?? 'Failed to load profiles');
+  try {
+    const result = await getProfiles();
+    if (result.success && result.data) {
+      store.setProfiles(result.data);
+    } else {
+      store.setProfileError(result.error?.message ?? 'Failed to load profiles');
+    }
+  } finally {
+    store.setLoadingProfiles(false);
   }
 }
 
