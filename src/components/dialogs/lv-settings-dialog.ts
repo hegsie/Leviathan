@@ -1,8 +1,10 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { settingsStore, type Theme, type FontSize } from '../../stores/settings.store.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate, type UpdateCheckEvent } from '../../services/update.service.ts';
+import * as aiService from '../../services/ai.service.ts';
+import type { AiModelStatus } from '../../services/ai.service.ts';
 
 @customElement('lv-settings-dialog')
 export class LvSettingsDialog extends LitElement {
@@ -187,6 +189,46 @@ export class LvSettingsDialog extends LitElement {
         font-size: 12px;
         min-width: auto;
       }
+
+      .progress-bar {
+        height: 4px;
+        background: var(--border-color);
+        border-radius: 2px;
+        overflow: hidden;
+        margin-top: 8px;
+      }
+
+      .progress-fill {
+        height: 100%;
+        background: var(--accent-color);
+        transition: width 0.2s ease;
+      }
+
+      .progress-text {
+        font-size: 11px;
+        color: var(--text-secondary);
+        margin-top: 4px;
+      }
+
+      .model-status {
+        font-size: 11px;
+        color: var(--text-secondary);
+      }
+
+      .model-status.available {
+        color: var(--success-color, #22c55e);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .error-text {
+        font-size: 11px;
+        color: var(--error-color);
+        margin-top: 4px;
+      }
     `,
   ];
 
@@ -202,14 +244,67 @@ export class LvSettingsDialog extends LitElement {
   @state() private confirmBeforeDiscard = true;
   @state() private staleBranchDays = 90;
 
+  // AI settings
+  @state() private aiModelStatus: AiModelStatus | null = null;
+  @state() private isDownloadingModel = false;
+  @state() private downloadProgress = 0;
+  @state() private aiError: string | null = null;
+
   connectedCallback(): void {
     super.connectedCallback();
     this.loadSettings();
     this.loadVersion();
+    this.loadAiStatus();
   }
 
   private async loadVersion(): Promise<void> {
     this.appVersion = await getAppVersion();
+  }
+
+  private async loadAiStatus(): Promise<void> {
+    const result = await aiService.getAiStatus();
+    if (result.success && result.data) {
+      this.aiModelStatus = result.data;
+    }
+  }
+
+  private async handleDownloadModel(): Promise<void> {
+    this.isDownloadingModel = true;
+    this.downloadProgress = 0;
+    this.aiError = null;
+
+    // Listen for progress events
+    const unlisten = await aiService.onModelDownloadProgress((progress) => {
+      this.downloadProgress = progress.progressPercent;
+      if (progress.status === 'error') {
+        this.aiError = 'Download failed';
+        this.isDownloadingModel = false;
+      } else if (progress.status === 'complete') {
+        this.isDownloadingModel = false;
+        this.loadAiStatus();
+      }
+    });
+
+    const result = await aiService.downloadAiModel();
+
+    if (!result.success) {
+      this.aiError = result.error?.message ?? 'Download failed';
+      this.isDownloadingModel = false;
+    }
+
+    unlisten();
+  }
+
+  private async handleDeleteModel(): Promise<void> {
+    const confirmed = confirm('Are you sure you want to delete the AI model? You will need to download it again to use AI features.');
+    if (!confirmed) return;
+
+    const result = await aiService.deleteAiModel();
+    if (result.success) {
+      this.loadAiStatus();
+    } else {
+      this.aiError = result.error?.message ?? 'Failed to delete model';
+    }
   }
 
   private async handleCheckForUpdate(): Promise<void> {
@@ -413,6 +508,41 @@ export class LvSettingsDialog extends LitElement {
               @change=${this.handleStaleBranchDaysChange}
               style="width: 80px;"
             />
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-title">AI Features</div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">AI Commit Messages</span>
+              <span class="setting-description">
+                ${this.aiModelStatus?.modelAvailable
+                  ? html`Model installed (${this.aiModelStatus.modelSizeMb}MB, ${this.aiModelStatus.quantization})`
+                  : 'Model not installed (~2GB download)'}
+              </span>
+              ${this.isDownloadingModel ? html`
+                <div class="progress-bar">
+                  <div class="progress-fill" style="width: ${this.downloadProgress}%"></div>
+                </div>
+                <span class="progress-text">${Math.round(this.downloadProgress)}% downloaded</span>
+              ` : nothing}
+              ${this.aiError ? html`
+                <span class="error-text">${this.aiError}</span>
+              ` : nothing}
+            </div>
+            ${this.aiModelStatus?.modelAvailable ? html`
+              <button class="danger" @click=${this.handleDeleteModel}>Delete</button>
+            ` : html`
+              <button
+                class="primary"
+                @click=${this.handleDownloadModel}
+                ?disabled=${this.isDownloadingModel}
+              >
+                ${this.isDownloadingModel ? 'Downloading...' : 'Download'}
+              </button>
+            `}
           </div>
         </div>
 

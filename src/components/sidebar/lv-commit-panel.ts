@@ -2,6 +2,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import * as aiService from '../../services/ai.service.ts';
 import type { CommitTemplate, ConventionalType } from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
 
@@ -275,6 +276,46 @@ export class LvCommitPanel extends LitElement {
         color: var(--color-success);
         font-size: var(--font-size-xs);
       }
+
+      .generate-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-tertiary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .generate-btn:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        color: var(--color-primary);
+        border-color: var(--color-primary);
+      }
+
+      .generate-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .generate-btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .generate-btn .spinner {
+        animation: spin 1s linear infinite;
+      }
+
+      @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
     `,
   ];
 
@@ -303,6 +344,11 @@ export class LvCommitPanel extends LitElement {
   private originalSummary: string = '';
   private originalDescription: string = '';
 
+  // AI state
+  @state() private aiAvailable: boolean = false;
+  @state() private isGenerating: boolean = false;
+  @state() private generationError: string | null = null;
+
   @query('.summary-input') private summaryInput!: HTMLTextAreaElement;
 
   private readonly SUMMARY_LIMIT = 72;
@@ -312,6 +358,11 @@ export class LvCommitPanel extends LitElement {
     await this.loadTemplates();
     await this.loadConventionalTypes();
     await this.loadGitTemplate();
+    await this.checkAiAvailability();
+  }
+
+  private async checkAiAvailability(): Promise<void> {
+    this.aiAvailable = await aiService.isAiAvailable();
   }
 
   private async loadTemplates(): Promise<void> {
@@ -476,6 +527,43 @@ export class LvCommitPanel extends LitElement {
     }
   }
 
+  private async handleGenerateMessage(): Promise<void> {
+    if (!this.repositoryPath || this.isGenerating) return;
+
+    this.isGenerating = true;
+    this.generationError = null;
+
+    try {
+      const result = await aiService.generateCommitMessage(this.repositoryPath);
+
+      if (result.success && result.data) {
+        // Parse conventional commit format if present
+        const summary = result.data.summary;
+        const conventionalMatch = summary.match(
+          /^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\(.+?\))?:\s*(.+)$/i
+        );
+
+        if (conventionalMatch && this.conventionalMode) {
+          this.selectedType = conventionalMatch[1].toLowerCase();
+          if (conventionalMatch[2]) {
+            this.scope = conventionalMatch[2].slice(1, -1); // Remove parentheses
+          }
+          this.summary = conventionalMatch[3];
+        } else {
+          this.summary = summary;
+        }
+
+        this.description = result.data.body ?? '';
+      } else {
+        this.generationError = result.error?.message ?? 'Failed to generate message';
+      }
+    } catch (err) {
+      this.generationError = err instanceof Error ? err.message : 'Unknown error';
+    } finally {
+      this.isGenerating = false;
+    }
+  }
+
   private async handleCommit(): Promise<void> {
     if (!this.canCommit) return;
 
@@ -577,6 +665,33 @@ export class LvCommitPanel extends LitElement {
           </button>
         </div>
       `}
+
+      ${this.stagedCount > 0 && this.aiAvailable ? html`
+        <button
+          class="generate-btn"
+          @click=${this.handleGenerateMessage}
+          ?disabled=${this.isGenerating || this.stagedCount === 0}
+          title="Generate commit message using AI"
+        >
+          ${this.isGenerating ? html`
+            <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10" stroke-dasharray="60" stroke-dashoffset="20"></circle>
+            </svg>
+            Generating...
+          ` : html`
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+              <path d="M2 17l10 5 10-5"/>
+              <path d="M2 12l10 5 10-5"/>
+            </svg>
+            Generate with AI
+          `}
+        </button>
+      ` : nothing}
+
+      ${this.generationError ? html`
+        <div class="error">${this.generationError}</div>
+      ` : nothing}
 
       ${this.conventionalMode ? html`
         <div class="conventional-row">

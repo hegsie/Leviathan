@@ -16,7 +16,7 @@ use tauri::Manager;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use commands::watcher::WatcherState;
-use services::{create_autofetch_state, create_update_state};
+use services::{create_ai_state, create_autofetch_state, create_update_state};
 
 /// Derive a 32-byte key from password using argon2
 fn derive_stronghold_key(password: &str) -> [u8; 32] {
@@ -76,6 +76,10 @@ pub fn run() {
         .manage(create_autofetch_state())
         .manage(create_update_state())
         .setup(|app| {
+            // Initialize AI state with config directory
+            let config_dir = app.path().app_config_dir().unwrap_or_default();
+            app.manage(create_ai_state(config_dir));
+
             tracing::info!("Application setup complete");
 
             #[cfg(debug_assertions)]
@@ -328,6 +332,12 @@ pub fn run() {
             commands::update::stop_auto_update_check,
             commands::update::is_auto_update_running,
             commands::update::get_app_version,
+            // AI commit message generation
+            commands::ai::get_ai_status,
+            commands::ai::is_ai_available,
+            commands::ai::download_ai_model,
+            commands::ai::delete_ai_model,
+            commands::ai::generate_commit_message,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
