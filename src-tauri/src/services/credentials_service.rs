@@ -3,6 +3,7 @@
 //! Provides credential management for git operations using the system keyring
 //! for secure storage.
 
+use base64::Engine;
 use git2::{Cred, CredentialType, RemoteCallbacks};
 
 /// Service name for keyring storage
@@ -86,6 +87,14 @@ impl CredentialsHelper {
             // Try stored credentials from keyring for HTTPS
             if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) && !tried_keyring {
                 tried_keyring = true;
+
+                // First, check if this is an Azure DevOps URL and try the stored ADO token
+                if let Some(token) = get_ado_token_for_git(url) {
+                    tracing::debug!("Using stored Azure DevOps PAT for: {}", url);
+                    // Azure DevOps accepts any username with PAT as password
+                    return Cred::userpass_plaintext("", &token);
+                }
+
                 if let Some((username, password)) = get_stored_credentials(url) {
                     tracing::debug!("Using stored credentials for: {}", url);
                     return Cred::userpass_plaintext(&username, &password);
@@ -105,6 +114,36 @@ impl CredentialsHelper {
 
         callbacks
     }
+}
+
+/// Check if URL is an Azure DevOps URL and get the stored ADO token
+fn get_ado_token_for_git(url: &str) -> Option<String> {
+    // Check if this is an Azure DevOps URL
+    if !url.contains("dev.azure.com") && !url.contains("visualstudio.com") {
+        return None;
+    }
+
+    // Try to read the ADO token from the stored file
+    let data_dir = dirs::data_local_dir()?;
+    let token_path = data_dir.join("leviathan").join("ado_token.dat");
+
+    if !token_path.exists() {
+        tracing::debug!("ADO token file not found at {:?}", token_path);
+        return None;
+    }
+
+    let obfuscated = std::fs::read_to_string(&token_path).ok()?;
+
+    // Deobfuscate the token (same logic as in azure_devops.rs)
+    let key: u8 = 0x5A;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&obfuscated)
+        .ok()?;
+    let original: Vec<u8> = decoded.iter().map(|b| b ^ key).collect();
+    let token = String::from_utf8(original).ok()?;
+
+    tracing::debug!("Found ADO token for git operations (length: {})", token.len());
+    Some(token)
 }
 
 /// Get stored credentials from the system keyring
