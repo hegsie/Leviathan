@@ -10,102 +10,15 @@ use tracing::{debug, error, info};
 
 const AZURE_DEVOPS_API_VERSION: &str = "7.1";
 
-// ============================================================================
-// Token Management
-// ============================================================================
-
-const ADO_TOKEN_FILE: &str = "ado_token.dat";
-
-/// Get the path to the token storage file
-fn get_token_file_path() -> Result<std::path::PathBuf> {
-    let data_dir = dirs::data_local_dir()
-        .ok_or_else(|| LeviathanError::OperationFailed("Cannot find app data directory".into()))?;
-    let app_dir = data_dir.join("leviathan");
-    Ok(app_dir.join(ADO_TOKEN_FILE))
-}
-
-/// Simple obfuscation for the token (not cryptographically secure, but prevents casual reading)
-fn obfuscate(data: &str) -> String {
-    use base64::Engine;
-    let key: u8 = 0x5A; // Simple XOR key
-    let obfuscated: Vec<u8> = data.bytes().map(|b| b ^ key).collect();
-    BASE64.encode(&obfuscated)
-}
-
-/// Reverse the obfuscation
-fn deobfuscate(data: &str) -> Result<String> {
-    use base64::Engine;
-    let key: u8 = 0x5A;
-    let decoded = BASE64
-        .decode(data)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to decode token: {}", e)))?;
-    let original: Vec<u8> = decoded.iter().map(|b| b ^ key).collect();
-    String::from_utf8(original)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Invalid token data: {}", e)))
-}
-
-/// Store Azure DevOps PAT
-#[command]
-pub async fn store_ado_token(token: String) -> Result<()> {
-    info!("Storing Azure DevOps PAT token (length: {})", token.len());
-
-    let file_path = get_token_file_path()?;
-    debug!("Token file path: {:?}", file_path);
-
-    // Ensure the directory exists
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            error!("Failed to create app data directory: {}", e);
-            LeviathanError::OperationFailed(format!("Failed to create directory: {}", e))
-        })?;
+/// Helper to resolve token from parameter
+/// Returns an error if no token is provided
+fn resolve_ado_token(token: Option<String>) -> Result<String> {
+    match token {
+        Some(t) if !t.is_empty() => Ok(t),
+        _ => Err(LeviathanError::OperationFailed(
+            "Azure DevOps token not configured".to_string(),
+        )),
     }
-
-    // Obfuscate and store
-    let obfuscated = obfuscate(&token);
-    std::fs::write(&file_path, &obfuscated).map_err(|e| {
-        error!("Failed to write token file: {}", e);
-        LeviathanError::OperationFailed(format!("Failed to store token: {}", e))
-    })?;
-
-    info!("Successfully stored Azure DevOps PAT token");
-    Ok(())
-}
-
-/// Get Azure DevOps PAT
-#[command]
-pub async fn get_ado_token() -> Result<Option<String>> {
-    let file_path = get_token_file_path()?;
-    debug!("Looking for token at: {:?}", file_path);
-
-    if !file_path.exists() {
-        debug!("Token file does not exist");
-        return Ok(None);
-    }
-
-    let obfuscated = std::fs::read_to_string(&file_path).map_err(|e| {
-        error!("Failed to read token file: {}", e);
-        LeviathanError::OperationFailed(format!("Failed to read token: {}", e))
-    })?;
-
-    let token = deobfuscate(&obfuscated)?;
-    debug!("Retrieved token (length: {})", token.len());
-    Ok(Some(token))
-}
-
-/// Delete Azure DevOps PAT
-#[command]
-pub async fn delete_ado_token() -> Result<()> {
-    let file_path = get_token_file_path()?;
-
-    if file_path.exists() {
-        std::fs::remove_file(&file_path).map_err(|e| {
-            error!("Failed to delete token file: {}", e);
-            LeviathanError::OperationFailed(format!("Failed to delete token: {}", e))
-        })?;
-        info!("Deleted Azure DevOps PAT token");
-    }
-
-    Ok(())
 }
 
 // ============================================================================
@@ -235,26 +148,22 @@ pub async fn check_ado_connection(
     organization: String,
     token: Option<String>,
 ) -> Result<AdoConnectionStatus> {
-    info!("Checking Azure DevOps connection for org: {}", organization);
+    debug!("Checking Azure DevOps connection for org: {}", organization);
 
-    // Use provided token, or fall back to stored token
+    // Use provided token - no fallback to file storage
     let token = match token {
         Some(t) if !t.is_empty() => {
             debug!("Using provided token (length: {})", t.len());
             t
         }
-        _ => match get_ado_token().await? {
-            Some(t) => {
-                debug!("Found stored token (length: {})", t.len());
-                t
-            }
-            None => {
-                error!("No Azure DevOps token found");
-                return Err(LeviathanError::OperationFailed(
-                    "No token stored. Please enter your Personal Access Token.".to_string(),
-                ));
-            }
-        },
+        _ => {
+            debug!("No Azure DevOps token provided");
+            return Ok(AdoConnectionStatus {
+                connected: false,
+                user: None,
+                organization: Some(organization),
+            });
+        }
     };
 
     let client = reqwest::Client::new();
@@ -372,10 +281,9 @@ pub async fn get_ado_pull_request(
     project: String,
     repository: String,
     pull_request_id: u32,
+    token: Option<String>,
 ) -> Result<AdoPullRequest> {
-    let token = get_ado_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Azure DevOps token not configured".to_string())
-    })?;
+    let token = resolve_ado_token(token)?;
 
     let url = build_api_url(
         &organization,
@@ -536,10 +444,9 @@ pub async fn list_ado_pull_requests(
     project: String,
     repository: String,
     status: Option<String>,
+    token: Option<String>,
 ) -> Result<Vec<AdoPullRequest>> {
-    let token = get_ado_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Azure DevOps token not configured".to_string())
-    })?;
+    let token = resolve_ado_token(token)?;
 
     let status_param = status.unwrap_or_else(|| "active".to_string());
     let url = build_api_url_with_params(
@@ -648,10 +555,9 @@ pub async fn create_ado_pull_request(
     project: String,
     repository: String,
     input: CreateAdoPullRequestInput,
+    token: Option<String>,
 ) -> Result<AdoPullRequest> {
-    let token = get_ado_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Azure DevOps token not configured".to_string())
-    })?;
+    let token = resolve_ado_token(token)?;
 
     let url = build_api_url(
         &organization,
@@ -774,14 +680,13 @@ pub async fn get_ado_work_items(
     organization: String,
     project: String,
     ids: Vec<u32>,
+    token: Option<String>,
 ) -> Result<Vec<AdoWorkItem>> {
     if ids.is_empty() {
         return Ok(vec![]);
     }
 
-    let token = get_ado_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Azure DevOps token not configured".to_string())
-    })?;
+    let token = resolve_ado_token(token)?;
 
     let ids_str = ids
         .iter()
@@ -885,10 +790,9 @@ pub async fn query_ado_work_items(
     organization: String,
     project: String,
     state: Option<String>,
+    token: Option<String>,
 ) -> Result<Vec<AdoWorkItem>> {
-    let token = get_ado_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Azure DevOps token not configured".to_string())
-    })?;
+    let token = resolve_ado_token(token)?;
 
     let state_clause = state
         .map(|s| format!(" AND [System.State] = '{}'", s))
@@ -949,7 +853,7 @@ pub async fn query_ado_work_items(
         return Ok(vec![]);
     }
 
-    get_ado_work_items(organization, project, ids).await
+    get_ado_work_items(organization, project, ids, Some(token)).await
 }
 
 // ============================================================================
@@ -962,10 +866,9 @@ pub async fn list_ado_pipeline_runs(
     organization: String,
     project: String,
     top: Option<u32>,
+    token: Option<String>,
 ) -> Result<Vec<AdoPipelineRun>> {
-    let token = get_ado_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("Azure DevOps token not configured".to_string())
-    })?;
+    let token = resolve_ado_token(token)?;
 
     let top = top.unwrap_or(20);
     let url = build_api_url_with_params(

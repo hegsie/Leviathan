@@ -765,9 +765,7 @@ export class LvGitHubDialog extends LitElement {
     if (this.selectedAccountId) {
       return accountsService.getAccountToken('github', this.selectedAccountId);
     }
-    // Fall back to legacy token if no account selected
-    const result = await gitService.getGitHubToken();
-    return result.success ? (result.data ?? null) : null;
+    return null;
   }
 
   /**

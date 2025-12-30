@@ -2,26 +2,11 @@
 //! Provides GitHub API integration for PRs, issues, and Actions
 
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
-const TOKEN_FILE_NAME: &str = "github-token";
-
-/// Get the path to the token file in app data directory
-fn get_token_file_path() -> Result<PathBuf> {
-    let data_dir = dirs::data_dir().ok_or_else(|| {
-        LeviathanError::OperationFailed("Could not find data directory".to_string())
-    })?;
-    let app_dir = data_dir.join("leviathan");
-    fs::create_dir_all(&app_dir).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to create app directory: {}", e))
-    })?;
-    Ok(app_dir.join(TOKEN_FILE_NAME))
-}
 
 /// GitHub user information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,83 +197,30 @@ pub struct DetectedGitHubRepo {
 // Authentication Commands
 // ============================================================================
 
-/// Store GitHub personal access token
-#[command]
-pub async fn store_github_token(token: String) -> Result<()> {
-    let token_path = get_token_file_path()?;
-
-    fs::write(&token_path, &token)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to store token: {}", e)))?;
-
-    Ok(())
-}
-
-/// Get stored GitHub token (returns None if not set)
-#[command]
-pub async fn get_github_token() -> Result<Option<String>> {
-    let token_path = get_token_file_path()?;
-
-    if !token_path.exists() {
-        return Ok(None);
-    }
-
-    match fs::read_to_string(&token_path) {
-        Ok(token) => {
-            let token = token.trim().to_string();
-            if token.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(token))
-            }
-        }
-        Err(e) => Err(LeviathanError::OperationFailed(format!(
-            "Failed to read token: {}",
-            e
-        ))),
-    }
-}
-
-/// Delete stored GitHub token
-#[command]
-pub async fn delete_github_token() -> Result<()> {
-    let token_path = get_token_file_path()?;
-
-    if token_path.exists() {
-        fs::remove_file(&token_path).map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to delete token: {}", e))
-        })?;
-    }
-
-    Ok(())
-}
-
-/// Helper to resolve token from parameter or fallback to stored token
-/// Returns an error if no token is available
-async fn resolve_github_token(token: Option<String>) -> Result<String> {
+/// Helper to resolve token from parameter
+/// Returns an error if no token is provided
+fn resolve_github_token(token: Option<String>) -> Result<String> {
     match token {
         Some(t) if !t.is_empty() => Ok(t),
-        _ => get_github_token().await?.ok_or_else(|| {
-            LeviathanError::OperationFailed("GitHub token not configured".to_string())
-        }),
+        _ => Err(LeviathanError::OperationFailed(
+            "GitHub token not configured".to_string(),
+        )),
     }
 }
 
 /// Check GitHub connection and get user info
 #[command]
 pub async fn check_github_connection(token: Option<String>) -> Result<GitHubConnectionStatus> {
-    // Use provided token, or fall back to stored token
+    // Use provided token - no fallback to file storage
     let token = match token {
         Some(t) if !t.is_empty() => t,
-        _ => match get_github_token().await? {
-            Some(t) => t,
-            None => {
-                return Ok(GitHubConnectionStatus {
-                    connected: false,
-                    user: None,
-                    scopes: vec![],
-                })
-            }
-        },
+        _ => {
+            return Ok(GitHubConnectionStatus {
+                connected: false,
+                user: None,
+                scopes: vec![],
+            })
+        }
     };
 
     let client = reqwest::Client::new();
@@ -402,7 +334,7 @@ pub async fn list_pull_requests(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<PullRequestSummary>> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let state = state.unwrap_or_else(|| "open".to_string());
     let per_page = per_page.unwrap_or(30);
@@ -508,7 +440,7 @@ pub async fn get_pull_request(
     number: u32,
     token: Option<String>,
 ) -> Result<PullRequestDetails> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -663,7 +595,7 @@ pub async fn create_pull_request(
     input: CreatePullRequestInput,
     token: Option<String>,
 ) -> Result<PullRequestSummary> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     #[derive(Serialize)]
     struct CreatePRBody {
@@ -777,7 +709,7 @@ pub async fn get_pull_request_reviews(
     number: u32,
     token: Option<String>,
 ) -> Result<Vec<PullRequestReview>> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -858,7 +790,7 @@ pub async fn get_workflow_runs(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<WorkflowRun>> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let per_page = per_page.unwrap_or(20);
 
@@ -944,7 +876,7 @@ pub async fn get_check_runs(
     commit_sha: String,
     token: Option<String>,
 ) -> Result<Vec<CheckRun>> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -1014,7 +946,7 @@ pub async fn get_commit_status(
     commit_sha: String,
     token: Option<String>,
 ) -> Result<String> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -1112,7 +1044,7 @@ pub async fn list_issues(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<IssueSummary>> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let state = state.unwrap_or_else(|| "open".to_string());
     let per_page = per_page.unwrap_or(30);
@@ -1240,7 +1172,7 @@ pub async fn get_issue(
     number: u32,
     token: Option<String>,
 ) -> Result<IssueSummary> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -1352,7 +1284,7 @@ pub async fn create_issue(
     input: CreateIssueInput,
     token: Option<String>,
 ) -> Result<IssueSummary> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     #[derive(Serialize)]
     struct CreateIssueBody {
@@ -1484,7 +1416,7 @@ pub async fn update_issue_state(
     state: String,
     token: Option<String>,
 ) -> Result<IssueSummary> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     #[derive(Serialize)]
     struct UpdateBody {
@@ -1603,7 +1535,7 @@ pub async fn get_issue_comments(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<IssueComment>> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let per_page = per_page.unwrap_or(30);
 
@@ -1683,7 +1615,7 @@ pub async fn add_issue_comment(
     body: String,
     token: Option<String>,
 ) -> Result<IssueComment> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     #[derive(Serialize)]
     struct CommentBody {
@@ -1762,7 +1694,7 @@ pub async fn get_repo_labels(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<Label>> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let per_page = per_page.unwrap_or(100);
 
@@ -1875,7 +1807,7 @@ pub async fn list_releases(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<ReleaseSummary>> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let per_page = per_page.unwrap_or(30);
 
@@ -1964,7 +1896,7 @@ pub async fn get_release_by_tag(
     tag: String,
     token: Option<String>,
 ) -> Result<ReleaseSummary> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -2046,7 +1978,7 @@ pub async fn get_latest_release(
     repo: String,
     token: Option<String>,
 ) -> Result<ReleaseSummary> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -2130,7 +2062,7 @@ pub async fn create_release(
     input: CreateReleaseInput,
     token: Option<String>,
 ) -> Result<ReleaseSummary> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     #[derive(Serialize)]
     struct CreateReleaseBody {
@@ -2241,7 +2173,7 @@ pub async fn delete_release(
     release_id: u64,
     token: Option<String>,
 ) -> Result<()> {
-    let token = resolve_github_token(token).await?;
+    let token = resolve_github_token(token)?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -2272,75 +2204,6 @@ pub async fn delete_release(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-
-    /// Helper to set up a temporary token file for testing
-    fn setup_test_token_dir() -> (tempfile::TempDir, PathBuf) {
-        let temp_dir = tempdir().expect("Failed to create temp dir");
-        let token_path = temp_dir.path().join("github-token");
-        (temp_dir, token_path)
-    }
-
-    // ========================================================================
-    // Token Storage Tests
-    // ========================================================================
-
-    #[test]
-    fn test_token_file_write_and_read() {
-        let (_temp_dir, token_path) = setup_test_token_dir();
-        let test_token = "ghp_test1234567890abcdef";
-
-        // Write token
-        fs::write(&token_path, test_token).expect("Failed to write token");
-
-        // Read token back
-        let read_token = fs::read_to_string(&token_path).expect("Failed to read token");
-        assert_eq!(read_token.trim(), test_token);
-    }
-
-    #[test]
-    fn test_token_file_delete() {
-        let (_temp_dir, token_path) = setup_test_token_dir();
-        let test_token = "ghp_test1234567890abcdef";
-
-        // Write token
-        fs::write(&token_path, test_token).expect("Failed to write token");
-        assert!(token_path.exists());
-
-        // Delete token
-        fs::remove_file(&token_path).expect("Failed to delete token");
-        assert!(!token_path.exists());
-    }
-
-    #[test]
-    fn test_token_file_not_found_returns_none() {
-        let (_temp_dir, token_path) = setup_test_token_dir();
-
-        // File doesn't exist
-        assert!(!token_path.exists());
-    }
-
-    #[test]
-    fn test_empty_token_file() {
-        let (_temp_dir, token_path) = setup_test_token_dir();
-
-        // Write empty token
-        fs::write(&token_path, "").expect("Failed to write empty token");
-
-        let read_token = fs::read_to_string(&token_path).expect("Failed to read token");
-        assert!(read_token.trim().is_empty());
-    }
-
-    #[test]
-    fn test_token_with_whitespace_trimmed() {
-        let (_temp_dir, token_path) = setup_test_token_dir();
-        let test_token = "  ghp_test1234567890abcdef  \n";
-
-        fs::write(&token_path, test_token).expect("Failed to write token");
-
-        let read_token = fs::read_to_string(&token_path).expect("Failed to read token");
-        assert_eq!(read_token.trim(), "ghp_test1234567890abcdef");
-    }
 
     // ========================================================================
     // GitHubUser Parsing Tests

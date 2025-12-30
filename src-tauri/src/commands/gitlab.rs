@@ -10,37 +10,15 @@ use tauri::command;
 
 const GITLAB_API_VERSION: &str = "v4";
 
-// ============================================================================
-// Token Management (handled by frontend Stronghold - these are stubs)
-// ============================================================================
-
-/// Store GitLab PAT - handled by frontend Stronghold
-#[command]
-pub async fn store_gitlab_token(_token: String) -> Result<()> {
-    // Token storage is now handled by frontend Stronghold
-    Ok(())
-}
-
-/// Get GitLab PAT - handled by frontend Stronghold
-#[command]
-pub async fn get_gitlab_token() -> Result<Option<String>> {
-    // Token storage is now handled by frontend Stronghold
-    // Return None - tokens should be passed from frontend
-    Ok(None)
-}
-
-/// Delete GitLab PAT - handled by frontend Stronghold
-#[command]
-pub async fn delete_gitlab_token() -> Result<()> {
-    // Token storage is now handled by frontend Stronghold
-    Ok(())
-}
-
-/// Helper to get token from optional parameter
+/// Helper to resolve token from parameter
+/// Returns an error if no token is provided
 fn resolve_token(token: Option<String>) -> Result<String> {
-    token
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| LeviathanError::OperationFailed("GitLab token not configured".to_string()))
+    match token {
+        Some(t) if !t.is_empty() => Ok(t),
+        _ => Err(LeviathanError::OperationFailed(
+            "GitLab token not configured".to_string(),
+        )),
+    }
 }
 
 // ============================================================================
@@ -166,19 +144,16 @@ pub async fn check_gitlab_connection(
     instance_url: String,
     token: Option<String>,
 ) -> Result<GitLabConnectionStatus> {
-    // Use provided token, or fall back to stored token
+    // Use provided token - no fallback to file storage
     let token = match token {
         Some(t) if !t.is_empty() => t,
-        _ => match get_gitlab_token().await? {
-            Some(t) => t,
-            None => {
-                return Ok(GitLabConnectionStatus {
-                    connected: false,
-                    user: None,
-                    instance_url,
-                })
-            }
-        },
+        _ => {
+            return Ok(GitLabConnectionStatus {
+                connected: false,
+                user: None,
+                instance_url,
+            })
+        }
     };
 
     let client = reqwest::Client::new();

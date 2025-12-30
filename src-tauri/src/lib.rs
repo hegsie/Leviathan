@@ -257,9 +257,6 @@ pub fn run() {
             commands::credentials::test_credentials,
             commands::credentials::erase_credentials,
             // GitHub integration
-            commands::github::store_github_token,
-            commands::github::get_github_token,
-            commands::github::delete_github_token,
             commands::github::check_github_connection,
             commands::github::detect_github_repo,
             commands::github::list_pull_requests,
@@ -284,9 +281,6 @@ pub fn run() {
             commands::github::create_release,
             commands::github::delete_release,
             // Azure DevOps integration
-            commands::azure_devops::store_ado_token,
-            commands::azure_devops::get_ado_token,
-            commands::azure_devops::delete_ado_token,
             commands::azure_devops::check_ado_connection,
             commands::azure_devops::detect_ado_repo,
             commands::azure_devops::list_ado_pull_requests,
@@ -296,9 +290,6 @@ pub fn run() {
             commands::azure_devops::query_ado_work_items,
             commands::azure_devops::list_ado_pipeline_runs,
             // GitLab integration
-            commands::gitlab::store_gitlab_token,
-            commands::gitlab::get_gitlab_token,
-            commands::gitlab::delete_gitlab_token,
             commands::gitlab::check_gitlab_connection,
             commands::gitlab::detect_gitlab_repo,
             commands::gitlab::list_gitlab_merge_requests,

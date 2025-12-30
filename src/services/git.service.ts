@@ -1959,13 +1959,15 @@ export async function listAdoPullRequests(
   organization: string,
   project: string,
   repository: string,
-  status?: string
+  status?: string,
+  token?: string | null
 ): Promise<CommandResult<AdoPullRequest[]>> {
   return invokeCommand<AdoPullRequest[]>('list_ado_pull_requests', {
     organization,
     project,
     repository,
     status,
+    token,
   });
 }
 
@@ -1973,13 +1975,15 @@ export async function getAdoPullRequest(
   organization: string,
   project: string,
   repository: string,
-  pullRequestId: number
+  pullRequestId: number,
+  token?: string | null
 ): Promise<CommandResult<AdoPullRequest>> {
   return invokeCommand<AdoPullRequest>('get_ado_pull_request', {
     organization,
     project,
     repository,
     pullRequestId,
+    token,
   });
 }
 
@@ -1987,13 +1991,15 @@ export async function createAdoPullRequest(
   organization: string,
   project: string,
   repository: string,
-  input: CreateAdoPullRequestInput
+  input: CreateAdoPullRequestInput,
+  token?: string | null
 ): Promise<CommandResult<AdoPullRequest>> {
   return invokeCommand<AdoPullRequest>('create_ado_pull_request', {
     organization,
     project,
     repository,
     input,
+    token,
   });
 }
 
@@ -2002,17 +2008,19 @@ export async function createAdoPullRequest(
 export async function getAdoWorkItems(
   organization: string,
   project: string,
-  ids: number[]
+  ids: number[],
+  token?: string | null
 ): Promise<CommandResult<AdoWorkItem[]>> {
-  return invokeCommand<AdoWorkItem[]>('get_ado_work_items', { organization, project, ids });
+  return invokeCommand<AdoWorkItem[]>('get_ado_work_items', { organization, project, ids, token });
 }
 
 export async function queryAdoWorkItems(
   organization: string,
   project: string,
-  state?: string
+  state?: string,
+  token?: string | null
 ): Promise<CommandResult<AdoWorkItem[]>> {
-  return invokeCommand<AdoWorkItem[]>('query_ado_work_items', { organization, project, state });
+  return invokeCommand<AdoWorkItem[]>('query_ado_work_items', { organization, project, state, token });
 }
 
 // Azure DevOps Pipelines
@@ -2020,9 +2028,10 @@ export async function queryAdoWorkItems(
 export async function listAdoPipelineRuns(
   organization: string,
   project: string,
-  top?: number
+  top?: number,
+  token?: string | null
 ): Promise<CommandResult<AdoPipelineRun[]>> {
-  return invokeCommand<AdoPipelineRun[]>('list_ado_pipeline_runs', { organization, project, top });
+  return invokeCommand<AdoPipelineRun[]>('list_ado_pipeline_runs', { organization, project, top, token });
 }
 
 // =======================

@@ -630,9 +630,7 @@ export class LvGitLabDialog extends LitElement {
     if (this.selectedAccountId) {
       return accountsService.getAccountToken('gitlab', this.selectedAccountId);
     }
-    // Fall back to legacy token if no account selected
-    const result = await gitService.getGitLabToken();
-    return result.success ? (result.data ?? null) : null;
+    return null;
   }
 
   /**

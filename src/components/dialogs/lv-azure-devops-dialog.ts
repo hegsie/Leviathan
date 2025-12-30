@@ -687,9 +687,7 @@ export class LvAzureDevOpsDialog extends LitElement {
     if (this.selectedAccountId) {
       return accountsService.getAccountToken('azure-devops', this.selectedAccountId);
     }
-    // Fall back to legacy token if no account selected
-    const result = await gitService.getAdoToken();
-    return result.success ? (result.data ?? null) : null;
+    return null;
   }
 
   /**
@@ -764,11 +762,13 @@ export class LvAzureDevOpsDialog extends LitElement {
     this.error = null;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.listAdoPullRequests(
         this.detectedRepo.organization,
         this.detectedRepo.project,
         this.detectedRepo.repository,
-        this.prFilter === 'all' ? undefined : this.prFilter
+        this.prFilter === 'all' ? undefined : this.prFilter,
+        token
       );
 
       if (result.success && result.data) {
@@ -787,10 +787,12 @@ export class LvAzureDevOpsDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.queryAdoWorkItems(
         this.detectedRepo.organization,
         this.detectedRepo.project,
-        this.workItemFilter || undefined
+        this.workItemFilter || undefined,
+        token
       );
 
       if (result.success && result.data) {
@@ -805,10 +807,12 @@ export class LvAzureDevOpsDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.listAdoPipelineRuns(
         this.detectedRepo.organization,
         this.detectedRepo.project,
-        20
+        20,
+        token
       );
 
       if (result.success && result.data) {
@@ -928,11 +932,13 @@ export class LvAzureDevOpsDialog extends LitElement {
         isDraft: this.createPrDraft,
       };
 
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.createAdoPullRequest(
         this.detectedRepo.organization,
         this.detectedRepo.project,
         this.detectedRepo.repository,
-        input
+        input,
+        token
       );
 
       if (result.success && result.data) {
