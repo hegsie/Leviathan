@@ -578,6 +578,17 @@ export class LvGitLabDialog extends LitElement {
     this.error = null;
 
     try {
+      // Ensure accounts are loaded from disk into store
+      await accountsService.loadAccountsIntoStore();
+
+      // Re-sync local state with store after loading
+      const state = integrationAccountsStore.getState();
+      this.accounts = state.accounts.filter((a) => a.integrationType === 'gitlab');
+      if (this.accounts.length > 0 && !this.selectedAccountId) {
+        const activeAccount = state.activeAccounts['gitlab'];
+        this.selectedAccountId = activeAccount?.id ?? this.accounts.find((a) => a.isDefault)?.id ?? this.accounts[0]?.id ?? null;
+      }
+
       if (this.repositoryPath) {
         await this.detectRepo();
       }

@@ -710,6 +710,17 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
+      // Ensure accounts are loaded from disk into store
+      await accountsService.loadAccountsIntoStore();
+
+      // Re-sync local state with store after loading
+      const state = integrationAccountsStore.getState();
+      this.accounts = state.accounts.filter((a) => a.integrationType === 'github');
+      if (this.accounts.length > 0 && !this.selectedAccountId) {
+        const activeAccount = state.activeAccounts['github'];
+        this.selectedAccountId = activeAccount?.id ?? this.accounts.find((a) => a.isDefault)?.id ?? this.accounts[0]?.id ?? null;
+      }
+
       await this.checkConnection();
       if (this.repositoryPath) {
         await this.detectRepo();
