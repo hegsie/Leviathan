@@ -117,7 +117,9 @@ pub async fn get_integration_accounts_config() -> Result<IntegrationAccountsConf
 
 /// Get accounts filtered by integration type
 #[command]
-pub async fn get_accounts_by_type(integration_type: IntegrationType) -> Result<Vec<IntegrationAccount>> {
+pub async fn get_accounts_by_type(
+    integration_type: IntegrationType,
+) -> Result<Vec<IntegrationAccount>> {
     let config = load_accounts_config()?;
     Ok(config
         .accounts
@@ -380,8 +382,10 @@ mod tests {
 
     #[test]
     fn test_gitlab_account_with_instance() {
-        let account =
-            IntegrationAccount::new_gitlab("Work".to_string(), "https://gitlab.mycompany.com".to_string());
+        let account = IntegrationAccount::new_gitlab(
+            "Work".to_string(),
+            "https://gitlab.mycompany.com".to_string(),
+        );
         assert_eq!(account.integration_type, IntegrationType::GitLab);
         if let IntegrationConfig::GitLab { instance_url } = account.config {
             assert_eq!(instance_url, "https://gitlab.mycompany.com");

@@ -203,7 +203,10 @@ pub struct IntegrationAccountsConfig {
 
 impl IntegrationAccountsConfig {
     /// Get accounts by integration type
-    pub fn get_accounts_by_type(&self, integration_type: &IntegrationType) -> Vec<&IntegrationAccount> {
+    pub fn get_accounts_by_type(
+        &self,
+        integration_type: &IntegrationType,
+    ) -> Vec<&IntegrationAccount> {
         self.accounts
             .iter()
             .filter(|a| &a.integration_type == integration_type)
@@ -211,7 +214,10 @@ impl IntegrationAccountsConfig {
     }
 
     /// Get the default account for an integration type
-    pub fn get_default_account(&self, integration_type: &IntegrationType) -> Option<&IntegrationAccount> {
+    pub fn get_default_account(
+        &self,
+        integration_type: &IntegrationType,
+    ) -> Option<&IntegrationAccount> {
         self.accounts
             .iter()
             .find(|a| &a.integration_type == integration_type && a.is_default)
@@ -232,7 +238,9 @@ impl IntegrationAccountsConfig {
         // If this account is being set as default, unset other defaults of same type
         if account.is_default {
             for existing in &mut self.accounts {
-                if existing.integration_type == account.integration_type && existing.id != account.id {
+                if existing.integration_type == account.integration_type
+                    && existing.id != account.id
+                {
                     existing.is_default = false;
                 }
             }
@@ -324,9 +332,16 @@ mod tests {
     #[test]
     fn test_config_get_accounts_by_type() {
         let mut config = IntegrationAccountsConfig::default();
-        config.accounts.push(IntegrationAccount::new_github("Work GH".to_string()));
-        config.accounts.push(IntegrationAccount::new_github("Personal GH".to_string()));
-        config.accounts.push(IntegrationAccount::new_gitlab("Work GL".to_string(), "https://gitlab.com".to_string()));
+        config
+            .accounts
+            .push(IntegrationAccount::new_github("Work GH".to_string()));
+        config
+            .accounts
+            .push(IntegrationAccount::new_github("Personal GH".to_string()));
+        config.accounts.push(IntegrationAccount::new_gitlab(
+            "Work GL".to_string(),
+            "https://gitlab.com".to_string(),
+        ));
 
         let github_accounts = config.get_accounts_by_type(&IntegrationType::GitHub);
         assert_eq!(github_accounts.len(), 2);

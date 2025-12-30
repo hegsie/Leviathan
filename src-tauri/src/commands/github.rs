@@ -262,6 +262,17 @@ pub async fn delete_github_token() -> Result<()> {
     Ok(())
 }
 
+/// Helper to resolve token from parameter or fallback to stored token
+/// Returns an error if no token is available
+async fn resolve_github_token(token: Option<String>) -> Result<String> {
+    match token {
+        Some(t) if !t.is_empty() => Ok(t),
+        _ => get_github_token().await?.ok_or_else(|| {
+            LeviathanError::OperationFailed("GitHub token not configured".to_string())
+        }),
+    }
+}
+
 /// Check GitHub connection and get user info
 #[command]
 pub async fn check_github_connection(token: Option<String>) -> Result<GitHubConnectionStatus> {
@@ -389,10 +400,9 @@ pub async fn list_pull_requests(
     repo: String,
     state: Option<String>,
     per_page: Option<u32>,
+    token: Option<String>,
 ) -> Result<Vec<PullRequestSummary>> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let state = state.unwrap_or_else(|| "open".to_string());
     let per_page = per_page.unwrap_or(30);
@@ -496,10 +506,9 @@ pub async fn get_pull_request(
     owner: String,
     repo: String,
     number: u32,
+    token: Option<String>,
 ) -> Result<PullRequestDetails> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -652,10 +661,9 @@ pub async fn create_pull_request(
     owner: String,
     repo: String,
     input: CreatePullRequestInput,
+    token: Option<String>,
 ) -> Result<PullRequestSummary> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct CreatePRBody {
@@ -767,10 +775,9 @@ pub async fn get_pull_request_reviews(
     owner: String,
     repo: String,
     number: u32,
+    token: Option<String>,
 ) -> Result<Vec<PullRequestReview>> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -849,10 +856,9 @@ pub async fn get_workflow_runs(
     repo: String,
     branch: Option<String>,
     per_page: Option<u32>,
+    token: Option<String>,
 ) -> Result<Vec<WorkflowRun>> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let per_page = per_page.unwrap_or(20);
 
@@ -936,10 +942,9 @@ pub async fn get_check_runs(
     owner: String,
     repo: String,
     commit_sha: String,
+    token: Option<String>,
 ) -> Result<Vec<CheckRun>> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -1003,10 +1008,13 @@ pub async fn get_check_runs(
 
 /// Get combined status for a commit (legacy status API + checks)
 #[command]
-pub async fn get_commit_status(owner: String, repo: String, commit_sha: String) -> Result<String> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+pub async fn get_commit_status(
+    owner: String,
+    repo: String,
+    commit_sha: String,
+    token: Option<String>,
+) -> Result<String> {
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -1102,10 +1110,9 @@ pub async fn list_issues(
     state: Option<String>,
     labels: Option<String>,
     per_page: Option<u32>,
+    token: Option<String>,
 ) -> Result<Vec<IssueSummary>> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let state = state.unwrap_or_else(|| "open".to_string());
     let per_page = per_page.unwrap_or(30);
@@ -1227,10 +1234,13 @@ pub async fn list_issues(
 
 /// Get issue details
 #[command]
-pub async fn get_issue(owner: String, repo: String, number: u32) -> Result<IssueSummary> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+pub async fn get_issue(
+    owner: String,
+    repo: String,
+    number: u32,
+    token: Option<String>,
+) -> Result<IssueSummary> {
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -1340,10 +1350,9 @@ pub async fn create_issue(
     owner: String,
     repo: String,
     input: CreateIssueInput,
+    token: Option<String>,
 ) -> Result<IssueSummary> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct CreateIssueBody {
@@ -1473,10 +1482,9 @@ pub async fn update_issue_state(
     repo: String,
     number: u32,
     state: String,
+    token: Option<String>,
 ) -> Result<IssueSummary> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct UpdateBody {
@@ -1593,10 +1601,9 @@ pub async fn get_issue_comments(
     repo: String,
     number: u32,
     per_page: Option<u32>,
+    token: Option<String>,
 ) -> Result<Vec<IssueComment>> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let per_page = per_page.unwrap_or(30);
 
@@ -1674,10 +1681,9 @@ pub async fn add_issue_comment(
     repo: String,
     number: u32,
     body: String,
+    token: Option<String>,
 ) -> Result<IssueComment> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct CommentBody {
@@ -1754,10 +1760,9 @@ pub async fn get_repo_labels(
     owner: String,
     repo: String,
     per_page: Option<u32>,
+    token: Option<String>,
 ) -> Result<Vec<Label>> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let per_page = per_page.unwrap_or(100);
 
@@ -1868,10 +1873,9 @@ pub async fn list_releases(
     owner: String,
     repo: String,
     per_page: Option<u32>,
+    token: Option<String>,
 ) -> Result<Vec<ReleaseSummary>> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let per_page = per_page.unwrap_or(30);
 
@@ -1958,10 +1962,9 @@ pub async fn get_release_by_tag(
     owner: String,
     repo: String,
     tag: String,
+    token: Option<String>,
 ) -> Result<ReleaseSummary> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -2038,10 +2041,12 @@ pub async fn get_release_by_tag(
 
 /// Get latest release
 #[command]
-pub async fn get_latest_release(owner: String, repo: String) -> Result<ReleaseSummary> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+pub async fn get_latest_release(
+    owner: String,
+    repo: String,
+    token: Option<String>,
+) -> Result<ReleaseSummary> {
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -2123,10 +2128,9 @@ pub async fn create_release(
     owner: String,
     repo: String,
     input: CreateReleaseInput,
+    token: Option<String>,
 ) -> Result<ReleaseSummary> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct CreateReleaseBody {
@@ -2231,10 +2235,13 @@ pub async fn create_release(
 
 /// Delete a release
 #[command]
-pub async fn delete_release(owner: String, repo: String, release_id: u64) -> Result<()> {
-    let token = get_github_token().await?.ok_or_else(|| {
-        LeviathanError::OperationFailed("GitHub token not configured".to_string())
-    })?;
+pub async fn delete_release(
+    owner: String,
+    repo: String,
+    release_id: u64,
+    token: Option<String>,
+) -> Result<()> {
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client

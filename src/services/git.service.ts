@@ -1531,33 +1531,37 @@ export async function listPullRequests(
   owner: string,
   repo: string,
   state?: string,
-  perPage?: number
+  perPage?: number,
+  token?: string | null
 ): Promise<CommandResult<PullRequestSummary[]>> {
-  return invokeCommand<PullRequestSummary[]>('list_pull_requests', { owner, repo, state, perPage });
+  return invokeCommand<PullRequestSummary[]>('list_pull_requests', { owner, repo, state, perPage, token });
 }
 
 export async function getPullRequest(
   owner: string,
   repo: string,
-  number: number
+  number: number,
+  token?: string | null
 ): Promise<CommandResult<PullRequestDetails>> {
-  return invokeCommand<PullRequestDetails>('get_pull_request', { owner, repo, number });
+  return invokeCommand<PullRequestDetails>('get_pull_request', { owner, repo, number, token });
 }
 
 export async function createPullRequest(
   owner: string,
   repo: string,
-  input: CreatePullRequestInput
+  input: CreatePullRequestInput,
+  token?: string | null
 ): Promise<CommandResult<PullRequestSummary>> {
-  return invokeCommand<PullRequestSummary>('create_pull_request', { owner, repo, input });
+  return invokeCommand<PullRequestSummary>('create_pull_request', { owner, repo, input, token });
 }
 
 export async function getPullRequestReviews(
   owner: string,
   repo: string,
-  number: number
+  number: number,
+  token?: string | null
 ): Promise<CommandResult<PullRequestReview[]>> {
-  return invokeCommand<PullRequestReview[]>('get_pull_request_reviews', { owner, repo, number });
+  return invokeCommand<PullRequestReview[]>('get_pull_request_reviews', { owner, repo, number, token });
 }
 
 // GitHub Actions
@@ -1565,25 +1569,28 @@ export async function getWorkflowRuns(
   owner: string,
   repo: string,
   branch?: string,
-  perPage?: number
+  perPage?: number,
+  token?: string | null
 ): Promise<CommandResult<WorkflowRun[]>> {
-  return invokeCommand<WorkflowRun[]>('get_workflow_runs', { owner, repo, branch, perPage });
+  return invokeCommand<WorkflowRun[]>('get_workflow_runs', { owner, repo, branch, perPage, token });
 }
 
 export async function getCheckRuns(
   owner: string,
   repo: string,
-  commitSha: string
+  commitSha: string,
+  token?: string | null
 ): Promise<CommandResult<CheckRun[]>> {
-  return invokeCommand<CheckRun[]>('get_check_runs', { owner, repo, commitSha });
+  return invokeCommand<CheckRun[]>('get_check_runs', { owner, repo, commitSha, token });
 }
 
 export async function getCommitStatus(
   owner: string,
   repo: string,
-  commitSha: string
+  commitSha: string,
+  token?: string | null
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>('get_commit_status', { owner, repo, commitSha });
+  return invokeCommand<string>('get_commit_status', { owner, repo, commitSha, token });
 }
 
 // GitHub Issues
@@ -1624,60 +1631,67 @@ export async function listIssues(
   repo: string,
   state?: string,
   labels?: string,
-  perPage?: number
+  perPage?: number,
+  token?: string | null
 ): Promise<CommandResult<IssueSummary[]>> {
-  return invokeCommand<IssueSummary[]>('list_issues', { owner, repo, state, labels, perPage });
+  return invokeCommand<IssueSummary[]>('list_issues', { owner, repo, state, labels, perPage, token });
 }
 
 export async function getIssue(
   owner: string,
   repo: string,
-  number: number
+  number: number,
+  token?: string | null
 ): Promise<CommandResult<IssueSummary>> {
-  return invokeCommand<IssueSummary>('get_issue', { owner, repo, number });
+  return invokeCommand<IssueSummary>('get_issue', { owner, repo, number, token });
 }
 
 export async function createIssue(
   owner: string,
   repo: string,
-  input: CreateIssueInput
+  input: CreateIssueInput,
+  token?: string | null
 ): Promise<CommandResult<IssueSummary>> {
-  return invokeCommand<IssueSummary>('create_issue', { owner, repo, input });
+  return invokeCommand<IssueSummary>('create_issue', { owner, repo, input, token });
 }
 
 export async function updateIssueState(
   owner: string,
   repo: string,
   number: number,
-  state: string
+  state: string,
+  token?: string | null
 ): Promise<CommandResult<IssueSummary>> {
-  return invokeCommand<IssueSummary>('update_issue_state', { owner, repo, number, state });
+  return invokeCommand<IssueSummary>('update_issue_state', { owner, repo, number, state, token });
 }
 
 export async function getIssueComments(
   owner: string,
   repo: string,
   number: number,
-  perPage?: number
+  perPage?: number,
+  token?: string | null
 ): Promise<CommandResult<IssueComment[]>> {
-  return invokeCommand<IssueComment[]>('get_issue_comments', { owner, repo, number, perPage });
+  return invokeCommand<IssueComment[]>('get_issue_comments', { owner, repo, number, perPage, token });
 }
 
 export async function addIssueComment(
   owner: string,
   repo: string,
   number: number,
-  body: string
+  body: string,
+  token?: string | null
 ): Promise<CommandResult<IssueComment>> {
-  return invokeCommand<IssueComment>('add_issue_comment', { owner, repo, number, body });
+  return invokeCommand<IssueComment>('add_issue_comment', { owner, repo, number, body, token });
 }
 
 export async function getRepoLabels(
   owner: string,
   repo: string,
-  perPage?: number
+  perPage?: number,
+  token?: string | null
 ): Promise<CommandResult<Label[]>> {
-  return invokeCommand<Label[]>('get_repo_labels', { owner, repo, perPage });
+  return invokeCommand<Label[]>('get_repo_labels', { owner, repo, perPage, token });
 }
 
 // Issue Reference Utilities
@@ -1771,40 +1785,45 @@ export interface CreateReleaseInput {
 export async function listReleases(
   owner: string,
   repo: string,
-  perPage?: number
+  perPage?: number,
+  token?: string | null
 ): Promise<CommandResult<ReleaseSummary[]>> {
-  return invokeCommand<ReleaseSummary[]>('list_releases', { owner, repo, perPage });
+  return invokeCommand<ReleaseSummary[]>('list_releases', { owner, repo, perPage, token });
 }
 
 export async function getReleaseByTag(
   owner: string,
   repo: string,
-  tag: string
+  tag: string,
+  token?: string | null
 ): Promise<CommandResult<ReleaseSummary>> {
-  return invokeCommand<ReleaseSummary>('get_release_by_tag', { owner, repo, tag });
+  return invokeCommand<ReleaseSummary>('get_release_by_tag', { owner, repo, tag, token });
 }
 
 export async function getLatestRelease(
   owner: string,
-  repo: string
+  repo: string,
+  token?: string | null
 ): Promise<CommandResult<ReleaseSummary>> {
-  return invokeCommand<ReleaseSummary>('get_latest_release', { owner, repo });
+  return invokeCommand<ReleaseSummary>('get_latest_release', { owner, repo, token });
 }
 
 export async function createRelease(
   owner: string,
   repo: string,
-  input: CreateReleaseInput
+  input: CreateReleaseInput,
+  token?: string | null
 ): Promise<CommandResult<ReleaseSummary>> {
-  return invokeCommand<ReleaseSummary>('create_release', { owner, repo, input });
+  return invokeCommand<ReleaseSummary>('create_release', { owner, repo, input, token });
 }
 
 export async function deleteRelease(
   owner: string,
   repo: string,
-  releaseId: number
+  releaseId: number,
+  token?: string | null
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_release', { owner, repo, releaseId });
+  return invokeCommand<void>('delete_release', { owner, repo, releaseId, token });
 }
 
 // =======================

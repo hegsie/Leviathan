@@ -826,11 +826,13 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.listPullRequests(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
         this.prFilter,
-        30
+        30,
+        token
       );
 
       if (result.success && result.data) {
@@ -849,11 +851,13 @@ export class LvGitHubDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.getWorkflowRuns(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
         undefined,
-        20
+        20,
+        token
       );
 
       if (result.success && result.data) {
@@ -868,12 +872,14 @@ export class LvGitHubDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.listIssues(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
         this.issueFilter,
         undefined,
-        30
+        30,
+        token
       );
 
       if (result.success && result.data) {
@@ -888,9 +894,12 @@ export class LvGitHubDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.getRepoLabels(
         this.detectedRepo.owner,
-        this.detectedRepo.repo
+        this.detectedRepo.repo,
+        undefined,
+        token
       );
 
       if (result.success && result.data) {
@@ -905,10 +914,12 @@ export class LvGitHubDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.listReleases(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
-        20
+        20,
+        token
       );
 
       if (result.success && result.data) {
@@ -1016,6 +1027,7 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const input: CreatePullRequestInput = {
         title: this.createPrTitle,
         body: this.createPrBody || undefined,
@@ -1027,7 +1039,8 @@ export class LvGitHubDialog extends LitElement {
       const result = await gitService.createPullRequest(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
-        input
+        input,
+        token
       );
 
       if (result.success && result.data) {
@@ -1068,6 +1081,7 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const input: CreateIssueInput = {
         title: this.createIssueTitle,
         body: this.createIssueBody || undefined,
@@ -1077,7 +1091,8 @@ export class LvGitHubDialog extends LitElement {
       const result = await gitService.createIssue(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
-        input
+        input,
+        token
       );
 
       if (result.success && result.data) {
@@ -1122,6 +1137,7 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const input: CreateReleaseInput = {
         tagName: this.createReleaseTag,
         name: this.createReleaseName || undefined,
@@ -1134,7 +1150,8 @@ export class LvGitHubDialog extends LitElement {
       const result = await gitService.createRelease(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
-        input
+        input,
+        token
       );
 
       if (result.success && result.data) {
