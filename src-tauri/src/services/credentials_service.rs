@@ -142,7 +142,10 @@ fn get_ado_token_for_git(url: &str) -> Option<String> {
     let original: Vec<u8> = decoded.iter().map(|b| b ^ key).collect();
     let token = String::from_utf8(original).ok()?;
 
-    tracing::debug!("Found ADO token for git operations (length: {})", token.len());
+    tracing::debug!(
+        "Found ADO token for git operations (length: {})",
+        token.len()
+    );
     Some(token)
 }
 
