@@ -8,10 +8,12 @@ use std::collections::HashMap;
 
 /// Integration service type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
 pub enum IntegrationType {
+    #[serde(rename = "github")]
     GitHub,
+    #[serde(rename = "gitlab")]
     GitLab,
+    #[serde(rename = "azure-devops")]
     AzureDevOps,
 }
 

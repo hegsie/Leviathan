@@ -12,6 +12,7 @@
     "dialog:allow-ask",
     "dialog:allow-confirm",
     "notification:default",
+    "stronghold:default",
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
     "fs:allow-exists",

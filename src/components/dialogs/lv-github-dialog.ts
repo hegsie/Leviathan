@@ -828,14 +828,14 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
-  private async loadPullRequests(): Promise<void> {
+  private async loadPullRequests(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     this.isLoading = true;
     this.error = null;
 
     try {
-      const token = await this.getSelectedAccountToken();
+      const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.listPullRequests(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
@@ -856,11 +856,11 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
-  private async loadWorkflowRuns(): Promise<void> {
+  private async loadWorkflowRuns(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
-      const token = await this.getSelectedAccountToken();
+      const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.getWorkflowRuns(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
@@ -877,11 +877,11 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
-  private async loadIssues(): Promise<void> {
+  private async loadIssues(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
-      const token = await this.getSelectedAccountToken();
+      const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.listIssues(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
@@ -899,11 +899,11 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
-  private async loadLabels(): Promise<void> {
+  private async loadLabels(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
-      const token = await this.getSelectedAccountToken();
+      const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.getRepoLabels(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
@@ -919,11 +919,11 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
-  private async loadReleases(): Promise<void> {
+  private async loadReleases(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
-      const token = await this.getSelectedAccountToken();
+      const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.listReleases(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
@@ -987,13 +987,14 @@ export class LvGitHubDialog extends LitElement {
       this.connectionStatus = verifyResult.data;
 
       // Load data if connected and repo detected
+      // Pass the token directly since storage might not be ready yet
       if (this.connectionStatus?.connected && this.detectedRepo) {
         await Promise.all([
-          this.loadPullRequests(),
-          this.loadWorkflowRuns(),
-          this.loadIssues(),
-          this.loadLabels(),
-          this.loadReleases(),
+          this.loadPullRequests(tokenToSave),
+          this.loadWorkflowRuns(tokenToSave),
+          this.loadIssues(tokenToSave),
+          this.loadLabels(tokenToSave),
+          this.loadReleases(tokenToSave),
         ]);
       }
     } catch (err) {

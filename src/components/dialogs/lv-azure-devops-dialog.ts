@@ -747,22 +747,22 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
   }
 
-  private async loadAllData(): Promise<void> {
+  private async loadAllData(providedToken?: string): Promise<void> {
     await Promise.all([
-      this.loadPullRequests(),
-      this.loadWorkItems(),
-      this.loadPipelineRuns(),
+      this.loadPullRequests(providedToken),
+      this.loadWorkItems(providedToken),
+      this.loadPipelineRuns(providedToken),
     ]);
   }
 
-  private async loadPullRequests(): Promise<void> {
+  private async loadPullRequests(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     this.isLoading = true;
     this.error = null;
 
     try {
-      const token = await this.getSelectedAccountToken();
+      const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.listAdoPullRequests(
         this.detectedRepo.organization,
         this.detectedRepo.project,
@@ -783,11 +783,11 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
   }
 
-  private async loadWorkItems(): Promise<void> {
+  private async loadWorkItems(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
-      const token = await this.getSelectedAccountToken();
+      const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.queryAdoWorkItems(
         this.detectedRepo.organization,
         this.detectedRepo.project,
@@ -803,11 +803,11 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
   }
 
-  private async loadPipelineRuns(): Promise<void> {
+  private async loadPipelineRuns(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
-      const token = await this.getSelectedAccountToken();
+      const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.listAdoPipelineRuns(
         this.detectedRepo.organization,
         this.detectedRepo.project,
@@ -881,8 +881,9 @@ export class LvAzureDevOpsDialog extends LitElement {
       this.connectionStatus = verifyResult.data;
 
       // Load data if connected and repo detected
+      // Pass the token directly since storage might not be ready yet
       if (this.connectionStatus?.connected && this.detectedRepo) {
-        await this.loadAllData();
+        await this.loadAllData(tokenToSave);
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to connect';
