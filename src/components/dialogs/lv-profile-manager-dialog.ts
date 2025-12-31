@@ -8,7 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import type { UnifiedProfile, ProfileIntegrationAccount, IntegrationType } from '../../types/unified-profile.types.ts';
+import type { UnifiedProfile, ProfileIntegrationAccount, IntegrationType, IntegrationConfig } from '../../types/unified-profile.types.ts';
 import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import { showToast } from '../../services/notification.service.ts';
 
@@ -620,7 +620,7 @@ export class LvProfileManagerDialog extends LitElement {
     this.editingAccount = {
       name: '',
       integrationType: 'github',
-      config: {},
+      config: { type: 'github' },
       color: null,
       cachedUser: null,
       isDefaultForType: false,
@@ -655,11 +655,12 @@ export class LvProfileManagerDialog extends LitElement {
       return;
     }
 
+    const integrationType = this.editingAccount.integrationType ?? 'github';
     const account: ProfileIntegrationAccount = {
       id: this.editingAccount.id ?? crypto.randomUUID(),
       name: this.editingAccount.name.trim(),
-      integrationType: this.editingAccount.integrationType ?? 'github',
-      config: this.editingAccount.config ?? {},
+      integrationType,
+      config: this.editingAccount.config ?? this.getDefaultConfigForType(integrationType),
       color: this.editingAccount.color ?? null,
       cachedUser: this.editingAccount.cachedUser ?? null,
       isDefaultForType: this.editingAccount.isDefaultForType ?? false,
@@ -1010,7 +1011,7 @@ export class LvProfileManagerDialog extends LitElement {
             <span class="type-badge">${account.integrationType}</span>
           </div>
           ${account.cachedUser
-            ? html`<div class="account-detail">${account.cachedUser.login || account.cachedUser.name}</div>`
+            ? html`<div class="account-detail">${account.cachedUser.username || account.cachedUser.displayName}</div>`
             : this.getAccountConfigDetail(account)
               ? html`<div class="account-detail">${this.getAccountConfigDetail(account)}</div>`
               : nothing}
@@ -1063,13 +1064,24 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private getAccountConfigDetail(account: ProfileIntegrationAccount): string | null {
-    if (account.integrationType === 'gitlab' && account.config.instanceUrl) {
-      return account.config.instanceUrl as string;
+    if (account.config.type === 'gitlab' && account.config.instanceUrl) {
+      return account.config.instanceUrl;
     }
-    if (account.integrationType === 'azure-devops' && account.config.organization) {
-      return account.config.organization as string;
+    if (account.config.type === 'azure-devops' && account.config.organization) {
+      return account.config.organization;
     }
     return null;
+  }
+
+  private getDefaultConfigForType(type: IntegrationType): IntegrationConfig {
+    switch (type) {
+      case 'github':
+        return { type: 'github' };
+      case 'gitlab':
+        return { type: 'gitlab', instanceUrl: 'https://gitlab.com' };
+      case 'azure-devops':
+        return { type: 'azure-devops', organization: '' };
+    }
   }
 
   private renderAccountForm() {
@@ -1140,18 +1152,20 @@ export class LvProfileManagerDialog extends LitElement {
 
   private renderAccountConfigFields() {
     const type = this.editingAccount?.integrationType;
+    const config = this.editingAccount?.config;
 
     if (type === 'gitlab') {
+      const instanceUrl = config?.type === 'gitlab' ? config.instanceUrl : '';
       return html`
         <div class="form-group">
           <label>GitLab Instance URL (optional)</label>
           <input
             type="url"
             placeholder="https://gitlab.com"
-            .value=${(this.editingAccount?.config?.instanceUrl as string) ?? ''}
+            .value=${instanceUrl ?? ''}
             @input=${(e: Event) => this.updateEditingAccount('config', {
-              ...this.editingAccount?.config,
-              instanceUrl: (e.target as HTMLInputElement).value || undefined,
+              type: 'gitlab',
+              instanceUrl: (e.target as HTMLInputElement).value || 'https://gitlab.com',
             })}
           />
           <div class="form-hint">Leave empty for gitlab.com, or enter your self-hosted GitLab URL</div>
@@ -1160,16 +1174,17 @@ export class LvProfileManagerDialog extends LitElement {
     }
 
     if (type === 'azure-devops') {
+      const organization = config?.type === 'azure-devops' ? config.organization : '';
       return html`
         <div class="form-group">
           <label>Organization</label>
           <input
             type="text"
             placeholder="my-organization"
-            .value=${(this.editingAccount?.config?.organization as string) ?? ''}
+            .value=${organization ?? ''}
             @input=${(e: Event) => this.updateEditingAccount('config', {
-              ...this.editingAccount?.config,
-              organization: (e.target as HTMLInputElement).value || undefined,
+              type: 'azure-devops',
+              organization: (e.target as HTMLInputElement).value || '',
             })}
           />
           <div class="form-hint">Your Azure DevOps organization name</div>

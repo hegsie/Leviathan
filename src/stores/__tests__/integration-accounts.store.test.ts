@@ -23,11 +23,17 @@ describe('integration-accounts.store', () => {
       urlPatterns?: string[];
     } = {}
   ): IntegrationAccount {
+    const config = type === 'github'
+      ? { type: 'github' as const }
+      : type === 'gitlab'
+        ? { type: 'gitlab' as const, instanceUrl: 'https://gitlab.com' }
+        : { type: 'azure-devops' as const, organization: 'test-org' };
+
     return {
       id,
       name: options.name ?? `Account ${id}`,
       integrationType: type,
-      config: { type },
+      config,
       color: '#3b82f6',
       cachedUser: null,
       isDefault: options.isDefault ?? false,

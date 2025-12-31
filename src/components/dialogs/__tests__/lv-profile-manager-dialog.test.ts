@@ -127,9 +127,10 @@ describe('Profile Manager Dialog Data Structures', () => {
         config: { type: 'github' },
         color: '#10b981',
         cachedUser: {
-          login: 'octocat',
-          name: 'The Octocat',
+          username: 'octocat',
+          displayName: 'The Octocat',
           avatarUrl: 'https://github.com/octocat.png',
+          email: null,
         },
         isDefaultForType: true,
       };
@@ -137,7 +138,7 @@ describe('Profile Manager Dialog Data Structures', () => {
       expect(account.id).to.equal('github-account-1');
       expect(account.integrationType).to.equal('github');
       expect(account.config.type).to.equal('github');
-      expect(account.cachedUser?.login).to.equal('octocat');
+      expect(account.cachedUser?.username).to.equal('octocat');
       expect(account.isDefaultForType).to.be.true;
     });
 
@@ -156,7 +157,9 @@ describe('Profile Manager Dialog Data Structures', () => {
       };
 
       expect(account.integrationType).to.equal('gitlab');
-      expect(account.config.instanceUrl).to.equal('https://gitlab.internal.company.com');
+      if (account.config.type === 'gitlab') {
+        expect(account.config.instanceUrl).to.equal('https://gitlab.internal.company.com');
+      }
     });
 
     it('should have correct structure for Azure DevOps account', () => {
@@ -174,7 +177,9 @@ describe('Profile Manager Dialog Data Structures', () => {
       };
 
       expect(account.integrationType).to.equal('azure-devops');
-      expect(account.config.organization).to.equal('mycompany');
+      if (account.config.type === 'azure-devops') {
+        expect(account.config.organization).to.equal('mycompany');
+      }
     });
 
     it('should allow null color to inherit from profile', () => {

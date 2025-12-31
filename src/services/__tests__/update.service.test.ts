@@ -407,8 +407,8 @@ describe('Version Display', () => {
   });
 
   it('should compare versions for update badge', () => {
-    const current = '1.0.0';
-    const latest = '1.1.0';
+    const current: string = '1.0.0';
+    const latest: string = '1.1.0';
     const updateAvailable = current !== latest;
 
     expect(updateAvailable).to.be.true;

@@ -23,11 +23,17 @@ describe('unified-profile.store', () => {
     type: 'github' | 'gitlab' | 'azure-devops' = 'github',
     isDefault = false
   ): ProfileIntegrationAccount {
+    const config = type === 'github'
+      ? { type: 'github' as const }
+      : type === 'gitlab'
+        ? { type: 'gitlab' as const, instanceUrl: 'https://gitlab.com' }
+        : { type: 'azure-devops' as const, organization: 'test-org' };
+
     return {
       id,
       name: `Account ${id}`,
       integrationType: type,
-      config: { type },
+      config,
       color: null,
       cachedUser: null,
       isDefaultForType: isDefault,

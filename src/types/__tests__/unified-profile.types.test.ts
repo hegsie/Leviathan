@@ -42,13 +42,11 @@ describe('unified-profile.types', () => {
       organization?: string;
     } = {}
   ): ProfileIntegrationAccount {
-    const config: Record<string, unknown> = { type };
-    if (type === 'gitlab' && options.instanceUrl) {
-      config.instanceUrl = options.instanceUrl;
-    }
-    if (type === 'azure-devops' && options.organization) {
-      config.organization = options.organization;
-    }
+    const config = type === 'github'
+      ? { type: 'github' as const }
+      : type === 'gitlab'
+        ? { type: 'gitlab' as const, instanceUrl: options.instanceUrl ?? 'https://gitlab.com' }
+        : { type: 'azure-devops' as const, organization: options.organization ?? '' };
 
     return {
       id,
@@ -179,13 +177,19 @@ describe('unified-profile.types', () => {
     it('uses default instance URL', () => {
       const account = createEmptyGitLabProfileAccount();
 
-      expect(account.config.instanceUrl).to.equal('https://gitlab.com');
+      expect(account.config.type).to.equal('gitlab');
+      if (account.config.type === 'gitlab') {
+        expect(account.config.instanceUrl).to.equal('https://gitlab.com');
+      }
     });
 
     it('accepts custom instance URL', () => {
       const account = createEmptyGitLabProfileAccount('https://gitlab.company.com');
 
-      expect(account.config.instanceUrl).to.equal('https://gitlab.company.com');
+      expect(account.config.type).to.equal('gitlab');
+      if (account.config.type === 'gitlab') {
+        expect(account.config.instanceUrl).to.equal('https://gitlab.company.com');
+      }
     });
   });
 
@@ -199,13 +203,19 @@ describe('unified-profile.types', () => {
     it('has empty organization by default', () => {
       const account = createEmptyAzureDevOpsProfileAccount();
 
-      expect(account.config.organization).to.equal('');
+      expect(account.config.type).to.equal('azure-devops');
+      if (account.config.type === 'azure-devops') {
+        expect(account.config.organization).to.equal('');
+      }
     });
 
     it('accepts custom organization', () => {
       const account = createEmptyAzureDevOpsProfileAccount('my-org');
 
-      expect(account.config.organization).to.equal('my-org');
+      expect(account.config.type).to.equal('azure-devops');
+      if (account.config.type === 'azure-devops') {
+        expect(account.config.organization).to.equal('my-org');
+      }
     });
   });
 

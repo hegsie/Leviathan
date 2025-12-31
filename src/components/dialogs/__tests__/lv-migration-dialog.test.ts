@@ -264,7 +264,7 @@ describe('Migration Dialog Data Structures', () => {
       };
 
       // User changes assignment for account-1
-      const updatedAssignments = {
+      const updatedAssignments: Record<string, string> = {
         ...initialAssignments,
         'account-1': 'profile-2',
       };
