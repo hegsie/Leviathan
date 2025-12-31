@@ -138,7 +138,8 @@ export const integrationAccountsStore = createStore<IntegrationAccountsState>()(
 
   unassignAccountFromRepository: (repoPath) =>
     set((state) => {
-      const { [repoPath]: _, ...rest } = state.repositoryAssignments;
+      const { [repoPath]: _removed, ...rest } = state.repositoryAssignments;
+      void _removed; // Intentionally unused - destructuring to remove key
       return { repositoryAssignments: rest };
     }),
 

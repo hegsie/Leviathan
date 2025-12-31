@@ -369,7 +369,7 @@ describe('Azure DevOps URL Parsing', () => {
 
     // Visual Studio format: https://{org}.visualstudio.com/{project}/_git/{repo}
     if (url.includes('.visualstudio.com')) {
-      let path = url.replace(/^https?:\/\//, '');
+      const path = url.replace(/^https?:\/\//, '');
       const parts = path.split('/');
       if (parts.length >= 4 && parts[2] === '_git') {
         const org = parts[0].split('.')[0];

@@ -377,15 +377,11 @@ fn run_inference(
 /// Parse the model response into a structured commit message
 fn parse_response(response: &str) -> GeneratedCommitMessage {
     // Extract reasoning if present (model outputs <reasoning>...</reasoning>)
-    let reasoning = if let Some(start) = response.find("<reasoning>") {
-        if let Some(end) = response.find("</reasoning>") {
-            Some(response[start + 11..end].trim().to_string())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let reasoning = response.find("<reasoning>").and_then(|start| {
+        response
+            .find("</reasoning>")
+            .map(|end| response[start + 11..end].trim().to_string())
+    });
 
     // Get message part (after reasoning block if present)
     let message_part = if let Some(end) = response.find("</reasoning>") {
@@ -403,7 +399,7 @@ fn parse_response(response: &str) -> GeneratedCommitMessage {
 
     // Body is everything after the first blank line
     let body = if lines.len() > 2 {
-        let body_lines: Vec<&str> = lines[2..].iter().copied().collect();
+        let body_lines: Vec<&str> = lines[2..].to_vec();
         let body_text = body_lines.join("\n").trim().to_string();
         if body_text.is_empty() {
             None

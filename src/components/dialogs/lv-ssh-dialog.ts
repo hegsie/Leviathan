@@ -471,7 +471,7 @@ export class LvSshDialog extends LitElement {
         setTimeout(() => {
           this.copiedKey = null;
         }, 2000);
-      } catch (e) {
+      } catch {
         this.error = 'Failed to copy to clipboard';
       }
     }

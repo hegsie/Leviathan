@@ -10,7 +10,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { UnifiedProfile } from '../../types/unified-profile.types.ts';
-import { PROFILE_COLORS, getAccountCountByType } from '../../types/unified-profile.types.ts';
+import { PROFILE_COLORS } from '../../types/unified-profile.types.ts';
 
 @customElement('lv-profile-selector')
 export class LvProfileSelector extends LitElement {
@@ -279,7 +279,6 @@ export class LvProfileSelector extends LitElement {
           ? html`<div class="empty-state">No profiles configured</div>`
           : this.profiles.map(
               (profile) => {
-                const accountCounts = getAccountCountByType(profile);
                 const totalAccounts = profile.integrationAccounts.length;
                 return html`
                   <button

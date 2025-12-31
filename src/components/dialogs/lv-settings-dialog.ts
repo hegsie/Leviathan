@@ -2,7 +2,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { settingsStore, type Theme, type FontSize } from '../../stores/settings.store.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { getAppVersion, checkForUpdate, type UpdateCheckEvent } from '../../services/update.service.ts';
+import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import type { AiModelStatus } from '../../services/ai.service.ts';
 

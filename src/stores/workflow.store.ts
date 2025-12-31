@@ -4,7 +4,7 @@
  */
 
 import { createStore } from 'zustand/vanilla';
-import type { GitProfile, ProfilesConfig } from '../types/workflow.types.ts';
+import type { GitProfile } from '../types/workflow.types.ts';
 
 export interface WorkflowState {
   // Profiles

@@ -9,7 +9,6 @@ describe('Git Types', () => {
   describe('Branch', () => {
     describe('isStale calculation', () => {
       const STALE_THRESHOLD_DAYS = 90;
-      const MS_PER_DAY = 24 * 60 * 60 * 1000;
       const SEC_PER_DAY = 24 * 60 * 60;
 
       function isStale(lastCommitTimestamp: number | undefined, isHead: boolean): boolean {

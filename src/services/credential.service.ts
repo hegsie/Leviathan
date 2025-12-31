@@ -122,7 +122,7 @@ export async function getCredential(
 
     console.log(`[CredentialService] Retrieved credential: ${key}`);
     return value;
-  } catch (error) {
+  } catch {
     // If key doesn't exist, return null instead of throwing
     console.log(`[CredentialService] Credential not found: ${key}`);
     return null;
@@ -141,7 +141,7 @@ export async function deleteCredential(key: CredentialKey): Promise<void> {
     await strongholdInstance?.save();
 
     console.log(`[CredentialService] Deleted credential: ${key}`);
-  } catch (error) {
+  } catch {
     // Ignore if key doesn't exist
     console.log(`[CredentialService] Credential not found for deletion: ${key}`);
   }

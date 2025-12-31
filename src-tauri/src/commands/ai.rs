@@ -33,7 +33,7 @@ pub async fn download_ai_model(app: AppHandle, state: State<'_, AiState>) -> Res
     service
         .download_model(app)
         .await
-        .map_err(|e| LeviathanError::OperationFailed(e))
+        .map_err(LeviathanError::OperationFailed)
 }
 
 /// Delete the AI model
@@ -42,7 +42,7 @@ pub async fn delete_ai_model(state: State<'_, AiState>) -> Result<()> {
     let mut service = state.write().await;
     service
         .delete_model()
-        .map_err(|e| LeviathanError::OperationFailed(e))
+        .map_err(LeviathanError::OperationFailed)
 }
 
 /// Generate a commit message from staged changes
@@ -66,7 +66,7 @@ pub async fn generate_commit_message(
     service
         .generate_commit_message(diff, app)
         .await
-        .map_err(|e| LeviathanError::OperationFailed(e))
+        .map_err(LeviathanError::OperationFailed)
 }
 
 /// Get the staged diff as a string

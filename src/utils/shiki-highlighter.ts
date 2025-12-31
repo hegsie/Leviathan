@@ -463,7 +463,7 @@ export function highlightLineSync(
     }
 
     return tokens;
-  } catch (e) {
+  } catch {
     return [{ content: line, color: 'inherit' }];
   }
 }
