@@ -284,6 +284,8 @@ Tauri App
 - PR description generation
 - Diff summarization
 
+-- git worktrees support
+
 ---
 
 ### Future Considerations
