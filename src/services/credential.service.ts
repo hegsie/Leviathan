@@ -391,3 +391,48 @@ export const AccountCredentials = {
     return true;
   },
 };
+
+// =============================================================================
+// Convenience Exports for Account Tokens
+// =============================================================================
+
+/**
+ * Get a token for a specific integration account
+ */
+export async function getAccountToken(
+  integrationType: IntegrationType,
+  accountId: string
+): Promise<string | null> {
+  return AccountCredentials.getToken(integrationType, accountId);
+}
+
+/**
+ * Store a token for a specific integration account
+ */
+export async function storeAccountToken(
+  integrationType: IntegrationType,
+  accountId: string,
+  token: string
+): Promise<void> {
+  return AccountCredentials.setToken(integrationType, accountId, token);
+}
+
+/**
+ * Delete a token for a specific integration account
+ */
+export async function deleteAccountToken(
+  integrationType: IntegrationType,
+  accountId: string
+): Promise<void> {
+  return AccountCredentials.deleteToken(integrationType, accountId);
+}
+
+/**
+ * Check if a token exists for a specific integration account
+ */
+export async function hasAccountToken(
+  integrationType: IntegrationType,
+  accountId: string
+): Promise<boolean> {
+  return AccountCredentials.hasToken(integrationType, accountId);
+}

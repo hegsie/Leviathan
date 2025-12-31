@@ -31,6 +31,7 @@ import './components/dialogs/lv-gitlab-dialog.ts';
 import './components/dialogs/lv-bitbucket-dialog.ts';
 import './components/dialogs/lv-azure-devops-dialog.ts';
 import './components/dialogs/lv-profile-manager-dialog.ts';
+import './components/dialogs/lv-migration-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import './components/common/lv-toast-container.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
@@ -39,6 +40,7 @@ import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
 import * as gitService from './services/git.service.ts';
 import * as updateService from './services/update.service.ts';
+import * as unifiedProfileService from './services/unified-profile.service.ts';
 import { showToast } from './services/notification.service.ts';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
@@ -386,6 +388,9 @@ export class AppShell extends LitElement {
   // Profile Manager dialog
   @state() private showProfileManager = false;
 
+  // Migration dialog
+  @state() private showMigrationDialog = false;
+
   // Panel dimensions
   @state() private leftPanelWidth = 220;
   @state() private rightPanelWidth = 350;
@@ -461,6 +466,9 @@ export class AppShell extends LitElement {
     // Load profiles
     gitService.loadProfiles();
 
+    // Check for unified profiles migration
+    this.checkUnifiedProfilesMigration();
+
     // Restore previously open repositories
     this.restorePersistedRepositories();
 
@@ -505,6 +513,20 @@ export class AppShell extends LitElement {
     // Clean up update listeners
     this.updateUnlisteners.forEach((unlisten) => unlisten());
     this.updateUnlisteners = [];
+  }
+
+  private async checkUnifiedProfilesMigration(): Promise<void> {
+    try {
+      const needsMigration = await unifiedProfileService.checkMigrationNeeded();
+      if (needsMigration) {
+        // Show migration dialog after a short delay to let the UI settle
+        setTimeout(() => {
+          this.showMigrationDialog = true;
+        }, 500);
+      }
+    } catch (error) {
+      console.error('Failed to check migration status:', error);
+    }
   }
 
   private async setupUpdateListeners(): Promise<void> {
@@ -1525,6 +1547,12 @@ export class AppShell extends LitElement {
         .repoPath=${this.activeRepository?.repository.path ?? ''}
         @close=${() => { this.showProfileManager = false; }}
       ></lv-profile-manager-dialog>
+
+      <lv-migration-dialog
+        ?open=${this.showMigrationDialog}
+        @close=${() => { this.showMigrationDialog = false; }}
+        @open-profile-manager=${() => { this.showProfileManager = true; }}
+      ></lv-migration-dialog>
 
       <lv-toast-container></lv-toast-container>
     `;

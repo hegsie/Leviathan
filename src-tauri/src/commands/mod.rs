@@ -29,6 +29,7 @@ pub mod stash;
 pub mod submodule;
 pub mod tags;
 pub mod templates;
+pub mod unified_profiles;
 pub mod update;
 pub mod watcher;
 pub mod worktree;

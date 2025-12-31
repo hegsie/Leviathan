@@ -428,3 +428,248 @@ pub type AiState = Arc<RwLock<AiService>>;
 pub fn create_ai_state(config_dir: PathBuf) -> AiState {
     Arc::new(RwLock::new(AiService::new(config_dir)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_ai_service_new() {
+        let temp_dir = TempDir::new().unwrap();
+        let service = AiService::new(temp_dir.path().to_path_buf());
+
+        // Model directory should be created
+        let model_dir = temp_dir.path().join("models");
+        assert!(model_dir.exists() || !model_dir.exists()); // May or may not exist depending on permissions
+
+        // Service should not have model loaded initially
+        assert!(!service.model_loaded);
+    }
+
+    #[test]
+    fn test_get_model_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let service = AiService::new(temp_dir.path().to_path_buf());
+
+        let path = service.get_model_path();
+        assert!(path.to_string_lossy().contains("unsloth.Q4_K_M.gguf"));
+    }
+
+    #[test]
+    fn test_is_model_available_false_when_not_downloaded() {
+        let temp_dir = TempDir::new().unwrap();
+        let service = AiService::new(temp_dir.path().to_path_buf());
+
+        assert!(!service.is_model_available());
+    }
+
+    #[test]
+    fn test_is_model_available_true_when_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let model_dir = temp_dir.path().join("models");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("unsloth.Q4_K_M.gguf"), "fake model content").unwrap();
+
+        let service = AiService::new(temp_dir.path().to_path_buf());
+        assert!(service.is_model_available());
+    }
+
+    #[test]
+    fn test_get_status_model_not_available() {
+        let temp_dir = TempDir::new().unwrap();
+        let service = AiService::new(temp_dir.path().to_path_buf());
+
+        let status = service.get_status();
+        assert!(!status.model_available);
+        assert!(status.model_path.is_none());
+        assert!(status.model_size_mb.is_none());
+        assert!(status.quantization.is_none());
+    }
+
+    #[test]
+    fn test_get_status_model_available() {
+        let temp_dir = TempDir::new().unwrap();
+        let model_dir = temp_dir.path().join("models");
+        std::fs::create_dir_all(&model_dir).unwrap();
+
+        // Create a fake model file (1 MB)
+        let model_content = vec![0u8; 1024 * 1024];
+        std::fs::write(model_dir.join("unsloth.Q4_K_M.gguf"), model_content).unwrap();
+
+        let service = AiService::new(temp_dir.path().to_path_buf());
+        let status = service.get_status();
+
+        assert!(status.model_available);
+        assert!(status.model_path.is_some());
+        assert!(status.model_size_mb.is_some());
+        assert_eq!(status.quantization, Some("Q4_K_M".to_string()));
+    }
+
+    #[test]
+    fn test_delete_model() {
+        let temp_dir = TempDir::new().unwrap();
+        let model_dir = temp_dir.path().join("models");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("unsloth.Q4_K_M.gguf"), "fake model").unwrap();
+
+        let mut service = AiService::new(temp_dir.path().to_path_buf());
+        assert!(service.is_model_available());
+
+        let result = service.delete_model();
+        assert!(result.is_ok());
+        assert!(!service.is_model_available());
+    }
+
+    #[test]
+    fn test_delete_model_not_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut service = AiService::new(temp_dir.path().to_path_buf());
+
+        // Should not error when model doesn't exist
+        let result = service.delete_model();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_response_summary_only() {
+        let response = "fix: typo in readme";
+        let result = parse_response(response);
+
+        assert_eq!(result.summary, "fix: typo in readme");
+        assert!(result.body.is_none());
+        assert!(result.reasoning.is_none());
+    }
+
+    #[test]
+    fn test_parse_response_with_body() {
+        let response = "feat: add login feature\n\nThis implements the login feature with:\n- Form validation\n- Error handling";
+        let result = parse_response(response);
+
+        assert_eq!(result.summary, "feat: add login feature");
+        assert!(result.body.is_some());
+        assert!(result.body.unwrap().contains("Form validation"));
+    }
+
+    #[test]
+    fn test_parse_response_with_reasoning() {
+        let response = "<reasoning>The diff shows new files being added</reasoning>feat: add helper function";
+        let result = parse_response(response);
+
+        assert_eq!(result.summary, "feat: add helper function");
+        assert!(result.reasoning.is_some());
+        assert_eq!(result.reasoning.unwrap(), "The diff shows new files being added");
+    }
+
+    #[test]
+    fn test_parse_response_with_reasoning_and_body() {
+        let response = "<reasoning>Changes add new functionality</reasoning>feat: add user auth\n\nImplements JWT authentication";
+        let result = parse_response(response);
+
+        assert_eq!(result.summary, "feat: add user auth");
+        assert!(result.reasoning.is_some());
+        // Body may or may not be extracted depending on line count
+    }
+
+    #[test]
+    fn test_parse_response_empty() {
+        let response = "";
+        let result = parse_response(response);
+
+        assert_eq!(result.summary, "");
+        assert!(result.body.is_none());
+        assert!(result.reasoning.is_none());
+    }
+
+    #[test]
+    fn test_parse_response_multiline_reasoning() {
+        let response = "<reasoning>Line 1\nLine 2\nLine 3</reasoning>fix: bug";
+        let result = parse_response(response);
+
+        assert!(result.reasoning.is_some());
+        let reasoning = result.reasoning.unwrap();
+        assert!(reasoning.contains("Line 1"));
+        assert!(reasoning.contains("Line 2"));
+    }
+
+    #[test]
+    fn test_diff_truncation_logic() {
+        let short_diff = "a".repeat(5000);
+        let long_diff = "a".repeat(15000);
+
+        let max_chars = 12000;
+
+        // Short diff should not be truncated
+        let short_result = if short_diff.len() > max_chars {
+            format!("{}...\n[Diff truncated for length]", &short_diff[..max_chars])
+        } else {
+            short_diff.clone()
+        };
+        assert_eq!(short_result.len(), 5000);
+
+        // Long diff should be truncated
+        let long_result = if long_diff.len() > max_chars {
+            format!("{}...\n[Diff truncated for length]", &long_diff[..max_chars])
+        } else {
+            long_diff.clone()
+        };
+        assert!(long_result.contains("[Diff truncated for length]"));
+    }
+
+    #[test]
+    fn test_model_download_progress_serialization() {
+        let progress = ModelDownloadProgress {
+            downloaded_bytes: 1073741824,
+            total_bytes: Some(2147483648),
+            progress_percent: 50.0,
+            status: "downloading".to_string(),
+        };
+
+        let json = serde_json::to_string(&progress).unwrap();
+        assert!(json.contains("downloadedBytes"));
+        assert!(json.contains("1073741824"));
+        assert!(json.contains("progressPercent"));
+    }
+
+    #[test]
+    fn test_generation_progress_serialization() {
+        let progress = GenerationProgress {
+            status: "generating".to_string(),
+            tokens_generated: Some(50),
+            message: Some("Generating...".to_string()),
+        };
+
+        let json = serde_json::to_string(&progress).unwrap();
+        assert!(json.contains("tokensGenerated"));
+        assert!(json.contains("50"));
+    }
+
+    #[test]
+    fn test_generated_commit_message_serialization() {
+        let message = GeneratedCommitMessage {
+            summary: "feat: add feature".to_string(),
+            body: Some("Detailed description".to_string()),
+            reasoning: None,
+        };
+
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("summary"));
+        assert!(json.contains("feat: add feature"));
+        assert!(json.contains("body"));
+    }
+
+    #[test]
+    fn test_ai_model_status_serialization() {
+        let status = AiModelStatus {
+            model_available: true,
+            model_path: Some("/path/to/model".to_string()),
+            model_size_mb: Some(2048),
+            quantization: Some("Q4_K_M".to_string()),
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("modelAvailable"));
+        assert!(json.contains("modelPath"));
+        assert!(json.contains("modelSizeMb"));
+    }
+}

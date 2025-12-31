@@ -1,18 +1,18 @@
 /**
  * Profile Manager Dialog Component
- * Full CRUD interface for managing Git identity profiles
+ * Full CRUD interface for managing unified profiles (git identity + integration accounts)
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import * as gitService from '../../services/git.service.ts';
-import { workflowStore } from '../../stores/workflow.store.ts';
-import type { GitProfile } from '../../types/workflow.types.ts';
-import { PROFILE_COLORS } from '../../types/workflow.types.ts';
+import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import * as unifiedProfileService from '../../services/unified-profile.service.ts';
+import type { UnifiedProfile, ProfileIntegrationAccount, IntegrationType } from '../../types/unified-profile.types.ts';
+import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import { showToast } from '../../services/notification.service.ts';
 
-type ViewMode = 'list' | 'edit' | 'create';
+type ViewMode = 'list' | 'edit' | 'create' | 'add-account' | 'edit-account';
 
 @customElement('lv-profile-manager-dialog')
 export class LvProfileManagerDialog extends LitElement {
@@ -37,8 +37,8 @@ export class LvProfileManagerDialog extends LitElement {
         background: var(--color-bg-primary);
         border: 1px solid var(--color-border);
         border-radius: var(--radius-lg);
-        width: 600px;
-        max-height: 80vh;
+        width: 650px;
+        max-height: 85vh;
         display: flex;
         flex-direction: column;
         box-shadow: var(--shadow-xl);
@@ -132,6 +132,11 @@ export class LvProfileManagerDialog extends LitElement {
         background: var(--color-bg-hover);
       }
 
+      .btn-sm {
+        padding: var(--spacing-xs) var(--spacing-sm);
+        font-size: var(--font-size-xs);
+      }
+
       /* Profile list */
       .profile-list {
         display: flex;
@@ -189,10 +194,12 @@ export class LvProfileManagerDialog extends LitElement {
         color: var(--color-text-secondary);
       }
 
-      .profile-patterns {
+      .profile-meta {
         font-size: var(--font-size-xs);
         color: var(--color-text-tertiary);
         margin-top: 2px;
+        display: flex;
+        gap: var(--spacing-sm);
       }
 
       .profile-actions {
@@ -233,6 +240,20 @@ export class LvProfileManagerDialog extends LitElement {
       }
 
       /* Form */
+      .form-section {
+        margin-bottom: var(--spacing-lg);
+      }
+
+      .form-section-title {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+        margin-bottom: var(--spacing-sm);
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+      }
+
       .form-group {
         margin-bottom: var(--spacing-md);
       }
@@ -246,7 +267,8 @@ export class LvProfileManagerDialog extends LitElement {
       }
 
       .form-group input,
-      .form-group textarea {
+      .form-group textarea,
+      .form-group select {
         width: 100%;
         padding: var(--spacing-sm);
         background: var(--color-bg-secondary);
@@ -257,7 +279,8 @@ export class LvProfileManagerDialog extends LitElement {
       }
 
       .form-group input:focus,
-      .form-group textarea:focus {
+      .form-group textarea:focus,
+      .form-group select:focus {
         outline: none;
         border-color: var(--color-accent);
       }
@@ -344,6 +367,87 @@ export class LvProfileManagerDialog extends LitElement {
         background: var(--color-bg-hover);
         color: var(--color-text-primary);
       }
+
+      /* Accounts section */
+      .accounts-section {
+        margin-top: var(--spacing-md);
+        padding-top: var(--spacing-md);
+        border-top: 1px solid var(--color-border);
+      }
+
+      .accounts-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: var(--spacing-sm);
+      }
+
+      .accounts-list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-xs);
+      }
+
+      .account-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-sm);
+        background: var(--color-bg-tertiary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+      }
+
+      .account-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .account-icon {
+        width: 20px;
+        height: 20px;
+        flex-shrink: 0;
+      }
+
+      .account-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .account-name {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+      }
+
+      .account-detail {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-tertiary);
+      }
+
+      .account-actions {
+        display: flex;
+        gap: var(--spacing-xs);
+      }
+
+      .empty-accounts {
+        text-align: center;
+        padding: var(--spacing-md);
+        color: var(--color-text-tertiary);
+        font-size: var(--font-size-sm);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-sm);
+      }
+
+      .type-badge {
+        font-size: 10px;
+        padding: 1px 4px;
+        background: var(--color-bg-secondary);
+        border-radius: var(--radius-xs);
+        color: var(--color-text-tertiary);
+        text-transform: uppercase;
+      }
     `,
   ];
 
@@ -351,8 +455,9 @@ export class LvProfileManagerDialog extends LitElement {
   @property({ type: String }) repoPath = '';
 
   @state() private viewMode: ViewMode = 'list';
-  @state() private profiles: GitProfile[] = [];
-  @state() private editingProfile: Partial<GitProfile> | null = null;
+  @state() private profiles: UnifiedProfile[] = [];
+  @state() private editingProfile: Partial<UnifiedProfile> | null = null;
+  @state() private editingAccount: Partial<ProfileIntegrationAccount> | null = null;
   @state() private isLoading = false;
   @state() private isSaving = false;
 
@@ -360,15 +465,15 @@ export class LvProfileManagerDialog extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
-    // Get initial state
-    const initialState = workflowStore.getState();
+    // Get initial state from unified profile store
+    const initialState = unifiedProfileStore.getState();
     this.profiles = initialState.profiles;
-    this.isLoading = initialState.isLoadingProfiles;
+    this.isLoading = initialState.isLoading;
 
     // Subscribe to store changes
-    this.unsubscribeStore = workflowStore.subscribe((state) => {
+    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
       this.profiles = state.profiles;
-      this.isLoading = state.isLoadingProfiles;
+      this.isLoading = state.isLoading;
     });
   }
 
@@ -384,13 +489,14 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private async loadProfiles(): Promise<void> {
-    await gitService.loadProfiles();
+    await unifiedProfileService.loadUnifiedProfiles();
   }
 
   private handleClose(): void {
     this.open = false;
     this.viewMode = 'list';
     this.editingProfile = null;
+    this.editingAccount = null;
     this.dispatchEvent(new CustomEvent('close'));
   }
 
@@ -403,48 +509,56 @@ export class LvProfileManagerDialog extends LitElement {
       urlPatterns: [],
       isDefault: false,
       color: PROFILE_COLORS[0],
+      integrationAccounts: [],
     };
     this.viewMode = 'create';
   }
 
-  private handleEdit(profile: GitProfile): void {
-    this.editingProfile = { ...profile };
+  private handleEdit(profile: UnifiedProfile): void {
+    this.editingProfile = { ...profile, integrationAccounts: [...profile.integrationAccounts] };
     this.viewMode = 'edit';
   }
 
   private handleBack(): void {
-    this.viewMode = 'list';
-    this.editingProfile = null;
+    if (this.viewMode === 'add-account' || this.viewMode === 'edit-account') {
+      this.viewMode = this.editingProfile?.id ? 'edit' : 'create';
+      this.editingAccount = null;
+    } else {
+      this.viewMode = 'list';
+      this.editingProfile = null;
+    }
   }
 
-  private async handleDelete(profile: GitProfile, e: Event): Promise<void> {
+  private async handleDelete(profile: UnifiedProfile, e: Event): Promise<void> {
     e.stopPropagation();
-    if (!confirm(`Delete profile "${profile.name}"?`)) {
+    if (!confirm(`Delete profile "${profile.name}"? This will also remove all associated integration accounts.`)) {
       return;
     }
 
-    const result = await gitService.deleteProfile(profile.id);
-    if (result.success) {
+    try {
+      await unifiedProfileService.deleteUnifiedProfile(profile.id);
       showToast('Profile deleted', 'success');
-    } else {
-      showToast(`Failed to delete profile: ${result.error?.message}`, 'error');
+    } catch (error) {
+      showToast(`Failed to delete profile: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     }
   }
 
-  private async handleApply(profile: GitProfile, e: Event): Promise<void> {
+  private async handleApply(profile: UnifiedProfile, e: Event): Promise<void> {
     e.stopPropagation();
     if (!this.repoPath) {
       showToast('No repository open', 'error');
       return;
     }
 
-    const result = await gitService.applyProfile(this.repoPath, profile.id);
-    if (!result.success) {
-      showToast(`Failed to apply profile: ${result.error?.message}`, 'error');
+    try {
+      await unifiedProfileService.applyUnifiedProfile(this.repoPath, profile.id);
+      showToast(`Applied profile "${profile.name}"`, 'success');
+    } catch (error) {
+      showToast(`Failed to apply profile: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     }
   }
 
-  private updateEditingProfile(field: keyof GitProfile, value: unknown): void {
+  private updateEditingProfile(field: keyof UnifiedProfile, value: unknown): void {
     if (this.editingProfile) {
       this.editingProfile = { ...this.editingProfile, [field]: value };
     }
@@ -469,7 +583,7 @@ export class LvProfileManagerDialog extends LitElement {
 
     this.isSaving = true;
 
-    const profile: GitProfile = {
+    const profile: UnifiedProfile = {
       id: this.editingProfile.id ?? crypto.randomUUID(),
       name: this.editingProfile.name.trim(),
       gitName: this.editingProfile.gitName.trim(),
@@ -478,16 +592,17 @@ export class LvProfileManagerDialog extends LitElement {
       urlPatterns: this.editingProfile.urlPatterns ?? [],
       isDefault: this.editingProfile.isDefault ?? false,
       color: this.editingProfile.color ?? PROFILE_COLORS[0],
+      integrationAccounts: this.editingProfile.integrationAccounts ?? [],
     };
 
-    const result = await gitService.saveProfile(profile);
-    this.isSaving = false;
-
-    if (result.success) {
+    try {
+      await unifiedProfileService.saveUnifiedProfile(profile);
       showToast(this.viewMode === 'create' ? 'Profile created' : 'Profile saved', 'success');
       this.handleBack();
-    } else {
-      showToast(`Failed to save profile: ${result.error?.message}`, 'error');
+    } catch (error) {
+      showToast(`Failed to save profile: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
+    } finally {
+      this.isSaving = false;
     }
   }
 
@@ -500,6 +615,78 @@ export class LvProfileManagerDialog extends LitElement {
     this.updateEditingProfile('urlPatterns', patterns);
   }
 
+  // Account management
+  private handleAddAccount(): void {
+    this.editingAccount = {
+      name: '',
+      integrationType: 'github',
+      config: {},
+      color: null,
+      cachedUser: null,
+      isDefaultForType: false,
+    };
+    this.viewMode = 'add-account';
+  }
+
+  private handleEditAccount(account: ProfileIntegrationAccount): void {
+    this.editingAccount = { ...account };
+    this.viewMode = 'edit-account';
+  }
+
+  private handleRemoveAccount(accountId: string): void {
+    if (!this.editingProfile || !confirm('Remove this account from the profile?')) return;
+
+    const accounts = this.editingProfile.integrationAccounts?.filter((a) => a.id !== accountId) ?? [];
+    this.editingProfile = { ...this.editingProfile, integrationAccounts: accounts };
+  }
+
+  private updateEditingAccount(field: keyof ProfileIntegrationAccount, value: unknown): void {
+    if (this.editingAccount) {
+      this.editingAccount = { ...this.editingAccount, [field]: value };
+    }
+  }
+
+  private handleSaveAccount(): void {
+    if (!this.editingAccount || !this.editingProfile) return;
+
+    // Validation
+    if (!this.editingAccount.name?.trim()) {
+      showToast('Account name is required', 'error');
+      return;
+    }
+
+    const account: ProfileIntegrationAccount = {
+      id: this.editingAccount.id ?? crypto.randomUUID(),
+      name: this.editingAccount.name.trim(),
+      integrationType: this.editingAccount.integrationType ?? 'github',
+      config: this.editingAccount.config ?? {},
+      color: this.editingAccount.color ?? null,
+      cachedUser: this.editingAccount.cachedUser ?? null,
+      isDefaultForType: this.editingAccount.isDefaultForType ?? false,
+    };
+
+    const accounts = [...(this.editingProfile.integrationAccounts ?? [])];
+    const existingIndex = accounts.findIndex((a) => a.id === account.id);
+
+    if (existingIndex >= 0) {
+      accounts[existingIndex] = account;
+    } else {
+      accounts.push(account);
+    }
+
+    // If this is default for type, unset others of same type
+    if (account.isDefaultForType) {
+      accounts.forEach((a) => {
+        if (a.id !== account.id && a.integrationType === account.integrationType) {
+          a.isDefaultForType = false;
+        }
+      });
+    }
+
+    this.editingProfile = { ...this.editingProfile, integrationAccounts: accounts };
+    this.handleBack();
+  }
+
   render() {
     if (!this.open) return nothing;
 
@@ -510,7 +697,7 @@ export class LvProfileManagerDialog extends LitElement {
             <div class="dialog-title">
               ${this.viewMode !== 'list'
                 ? html`
-                    <button class="back-btn" @click=${this.handleBack} title="Back to list">
+                    <button class="back-btn" @click=${this.handleBack} title="Back">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="15 18 9 12 15 6"></polyline>
                       </svg>
@@ -521,11 +708,7 @@ export class LvProfileManagerDialog extends LitElement {
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
                 <circle cx="12" cy="7" r="4"></circle>
               </svg>
-              ${this.viewMode === 'list'
-                ? 'Git Profiles'
-                : this.viewMode === 'create'
-                  ? 'New Profile'
-                  : 'Edit Profile'}
+              ${this.getDialogTitle()}
             </div>
             <button class="close-btn" @click=${this.handleClose}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -535,29 +718,79 @@ export class LvProfileManagerDialog extends LitElement {
             </button>
           </div>
           <div class="dialog-content">
-            ${this.viewMode === 'list' ? this.renderProfileList() : this.renderProfileForm()}
+            ${this.renderContent()}
           </div>
           <div class="dialog-footer">
-            ${this.viewMode === 'list'
-              ? html`
-                  <button class="btn btn-primary" @click=${this.handleCreateNew}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <line x1="12" y1="5" x2="12" y2="19"></line>
-                      <line x1="5" y1="12" x2="19" y2="12"></line>
-                    </svg>
-                    New Profile
-                  </button>
-                `
-              : html`
-                  <button class="btn btn-secondary" @click=${this.handleBack}>Cancel</button>
-                  <button class="btn btn-primary" @click=${this.handleSave} ?disabled=${this.isSaving}>
-                    ${this.isSaving ? 'Saving...' : 'Save Profile'}
-                  </button>
-                `}
+            ${this.renderFooter()}
           </div>
         </div>
       </div>
     `;
+  }
+
+  private getDialogTitle(): string {
+    switch (this.viewMode) {
+      case 'list':
+        return 'Profiles';
+      case 'create':
+        return 'New Profile';
+      case 'edit':
+        return 'Edit Profile';
+      case 'add-account':
+        return 'Add Account';
+      case 'edit-account':
+        return 'Edit Account';
+      default:
+        return 'Profiles';
+    }
+  }
+
+  private renderContent() {
+    switch (this.viewMode) {
+      case 'list':
+        return this.renderProfileList();
+      case 'create':
+      case 'edit':
+        return this.renderProfileForm();
+      case 'add-account':
+      case 'edit-account':
+        return this.renderAccountForm();
+      default:
+        return nothing;
+    }
+  }
+
+  private renderFooter() {
+    switch (this.viewMode) {
+      case 'list':
+        return html`
+          <button class="btn btn-primary" @click=${this.handleCreateNew}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            New Profile
+          </button>
+        `;
+      case 'create':
+      case 'edit':
+        return html`
+          <button class="btn btn-secondary" @click=${this.handleBack}>Cancel</button>
+          <button class="btn btn-primary" @click=${this.handleSave} ?disabled=${this.isSaving}>
+            ${this.isSaving ? 'Saving...' : 'Save Profile'}
+          </button>
+        `;
+      case 'add-account':
+      case 'edit-account':
+        return html`
+          <button class="btn btn-secondary" @click=${this.handleBack}>Cancel</button>
+          <button class="btn btn-primary" @click=${this.handleSaveAccount}>
+            ${this.viewMode === 'add-account' ? 'Add Account' : 'Save Account'}
+          </button>
+        `;
+      default:
+        return nothing;
+    }
   }
 
   private renderProfileList() {
@@ -574,7 +807,7 @@ export class LvProfileManagerDialog extends LitElement {
           </svg>
           <div>No profiles yet</div>
           <p style="font-size: var(--font-size-sm); margin-top: var(--spacing-sm);">
-            Create profiles to quickly switch between different Git identities
+            Create profiles to manage git identities and integration accounts together
           </p>
         </div>
       `;
@@ -595,9 +828,14 @@ export class LvProfileManagerDialog extends LitElement {
                   ${profile.isDefault ? html`<span class="default-badge">Default</span>` : nothing}
                 </div>
                 <div class="profile-email">${profile.gitName} &lt;${profile.gitEmail}&gt;</div>
-                ${profile.urlPatterns.length > 0
-                  ? html`<div class="profile-patterns">${profile.urlPatterns.join(', ')}</div>`
-                  : nothing}
+                <div class="profile-meta">
+                  ${profile.integrationAccounts.length > 0
+                    ? html`<span>${profile.integrationAccounts.length} account${profile.integrationAccounts.length > 1 ? 's' : ''}</span>`
+                    : html`<span>No accounts</span>`}
+                  ${profile.urlPatterns.length > 0
+                    ? html`<span>· ${profile.urlPatterns.length} pattern${profile.urlPatterns.length > 1 ? 's' : ''}</span>`
+                    : nothing}
+                </div>
               </div>
               <div class="profile-actions">
                 ${this.repoPath
@@ -635,84 +873,311 @@ export class LvProfileManagerDialog extends LitElement {
     if (!this.editingProfile) return nothing;
 
     return html`
-      <div class="form-group">
-        <label>Profile Name</label>
-        <input
-          type="text"
-          placeholder="e.g., Work, Personal, Open Source"
-          .value=${this.editingProfile.name ?? ''}
-          @input=${(e: Event) => this.updateEditingProfile('name', (e.target as HTMLInputElement).value)}
-        />
-      </div>
+      <div class="form-section">
+        <div class="form-section-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle>
+          </svg>
+          Profile Settings
+        </div>
 
-      <div class="form-row">
         <div class="form-group">
-          <label>Git Name</label>
+          <label>Profile Name</label>
           <input
             type="text"
-            placeholder="John Doe"
-            .value=${this.editingProfile.gitName ?? ''}
-            @input=${(e: Event) => this.updateEditingProfile('gitName', (e.target as HTMLInputElement).value)}
+            placeholder="e.g., Work, Personal, Open Source"
+            .value=${this.editingProfile.name ?? ''}
+            @input=${(e: Event) => this.updateEditingProfile('name', (e.target as HTMLInputElement).value)}
           />
         </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Git Name</label>
+            <input
+              type="text"
+              placeholder="John Doe"
+              .value=${this.editingProfile.gitName ?? ''}
+              @input=${(e: Event) => this.updateEditingProfile('gitName', (e.target as HTMLInputElement).value)}
+            />
+          </div>
+          <div class="form-group">
+            <label>Git Email</label>
+            <input
+              type="email"
+              placeholder="john@example.com"
+              .value=${this.editingProfile.gitEmail ?? ''}
+              @input=${(e: Event) => this.updateEditingProfile('gitEmail', (e.target as HTMLInputElement).value)}
+            />
+          </div>
+        </div>
+
         <div class="form-group">
-          <label>Git Email</label>
+          <label>GPG Signing Key (optional)</label>
           <input
-            type="email"
-            placeholder="john@example.com"
-            .value=${this.editingProfile.gitEmail ?? ''}
-            @input=${(e: Event) => this.updateEditingProfile('gitEmail', (e.target as HTMLInputElement).value)}
+            type="text"
+            placeholder="Key ID or fingerprint"
+            .value=${this.editingProfile.signingKey ?? ''}
+            @input=${(e: Event) => this.updateEditingProfile('signingKey', (e.target as HTMLInputElement).value)}
           />
+        </div>
+
+        <div class="form-group">
+          <label>URL Patterns (one per line)</label>
+          <textarea
+            placeholder="github.com/mycompany/*&#10;gitlab.com/work-projects/*"
+            .value=${(this.editingProfile.urlPatterns ?? []).join('\n')}
+            @input=${this.handlePatternsChange}
+          ></textarea>
+          <div class="form-hint">
+            Auto-detect which profile to use based on repository URL. Supports wildcards (*).
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Color</label>
+          <div class="color-picker">
+            ${PROFILE_COLORS.map(
+              (color) => html`
+                <div
+                  class="color-option ${this.editingProfile?.color === color ? 'selected' : ''}"
+                  style="background: ${color}"
+                  @click=${() => this.updateEditingProfile('color', color)}
+                ></div>
+              `
+            )}
+          </div>
+        </div>
+
+        <div class="checkbox-row">
+          <input
+            type="checkbox"
+            id="isDefault"
+            .checked=${this.editingProfile.isDefault ?? false}
+            @change=${(e: Event) => this.updateEditingProfile('isDefault', (e.target as HTMLInputElement).checked)}
+          />
+          <label for="isDefault">Set as default profile</label>
         </div>
       </div>
 
+      <!-- Integration Accounts Section -->
+      <div class="accounts-section">
+        <div class="accounts-header">
+          <div class="form-section-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+              <circle cx="9" cy="7" r="4"></circle>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+            </svg>
+            Integration Accounts
+          </div>
+          <button class="btn btn-sm" @click=${this.handleAddAccount}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Add
+          </button>
+        </div>
+
+        ${(this.editingProfile.integrationAccounts ?? []).length === 0
+          ? html`
+              <div class="empty-accounts">
+                No integration accounts linked to this profile.
+                <br />
+                Add accounts to connect GitHub, GitLab, or Azure DevOps.
+              </div>
+            `
+          : html`
+              <div class="accounts-list">
+                ${(this.editingProfile.integrationAccounts ?? []).map((account) => this.renderAccountItem(account))}
+              </div>
+            `}
+      </div>
+    `;
+  }
+
+  private renderAccountItem(account: ProfileIntegrationAccount) {
+    return html`
+      <div class="account-item">
+        ${this.renderAccountIcon(account.integrationType)}
+        <div class="account-info">
+          <div class="account-name">
+            ${account.name}
+            ${account.isDefaultForType ? html`<span class="default-badge">Default</span>` : nothing}
+            <span class="type-badge">${account.integrationType}</span>
+          </div>
+          ${account.cachedUser
+            ? html`<div class="account-detail">${account.cachedUser.login || account.cachedUser.name}</div>`
+            : this.getAccountConfigDetail(account)
+              ? html`<div class="account-detail">${this.getAccountConfigDetail(account)}</div>`
+              : nothing}
+        </div>
+        <div class="account-actions">
+          <button class="action-btn" @click=${() => this.handleEditAccount(account)} title="Edit account">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+            </svg>
+          </button>
+          <button class="action-btn delete" @click=${() => this.handleRemoveAccount(account.id)} title="Remove account">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderAccountIcon(type: IntegrationType) {
+    switch (type) {
+      case 'github':
+        return html`
+          <svg class="account-icon" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+          </svg>
+        `;
+      case 'gitlab':
+        return html`
+          <svg class="account-icon" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M22.65 14.39L12 22.13 1.35 14.39a.84.84 0 0 1-.3-.94l1.22-3.78 2.44-7.51A.42.42 0 0 1 4.82 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.49h8.1l2.44-7.51A.42.42 0 0 1 18.6 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.51L23 13.45a.84.84 0 0 1-.35.94z"/>
+          </svg>
+        `;
+      case 'azure-devops':
+        return html`
+          <svg class="account-icon" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M0 8.877L2.247 5.91l8.405-3.416V.022l7.37 5.393L2.966 8.338v8.225L0 15.707zm24-4.45v14.651l-5.753 4.9-9.303-3.057v3.056l-5.978-7.416 15.057 1.798V5.415z"/>
+          </svg>
+        `;
+      default:
+        return html`
+          <svg class="account-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+          </svg>
+        `;
+    }
+  }
+
+  private getAccountConfigDetail(account: ProfileIntegrationAccount): string | null {
+    if (account.integrationType === 'gitlab' && account.config.instanceUrl) {
+      return account.config.instanceUrl as string;
+    }
+    if (account.integrationType === 'azure-devops' && account.config.organization) {
+      return account.config.organization as string;
+    }
+    return null;
+  }
+
+  private renderAccountForm() {
+    if (!this.editingAccount) return nothing;
+
+    return html`
       <div class="form-group">
-        <label>GPG Signing Key (optional)</label>
+        <label>Account Name</label>
         <input
           type="text"
-          placeholder="Key ID or fingerprint"
-          .value=${this.editingProfile.signingKey ?? ''}
-          @input=${(e: Event) => this.updateEditingProfile('signingKey', (e.target as HTMLInputElement).value)}
+          placeholder="e.g., Work GitHub, Personal GitLab"
+          .value=${this.editingAccount.name ?? ''}
+          @input=${(e: Event) => this.updateEditingAccount('name', (e.target as HTMLInputElement).value)}
         />
       </div>
 
       <div class="form-group">
-        <label>URL Patterns (one per line)</label>
-        <textarea
-          placeholder="github.com/mycompany/*&#10;gitlab.com/work-projects/*"
-          .value=${(this.editingProfile.urlPatterns ?? []).join('\n')}
-          @input=${this.handlePatternsChange}
-        ></textarea>
-        <div class="form-hint">
-          Use patterns to auto-detect which profile to use. Supports wildcards like * for matching.
-        </div>
+        <label>Integration Type</label>
+        <select
+          .value=${this.editingAccount.integrationType ?? 'github'}
+          @change=${(e: Event) => this.updateEditingAccount('integrationType', (e.target as HTMLSelectElement).value as IntegrationType)}
+        >
+          <option value="github" ?selected=${this.editingAccount.integrationType === 'github'}>GitHub</option>
+          <option value="gitlab" ?selected=${this.editingAccount.integrationType === 'gitlab'}>GitLab</option>
+          <option value="azure-devops" ?selected=${this.editingAccount.integrationType === 'azure-devops'}>Azure DevOps</option>
+        </select>
       </div>
 
+      ${this.renderAccountConfigFields()}
+
       <div class="form-group">
-        <label>Color</label>
+        <label>Color (optional)</label>
         <div class="color-picker">
-          ${PROFILE_COLORS.map(
+          <div
+            class="color-option ${!this.editingAccount.color ? 'selected' : ''}"
+            style="background: var(--color-bg-tertiary); border: 1px dashed var(--color-border);"
+            @click=${() => this.updateEditingAccount('color', null)}
+            title="Inherit from profile"
+          ></div>
+          ${ACCOUNT_COLORS.map(
             (color) => html`
               <div
-                class="color-option ${this.editingProfile?.color === color ? 'selected' : ''}"
+                class="color-option ${this.editingAccount?.color === color ? 'selected' : ''}"
                 style="background: ${color}"
-                @click=${() => this.updateEditingProfile('color', color)}
+                @click=${() => this.updateEditingAccount('color', color)}
               ></div>
             `
           )}
         </div>
+        <div class="form-hint">Leave unset to inherit the profile color</div>
       </div>
 
       <div class="checkbox-row">
         <input
           type="checkbox"
-          id="isDefault"
-          .checked=${this.editingProfile.isDefault ?? false}
-          @change=${(e: Event) => this.updateEditingProfile('isDefault', (e.target as HTMLInputElement).checked)}
+          id="isDefaultForType"
+          .checked=${this.editingAccount.isDefaultForType ?? false}
+          @change=${(e: Event) => this.updateEditingAccount('isDefaultForType', (e.target as HTMLInputElement).checked)}
         />
-        <label for="isDefault">Set as default profile</label>
+        <label for="isDefaultForType">Set as default ${INTEGRATION_TYPE_NAMES[this.editingAccount.integrationType ?? 'github']} account for this profile</label>
+      </div>
+
+      <div class="form-hint" style="margin-top: var(--spacing-sm);">
+        Note: Authentication tokens are configured separately in the integration dialogs (GitHub, GitLab, Azure DevOps).
       </div>
     `;
+  }
+
+  private renderAccountConfigFields() {
+    const type = this.editingAccount?.integrationType;
+
+    if (type === 'gitlab') {
+      return html`
+        <div class="form-group">
+          <label>GitLab Instance URL (optional)</label>
+          <input
+            type="url"
+            placeholder="https://gitlab.com"
+            .value=${(this.editingAccount?.config?.instanceUrl as string) ?? ''}
+            @input=${(e: Event) => this.updateEditingAccount('config', {
+              ...this.editingAccount?.config,
+              instanceUrl: (e.target as HTMLInputElement).value || undefined,
+            })}
+          />
+          <div class="form-hint">Leave empty for gitlab.com, or enter your self-hosted GitLab URL</div>
+        </div>
+      `;
+    }
+
+    if (type === 'azure-devops') {
+      return html`
+        <div class="form-group">
+          <label>Organization</label>
+          <input
+            type="text"
+            placeholder="my-organization"
+            .value=${(this.editingAccount?.config?.organization as string) ?? ''}
+            @input=${(e: Event) => this.updateEditingAccount('config', {
+              ...this.editingAccount?.config,
+              organization: (e.target as HTMLInputElement).value || undefined,
+            })}
+          />
+          <div class="form-hint">Your Azure DevOps organization name</div>
+        </div>
+      `;
+    }
+
+    return nothing;
   }
 }
 

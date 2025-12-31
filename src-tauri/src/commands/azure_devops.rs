@@ -384,6 +384,18 @@ fn parse_ado_url(url: &str) -> Option<(String, String, String)> {
     // https://{org}.visualstudio.com/{project}/_git/{repo}
     // git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
 
+    // Check SSH format first (before HTTPS check since it also contains dev.azure.com)
+    if url.starts_with("git@ssh.dev.azure.com:v3/") {
+        let path = url.trim_start_matches("git@ssh.dev.azure.com:v3/");
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 3 {
+            let org = parts[0].to_string();
+            let project = parts[1].to_string();
+            let repo = parts[2].trim_end_matches(".git").to_string();
+            return Some((org, project, repo));
+        }
+    }
+
     if url.contains("dev.azure.com") || url.contains("visualstudio.com") {
         // HTTPS format
         let url = url
@@ -417,16 +429,6 @@ fn parse_ado_url(url: &str) -> Option<(String, String, String)> {
                 let repo = parts[3].trim_end_matches(".git").to_string();
                 return Some((org, project, repo));
             }
-        }
-    } else if url.starts_with("git@ssh.dev.azure.com:v3/") {
-        // SSH format: git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
-        let path = url.trim_start_matches("git@ssh.dev.azure.com:v3/");
-        let parts: Vec<&str> = path.split('/').collect();
-        if parts.len() >= 3 {
-            let org = parts[0].to_string();
-            let project = parts[1].to_string();
-            let repo = parts[2].trim_end_matches(".git").to_string();
-            return Some((org, project, repo));
         }
     }
 
@@ -954,4 +956,298 @@ pub async fn list_ado_pipeline_runs(
             url: b.links.web.href,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ado_url_https_standard() {
+        let url = "https://dev.azure.com/mycompany/MyProject/_git/frontend";
+        let result = parse_ado_url(url);
+
+        assert!(result.is_some());
+        let (org, project, repo) = result.unwrap();
+        assert_eq!(org, "mycompany");
+        assert_eq!(project, "MyProject");
+        assert_eq!(repo, "frontend");
+    }
+
+    #[test]
+    fn test_parse_ado_url_https_with_username() {
+        let url = "https://mycompany@dev.azure.com/mycompany/MyProject/_git/backend";
+        let result = parse_ado_url(url);
+
+        assert!(result.is_some());
+        let (org, project, repo) = result.unwrap();
+        assert_eq!(org, "mycompany");
+        assert_eq!(project, "MyProject");
+        assert_eq!(repo, "backend");
+    }
+
+    #[test]
+    fn test_parse_ado_url_https_with_git_suffix() {
+        let url = "https://dev.azure.com/mycompany/MyProject/_git/repo.git";
+        let result = parse_ado_url(url);
+
+        assert!(result.is_some());
+        let (_, _, repo) = result.unwrap();
+        assert_eq!(repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_ado_url_visualstudio() {
+        let url = "https://mycompany.visualstudio.com/MyProject/_git/repo";
+        let result = parse_ado_url(url);
+
+        assert!(result.is_some());
+        let (org, project, repo) = result.unwrap();
+        assert_eq!(org, "mycompany");
+        assert_eq!(project, "MyProject");
+        assert_eq!(repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_ado_url_ssh() {
+        let url = "git@ssh.dev.azure.com:v3/mycompany/MyProject/repo";
+        let result = parse_ado_url(url);
+
+        assert!(result.is_some());
+        let (org, project, repo) = result.unwrap();
+        assert_eq!(org, "mycompany");
+        assert_eq!(project, "MyProject");
+        assert_eq!(repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_ado_url_ssh_with_git_suffix() {
+        let url = "git@ssh.dev.azure.com:v3/mycompany/MyProject/repo.git";
+        let result = parse_ado_url(url);
+
+        assert!(result.is_some());
+        let (_, _, repo) = result.unwrap();
+        assert_eq!(repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_ado_url_github_returns_none() {
+        let url = "https://github.com/user/repo";
+        let result = parse_ado_url(url);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_ado_url_gitlab_returns_none() {
+        let url = "https://gitlab.com/user/repo";
+        let result = parse_ado_url(url);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_ado_url_malformed_returns_none() {
+        let url = "https://dev.azure.com/org/project";
+        let result = parse_ado_url(url);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_ado_url_empty_returns_none() {
+        let url = "";
+        let result = parse_ado_url(url);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_auth_header() {
+        let token = "myToken123";
+        let header = get_auth_header(token);
+
+        assert!(header.starts_with("Basic "));
+        // Decode and verify format
+        let encoded = header.trim_start_matches("Basic ");
+        let decoded = String::from_utf8(
+            base64::Engine::decode(&BASE64, encoded).unwrap()
+        ).unwrap();
+        assert_eq!(decoded, ":myToken123");
+    }
+
+    #[test]
+    fn test_build_api_url() {
+        let url = build_api_url("myorg", "myproject", "git/repositories");
+
+        assert!(url.contains("dev.azure.com/myorg/myproject"));
+        assert!(url.contains("_apis/git/repositories"));
+        assert!(url.contains("api-version=7.1"));
+    }
+
+    #[test]
+    fn test_build_api_url_with_params() {
+        let url = build_api_url_with_params(
+            "myorg",
+            "myproject",
+            "git/pullrequests",
+            "status=active&top=10"
+        );
+
+        assert!(url.contains("api-version=7.1"));
+        assert!(url.contains("status=active"));
+        assert!(url.contains("top=10"));
+    }
+
+    #[test]
+    fn test_resolve_ado_token_valid() {
+        let result = resolve_ado_token(Some("valid-token".to_string()));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "valid-token");
+    }
+
+    #[test]
+    fn test_resolve_ado_token_empty() {
+        let result = resolve_ado_token(Some("".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_ado_token_none() {
+        let result = resolve_ado_token(None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ado_user_serialization() {
+        let user = AdoUser {
+            id: "user-123".to_string(),
+            display_name: "John Doe".to_string(),
+            unique_name: "john@company.com".to_string(),
+            image_url: Some("https://example.com/avatar.png".to_string()),
+        };
+
+        let json = serde_json::to_string(&user).unwrap();
+        assert!(json.contains("displayName"));
+        assert!(json.contains("John Doe"));
+        assert!(json.contains("uniqueName"));
+    }
+
+    #[test]
+    fn test_ado_connection_status_connected() {
+        let status = AdoConnectionStatus {
+            connected: true,
+            user: Some(AdoUser {
+                id: "1".to_string(),
+                display_name: "User".to_string(),
+                unique_name: "user@test.com".to_string(),
+                image_url: None,
+            }),
+            organization: Some("myorg".to_string()),
+        };
+
+        assert!(status.connected);
+        assert!(status.user.is_some());
+    }
+
+    #[test]
+    fn test_ado_connection_status_disconnected() {
+        let status = AdoConnectionStatus {
+            connected: false,
+            user: None,
+            organization: Some("myorg".to_string()),
+        };
+
+        assert!(!status.connected);
+        assert!(status.user.is_none());
+    }
+
+    #[test]
+    fn test_detected_ado_repo_serialization() {
+        let repo = DetectedAdoRepo {
+            organization: "mycompany".to_string(),
+            project: "MyProject".to_string(),
+            repository: "frontend".to_string(),
+            remote_name: "origin".to_string(),
+        };
+
+        let json = serde_json::to_string(&repo).unwrap();
+        assert!(json.contains("organization"));
+        assert!(json.contains("mycompany"));
+        assert!(json.contains("remoteName"));
+    }
+
+    #[test]
+    fn test_ado_pull_request_serialization() {
+        let pr = AdoPullRequest {
+            pull_request_id: 123,
+            title: "Test PR".to_string(),
+            description: Some("Description".to_string()),
+            status: "active".to_string(),
+            created_by: AdoUser {
+                id: "1".to_string(),
+                display_name: "User".to_string(),
+                unique_name: "user@test.com".to_string(),
+                image_url: None,
+            },
+            creation_date: "2024-01-15T10:00:00Z".to_string(),
+            source_ref_name: "feature/test".to_string(),
+            target_ref_name: "main".to_string(),
+            is_draft: false,
+            url: "https://dev.azure.com/org/proj/_git/repo/pullrequest/123".to_string(),
+            repository_id: "repo-id".to_string(),
+        };
+
+        let json = serde_json::to_string(&pr).unwrap();
+        assert!(json.contains("pullRequestId"));
+        assert!(json.contains("123"));
+        assert!(json.contains("sourceRefName"));
+        assert!(json.contains("isDraft"));
+    }
+
+    #[test]
+    fn test_create_ado_pull_request_input_serialization() {
+        let input = CreateAdoPullRequestInput {
+            title: "New Feature".to_string(),
+            description: Some("Adds a new feature".to_string()),
+            source_ref_name: "feature/new".to_string(),
+            target_ref_name: "main".to_string(),
+            is_draft: Some(true),
+        };
+
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(json.contains("title"));
+        assert!(json.contains("sourceRefName"));
+    }
+
+    #[test]
+    fn test_ado_work_item_serialization() {
+        let work_item = AdoWorkItem {
+            id: 456,
+            title: "Implement feature".to_string(),
+            work_item_type: "User Story".to_string(),
+            state: "Active".to_string(),
+            assigned_to: None,
+            created_date: "2024-01-10T08:00:00Z".to_string(),
+            url: "https://dev.azure.com/org/_workitems/edit/456".to_string(),
+        };
+
+        let json = serde_json::to_string(&work_item).unwrap();
+        assert!(json.contains("workItemType"));
+        assert!(json.contains("User Story"));
+    }
+
+    #[test]
+    fn test_ado_pipeline_run_serialization() {
+        let run = AdoPipelineRun {
+            id: 1234,
+            name: "Build #1234".to_string(),
+            state: "completed".to_string(),
+            result: Some("succeeded".to_string()),
+            created_date: "2024-01-15T10:00:00Z".to_string(),
+            finished_date: Some("2024-01-15T10:15:00Z".to_string()),
+            source_branch: "main".to_string(),
+            url: "https://dev.azure.com/org/proj/_build/results?buildId=1234".to_string(),
+        };
+
+        let json = serde_json::to_string(&run).unwrap();
+        assert!(json.contains("sourceBranch"));
+        assert!(json.contains("finishedDate"));
+    }
 }

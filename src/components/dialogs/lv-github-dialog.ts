@@ -19,9 +19,10 @@ import type {
   ReleaseSummary,
   CreateReleaseInput,
 } from '../../services/git.service.ts';
-import { integrationAccountsStore } from '../../stores/integration-accounts.store.ts';
-import * as accountsService from '../../services/integration-accounts.service.ts';
-import type { IntegrationAccount } from '../../types/integration-accounts.types.ts';
+import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import * as unifiedProfileService from '../../services/unified-profile.service.ts';
+import type { ProfileIntegrationAccount } from '../../types/unified-profile.types.ts';
+import * as credentialService from '../../services/credential.service.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
@@ -631,8 +632,8 @@ export class LvGitHubDialog extends LitElement {
   @state() private prFilter: 'open' | 'closed' | 'all' = 'open';
   @state() private issueFilter: 'open' | 'closed' | 'all' = 'open';
 
-  // Multi-account support
-  @state() private accounts: IntegrationAccount[] = [];
+  // Multi-account support (from active unified profile)
+  @state() private accounts: ProfileIntegrationAccount[] = [];
   @state() private selectedAccountId: string | null = null;
 
   private unsubscribeStore?: () => void;
@@ -663,27 +664,29 @@ export class LvGitHubDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
 
-    // Subscribe to accounts store
-    this.unsubscribeStore = integrationAccountsStore.subscribe((state) => {
-      this.accounts = state.accounts.filter((a) => a.integrationType === 'github');
-      // If no account selected, try to select the active one or default
-      if (!this.selectedAccountId && this.accounts.length > 0) {
-        const activeAccount = state.activeAccounts['github'];
-        if (activeAccount) {
-          this.selectedAccountId = activeAccount.id;
-        } else {
-          const defaultAccount = this.accounts.find((a) => a.isDefault);
+    // Subscribe to unified profile store - get accounts from active profile
+    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
+      const activeProfile = state.activeProfile;
+      if (activeProfile) {
+        this.accounts = activeProfile.integrationAccounts.filter((a) => a.integrationType === 'github');
+        // If no account selected, try to select the default one
+        if (!this.selectedAccountId && this.accounts.length > 0) {
+          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
           this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
         }
+      } else {
+        this.accounts = [];
       }
     });
 
-    // Initialize store with accounts
-    const state = integrationAccountsStore.getState();
-    this.accounts = state.accounts.filter((a) => a.integrationType === 'github');
-    if (this.accounts.length > 0 && !this.selectedAccountId) {
-      const activeAccount = state.activeAccounts['github'];
-      this.selectedAccountId = activeAccount?.id ?? this.accounts.find((a) => a.isDefault)?.id ?? this.accounts[0]?.id ?? null;
+    // Initialize from current state
+    const state = unifiedProfileStore.getState();
+    if (state.activeProfile) {
+      this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'github');
+      if (this.accounts.length > 0 && !this.selectedAccountId) {
+        const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
+        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+      }
     }
 
     if (this.open) {
@@ -710,15 +713,17 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
-      // Ensure accounts are loaded from disk into store
-      await accountsService.loadAccountsIntoStore();
+      // Ensure unified profiles are loaded
+      await unifiedProfileService.loadUnifiedProfiles();
 
       // Re-sync local state with store after loading
-      const state = integrationAccountsStore.getState();
-      this.accounts = state.accounts.filter((a) => a.integrationType === 'github');
-      if (this.accounts.length > 0 && !this.selectedAccountId) {
-        const activeAccount = state.activeAccounts['github'];
-        this.selectedAccountId = activeAccount?.id ?? this.accounts.find((a) => a.isDefault)?.id ?? this.accounts[0]?.id ?? null;
+      const state = unifiedProfileStore.getState();
+      if (state.activeProfile) {
+        this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'github');
+        if (this.accounts.length > 0 && !this.selectedAccountId) {
+          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
+          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+        }
       }
 
       await this.checkConnection();
@@ -740,8 +745,9 @@ export class LvGitHubDialog extends LitElement {
       if (result.success && result.data) {
         this.connectionStatus = result.data;
         // Update cached user in account if connected
-        if (this.selectedAccountId && result.data.connected && result.data.user) {
-          await accountsService.updateAccountCachedUser(this.selectedAccountId, {
+        const activeProfile = unifiedProfileStore.getState().activeProfile;
+        if (activeProfile && this.selectedAccountId && result.data.connected && result.data.user) {
+          await unifiedProfileService.updateProfileAccountCachedUser(activeProfile.id, this.selectedAccountId, {
             username: result.data.user.login,
             displayName: result.data.user.name ?? null,
             email: result.data.user.email ?? null,
@@ -763,7 +769,7 @@ export class LvGitHubDialog extends LitElement {
    */
   private async getSelectedAccountToken(): Promise<string | null> {
     if (this.selectedAccountId) {
-      return accountsService.getAccountToken('github', this.selectedAccountId);
+      return credentialService.getAccountToken('github', this.selectedAccountId);
     }
     return null;
   }
@@ -771,14 +777,11 @@ export class LvGitHubDialog extends LitElement {
   /**
    * Handle account selection change
    */
-  private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
+  private async handleAccountChange(e: CustomEvent<{ account: ProfileIntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
     this.error = null;
-
-    // Update active account in store
-    integrationAccountsStore.getState().setActiveAccount('github', account);
 
     // Re-check connection with new account
     await this.loadInitialData();
@@ -955,31 +958,33 @@ export class LvGitHubDialog extends LitElement {
       }
 
       const user = verifyResult.data.user;
+      const activeProfile = unifiedProfileStore.getState().activeProfile;
 
       // If we have a selected account, save token to that account
       if (this.selectedAccountId) {
-        await accountsService.storeAccountToken('github', this.selectedAccountId, tokenToSave);
-      } else {
-        // No account selected - create a new account for this token
-        const accountName = user?.login ? `GitHub (${user.login})` : 'GitHub Account';
-        const { createGitHubAccount } = await import('../../types/integration-accounts.types.ts');
-        const newAccount = createGitHubAccount(accountName);
-        newAccount.isDefault = this.accounts.length === 0;
-        newAccount.cachedUser = user ? {
-          username: user.login,
-          displayName: user.name ?? null,
-          email: user.email ?? null,
-          avatarUrl: user.avatarUrl ?? null,
-        } : null;
+        await credentialService.storeAccountToken('github', this.selectedAccountId, tokenToSave);
+      } else if (activeProfile) {
+        // No account selected - create a new account in the active profile
+        const { createEmptyGitHubProfileAccount, generateId } = await import('../../types/unified-profile.types.ts');
+        const newAccount = {
+          ...createEmptyGitHubProfileAccount(),
+          id: generateId(),
+          name: user?.login ? `GitHub (${user.login})` : 'GitHub Account',
+          isDefaultForType: this.accounts.length === 0,
+          cachedUser: user ? {
+            username: user.login,
+            displayName: user.name ?? null,
+            email: user.email ?? null,
+            avatarUrl: user.avatarUrl ?? null,
+          } : null,
+        };
 
-        const saveResult = await accountsService.saveIntegrationAccount(newAccount);
-        if (saveResult.success && saveResult.data) {
-          await accountsService.storeAccountToken('github', saveResult.data.id, tokenToSave);
-          this.selectedAccountId = saveResult.data.id;
-        } else {
-          // Fallback to legacy token storage
-          await gitService.storeGitHubToken(tokenToSave);
-        }
+        const savedAccount = await unifiedProfileService.addAccountToProfile(activeProfile.id, newAccount);
+        await credentialService.storeAccountToken('github', savedAccount.id, tokenToSave);
+        this.selectedAccountId = savedAccount.id;
+      } else {
+        // Fallback to legacy token storage if no profile
+        await gitService.storeGitHubToken(tokenToSave);
       }
 
       // Token saved, update state
@@ -1012,7 +1017,7 @@ export class LvGitHubDialog extends LitElement {
     try {
       // Delete token for selected account or legacy token
       if (this.selectedAccountId) {
-        await accountsService.deleteAccountToken('github', this.selectedAccountId);
+        await credentialService.deleteAccountToken('github', this.selectedAccountId);
       } else {
         await gitService.deleteGitHubToken();
       }

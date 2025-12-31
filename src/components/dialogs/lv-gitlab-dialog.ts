@@ -16,10 +16,10 @@ import type {
   CreateMergeRequestInput,
   CreateGitLabIssueInput,
 } from '../../services/git.service.ts';
-import { integrationAccountsStore } from '../../stores/integration-accounts.store.ts';
-import * as accountsService from '../../services/integration-accounts.service.ts';
-import type { IntegrationAccount } from '../../types/integration-accounts.types.ts';
-import { safeGetInstanceUrl, safeSetInstanceUrl } from '../../types/integration-accounts.types.ts';
+import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import * as unifiedProfileService from '../../services/unified-profile.service.ts';
+import type { ProfileIntegrationAccount } from '../../types/unified-profile.types.ts';
+import * as credentialService from '../../services/credential.service.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
@@ -494,8 +494,8 @@ export class LvGitLabDialog extends LitElement {
   @state() private mrFilter: 'opened' | 'merged' | 'closed' | 'all' = 'opened';
   @state() private issueFilter: 'opened' | 'closed' | 'all' = 'opened';
 
-  // Multi-account support
-  @state() private accounts: IntegrationAccount[] = [];
+  // Multi-account support (from active unified profile)
+  @state() private accounts: ProfileIntegrationAccount[] = [];
   @state() private selectedAccountId: string | null = null;
 
   private unsubscribeStore?: () => void;
@@ -515,41 +515,40 @@ export class LvGitLabDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
 
-    // Subscribe to accounts store
-    this.unsubscribeStore = integrationAccountsStore.subscribe((state) => {
-      this.accounts = state.accounts.filter((a) => a.integrationType === 'gitlab');
-      // If no account selected, try to select the active one or default
-      if (!this.selectedAccountId && this.accounts.length > 0) {
-        const activeAccount = state.activeAccounts['gitlab'];
-        if (activeAccount) {
-          this.selectedAccountId = activeAccount.id;
-          // Update instance URL from account config
-          const instanceUrl = safeGetInstanceUrl(activeAccount);
-          if (instanceUrl) {
-            this.instanceUrlInput = instanceUrl;
-          }
-        } else {
-          const defaultAccount = this.accounts.find((a) => a.isDefault);
-          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
-          const instanceUrl = defaultAccount ? safeGetInstanceUrl(defaultAccount) : null;
-          if (instanceUrl) {
-            this.instanceUrlInput = instanceUrl;
+    // Subscribe to unified profile store - get accounts from active profile
+    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
+      const activeProfile = state.activeProfile;
+      if (activeProfile) {
+        this.accounts = activeProfile.integrationAccounts.filter((a) => a.integrationType === 'gitlab');
+        // If no account selected, try to select the default one
+        if (!this.selectedAccountId && this.accounts.length > 0) {
+          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
+          const account = defaultAccount ?? this.accounts[0];
+          if (account) {
+            this.selectedAccountId = account.id;
+            // Update instance URL from account config
+            if (account.config.type === 'gitlab' && account.config.instanceUrl) {
+              this.instanceUrlInput = account.config.instanceUrl;
+            }
           }
         }
+      } else {
+        this.accounts = [];
       }
     });
 
-    // Initialize store with accounts
-    const state = integrationAccountsStore.getState();
-    this.accounts = state.accounts.filter((a) => a.integrationType === 'gitlab');
-    if (this.accounts.length > 0 && !this.selectedAccountId) {
-      const activeAccount = state.activeAccounts['gitlab'];
-      const account = activeAccount ?? this.accounts.find((a) => a.isDefault) ?? this.accounts[0];
-      if (account) {
-        this.selectedAccountId = account.id;
-        const instanceUrl = safeGetInstanceUrl(account);
-        if (instanceUrl) {
-          this.instanceUrlInput = instanceUrl;
+    // Initialize from current state
+    const state = unifiedProfileStore.getState();
+    if (state.activeProfile) {
+      this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'gitlab');
+      if (this.accounts.length > 0 && !this.selectedAccountId) {
+        const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
+        const account = defaultAccount ?? this.accounts[0];
+        if (account) {
+          this.selectedAccountId = account.id;
+          if (account.config.type === 'gitlab' && account.config.instanceUrl) {
+            this.instanceUrlInput = account.config.instanceUrl;
+          }
         }
       }
     }
@@ -578,15 +577,17 @@ export class LvGitLabDialog extends LitElement {
     this.error = null;
 
     try {
-      // Ensure accounts are loaded from disk into store
-      await accountsService.loadAccountsIntoStore();
+      // Ensure unified profiles are loaded
+      await unifiedProfileService.loadUnifiedProfiles();
 
       // Re-sync local state with store after loading
-      const state = integrationAccountsStore.getState();
-      this.accounts = state.accounts.filter((a) => a.integrationType === 'gitlab');
-      if (this.accounts.length > 0 && !this.selectedAccountId) {
-        const activeAccount = state.activeAccounts['gitlab'];
-        this.selectedAccountId = activeAccount?.id ?? this.accounts.find((a) => a.isDefault)?.id ?? this.accounts[0]?.id ?? null;
+      const state = unifiedProfileStore.getState();
+      if (state.activeProfile) {
+        this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'gitlab');
+        if (this.accounts.length > 0 && !this.selectedAccountId) {
+          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
+          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+        }
       }
 
       if (this.repositoryPath) {
@@ -612,8 +613,9 @@ export class LvGitLabDialog extends LitElement {
     if (result.success && result.data) {
       this.connectionStatus = result.data;
       // Update cached user in account if connected
-      if (this.selectedAccountId && result.data.connected && result.data.user) {
-        await accountsService.updateAccountCachedUser(this.selectedAccountId, {
+      const activeProfile = unifiedProfileStore.getState().activeProfile;
+      if (activeProfile && this.selectedAccountId && result.data.connected && result.data.user) {
+        await unifiedProfileService.updateProfileAccountCachedUser(activeProfile.id, this.selectedAccountId, {
           username: result.data.user.username,
           displayName: result.data.user.name ?? null,
           email: null, // GitLab API doesn't return email in user object
@@ -628,7 +630,7 @@ export class LvGitLabDialog extends LitElement {
    */
   private async getSelectedAccountToken(): Promise<string | null> {
     if (this.selectedAccountId) {
-      return accountsService.getAccountToken('gitlab', this.selectedAccountId);
+      return credentialService.getAccountToken('gitlab', this.selectedAccountId);
     }
     return null;
   }
@@ -636,20 +638,16 @@ export class LvGitLabDialog extends LitElement {
   /**
    * Handle account selection change
    */
-  private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
+  private async handleAccountChange(e: CustomEvent<{ account: ProfileIntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
     this.error = null;
 
     // Update instance URL from account config
-    const instanceUrl = safeGetInstanceUrl(account);
-    if (instanceUrl) {
-      this.instanceUrlInput = instanceUrl;
+    if (account.config.type === 'gitlab' && account.config.instanceUrl) {
+      this.instanceUrlInput = account.config.instanceUrl;
     }
-
-    // Update active account in store
-    integrationAccountsStore.getState().setActiveAccount('gitlab', account);
 
     // Re-check connection with new account
     await this.loadInitialData();
@@ -792,40 +790,33 @@ export class LvGitLabDialog extends LitElement {
       }
 
       const user = verifyResult.data.user;
+      const activeProfile = unifiedProfileStore.getState().activeProfile;
 
       // If we have a selected account, save token to that account
       if (this.selectedAccountId) {
-        await accountsService.storeAccountToken('gitlab', this.selectedAccountId, tokenToSave);
-        // Update account's instance URL if different
-        const account = this.accounts.find((a) => a.id === this.selectedAccountId);
-        if (account) {
-          const currentUrl = safeGetInstanceUrl(account);
-          if (currentUrl !== instanceUrl) {
-            safeSetInstanceUrl(account, instanceUrl);
-            await accountsService.saveIntegrationAccount(account);
-          }
-        }
-      } else {
-        // No account selected - create a new account for this token
-        const accountName = user?.username ? `GitLab (${user.username})` : 'GitLab Account';
-        const { createGitLabAccount } = await import('../../types/integration-accounts.types.ts');
-        const newAccount = createGitLabAccount(accountName, instanceUrl);
-        newAccount.isDefault = this.accounts.length === 0;
-        newAccount.cachedUser = user ? {
-          username: user.username,
-          displayName: user.name ?? null,
-          email: null, // GitLab API doesn't return email in user object
-          avatarUrl: user.avatarUrl ?? null,
-        } : null;
+        await credentialService.storeAccountToken('gitlab', this.selectedAccountId, tokenToSave);
+      } else if (activeProfile) {
+        // No account selected - create a new account in the active profile
+        const { createEmptyGitLabProfileAccount, generateId } = await import('../../types/unified-profile.types.ts');
+        const newAccount = {
+          ...createEmptyGitLabProfileAccount(instanceUrl),
+          id: generateId(),
+          name: user?.username ? `GitLab (${user.username})` : 'GitLab Account',
+          isDefaultForType: this.accounts.length === 0,
+          cachedUser: user ? {
+            username: user.username,
+            displayName: user.name ?? null,
+            email: null, // GitLab API doesn't return email in user object
+            avatarUrl: user.avatarUrl ?? null,
+          } : null,
+        };
 
-        const saveResult = await accountsService.saveIntegrationAccount(newAccount);
-        if (saveResult.success && saveResult.data) {
-          await accountsService.storeAccountToken('gitlab', saveResult.data.id, tokenToSave);
-          this.selectedAccountId = saveResult.data.id;
-        } else {
-          // Fallback to legacy token storage
-          await gitService.storeGitLabToken(tokenToSave);
-        }
+        const savedAccount = await unifiedProfileService.addAccountToProfile(activeProfile.id, newAccount);
+        await credentialService.storeAccountToken('gitlab', savedAccount.id, tokenToSave);
+        this.selectedAccountId = savedAccount.id;
+      } else {
+        // Fallback to legacy token storage if no profile
+        await gitService.storeGitLabToken(tokenToSave);
       }
 
       // Token saved, update state
@@ -850,7 +841,7 @@ export class LvGitLabDialog extends LitElement {
     try {
       // Delete token for selected account or legacy token
       if (this.selectedAccountId) {
-        await accountsService.deleteAccountToken('gitlab', this.selectedAccountId);
+        await credentialService.deleteAccountToken('gitlab', this.selectedAccountId);
       } else {
         await gitService.deleteGitLabToken();
       }

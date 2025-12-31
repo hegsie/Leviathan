@@ -1,15 +1,16 @@
 /**
  * Profile Selector Component
  * Dropdown for quick profile switching in the toolbar
+ * Updated to use unified profiles (git identity + integration accounts)
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { workflowStore } from '../../stores/workflow.store.ts';
-import * as gitService from '../../services/git.service.ts';
-import type { GitProfile } from '../../types/workflow.types.ts';
-import { PROFILE_COLORS } from '../../types/workflow.types.ts';
+import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import * as unifiedProfileService from '../../services/unified-profile.service.ts';
+import type { UnifiedProfile } from '../../types/unified-profile.types.ts';
+import { PROFILE_COLORS, getAccountCountByType } from '../../types/unified-profile.types.ts';
 
 @customElement('lv-profile-selector')
 export class LvProfileSelector extends LitElement {
@@ -185,21 +186,21 @@ export class LvProfileSelector extends LitElement {
 
   @property({ type: String }) repoPath = '';
 
-  @state() private profiles: GitProfile[] = [];
-  @state() private activeProfile: GitProfile | null = null;
+  @state() private profiles: UnifiedProfile[] = [];
+  @state() private activeProfile: UnifiedProfile | null = null;
   @state() private isOpen = false;
 
   private unsubscribe?: () => void;
 
   connectedCallback(): void {
     super.connectedCallback();
-    // Get initial state
-    const initialState = workflowStore.getState();
+    // Get initial state from unified profile store
+    const initialState = unifiedProfileStore.getState();
     this.profiles = initialState.profiles;
     this.activeProfile = initialState.activeProfile;
 
     // Subscribe to store changes
-    this.unsubscribe = workflowStore.subscribe((state) => {
+    this.unsubscribe = unifiedProfileStore.subscribe((state) => {
       this.profiles = state.profiles;
       this.activeProfile = state.activeProfile;
     });
@@ -225,12 +226,13 @@ export class LvProfileSelector extends LitElement {
     this.isOpen = !this.isOpen;
   }
 
-  private async handleSelectProfile(profile: GitProfile): Promise<void> {
+  private async handleSelectProfile(profile: UnifiedProfile): Promise<void> {
     this.isOpen = false;
 
     if (!this.repoPath) return;
 
-    await gitService.applyProfile(this.repoPath, profile.id);
+    // Apply the unified profile (sets git identity)
+    await unifiedProfileService.applyUnifiedProfile(this.repoPath, profile.id);
   }
 
   private handleOpenManager(): void {
@@ -276,28 +278,38 @@ export class LvProfileSelector extends LitElement {
         ${this.profiles.length === 0
           ? html`<div class="empty-state">No profiles configured</div>`
           : this.profiles.map(
-              (profile) => html`
-                <button
-                  class="dropdown-item ${this.activeProfile?.id === profile.id ? 'active' : ''}"
-                  @click=${() => this.handleSelectProfile(profile)}
-                >
-                  <span
-                    class="profile-color"
-                    style="background: ${profile.color ?? PROFILE_COLORS[0]}"
-                  ></span>
-                  <span class="profile-info">
-                    <span class="profile-display-name">${profile.name}</span>
-                    <span class="profile-email">${profile.gitEmail}</span>
-                  </span>
-                  ${this.activeProfile?.id === profile.id
-                    ? html`
-                        <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <polyline points="20 6 9 17 4 12"></polyline>
-                        </svg>
-                      `
-                    : nothing}
-                </button>
-              `
+              (profile) => {
+                const accountCounts = getAccountCountByType(profile);
+                const totalAccounts = profile.integrationAccounts.length;
+                return html`
+                  <button
+                    class="dropdown-item ${this.activeProfile?.id === profile.id ? 'active' : ''}"
+                    @click=${() => this.handleSelectProfile(profile)}
+                  >
+                    <span
+                      class="profile-color"
+                      style="background: ${profile.color ?? PROFILE_COLORS[0]}"
+                    ></span>
+                    <span class="profile-info">
+                      <span class="profile-display-name">
+                        ${profile.name}
+                        ${profile.isDefault ? html`<span style="font-size: 10px; opacity: 0.6">(default)</span>` : nothing}
+                      </span>
+                      <span class="profile-email">
+                        ${profile.gitEmail}
+                        ${totalAccounts > 0 ? html` · ${totalAccounts} account${totalAccounts > 1 ? 's' : ''}` : nothing}
+                      </span>
+                    </span>
+                    ${this.activeProfile?.id === profile.id
+                      ? html`
+                          <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="20 6 9 17 4 12"></polyline>
+                          </svg>
+                        `
+                      : nothing}
+                  </button>
+                `;
+              }
             )}
         <div class="dropdown-divider"></div>
         <button class="dropdown-action" @click=${this.handleOpenManager}>

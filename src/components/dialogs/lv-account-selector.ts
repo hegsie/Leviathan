@@ -1,21 +1,15 @@
 /**
  * Integration Account Selector Component
  * Dropdown for quick account switching in integration dialogs
+ * Updated to use unified profiles - accounts come from the active profile
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { integrationAccountsStore } from '../../stores/integration-accounts.store.ts';
-import type {
-  IntegrationAccount,
-  IntegrationType,
-} from '../../types/integration-accounts.types.ts';
-import {
-  ACCOUNT_COLORS,
-  INTEGRATION_TYPE_NAMES,
-  getAccountDisplayLabel,
-} from '../../types/integration-accounts.types.ts';
+import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import type { ProfileIntegrationAccount, IntegrationType } from '../../types/unified-profile.types.ts';
+import { ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 
 @customElement('lv-account-selector')
 export class LvAccountSelector extends LitElement {
@@ -259,18 +253,32 @@ export class LvAccountSelector extends LitElement {
   @property({ type: String }) selectedAccountId: string | null = null;
   @property({ type: Boolean }) compact = false;
 
-  @state() private accounts: IntegrationAccount[] = [];
+  @state() private accounts: ProfileIntegrationAccount[] = [];
   @state() private isOpen = false;
 
   private unsubscribe?: () => void;
 
   connectedCallback(): void {
     super.connectedCallback();
-    this.unsubscribe = integrationAccountsStore.subscribe((state) => {
-      this.accounts = state.accounts.filter(
+    // Subscribe to unified profile store - get accounts from active profile
+    this.unsubscribe = unifiedProfileStore.subscribe((state) => {
+      const activeProfile = state.activeProfile;
+      if (activeProfile) {
+        this.accounts = activeProfile.integrationAccounts.filter(
+          (a) => a.integrationType === this.integrationType
+        );
+      } else {
+        this.accounts = [];
+      }
+    });
+
+    // Initialize from current state
+    const state = unifiedProfileStore.getState();
+    if (state.activeProfile) {
+      this.accounts = state.activeProfile.integrationAccounts.filter(
         (a) => a.integrationType === this.integrationType
       );
-    });
+    }
 
     // Close dropdown when clicking outside
     document.addEventListener('click', this.handleDocumentClick);
@@ -293,7 +301,7 @@ export class LvAccountSelector extends LitElement {
     this.isOpen = !this.isOpen;
   }
 
-  private handleSelectAccount(account: IntegrationAccount): void {
+  private handleSelectAccount(account: ProfileIntegrationAccount): void {
     this.isOpen = false;
     this.dispatchEvent(
       new CustomEvent('account-change', {
@@ -326,7 +334,7 @@ export class LvAccountSelector extends LitElement {
     );
   }
 
-  private get selectedAccount(): IntegrationAccount | null {
+  private get selectedAccount(): ProfileIntegrationAccount | null {
     if (!this.selectedAccountId) return null;
     return this.accounts.find((a) => a.id === this.selectedAccountId) ?? null;
   }
@@ -441,10 +449,10 @@ export class LvAccountSelector extends LitElement {
     `;
   }
 
-  private renderAccountItem(account: IntegrationAccount) {
+  private renderAccountItem(account: ProfileIntegrationAccount) {
     const isSelected = this.selectedAccountId === account.id;
     const color = account.color ?? ACCOUNT_COLORS[0];
-    const displayLabel = getAccountDisplayLabel(account);
+    const displayLabel = account.name;
     const detail =
       account.cachedUser?.username ?? account.cachedUser?.email ?? '';
 
@@ -466,7 +474,7 @@ export class LvAccountSelector extends LitElement {
         <span class="item-info">
           <span class="item-name">
             ${displayLabel}
-            ${account.isDefault
+            ${account.isDefaultForType
               ? html`<span class="default-badge">Default</span>`
               : nothing}
           </span>
