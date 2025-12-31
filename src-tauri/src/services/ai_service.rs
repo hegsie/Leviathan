@@ -274,7 +274,8 @@ fn run_inference(
     tracing::info!("Loading model from: {:?}", model_path);
 
     // Initialize llama backend
-    let backend = LlamaBackend::init().map_err(|e| format!("Failed to init llama backend: {}", e))?;
+    let backend =
+        LlamaBackend::init().map_err(|e| format!("Failed to init llama backend: {}", e))?;
 
     // Load model parameters
     let model_params = LlamaModelParams::default();
@@ -286,8 +287,7 @@ fn run_inference(
     tracing::info!("Model loaded successfully");
 
     // Create context parameters
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(4096));
+    let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(4096));
 
     // Create context
     let mut ctx = model
@@ -549,12 +549,16 @@ mod tests {
 
     #[test]
     fn test_parse_response_with_reasoning() {
-        let response = "<reasoning>The diff shows new files being added</reasoning>feat: add helper function";
+        let response =
+            "<reasoning>The diff shows new files being added</reasoning>feat: add helper function";
         let result = parse_response(response);
 
         assert_eq!(result.summary, "feat: add helper function");
         assert!(result.reasoning.is_some());
-        assert_eq!(result.reasoning.unwrap(), "The diff shows new files being added");
+        assert_eq!(
+            result.reasoning.unwrap(),
+            "The diff shows new files being added"
+        );
     }
 
     #[test]
@@ -597,7 +601,10 @@ mod tests {
 
         // Short diff should not be truncated
         let short_result = if short_diff.len() > max_chars {
-            format!("{}...\n[Diff truncated for length]", &short_diff[..max_chars])
+            format!(
+                "{}...\n[Diff truncated for length]",
+                &short_diff[..max_chars]
+            )
         } else {
             short_diff.clone()
         };
@@ -605,7 +612,10 @@ mod tests {
 
         // Long diff should be truncated
         let long_result = if long_diff.len() > max_chars {
-            format!("{}...\n[Diff truncated for length]", &long_diff[..max_chars])
+            format!(
+                "{}...\n[Diff truncated for length]",
+                &long_diff[..max_chars]
+            )
         } else {
             long_diff.clone()
         };

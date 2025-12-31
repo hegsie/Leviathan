@@ -71,8 +71,9 @@ pub async fn generate_commit_message(
 
 /// Get the staged diff as a string
 fn get_staged_diff(repo_path: &str) -> Result<String> {
-    let repo = git2::Repository::open(repo_path)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to open repository: {}", e)))?;
+    let repo = git2::Repository::open(repo_path).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to open repository: {}", e))
+    })?;
 
     // Get HEAD tree (for comparing staged changes)
     let head = repo.head().ok();

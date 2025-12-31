@@ -1066,9 +1066,7 @@ mod tests {
         assert!(header.starts_with("Basic "));
         // Decode and verify format
         let encoded = header.trim_start_matches("Basic ");
-        let decoded = String::from_utf8(
-            base64::Engine::decode(&BASE64, encoded).unwrap()
-        ).unwrap();
+        let decoded = String::from_utf8(base64::Engine::decode(&BASE64, encoded).unwrap()).unwrap();
         assert_eq!(decoded, ":myToken123");
     }
 
@@ -1087,7 +1085,7 @@ mod tests {
             "myorg",
             "myproject",
             "git/pullrequests",
-            "status=active&top=10"
+            "status=active&top=10",
         );
 
         assert!(url.contains("api-version=7.1"));

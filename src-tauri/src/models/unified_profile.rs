@@ -188,7 +188,9 @@ impl UnifiedProfile {
 
     /// Get an account by ID
     pub fn get_account(&self, account_id: &str) -> Option<&ProfileIntegrationAccount> {
-        self.integration_accounts.iter().find(|a| a.id == account_id)
+        self.integration_accounts
+            .iter()
+            .find(|a| a.id == account_id)
     }
 
     /// Get a mutable account by ID
@@ -330,7 +332,10 @@ impl UnifiedProfilesConfig {
     }
 
     /// Find an account across all profiles by ID
-    pub fn find_account(&self, account_id: &str) -> Option<(&UnifiedProfile, &ProfileIntegrationAccount)> {
+    pub fn find_account(
+        &self,
+        account_id: &str,
+    ) -> Option<(&UnifiedProfile, &ProfileIntegrationAccount)> {
         for profile in &self.profiles {
             if let Some(account) = profile.get_account(account_id) {
                 return Some((profile, account));
@@ -455,7 +460,9 @@ mod tests {
         assert!(acc2.is_default_for_type);
 
         // get_default_account should return account2
-        let default = profile.get_default_account(&IntegrationType::GitHub).unwrap();
+        let default = profile
+            .get_default_account(&IntegrationType::GitHub)
+            .unwrap();
         assert_eq!(default.id, account2.id);
     }
 
@@ -479,11 +486,16 @@ mod tests {
     fn test_config_default_profile() {
         let mut config = UnifiedProfilesConfig::default();
 
-        let mut profile1 = UnifiedProfile::new("Work".to_string(), "J".to_string(), "j@w.com".to_string());
+        let mut profile1 =
+            UnifiedProfile::new("Work".to_string(), "J".to_string(), "j@w.com".to_string());
         profile1.is_default = true;
         config.save_profile(profile1.clone());
 
-        let mut profile2 = UnifiedProfile::new("Personal".to_string(), "J".to_string(), "j@p.com".to_string());
+        let mut profile2 = UnifiedProfile::new(
+            "Personal".to_string(),
+            "J".to_string(),
+            "j@p.com".to_string(),
+        );
         profile2.is_default = true;
         config.save_profile(profile2.clone());
 
@@ -499,7 +511,8 @@ mod tests {
     fn test_repository_assignment() {
         let mut config = UnifiedProfilesConfig::default();
 
-        let profile = UnifiedProfile::new("Work".to_string(), "J".to_string(), "j@w.com".to_string());
+        let profile =
+            UnifiedProfile::new("Work".to_string(), "J".to_string(), "j@w.com".to_string());
         let profile_id = profile.id.clone();
         config.save_profile(profile);
 
@@ -517,7 +530,8 @@ mod tests {
     fn test_delete_profile_removes_assignments() {
         let mut config = UnifiedProfilesConfig::default();
 
-        let profile = UnifiedProfile::new("Work".to_string(), "J".to_string(), "j@w.com".to_string());
+        let profile =
+            UnifiedProfile::new("Work".to_string(), "J".to_string(), "j@w.com".to_string());
         let profile_id = profile.id.clone();
         config.save_profile(profile);
         config.assign_profile("/path/to/repo".to_string(), profile_id.clone());
@@ -537,7 +551,10 @@ mod tests {
         );
 
         let account1 = ProfileIntegrationAccount::new_github("GitHub 1".to_string());
-        let account2 = ProfileIntegrationAccount::new_gitlab("GitLab 1".to_string(), "https://gitlab.com".to_string());
+        let account2 = ProfileIntegrationAccount::new_gitlab(
+            "GitLab 1".to_string(),
+            "https://gitlab.com".to_string(),
+        );
         let account1_id = account1.id.clone();
 
         profile.save_account(account1);
@@ -559,9 +576,16 @@ mod tests {
             "john@work.com".to_string(),
         );
 
-        profile.save_account(ProfileIntegrationAccount::new_github("GitHub 1".to_string()));
-        profile.save_account(ProfileIntegrationAccount::new_github("GitHub 2".to_string()));
-        profile.save_account(ProfileIntegrationAccount::new_gitlab("GitLab 1".to_string(), "https://gitlab.com".to_string()));
+        profile.save_account(ProfileIntegrationAccount::new_github(
+            "GitHub 1".to_string(),
+        ));
+        profile.save_account(ProfileIntegrationAccount::new_github(
+            "GitHub 2".to_string(),
+        ));
+        profile.save_account(ProfileIntegrationAccount::new_gitlab(
+            "GitLab 1".to_string(),
+            "https://gitlab.com".to_string(),
+        ));
 
         let github_accounts = profile.get_accounts_by_type(&IntegrationType::GitHub);
         let gitlab_accounts = profile.get_accounts_by_type(&IntegrationType::GitLab);

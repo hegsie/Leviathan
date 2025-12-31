@@ -49,7 +49,9 @@ fn get_legacy_accounts_path() -> Result<std::path::PathBuf> {
     let config_dir = dirs::config_dir().ok_or_else(|| {
         LeviathanError::OperationFailed("Could not find config directory".to_string())
     })?;
-    Ok(config_dir.join("leviathan").join("integration_accounts.json"))
+    Ok(config_dir
+        .join("leviathan")
+        .join("integration_accounts.json"))
 }
 
 // =============================================================================
@@ -309,10 +311,7 @@ pub async fn remove_account_from_profile(profile_id: String, account_id: String)
 
 /// Set an account as the default for its type within a profile
 #[command]
-pub async fn set_default_account_in_profile(
-    profile_id: String,
-    account_id: String,
-) -> Result<()> {
+pub async fn set_default_account_in_profile(profile_id: String, account_id: String) -> Result<()> {
     let mut config = load_unified_profiles_config()?;
 
     let profile = config
@@ -364,9 +363,7 @@ pub async fn update_profile_account_cached_user(
 
 /// Detect which profile should be used for a repository based on URL patterns
 #[command]
-pub async fn detect_unified_profile_for_repository(
-    path: String,
-) -> Result<Option<UnifiedProfile>> {
+pub async fn detect_unified_profile_for_repository(path: String) -> Result<Option<UnifiedProfile>> {
     let config = load_unified_profiles_config()?;
     let repo_path = Path::new(&path);
 
@@ -394,10 +391,7 @@ pub async fn get_assigned_unified_profile(path: String) -> Result<Option<Unified
 
 /// Manually assign a profile to a repository
 #[command]
-pub async fn assign_unified_profile_to_repository(
-    path: String,
-    profile_id: String,
-) -> Result<()> {
+pub async fn assign_unified_profile_to_repository(path: String, profile_id: String) -> Result<()> {
     let mut config = load_unified_profiles_config()?;
 
     // Verify the profile exists
@@ -556,11 +550,13 @@ pub async fn preview_unified_profiles_migration() -> Result<MigrationPreview> {
         // Try to match accounts by URL pattern overlap
         for account in &legacy_accounts.accounts {
             if has_pattern_overlap(&profile.url_patterns, &account.url_patterns) {
-                preview_profile.matched_accounts.push(MigrationPreviewAccount {
-                    account_id: account.id.clone(),
-                    account_name: account.name.clone(),
-                    integration_type: account.integration_type.clone(),
-                });
+                preview_profile
+                    .matched_accounts
+                    .push(MigrationPreviewAccount {
+                        account_id: account.id.clone(),
+                        account_name: account.name.clone(),
+                        integration_type: account.integration_type.clone(),
+                    });
             }
         }
 
@@ -569,10 +565,11 @@ pub async fn preview_unified_profiles_migration() -> Result<MigrationPreview> {
 
     // Find unmatched accounts
     for account in &legacy_accounts.accounts {
-        let is_matched = preview
-            .profiles
-            .iter()
-            .any(|p| p.matched_accounts.iter().any(|a| a.account_id == account.id));
+        let is_matched = preview.profiles.iter().any(|p| {
+            p.matched_accounts
+                .iter()
+                .any(|a| a.account_id == account.id)
+        });
 
         if !is_matched {
             // Suggest the default profile
@@ -656,15 +653,17 @@ pub async fn execute_unified_profiles_migration(
 
         if let Some(profile_id) = profile_id {
             if let Some(profile) = unified_profiles.iter_mut().find(|p| &p.id == profile_id) {
-                profile.integration_accounts.push(ProfileIntegrationAccount {
-                    id: account.id.clone(),
-                    name: account.name.clone(),
-                    integration_type: account.integration_type.clone(),
-                    config: account.config.clone(),
-                    color: account.color.clone(),
-                    cached_user: account.cached_user.clone(),
-                    is_default_for_type: account.is_default,
-                });
+                profile
+                    .integration_accounts
+                    .push(ProfileIntegrationAccount {
+                        id: account.id.clone(),
+                        name: account.name.clone(),
+                        integration_type: account.integration_type.clone(),
+                        config: account.config.clone(),
+                        color: account.color.clone(),
+                        cached_user: account.cached_user.clone(),
+                        is_default_for_type: account.is_default,
+                    });
                 result.accounts_migrated += 1;
             } else {
                 result.unmatched_accounts.push(UnmatchedAccount {
@@ -681,15 +680,17 @@ pub async fn execute_unified_profiles_migration(
             // Try URL pattern matching
             for profile in &mut unified_profiles {
                 if has_pattern_overlap(&profile.url_patterns, &account.url_patterns) {
-                    profile.integration_accounts.push(ProfileIntegrationAccount {
-                        id: account.id.clone(),
-                        name: account.name.clone(),
-                        integration_type: account.integration_type.clone(),
-                        config: account.config.clone(),
-                        color: account.color.clone(),
-                        cached_user: account.cached_user.clone(),
-                        is_default_for_type: account.is_default,
-                    });
+                    profile
+                        .integration_accounts
+                        .push(ProfileIntegrationAccount {
+                            id: account.id.clone(),
+                            name: account.name.clone(),
+                            integration_type: account.integration_type.clone(),
+                            config: account.config.clone(),
+                            color: account.color.clone(),
+                            cached_user: account.cached_user.clone(),
+                            is_default_for_type: account.is_default,
+                        });
                     result.accounts_migrated += 1;
                     assigned = true;
                     break;
@@ -699,27 +700,31 @@ pub async fn execute_unified_profiles_migration(
             // Fall back to default profile
             if !assigned {
                 if let Some(profile) = unified_profiles.iter_mut().find(|p| p.is_default) {
-                    profile.integration_accounts.push(ProfileIntegrationAccount {
-                        id: account.id.clone(),
-                        name: account.name.clone(),
-                        integration_type: account.integration_type.clone(),
-                        config: account.config.clone(),
-                        color: account.color.clone(),
-                        cached_user: account.cached_user.clone(),
-                        is_default_for_type: account.is_default,
-                    });
+                    profile
+                        .integration_accounts
+                        .push(ProfileIntegrationAccount {
+                            id: account.id.clone(),
+                            name: account.name.clone(),
+                            integration_type: account.integration_type.clone(),
+                            config: account.config.clone(),
+                            color: account.color.clone(),
+                            cached_user: account.cached_user.clone(),
+                            is_default_for_type: account.is_default,
+                        });
                     result.accounts_migrated += 1;
                 } else if let Some(profile) = unified_profiles.first_mut() {
                     // Use first profile as fallback
-                    profile.integration_accounts.push(ProfileIntegrationAccount {
-                        id: account.id.clone(),
-                        name: account.name.clone(),
-                        integration_type: account.integration_type.clone(),
-                        config: account.config.clone(),
-                        color: account.color.clone(),
-                        cached_user: account.cached_user.clone(),
-                        is_default_for_type: account.is_default,
-                    });
+                    profile
+                        .integration_accounts
+                        .push(ProfileIntegrationAccount {
+                            id: account.id.clone(),
+                            name: account.name.clone(),
+                            integration_type: account.integration_type.clone(),
+                            config: account.config.clone(),
+                            color: account.color.clone(),
+                            cached_user: account.cached_user.clone(),
+                            is_default_for_type: account.is_default,
+                        });
                     result.accounts_migrated += 1;
                 } else {
                     result.unmatched_accounts.push(UnmatchedAccount {
