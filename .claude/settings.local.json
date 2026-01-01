@@ -50,7 +50,10 @@
       "Bash(cargo clippy:*)",
       "Bash(git restore:*)",
       "Bash(gh release view:*)",
-      "Bash(cargo fmt:*)"
+      "Bash(cargo fmt:*)",
+      "Bash(gh release delete:*)",
+      "Bash(git pull:*)",
+      "Bash(npm version:*)"
     ]
   }
 }
