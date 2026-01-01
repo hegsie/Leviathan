@@ -49,6 +49,54 @@ fn derive_stronghold_key(password: &str) -> [u8; 32] {
 /// Initialize the application
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Set up panic hook FIRST to capture crash information before abort
+    // This runs even with panic="abort" in release builds
+    std::panic::set_hook(Box::new(|panic_info| {
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+
+        let message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic payload".to_string()
+        };
+
+        let location = panic_info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+
+        // Use eprintln since tracing may not be initialized or may have issues
+        eprintln!("╔══════════════════════════════════════════════════════════════╗");
+        eprintln!("║                      PANIC DETECTED                          ║");
+        eprintln!("╠══════════════════════════════════════════════════════════════╣");
+        eprintln!("║ Thread: {:<54}║", thread_name);
+        eprintln!("║ Location: {:<52}║", location);
+        eprintln!("╠══════════════════════════════════════════════════════════════╣");
+        eprintln!("║ Message:                                                     ║");
+        // Wrap long messages
+        for line in message.chars().collect::<Vec<_>>().chunks(60) {
+            let line_str: String = line.iter().collect();
+            eprintln!("║ {:<62}║", line_str);
+        }
+        eprintln!("╚══════════════════════════════════════════════════════════════╝");
+
+        // Also try to log via tracing if available
+        // This may or may not work depending on when the panic occurs
+        tracing::error!(
+            thread = thread_name,
+            location = location,
+            message = message,
+            "PANIC: Application crashed"
+        );
+
+        // Capture backtrace if available
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        eprintln!("\nBacktrace:\n{}", backtrace);
+    }));
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(

@@ -104,15 +104,28 @@ impl UpdateService {
 async fn check_and_install_update(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
 
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    tracing::debug!("check_and_install_update: Starting update check");
 
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    tracing::debug!("check_and_install_update: Current version is {}", current_version);
+
+    tracing::debug!("check_and_install_update: Building updater...");
     let updater = app
         .updater_builder()
         .build()
-        .map_err(|e| format!("Failed to build updater: {}", e))?;
+        .map_err(|e| {
+            tracing::error!("check_and_install_update: Failed to build updater: {}", e);
+            format!("Failed to build updater: {}", e)
+        })?;
+    tracing::debug!("check_and_install_update: Updater built successfully");
 
-    match updater.check().await {
+    tracing::debug!("check_and_install_update: Calling updater.check()...");
+    let check_result = updater.check().await;
+    tracing::debug!("check_and_install_update: updater.check() returned");
+
+    match check_result {
         Ok(Some(update)) => {
+            tracing::debug!("check_and_install_update: Update found");
             let latest_version = update.version.clone();
             let release_notes = update.body.clone();
 
@@ -176,7 +189,7 @@ async fn check_and_install_update(app: &tauri::AppHandle) -> Result<(), String> 
             Ok(())
         }
         Ok(None) => {
-            tracing::debug!("No update available");
+            tracing::debug!("check_and_install_update: No update available");
 
             let _ = app.emit(
                 "update-checked",
@@ -190,7 +203,10 @@ async fn check_and_install_update(app: &tauri::AppHandle) -> Result<(), String> 
 
             Ok(())
         }
-        Err(e) => Err(format!("Update check failed: {}", e)),
+        Err(e) => {
+            tracing::error!("check_and_install_update: Update check failed with error: {}", e);
+            Err(format!("Update check failed: {}", e))
+        }
     }
 }
 
