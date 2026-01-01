@@ -172,6 +172,32 @@ This document outlines planned features and improvements for future releases. Fo
 
 ---
 
+## Authentication Improvements
+
+### OAuth Authentication
+- **GitHub OAuth** - Browser-based login via OAuth 2.0 device flow (no PAT required)
+- **GitLab OAuth** - OAuth authentication for GitLab.com and self-hosted instances
+- **Azure DevOps OAuth** - Microsoft Entra ID (Azure AD) authentication
+- **Bitbucket OAuth** - Atlassian account authentication
+
+### GitHub Apps
+- Install as a GitHub App instead of personal OAuth
+- Fine-grained permissions per repository
+- Organization-level installation
+- No user token expiration concerns
+
+### Git Credential Manager Integration
+- Detect and use Git Credential Manager (GCM) tokens
+- Share credentials with git CLI
+- Support for GCM's built-in OAuth flows
+
+### Enterprise SSO
+- SAML authentication support
+- OIDC provider integration
+- Enterprise managed accounts
+
+---
+
 ## Future Considerations
 
 - Code review tools
