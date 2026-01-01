@@ -4,7 +4,7 @@ import { settingsStore, type Theme, type FontSize } from '../../stores/settings.
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
 import * as aiService from '../../services/ai.service.ts';
-import type { AiModelStatus } from '../../services/ai.service.ts';
+import type { AiProviderInfo, AiProviderType } from '../../services/ai.service.ts';
 
 @customElement('lv-settings-dialog')
 export class LvSettingsDialog extends LitElement {
@@ -229,6 +229,43 @@ export class LvSettingsDialog extends LitElement {
         color: var(--error-color);
         margin-top: 4px;
       }
+
+      .status-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+
+      .status-indicator.configured {
+        color: var(--success-color, #22c55e);
+        background: rgba(34, 197, 94, 0.1);
+      }
+
+      .status-indicator.not-configured {
+        color: var(--text-secondary);
+        background: var(--border-color);
+      }
+
+      .status-indicator.testing {
+        color: var(--accent-color);
+      }
+
+      .status-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+
+      .provider-status-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 4px;
+      }
     `,
   ];
 
@@ -245,65 +282,86 @@ export class LvSettingsDialog extends LitElement {
   @state() private staleBranchDays = 90;
 
   // AI settings
-  @state() private aiModelStatus: AiModelStatus | null = null;
-  @state() private isDownloadingModel = false;
-  @state() private downloadProgress = 0;
+  @state() private aiProviders: AiProviderInfo[] = [];
+  @state() private activeProvider: AiProviderType | null = null;
   @state() private aiError: string | null = null;
+  @state() private testingProvider: AiProviderType | null = null;
+  @state() private providerTestStatus: Record<string, 'untested' | 'success' | 'failed'> = {};
+  @state() private apiKeyInputs: Record<string, string> = {};
 
   connectedCallback(): void {
     super.connectedCallback();
     this.loadSettings();
     this.loadVersion();
-    this.loadAiStatus();
+    this.loadAiProviders();
   }
 
   private async loadVersion(): Promise<void> {
     this.appVersion = await getAppVersion();
   }
 
-  private async loadAiStatus(): Promise<void> {
-    const result = await aiService.getAiStatus();
-    if (result.success && result.data) {
-      this.aiModelStatus = result.data;
+  private async loadAiProviders(): Promise<void> {
+    const [providersResult, activeResult] = await Promise.all([
+      aiService.getAiProviders(),
+      aiService.getActiveAiProvider(),
+    ]);
+
+    if (providersResult.success && providersResult.data) {
+      this.aiProviders = providersResult.data;
+    }
+
+    if (activeResult.success && activeResult.data !== undefined) {
+      this.activeProvider = activeResult.data;
     }
   }
 
-  private async handleDownloadModel(): Promise<void> {
-    this.isDownloadingModel = true;
-    this.downloadProgress = 0;
+  private async handleProviderSelect(providerType: AiProviderType): Promise<void> {
+    this.aiError = null;
+    const result = await aiService.setAiProvider(providerType);
+    if (result.success) {
+      this.activeProvider = providerType;
+    } else {
+      this.aiError = result.error?.message ?? 'Failed to set provider';
+    }
+  }
+
+  private async handleApiKeyChange(providerType: AiProviderType, apiKey: string): Promise<void> {
+    this.apiKeyInputs = { ...this.apiKeyInputs, [providerType]: apiKey };
+  }
+
+  private async handleSaveApiKey(providerType: AiProviderType): Promise<void> {
+    this.aiError = null;
+    const apiKey = this.apiKeyInputs[providerType] || '';
+    const result = await aiService.setAiApiKey(providerType, apiKey || null);
+    if (result.success) {
+      await this.loadAiProviders();
+    } else {
+      this.aiError = result.error?.message ?? 'Failed to save API key';
+    }
+  }
+
+  private async handleModelChange(providerType: AiProviderType, model: string): Promise<void> {
+    this.aiError = null;
+    const result = await aiService.setAiModel(providerType, model || null);
+    if (result.success) {
+      await this.loadAiProviders();
+    } else {
+      this.aiError = result.error?.message ?? 'Failed to set model';
+    }
+  }
+
+  private async handleTestProvider(providerType: AiProviderType): Promise<void> {
+    this.testingProvider = providerType;
     this.aiError = null;
 
-    // Listen for progress events
-    const unlisten = await aiService.onModelDownloadProgress((progress) => {
-      this.downloadProgress = progress.progressPercent;
-      if (progress.status === 'error') {
-        this.aiError = 'Download failed';
-        this.isDownloadingModel = false;
-      } else if (progress.status === 'complete') {
-        this.isDownloadingModel = false;
-        this.loadAiStatus();
-      }
-    });
+    const result = await aiService.testAiProvider(providerType);
+    this.testingProvider = null;
 
-    const result = await aiService.downloadAiModel();
-
-    if (!result.success) {
-      this.aiError = result.error?.message ?? 'Download failed';
-      this.isDownloadingModel = false;
-    }
-
-    unlisten();
-  }
-
-  private async handleDeleteModel(): Promise<void> {
-    const confirmed = confirm('Are you sure you want to delete the AI model? You will need to download it again to use AI features.');
-    if (!confirmed) return;
-
-    const result = await aiService.deleteAiModel();
-    if (result.success) {
-      this.loadAiStatus();
+    if (result.success && result.data) {
+      this.providerTestStatus = { ...this.providerTestStatus, [providerType]: 'success' };
     } else {
-      this.aiError = result.error?.message ?? 'Failed to delete model';
+      this.providerTestStatus = { ...this.providerTestStatus, [providerType]: 'failed' };
+      this.aiError = `${aiService.getProviderDisplayName(providerType)} is not available. Check your API key and try again.`;
     }
   }
 
@@ -516,33 +574,106 @@ export class LvSettingsDialog extends LitElement {
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">AI Commit Messages</span>
+              <span class="setting-name">AI Provider</span>
               <span class="setting-description">
-                ${this.aiModelStatus?.modelAvailable
-                  ? html`Model installed (${this.aiModelStatus.modelSizeMb}MB, ${this.aiModelStatus.quantization})`
-                  : 'Model not installed (~2GB download)'}
+                Select an AI provider for commit message generation
               </span>
-              ${this.isDownloadingModel ? html`
-                <div class="progress-bar">
-                  <div class="progress-fill" style="width: ${this.downloadProgress}%"></div>
-                </div>
-                <span class="progress-text">${Math.round(this.downloadProgress)}% downloaded</span>
-              ` : nothing}
-              ${this.aiError ? html`
-                <span class="error-text">${this.aiError}</span>
-              ` : nothing}
             </div>
-            ${this.aiModelStatus?.modelAvailable ? html`
-              <button class="danger" @click=${this.handleDeleteModel}>Delete</button>
-            ` : html`
-              <button
-                class="primary"
-                @click=${this.handleDownloadModel}
-                ?disabled=${this.isDownloadingModel}
-              >
-                ${this.isDownloadingModel ? 'Downloading...' : 'Download'}
-              </button>
-            `}
+            <select
+              .value=${this.activeProvider || ''}
+              @change=${(e: Event) => {
+                const value = (e.target as HTMLSelectElement).value;
+                if (value) this.handleProviderSelect(value as AiProviderType);
+              }}
+            >
+              <option value="">Select provider...</option>
+              ${this.aiProviders.map(
+                (p) => html`
+                  <option value=${p.providerType} ?selected=${this.activeProvider === p.providerType}>
+                    ${p.name} ${p.available ? '(Available)' : p.requiresApiKey && !p.hasApiKey ? '(API key required)' : '(Unavailable)'}
+                  </option>
+                `
+              )}
+            </select>
+          </div>
+
+          ${this.aiError ? html`
+            <div class="setting-row">
+              <span class="error-text">${this.aiError}</span>
+            </div>
+          ` : nothing}
+
+          ${this.aiProviders.filter(p => p.requiresApiKey).map(provider => {
+            const testStatus = this.providerTestStatus[provider.providerType];
+            const isTesting = this.testingProvider === provider.providerType;
+            return html`
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="setting-name">${provider.name} API Key</span>
+                  <div class="provider-status-row">
+                    ${provider.hasApiKey ? html`
+                      <span class="status-indicator configured">
+                        <span class="status-dot"></span>
+                        Configured
+                      </span>
+                    ` : html`
+                      <span class="status-indicator not-configured">
+                        <span class="status-dot"></span>
+                        Not configured
+                      </span>
+                    `}
+                    ${testStatus === 'success' ? html`
+                      <span class="status-indicator configured">
+                        ✓ Working
+                      </span>
+                    ` : testStatus === 'failed' ? html`
+                      <span class="status-indicator" style="color: var(--error-color); background: rgba(239, 68, 68, 0.1);">
+                        ✗ Failed
+                      </span>
+                    ` : nothing}
+                  </div>
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <input
+                    type="password"
+                    placeholder=${provider.hasApiKey ? '••••••••' : 'Enter API key...'}
+                    .value=${this.apiKeyInputs[provider.providerType] || ''}
+                    @input=${(e: Event) =>
+                      this.handleApiKeyChange(
+                        provider.providerType,
+                        (e.target as HTMLInputElement).value
+                      )}
+                    style="width: 180px;"
+                  />
+                  <button
+                    @click=${() => this.handleSaveApiKey(provider.providerType)}
+                    ?disabled=${!this.apiKeyInputs[provider.providerType]}
+                  >
+                    Save
+                  </button>
+                  <button
+                    @click=${() => this.handleTestProvider(provider.providerType)}
+                    ?disabled=${isTesting || !provider.hasApiKey}
+                  >
+                    ${isTesting ? 'Testing...' : 'Test'}
+                  </button>
+                </div>
+              </div>
+            `;
+          })}
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Local Providers</span>
+              <span class="setting-description">
+                Ollama and LM Studio are auto-detected when running locally
+              </span>
+            </div>
+            <button
+              @click=${() => this.loadAiProviders()}
+            >
+              Refresh
+            </button>
           </div>
         </div>
 

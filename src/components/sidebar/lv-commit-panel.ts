@@ -527,6 +527,14 @@ export class LvCommitPanel extends LitElement {
     }
   }
 
+  private handleOpenSettings(): void {
+    // Dispatch event to open settings dialog
+    this.dispatchEvent(new CustomEvent('open-settings', {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   private async handleGenerateMessage(): Promise<void> {
     if (!this.repositoryPath || this.isGenerating) return;
 
@@ -666,28 +674,28 @@ export class LvCommitPanel extends LitElement {
         </div>
       `}
 
-      ${this.stagedCount > 0 && this.aiAvailable ? html`
-        <button
-          class="generate-btn"
-          @click=${this.handleGenerateMessage}
-          ?disabled=${this.isGenerating || this.stagedCount === 0}
-          title="Generate commit message using AI"
-        >
-          ${this.isGenerating ? html`
-            <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10" stroke-dasharray="60" stroke-dashoffset="20"></circle>
-            </svg>
-            Generating...
-          ` : html`
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-              <path d="M2 17l10 5 10-5"/>
-              <path d="M2 12l10 5 10-5"/>
-            </svg>
-            Generate with AI
-          `}
-        </button>
-      ` : nothing}
+      <button
+        class="generate-btn"
+        @click=${this.aiAvailable ? this.handleGenerateMessage : this.handleOpenSettings}
+        ?disabled=${this.isGenerating || (this.aiAvailable && this.stagedCount === 0)}
+        title=${this.aiAvailable
+          ? (this.stagedCount === 0 ? 'Stage changes to generate a commit message' : 'Generate commit message using AI')
+          : 'Configure an AI provider in Settings to enable this feature'}
+      >
+        ${this.isGenerating ? html`
+          <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" stroke-dasharray="60" stroke-dashoffset="20"></circle>
+          </svg>
+          Generating...
+        ` : html`
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+            <path d="M2 17l10 5 10-5"/>
+            <path d="M2 12l10 5 10-5"/>
+          </svg>
+          ${this.aiAvailable ? 'Generate with AI' : 'Configure AI'}
+        `}
+      </button>
 
       ${this.generationError ? html`
         <div class="error">${this.generationError}</div>

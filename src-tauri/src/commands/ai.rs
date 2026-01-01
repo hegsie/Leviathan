@@ -1,54 +1,86 @@
 //! AI commit message generation commands
+//!
+//! Provides commands for managing AI providers and generating commit messages.
 
 use crate::error::{LeviathanError, Result};
-use crate::services::ai_service::{AiModelStatus, AiState, GeneratedCommitMessage};
-use tauri::{command, AppHandle, State};
+use crate::services::ai::{AiProviderInfo, AiProviderType, AiState, GeneratedCommitMessage};
+use tauri::{command, State};
 
-/// Get AI model status
+/// Get list of all AI providers with their status
 #[command]
-pub async fn get_ai_status(state: State<'_, AiState>) -> Result<AiModelStatus> {
+pub async fn get_ai_providers(state: State<'_, AiState>) -> Result<Vec<AiProviderInfo>> {
     let service = state.read().await;
-    Ok(service.get_status())
+    Ok(service.get_providers_info().await)
 }
 
-/// Check if AI features are available (model downloaded)
+/// Get the currently active AI provider
 #[command]
-pub async fn is_ai_available(state: State<'_, AiState>) -> Result<bool> {
+pub async fn get_active_ai_provider(state: State<'_, AiState>) -> Result<Option<AiProviderType>> {
     let service = state.read().await;
-    Ok(service.is_model_available())
+    Ok(service.get_config().active_provider)
 }
 
-/// Download the AI model from HuggingFace
+/// Set the active AI provider
 #[command]
-pub async fn download_ai_model(app: AppHandle, state: State<'_, AiState>) -> Result<()> {
-    let service = state.read().await;
-
-    // Check if already downloaded
-    if service.is_model_available() {
-        return Err(LeviathanError::OperationFailed(
-            "Model is already downloaded".to_string(),
-        ));
-    }
-
+pub async fn set_ai_provider(
+    state: State<'_, AiState>,
+    provider_type: AiProviderType,
+) -> Result<()> {
+    let mut service = state.write().await;
     service
-        .download_model(app)
+        .set_active_provider(provider_type)
+        .map_err(LeviathanError::OperationFailed)
+}
+
+/// Set API key for a provider
+#[command]
+pub async fn set_ai_api_key(
+    state: State<'_, AiState>,
+    provider_type: AiProviderType,
+    api_key: Option<String>,
+) -> Result<()> {
+    let mut service = state.write().await;
+    service
+        .set_api_key(provider_type, api_key)
+        .map_err(LeviathanError::OperationFailed)
+}
+
+/// Set the model for a provider
+#[command]
+pub async fn set_ai_model(
+    state: State<'_, AiState>,
+    provider_type: AiProviderType,
+    model: Option<String>,
+) -> Result<()> {
+    let mut service = state.write().await;
+    service
+        .set_model(provider_type, model)
+        .map_err(LeviathanError::OperationFailed)
+}
+
+/// Test if a provider is available
+#[command]
+pub async fn test_ai_provider(
+    state: State<'_, AiState>,
+    provider_type: AiProviderType,
+) -> Result<bool> {
+    let service = state.read().await;
+    service
+        .test_provider(provider_type)
         .await
         .map_err(LeviathanError::OperationFailed)
 }
 
-/// Delete the AI model
+/// Auto-detect available local AI providers (Ollama, LM Studio)
 #[command]
-pub async fn delete_ai_model(state: State<'_, AiState>) -> Result<()> {
-    let mut service = state.write().await;
-    service
-        .delete_model()
-        .map_err(LeviathanError::OperationFailed)
+pub async fn auto_detect_ai_providers(state: State<'_, AiState>) -> Result<Vec<AiProviderType>> {
+    let service = state.read().await;
+    Ok(service.auto_detect_providers().await)
 }
 
 /// Generate a commit message from staged changes
 #[command]
 pub async fn generate_commit_message(
-    app: AppHandle,
     state: State<'_, AiState>,
     repo_path: String,
 ) -> Result<GeneratedCommitMessage> {
@@ -61,12 +93,34 @@ pub async fn generate_commit_message(
         ));
     }
 
-    // Generate message using AI
-    let mut service = state.write().await;
+    // Generate message using the active provider
+    let service = state.read().await;
     service
-        .generate_commit_message(diff, app)
+        .generate_commit_message(diff)
         .await
         .map_err(LeviathanError::OperationFailed)
+}
+
+/// Check if AI is available (any provider is configured and available)
+#[command]
+pub async fn is_ai_available(state: State<'_, AiState>) -> Result<bool> {
+    let service = state.read().await;
+
+    // Check if there's an active provider
+    let config = service.get_config();
+    if config.active_provider.is_none() {
+        return Ok(false);
+    }
+
+    // Check if the active provider is available
+    if let Some(provider_type) = config.active_provider {
+        return service
+            .test_provider(provider_type)
+            .await
+            .map_err(LeviathanError::OperationFailed);
+    }
+
+    Ok(false)
 }
 
 /// Get the staged diff as a string

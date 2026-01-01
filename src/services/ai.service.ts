@@ -1,39 +1,28 @@
 /**
  * AI Service
- * Provides AI-powered commit message generation via Tauri commands
+ * Provides AI-powered commit message generation via configurable providers
  */
 
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invokeCommand } from './tauri-api.ts';
 import type { CommandResult } from '../types/api.types.ts';
 
 /**
- * AI model status information
+ * AI provider types
  */
-export interface AiModelStatus {
-  modelAvailable: boolean;
-  modelPath: string | null;
-  modelSizeMb: number | null;
-  quantization: string | null;
-}
+export type AiProviderType = 'ollama' | 'lm_studio' | 'openai' | 'anthropic' | 'github_copilot';
 
 /**
- * Model download progress event
+ * AI provider information
  */
-export interface ModelDownloadProgress {
-  downloadedBytes: number;
-  totalBytes: number | null;
-  progressPercent: number;
-  status: 'downloading' | 'complete' | 'error';
-}
-
-/**
- * Generation progress event
- */
-export interface GenerationProgress {
-  status: 'loading_model' | 'generating' | 'complete' | 'error';
-  tokensGenerated: number | null;
-  message: string | null;
+export interface AiProviderInfo {
+  providerType: AiProviderType;
+  name: string;
+  available: boolean;
+  requiresApiKey: boolean;
+  hasApiKey: boolean;
+  endpoint: string;
+  models: string[];
+  selectedModel: string | null;
 }
 
 /**
@@ -42,36 +31,65 @@ export interface GenerationProgress {
 export interface GeneratedCommitMessage {
   summary: string;
   body: string | null;
-  reasoning: string | null;
 }
 
 /**
- * Get AI model status
+ * Get all AI providers with their status
  */
-export async function getAiStatus(): Promise<CommandResult<AiModelStatus>> {
-  return invokeCommand<AiModelStatus>('get_ai_status');
+export async function getAiProviders(): Promise<CommandResult<AiProviderInfo[]>> {
+  return invokeCommand<AiProviderInfo[]>('get_ai_providers');
 }
 
 /**
- * Check if AI features are available (model downloaded)
+ * Get the currently active AI provider
  */
-export async function isAiAvailable(): Promise<boolean> {
-  const result = await invokeCommand<boolean>('is_ai_available');
-  return result.success && result.data === true;
+export async function getActiveAiProvider(): Promise<CommandResult<AiProviderType | null>> {
+  return invokeCommand<AiProviderType | null>('get_active_ai_provider');
 }
 
 /**
- * Download the AI model from HuggingFace
+ * Set the active AI provider
  */
-export async function downloadAiModel(): Promise<CommandResult<void>> {
-  return invokeCommand<void>('download_ai_model');
+export async function setAiProvider(
+  providerType: AiProviderType
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_ai_provider', { providerType });
 }
 
 /**
- * Delete the AI model
+ * Set API key for a provider
  */
-export async function deleteAiModel(): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_ai_model');
+export async function setAiApiKey(
+  providerType: AiProviderType,
+  apiKey: string | null
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_ai_api_key', { providerType, apiKey });
+}
+
+/**
+ * Set the model for a provider
+ */
+export async function setAiModel(
+  providerType: AiProviderType,
+  model: string | null
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('set_ai_model', { providerType, model });
+}
+
+/**
+ * Test if a provider is available
+ */
+export async function testAiProvider(
+  providerType: AiProviderType
+): Promise<CommandResult<boolean>> {
+  return invokeCommand<boolean>('test_ai_provider', { providerType });
+}
+
+/**
+ * Auto-detect available local AI providers (Ollama, LM Studio)
+ */
+export async function autoDetectAiProviders(): Promise<CommandResult<AiProviderType[]>> {
+  return invokeCommand<AiProviderType[]>('auto_detect_ai_providers');
 }
 
 /**
@@ -86,23 +104,34 @@ export async function generateCommitMessage(
 }
 
 /**
- * Subscribe to model download progress events
+ * Check if AI is available (provider configured and working)
  */
-export async function onModelDownloadProgress(
-  handler: (progress: ModelDownloadProgress) => void
-): Promise<UnlistenFn> {
-  return listen<ModelDownloadProgress>('ai-model-download-progress', (event) => {
-    handler(event.payload);
-  });
+export async function isAiAvailable(): Promise<boolean> {
+  const result = await invokeCommand<boolean>('is_ai_available');
+  return result.success && result.data === true;
 }
 
 /**
- * Subscribe to generation progress events
+ * Get display name for a provider type
  */
-export async function onGenerationProgress(
-  handler: (progress: GenerationProgress) => void
-): Promise<UnlistenFn> {
-  return listen<GenerationProgress>('ai-generation-progress', (event) => {
-    handler(event.payload);
-  });
+export function getProviderDisplayName(providerType: AiProviderType): string {
+  switch (providerType) {
+    case 'ollama':
+      return 'Ollama';
+    case 'lm_studio':
+      return 'LM Studio';
+    case 'openai':
+      return 'OpenAI';
+    case 'anthropic':
+      return 'Anthropic Claude';
+    case 'github_copilot':
+      return 'GitHub Models';
+  }
+}
+
+/**
+ * Check if a provider requires an API key
+ */
+export function providerRequiresApiKey(providerType: AiProviderType): boolean {
+  return providerType === 'openai' || providerType === 'anthropic' || providerType === 'github_copilot';
 }

@@ -403,12 +403,16 @@ pub fn run() {
             commands::update::stop_auto_update_check,
             commands::update::is_auto_update_running,
             commands::update::get_app_version,
-            // AI commit message generation
-            commands::ai::get_ai_status,
-            commands::ai::is_ai_available,
-            commands::ai::download_ai_model,
-            commands::ai::delete_ai_model,
+            // AI provider system
+            commands::ai::get_ai_providers,
+            commands::ai::get_active_ai_provider,
+            commands::ai::set_ai_provider,
+            commands::ai::set_ai_api_key,
+            commands::ai::set_ai_model,
+            commands::ai::test_ai_provider,
+            commands::ai::auto_detect_ai_providers,
             commands::ai::generate_commit_message,
+            commands::ai::is_ai_available,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
