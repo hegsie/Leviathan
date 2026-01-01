@@ -1,6 +1,6 @@
 # Leviathan Roadmap
 
-## Current Features (v0.1.0)
+## Current Features (v0.2.x)
 
 ### Repository Management
 - Open, clone, and initialize repositories
@@ -96,6 +96,19 @@
 - **Issues** - view issues with priority and status
 - **Pipelines** - view pipeline run status
 
+### AI-Powered Features
+- **Commit Message Generation** - generate conventional commit messages from staged diffs
+- **Embedded LLM** - uses [Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message) model (~2GB quantized)
+- **Offline-First** - model downloads once on first use, runs entirely locally
+- **GPU Acceleration** - Metal on macOS, CUDA on Windows/Linux (configurable via `LEVIATHAN_GPU_LAYERS`)
+- **Progress Feedback** - download progress and generation status in UI
+
+### Unified Profiles
+- **Multiple Identities** - configure work/personal Git identities
+- **Integration Accounts** - link GitHub, GitLab, Azure DevOps accounts to profiles
+- **Auto-Detection** - automatically switch profiles based on repository URL patterns
+- **Profile Switching** - switch identity and linked accounts together
+
 ---
 
 ## Planned Features
@@ -150,12 +163,6 @@
 #### Trunk-Based Development
 - Short-lived feature branches
 - Feature flags integration
-
-#### Profiles
-- Multiple Git identities
-- Per-repository identity
-- Quick profile switching
-- Work/personal separation
 
 ---
 
@@ -245,47 +252,21 @@
 
 ---
 
-### Phase 10: AI Integration
+### Phase 10: AI Enhancements
 
-#### Embedded AI Commit Messages (Primary)
-- Bundle [Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message) model (1.5B params, ~1GB quantized)
-- Zero-setup: Model downloads on first "Generate" click, cached in app data dir
-- Use `llama-rs` or `candle` crate for native Rust inference (no external deps)
-- "Generate" button in commit panel - analyzes staged diff
-- Generate conventional commit format (feat/fix/chore + summary + body)
-- Works 100% offline after initial download
-- CPU-only inference (works on any machine with 8GB+ RAM)
-- Progress bar during model download
-- Settings: enable/disable, model storage location
-
-#### External AI Backends (Alternative)
+#### External AI Backends
 - Auto-detect Ollama running locally (`localhost:11434`)
 - Support LM Studio (`localhost:1234/v1`)
 - Configurable model selection in settings
 - Cache available models from `/api/tags`
-- Prefer external backend if available (user's choice, more model options)
+- User choice between embedded model and external backends
 
-#### Implementation Architecture
-```
-Tauri App
-├── Frontend: "Generate" button in lv-commit-panel
-├── Rust Backend:
-│   ├── llama-rs for embedded model inference
-│   ├── HTTP client for Ollama/LM Studio API
-│   ├── Model download manager (reqwest + progress)
-│   └── Command: generate_commit_message(diff) -> String
-└── Model storage: {configDir}/leviathan/models/
-```
-
-#### AI-Assisted Features (Future)
+#### AI-Assisted Features
 - Code review suggestions
 - Commit message improvements
 - Branch naming suggestions
 - PR description generation
 - Diff summarization
-
-## git worktrees support
-## git bisect support
 
 ---
 

@@ -53,6 +53,11 @@ Leviathan aims to be a fast, privacy-first alternative to existing Git clients l
 - **Azure DevOps** - Pull requests, work items, and pipelines
 - **Bitbucket** - Pull requests, issues, and pipelines
 
+### AI Features
+- **AI Commit Messages** - Generate conventional commit messages from staged diffs using an embedded LLM
+- **Offline-First** - Model downloads once and runs entirely locally (no API keys or cloud services)
+- **GPU Accelerated** - Uses Metal on macOS, CUDA on Windows/Linux for fast inference
+
 ### Additional Features
 - **Remote Operations** - Fetch, pull, push with force push support
 - **Tags & Stashes** - Full tag and stash management
@@ -62,6 +67,7 @@ Leviathan aims to be a fast, privacy-first alternative to existing Git clients l
 - **Git LFS** - Track and manage large files
 - **GPG Signing** - Sign commits and tags
 - **File Watching** - Auto-refresh on file system changes
+- **Unified Profiles** - Multiple Git identities with linked integration accounts
 
 ## Installation
 
@@ -188,6 +194,7 @@ leviathan/
 - [git2-rs](https://github.com/rust-lang/git2-rs) - libgit2 bindings
 - [Tokio](https://tokio.rs/) - Async runtime
 - [SQLite](https://www.sqlite.org/) - Local database
+- [llama-cpp-2](https://github.com/utilityai/llama-cpp-rs) - LLM inference with GPU acceleration
 
 ## Roadmap
 
@@ -197,8 +204,33 @@ See [ROADMAP.md](ROADMAP.md) for planned features including:
 - Image diff comparison
 - Commit message templates
 - Git Flow workflow support
-- Local AI-assisted commit messages (Ollama)
-- Custom themes and light mode
+- External AI backends (Ollama, LM Studio)
+- Code review suggestions
+
+## Troubleshooting
+
+### AI Commit Message Generation
+
+The AI feature uses an embedded LLM that runs locally on your machine. On first use, it downloads a ~2GB model file.
+
+**macOS GPU Issues**: If the app crashes when generating commit messages, you may need to adjust GPU settings:
+
+```bash
+# Run with CPU-only inference (slower but stable)
+LEVIATHAN_GPU_LAYERS=0 /Applications/Leviathan.app/Contents/MacOS/Leviathan
+
+# Or reduce GPU layers (try 16, 8, etc.)
+LEVIATHAN_GPU_LAYERS=16 /Applications/Leviathan.app/Contents/MacOS/Leviathan
+```
+
+This is a known issue with Metal GPU buffer allocation on some macOS configurations. See [llama.cpp#16266](https://github.com/ggml-org/llama.cpp/issues/16266) for details.
+
+**Model Storage**: The AI model is stored in:
+- macOS: `~/Library/Application Support/io.github.hegsie.leviathan/models/`
+- Windows: `%APPDATA%\io.github.hegsie.leviathan\models\`
+- Linux: `~/.config/io.github.hegsie.leviathan/models/`
+
+You can delete the model folder to re-download or free up space.
 
 ## Contributing
 
