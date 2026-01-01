@@ -5,8 +5,27 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tauri::Emitter;
 use tokio::sync::RwLock;
+
+// Global backend instance - initialized once to avoid Metal reinitialization issues
+static LLAMA_BACKEND: OnceLock<Result<llama_cpp_2::llama_backend::LlamaBackend, String>> =
+    OnceLock::new();
+
+/// Get or initialize the global LlamaBackend
+fn get_llama_backend() -> Result<&'static llama_cpp_2::llama_backend::LlamaBackend, String> {
+    let result = LLAMA_BACKEND.get_or_init(|| {
+        tracing::info!("Initializing global llama backend (first time)...");
+        llama_cpp_2::llama_backend::LlamaBackend::init()
+            .map_err(|e| format!("Failed to init llama backend: {}", e))
+    });
+
+    match result {
+        Ok(backend) => Ok(backend),
+        Err(e) => Err(e.clone()),
+    }
+}
 
 /// Model file name on HuggingFace
 const MODEL_FILENAME: &str = "unsloth.Q4_K_M.gguf";
@@ -264,7 +283,6 @@ fn run_inference(
     app: &tauri::AppHandle,
 ) -> Result<String, String> {
     use llama_cpp_2::context::params::LlamaContextParams;
-    use llama_cpp_2::llama_backend::LlamaBackend;
     use llama_cpp_2::llama_batch::LlamaBatch;
     use llama_cpp_2::model::params::LlamaModelParams;
     use llama_cpp_2::model::LlamaModel;
@@ -273,17 +291,26 @@ fn run_inference(
 
     tracing::info!("Loading model from: {:?}", model_path);
 
-    // Initialize llama backend
-    let backend =
-        LlamaBackend::init().map_err(|e| format!("Failed to init llama backend: {}", e))?;
+    // Get global llama backend (initialized once on first use)
+    let backend = get_llama_backend()?;
+    tracing::info!("Using global llama backend");
 
-    // Load model parameters
-    let model_params = LlamaModelParams::default();
+    // Load model parameters with GPU settings
+    // Use environment variable to control GPU layers, defaulting to 32 for balanced performance
+    // Higher values may cause Metal crashes on some macOS configurations
+    // See: https://github.com/ggml-org/llama.cpp/issues/16266
+    let n_gpu_layers = std::env::var("LEVIATHAN_GPU_LAYERS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(32);
+
+    let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
+    tracing::info!("Model params configured with n_gpu_layers={}", n_gpu_layers);
 
     // Load the model
-    let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
+    tracing::info!("Loading model file...");
+    let model = LlamaModel::load_from_file(backend, model_path, &model_params)
         .map_err(|e| format!("Failed to load model: {}", e))?;
-
     tracing::info!("Model loaded successfully");
 
     // Create context parameters
@@ -291,7 +318,7 @@ fn run_inference(
 
     // Create context
     let mut ctx = model
-        .new_context(&backend, ctx_params)
+        .new_context(backend, ctx_params)
         .map_err(|e| format!("Failed to create context: {}", e))?;
 
     // Tokenize the input diff
