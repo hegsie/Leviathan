@@ -145,12 +145,21 @@ This document outlines planned features and improvements for future releases. Fo
 
 ## AI Enhancements
 
-### External AI Backends
+### Local AI Backends
 - Auto-detect Ollama running locally (`localhost:11434`)
 - Support LM Studio (`localhost:1234/v1`)
 - Configurable model selection in settings
 - Cache available models from `/api/tags`
 - User choice between embedded model and external backends
+
+### Cloud AI Providers
+- **Anthropic Claude** - Claude API integration for commit messages, code review, PR descriptions
+- **GitHub Copilot** - Integration with GitHub Copilot for code suggestions and explanations
+- **OpenAI** - GPT-4 and future models for AI-assisted features
+- **Google Gemini** - Gemini API support
+- API key management with secure storage
+- Provider selection in settings (local vs cloud)
+- Usage tracking and cost estimates
 
 ### AI-Assisted Features
 - Code review suggestions
@@ -158,6 +167,8 @@ This document outlines planned features and improvements for future releases. Fo
 - Branch naming suggestions
 - PR description generation
 - Diff summarization
+- Conflict resolution suggestions
+- Code explanation for complex diffs
 
 ---
 
