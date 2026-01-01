@@ -45,7 +45,8 @@
     "shortDescription": "Git GUI Client",
     "longDescription": "A fully-featured, open-source, cross-platform Git GUI client",
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "entitlements": "Entitlements.plist"
     },
     "windows": {
       "wix": null,
