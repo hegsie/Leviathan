@@ -238,35 +238,54 @@ impl AiService {
             diff
         };
 
-        // Run inference in blocking task
+        // Run inference in blocking task with panic catching
         let result = tokio::task::spawn_blocking(move || {
-            // Emit generating status
-            let _ = app.emit(
-                "ai-generation-progress",
-                GenerationProgress {
-                    status: "generating".to_string(),
-                    tokens_generated: Some(0),
-                    message: Some("Generating commit message...".to_string()),
-                },
-            );
+            // Catch panics from the llama.cpp library (e.g., Metal GPU crashes)
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Emit generating status
+                let _ = app.emit(
+                    "ai-generation-progress",
+                    GenerationProgress {
+                        status: "generating".to_string(),
+                        tokens_generated: Some(0),
+                        message: Some("Generating commit message...".to_string()),
+                    },
+                );
 
-            // Load model and run inference
-            let output = run_inference(&model_path, &truncated_diff, &app)?;
+                // Load model and run inference
+                let output = run_inference(&model_path, &truncated_diff, &app)?;
 
-            // Parse the response
-            let result = parse_response(&output);
+                // Parse the response
+                let result = parse_response(&output);
 
-            // Emit completion
-            let _ = app.emit(
-                "ai-generation-progress",
-                GenerationProgress {
-                    status: "complete".to_string(),
-                    tokens_generated: Some(output.len() as u32),
-                    message: Some("Complete".to_string()),
-                },
-            );
+                // Emit completion
+                let _ = app.emit(
+                    "ai-generation-progress",
+                    GenerationProgress {
+                        status: "complete".to_string(),
+                        tokens_generated: Some(output.len() as u32),
+                        message: Some("Complete".to_string()),
+                    },
+                );
 
-            Ok::<GeneratedCommitMessage, String>(result)
+                Ok::<GeneratedCommitMessage, String>(result)
+            }));
+
+            match panic_result {
+                Ok(result) => result,
+                Err(panic_info) => {
+                    // Extract panic message if possible
+                    let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown panic in AI inference".to_string()
+                    };
+                    tracing::error!("AI inference panic: {}", panic_msg);
+                    Err(format!("AI model crashed: {}. Try setting LEVIATHAN_GPU_LAYERS=0 to disable GPU acceleration.", panic_msg))
+                }
+            }
         })
         .await
         .map_err(|e| format!("Task failed: {}", e))??;
