@@ -110,7 +110,7 @@ impl AiProvider for OpenAiCompatibleProvider {
         // Try to list models
         let mut request = self
             .client
-            .get(&self.models_url())
+            .get(self.models_url())
             .timeout(std::time::Duration::from_secs(5));
 
         if let Some(key) = &self.api_key {
@@ -126,7 +126,7 @@ impl AiProvider for OpenAiCompatibleProvider {
     async fn list_models(&self) -> Result<Vec<String>, String> {
         let mut request = self
             .client
-            .get(&self.models_url())
+            .get(self.models_url())
             .timeout(std::time::Duration::from_secs(10));
 
         if let Some(key) = &self.api_key {
@@ -187,7 +187,7 @@ impl AiProvider for OpenAiCompatibleProvider {
 
         let mut request = self
             .client
-            .post(&self.chat_url())
+            .post(self.chat_url())
             .json(&request_body)
             .timeout(std::time::Duration::from_secs(60));
 

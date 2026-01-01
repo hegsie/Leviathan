@@ -121,7 +121,7 @@ impl AiProvider for GithubCopilotProvider {
 
         let response = self
             .client
-            .post(&self.chat_url())
+            .post(self.chat_url())
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&request_body)

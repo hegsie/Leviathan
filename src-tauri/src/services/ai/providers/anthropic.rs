@@ -109,7 +109,7 @@ impl AiProvider for AnthropicProvider {
 
         let response = self
             .client
-            .post(&self.messages_url())
+            .post(self.messages_url())
             .header("x-api-key", api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")

@@ -303,7 +303,7 @@ impl AiService {
             .config
             .providers
             .entry(provider_type)
-            .or_insert_with(ProviderSettings::default);
+            .or_default();
         settings.api_key = api_key;
 
         // Reinitialize providers to pick up new key
@@ -321,7 +321,7 @@ impl AiService {
             .config
             .providers
             .entry(provider_type)
-            .or_insert_with(ProviderSettings::default);
+            .or_default();
         settings.model = model;
         self.save_config()
     }
@@ -336,7 +336,7 @@ impl AiService {
             .config
             .providers
             .entry(provider_type)
-            .or_insert_with(ProviderSettings::default);
+            .or_default();
         settings.endpoint = endpoint;
 
         // Reinitialize providers to use new endpoint
