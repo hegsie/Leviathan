@@ -299,11 +299,7 @@ impl AiService {
         provider_type: AiProviderType,
         api_key: Option<String>,
     ) -> Result<(), String> {
-        let settings = self
-            .config
-            .providers
-            .entry(provider_type)
-            .or_default();
+        let settings = self.config.providers.entry(provider_type).or_default();
         settings.api_key = api_key;
 
         // Reinitialize providers to pick up new key
@@ -317,11 +313,7 @@ impl AiService {
         provider_type: AiProviderType,
         model: Option<String>,
     ) -> Result<(), String> {
-        let settings = self
-            .config
-            .providers
-            .entry(provider_type)
-            .or_default();
+        let settings = self.config.providers.entry(provider_type).or_default();
         settings.model = model;
         self.save_config()
     }
@@ -332,11 +324,7 @@ impl AiService {
         provider_type: AiProviderType,
         endpoint: Option<String>,
     ) -> Result<(), String> {
-        let settings = self
-            .config
-            .providers
-            .entry(provider_type)
-            .or_default();
+        let settings = self.config.providers.entry(provider_type).or_default();
         settings.endpoint = endpoint;
 
         // Reinitialize providers to use new endpoint
