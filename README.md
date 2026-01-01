@@ -29,45 +29,114 @@ Leviathan aims to be a fast, privacy-first alternative to existing Git clients l
 
 ## Features
 
-### Core Git Operations
-- **Repository Management** - Open, clone, and initialize repositories with multi-tab support
-- **Commit History** - Interactive graph visualization with branch topology
-- **Staging** - Stage/unstage files and individual hunks with tree or flat view
-- **Branching** - Create, delete, rename, and checkout branches
-- **Merging** - Fast-forward, squash, and no-ff merge strategies
-- **Rebasing** - Standard and interactive rebase with action editor
-- **Cherry-pick & Revert** - Apply or undo specific commits
-- **Reset** - Soft, mixed, and hard reset modes
-- **Conflict Resolution** - 3-way merge editor for resolving conflicts
+### Repository Management
+- Open, clone, and initialize repositories
+- Multi-repository support with tabs
+- File system watching for auto-refresh
 
-### Productivity
-- **Command Palette** - Fuzzy finder for all actions (Ctrl/Cmd+P)
-- **Keyboard Navigation** - Vim-style shortcuts throughout
-- **File History** - View all commits that modified a file
-- **Commit Search** - Search by message, author, SHA, or date range
-- **Undo/Redo** - Visual reflog browser for recovering previous states
+### Commit Operations
+- Commit history with interactive graph visualization
+- Create commits with staging support
+- Hunk-level staging/unstaging
+- Commit details view with file list
+- Commit amend - modify last commit message and staged files
 
-### Platform Integrations
-- **GitHub** - Pull requests, issues, releases, and Actions status
-- **GitLab** - Merge requests, issues, and CI/CD pipelines
-- **Azure DevOps** - Pull requests, work items, and pipelines
-- **Bitbucket** - Pull requests, issues, and pipelines
+### Branch Operations
+- Create, delete, rename branches
+- Checkout branches and commits
+- Branch tracking (upstream detection)
+- Ahead/behind commit counting
 
-### AI Features
-- **AI Commit Messages** - Generate conventional commit messages from staged diffs using an embedded LLM
-- **Offline-First** - Model downloads once and runs entirely locally (no API keys or cloud services)
-- **GPU Accelerated** - Uses Metal on macOS, CUDA on Windows/Linux for fast inference
+### Merge & Rebase
+- Merge with fast-forward, squash, and no-ff options
+- Rebase onto branches
+- Interactive rebase with action editor
+- 3-way merge conflict resolution editor
+- Abort/continue operations
 
-### Additional Features
-- **Remote Operations** - Fetch, pull, push with force push support
-- **Tags & Stashes** - Full tag and stash management
-- **Diff Viewer** - Syntax-highlighted diffs powered by Shiki
-- **Blame View** - Line-by-line author attribution
-- **Submodules & Worktrees** - Manage submodules and multiple working directories
-- **Git LFS** - Track and manage large files
-- **GPG Signing** - Sign commits and tags
-- **File Watching** - Auto-refresh on file system changes
-- **Unified Profiles** - Multiple Git identities with linked integration accounts
+### Cherry-pick & Revert
+- Cherry-pick specific commits to apply to current branch
+- Conflict resolution support for cherry-pick
+- Abort/continue cherry-pick operations
+- Revert commits with auto-generated revert message
+- Abort/continue revert operations
+
+### Reset Operations
+- Soft, mixed, and hard reset modes
+- Reset to any commit with visual confirmation
+- Context menu integration for quick access
+
+### Remote Operations
+- Fetch, pull, push
+- Multiple remotes support
+- Force push option
+
+### Productivity Features
+- **Command Palette** (Cmd/Ctrl+P) - fuzzy finder for all actions
+- **File History** - view all commits that modified a file with rename following
+- **Commit Search** - search by message, author, SHA, file path, or date range
+- **Undo/Redo** - visual reflog browser for recovering previous states
+- **Keyboard Shortcuts** - comprehensive keyboard navigation with vim-style support
+- **Drag & Drop** - drag branches to merge/rebase, drag files to stage/unstage
+
+### Tags & Stashes
+- Tag management (create, delete, push)
+- Stash management (create, apply, pop, drop)
+
+### Diff & Blame
+- Diff viewer with syntax highlighting (Shiki)
+- Blame view with author attribution
+- Dark and light themes
+- Syntax highlighting theme options
+
+### Advanced Git Operations
+- **Remote Management** - add, remove, rename remotes, edit URLs
+- **Clean Operations** - remove untracked/ignored files with preview
+- **Bisect** - binary search for bug-introducing commits
+- **Submodules** - add, init, update, sync, remove submodules
+- **Worktrees** - create, remove, lock/unlock, move multiple working directories
+- **Git LFS** - track patterns, pull/fetch/prune large files
+
+### Security & Configuration
+- **GPG Signing** - configure keys, sign commits/tags, verify signatures, trust levels
+- **SSH Key Management** - generate keys (Ed25519, RSA, ECDSA), view/copy public keys, test connections
+- **Git Configuration** - view/edit global and repository config, manage aliases, user identity
+- **Credential Management** - credential helper configuration, test credentials, per-remote settings
+
+### GitHub Integration
+- **Pull Requests** - view PRs, create PRs, PR status visualization in commit graph
+- **Issues** - view issues, create issues, filter by state/labels
+- **Commit Linking** - automatic issue reference detection (fixes #123, closes #456)
+- **Releases** - view releases, create releases with auto-generated notes
+- **Actions** - workflow run status, check runs for commits
+
+### GitLab Integration
+- **Merge Requests** - view MRs, create MRs, status filtering
+- **Issues** - view issues, create issues, label filtering
+- **Pipelines** - view CI/CD pipeline status
+
+### Azure DevOps Integration
+- **Pull Requests** - view PRs, create PRs, PR status filtering
+- **Work Items** - browse and query work items by project
+- **Pipelines** - view pipeline/build run status
+
+### Bitbucket Integration
+- **Pull Requests** - view PRs, create PRs, status filtering
+- **Issues** - view issues with priority and status
+- **Pipelines** - view pipeline run status
+
+### AI-Powered Features
+- **Commit Message Generation** - generate conventional commit messages from staged diffs
+- **Embedded LLM** - uses [Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message) model (~2GB quantized)
+- **Offline-First** - model downloads once on first use, runs entirely locally
+- **GPU Acceleration** - Metal on macOS, CUDA on Windows/Linux (configurable via `LEVIATHAN_GPU_LAYERS`)
+- **Progress Feedback** - download progress and generation status in UI
+
+### Unified Profiles
+- **Multiple Identities** - configure work/personal Git identities
+- **Integration Accounts** - link GitHub, GitLab, Azure DevOps accounts to profiles
+- **Auto-Detection** - automatically switch profiles based on repository URL patterns
+- **Profile Switching** - switch identity and linked accounts together
 
 ## Installation
 
