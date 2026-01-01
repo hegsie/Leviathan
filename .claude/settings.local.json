@@ -53,7 +53,17 @@
       "Bash(cargo fmt:*)",
       "Bash(gh release delete:*)",
       "Bash(git pull:*)",
-      "Bash(npm version:*)"
+      "Bash(npm version:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:crates.io)",
+      "Bash(cargo search:*)",
+      "Bash(wc:*)",
+      "Bash(ls:*)",
+      "WebFetch(domain:v2.tauri.app)",
+      "Bash(npm run test:e2e:*)",
+      "Bash(git log:*)"
     ]
   }
 }

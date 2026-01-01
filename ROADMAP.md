@@ -198,6 +198,35 @@ This document outlines planned features and improvements for future releases. Fo
 
 ---
 
+## Testing & Quality Assurance
+
+### E2E Test Coverage
+- Fix shadow DOM selectors using `locator.locator()` chaining
+- Add store initialization to mock open repositories
+- Complete staging/commit/branch workflow tests
+- Add integration dialog tests (GitHub, GitLab, Azure DevOps)
+- Visual regression testing with screenshot comparisons
+
+### CI Integration
+- Run E2E tests on every pull request
+- Upload test artifacts (screenshots, traces) on failure
+- Parallel test execution across browsers
+- Test result reporting in PR comments
+
+### Test Infrastructure
+- Tauri WebDriver tests for Windows/Linux (native app testing)
+- Component-level visual testing
+- Performance benchmarks for large repositories
+- Accessibility (a11y) automated testing
+
+### Code Quality
+- Increase unit test coverage for components (currently ~10%)
+- Add integration tests for Tauri IPC commands
+- Mutation testing to verify test effectiveness
+- Code coverage thresholds and reporting
+
+---
+
 ## Future Considerations
 
 - Code review tools
