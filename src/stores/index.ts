@@ -15,3 +15,19 @@ export {
   hasAccountsForType,
   hasAnyAccounts,
 } from './integration-accounts.store.ts';
+
+// Re-import stores for test exposure
+import { repositoryStore as repoStore } from './repository.store.ts';
+import { commitsStore as cStore } from './commits.store.ts';
+import { uiStore as uStore } from './ui.store.ts';
+import { settingsStore as sStore } from './settings.store.ts';
+
+// Expose stores on window for E2E testing (only in dev mode)
+if (import.meta.env.DEV) {
+  (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ = {
+    repositoryStore: repoStore,
+    commitsStore: cStore,
+    uiStore: uStore,
+    settingsStore: sStore,
+  };
+}
