@@ -53,8 +53,7 @@ impl AiConfig {
         let contents = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read AI config: {}", e))?;
 
-        serde_json::from_str(&contents)
-            .map_err(|e| format!("Failed to parse AI config: {}", e))
+        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse AI config: {}", e))
     }
 
     /// Save configuration to disk

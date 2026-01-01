@@ -63,7 +63,14 @@
       "Bash(ls:*)",
       "WebFetch(domain:v2.tauri.app)",
       "Bash(npm run test:e2e:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(npm run tauri:build:*)",
+      "Bash(log show:*)",
+      "Bash(python3:*)",
+      "Bash(tr:*)",
+      "Bash(open:*)",
+      "Bash(npm run tauri:build:release:*)",
+      "Bash(npm run:*)"
     ]
   }
 }

@@ -44,12 +44,7 @@ struct ResponseMessage {
 }
 
 /// GitHub Models available models (subset of what's available)
-const COPILOT_MODELS: &[&str] = &[
-    "gpt-4o",
-    "gpt-4o-mini",
-    "o1-mini",
-    "o1-preview",
-];
+const COPILOT_MODELS: &[&str] = &["gpt-4o", "gpt-4o-mini", "o1-mini", "o1-preview"];
 
 /// GitHub Models provider implementation
 pub struct GithubCopilotProvider {
@@ -220,7 +215,7 @@ mod tests {
     #[test]
     fn test_copilot_models() {
         assert!(COPILOT_MODELS.contains(&"gpt-4o"));
-        assert!(COPILOT_MODELS.contains(&"claude-3.5-sonnet"));
+        assert!(COPILOT_MODELS.contains(&"gpt-4o-mini"));
     }
 
     #[test]

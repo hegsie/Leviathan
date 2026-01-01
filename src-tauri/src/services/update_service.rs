@@ -107,16 +107,16 @@ async fn check_and_install_update(app: &tauri::AppHandle) -> Result<(), String> 
     tracing::debug!("check_and_install_update: Starting update check");
 
     let current_version = env!("CARGO_PKG_VERSION").to_string();
-    tracing::debug!("check_and_install_update: Current version is {}", current_version);
+    tracing::debug!(
+        "check_and_install_update: Current version is {}",
+        current_version
+    );
 
     tracing::debug!("check_and_install_update: Building updater...");
-    let updater = app
-        .updater_builder()
-        .build()
-        .map_err(|e| {
-            tracing::error!("check_and_install_update: Failed to build updater: {}", e);
-            format!("Failed to build updater: {}", e)
-        })?;
+    let updater = app.updater_builder().build().map_err(|e| {
+        tracing::error!("check_and_install_update: Failed to build updater: {}", e);
+        format!("Failed to build updater: {}", e)
+    })?;
     tracing::debug!("check_and_install_update: Updater built successfully");
 
     tracing::debug!("check_and_install_update: Calling updater.check()...");
@@ -204,7 +204,10 @@ async fn check_and_install_update(app: &tauri::AppHandle) -> Result<(), String> 
             Ok(())
         }
         Err(e) => {
-            tracing::error!("check_and_install_update: Update check failed with error: {}", e);
+            tracing::error!(
+                "check_and_install_update: Update check failed with error: {}",
+                e
+            );
             Err(format!("Update check failed: {}", e))
         }
     }

@@ -64,7 +64,13 @@ impl AiProvider for OllamaProvider {
         // Try to list models - if we get a response, Ollama is running
         let url = format!("{}/api/tags", self.endpoint);
 
-        match self.client.get(&url).timeout(std::time::Duration::from_secs(2)).send().await {
+        match self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+        {
             Ok(response) => response.status().is_success(),
             Err(_) => false,
         }
@@ -82,10 +88,7 @@ impl AiProvider for OllamaProvider {
             .map_err(|e| format!("Failed to connect to Ollama: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(format!(
-                "Ollama returned error: {}",
-                response.status()
-            ));
+            return Err(format!("Ollama returned error: {}", response.status()));
         }
 
         let models: OllamaModelsResponse = response
@@ -198,7 +201,8 @@ mod tests {
 
     #[test]
     fn test_parse_commit_message_with_body() {
-        let text = "feat: add user authentication\n\nThis implements JWT-based auth\nwith refresh tokens.";
+        let text =
+            "feat: add user authentication\n\nThis implements JWT-based auth\nwith refresh tokens.";
         let result = parse_commit_message(text).unwrap();
         assert_eq!(result.summary, "feat: add user authentication");
         assert!(result.body.is_some());

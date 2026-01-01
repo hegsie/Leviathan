@@ -15,7 +15,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub use config::{AiConfig, ProviderSettings};
-pub use providers::{AnthropicProvider, GithubCopilotProvider, OllamaProvider, OpenAiCompatibleProvider};
+pub use providers::{
+    AnthropicProvider, GithubCopilotProvider, OllamaProvider, OpenAiCompatibleProvider,
+};
 
 /// AI provider types supported by the system
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
