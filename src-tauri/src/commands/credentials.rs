@@ -454,6 +454,31 @@ fn extract_ssh_username(message: &str) -> Option<String> {
     }
 }
 
+/// Store git credentials in the system keyring
+/// This is used for HTTPS authentication with git operations
+#[command]
+pub async fn store_git_credentials(url: String, username: String, password: String) -> Result<()> {
+    use crate::services::credentials_service;
+
+    tracing::info!("Storing git credentials for URL: {}", url);
+    credentials_service::store_credentials(&url, &username, &password).map_err(|e| {
+        tracing::error!("Failed to store credentials for {}: {}", url, e);
+        LeviathanError::OperationFailed(format!("Failed to store credentials: {}", e))
+    })?;
+    tracing::info!("Successfully stored git credentials for URL: {}", url);
+    Ok(())
+}
+
+/// Delete git credentials from the system keyring
+#[command]
+pub async fn delete_git_credentials(url: String) -> Result<()> {
+    use crate::services::credentials_service;
+
+    credentials_service::delete_credentials(&url).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to delete credentials: {}", e))
+    })
+}
+
 /// Erase stored credentials for a host
 #[command]
 pub async fn erase_credentials(path: String, host: String, protocol: String) -> Result<()> {

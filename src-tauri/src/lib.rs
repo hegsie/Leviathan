@@ -331,6 +331,8 @@ pub fn run() {
             commands::credentials::get_available_helpers,
             commands::credentials::test_credentials,
             commands::credentials::erase_credentials,
+            commands::credentials::store_git_credentials,
+            commands::credentials::delete_git_credentials,
             // GitHub integration
             commands::github::check_github_connection,
             commands::github::detect_github_repo,

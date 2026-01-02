@@ -1352,6 +1352,26 @@ export async function eraseCredentials(
   return invokeCommand<void>('erase_credentials', { path, host, protocol });
 }
 
+/**
+ * Store git credentials in the system keyring for HTTPS authentication
+ */
+export async function storeGitCredentials(
+  url: string,
+  username: string,
+  password: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('store_git_credentials', { url, username, password });
+}
+
+/**
+ * Delete git credentials from the system keyring
+ */
+export async function deleteGitCredentials(
+  url: string
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('delete_git_credentials', { url });
+}
+
 // ============================================================================
 // GitHub Integration
 // ============================================================================

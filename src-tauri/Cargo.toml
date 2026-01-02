@@ -1,6 +1,6 @@
 [package]
 name = "leviathan"
-version = "0.2.31"
+version = "0.2.32"
 description = "A fully-featured, open-source, cross-platform Git GUI client"
 authors = ["Leviathan Contributors"]
 edition = "2021"
@@ -30,7 +30,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
-keyring = "3"
+keyring = { version = "3", features = ["apple-native"] }
 notify = "8"
 reqwest = { version = "0.12", features = ["json"] }
 dirs = "6"

@@ -1,12 +1,85 @@
 //! Git credentials service
 //!
-//! Provides credential management for git operations using the system keyring
-//! for secure storage.
+//! Provides credential management for git operations using macOS Keychain
+//! via the `security` CLI tool (avoids permission prompts that the keyring crate triggers).
 
 use git2::{Cred, CredentialType, RemoteCallbacks};
+use std::collections::HashMap;
+use std::process::Command;
+use std::sync::Mutex;
 
-/// Service name for keyring storage
+/// Service name for keychain storage
 const SERVICE_NAME: &str = "leviathan-git";
+
+/// In-memory credential cache (host -> (username, password))
+/// Used as a fast lookup before hitting keychain
+static CREDENTIAL_CACHE: Mutex<Option<HashMap<String, (String, String)>>> = Mutex::new(None);
+
+/// Get credentials from the in-memory cache
+fn get_cached_credentials(host: &str) -> Option<(String, String)> {
+    let cache = CREDENTIAL_CACHE.lock().ok()?;
+    cache.as_ref()?.get(host).cloned()
+}
+
+/// Store credentials in the in-memory cache
+fn cache_credentials(host: &str, username: &str, password: &str) {
+    if let Ok(mut cache) = CREDENTIAL_CACHE.lock() {
+        let map = cache.get_or_insert_with(HashMap::new);
+        map.insert(
+            host.to_string(),
+            (username.to_string(), password.to_string()),
+        );
+    }
+}
+
+/// Get a password from macOS Keychain using security CLI
+fn keychain_get(service: &str, account: &str) -> Option<String> {
+    let output = Command::new("security")
+        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !password.is_empty() {
+            return Some(password);
+        }
+    }
+    None
+}
+
+/// Store a password in macOS Keychain using security CLI
+fn keychain_set(service: &str, account: &str, password: &str) -> bool {
+    // First try to delete any existing entry (ignore errors)
+    let _ = Command::new("security")
+        .args(["delete-generic-password", "-s", service, "-a", account])
+        .output();
+
+    // Add the new entry
+    let output = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-s",
+            service,
+            "-a",
+            account,
+            "-w",
+            password,
+            "-U", // Update if exists
+        ])
+        .output();
+
+    output.map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Delete a password from macOS Keychain using security CLI
+fn keychain_delete(service: &str, account: &str) -> bool {
+    let output = Command::new("security")
+        .args(["delete-generic-password", "-s", service, "-a", account])
+        .output();
+
+    output.map(|o| o.status.success()).unwrap_or(false)
+}
 
 /// Credentials helper that provides git2 remote callbacks with authentication support
 pub struct CredentialsHelper {
@@ -108,53 +181,91 @@ impl CredentialsHelper {
     }
 }
 
-/// Get stored credentials from the system keyring
+/// Get stored credentials - checks memory cache first, then keychain
 fn get_stored_credentials(url: &str) -> Option<(String, String)> {
-    // Parse URL to get host for keyring lookup
     let host = extract_host(url)?;
+    tracing::debug!("Looking up credentials for host: {}", host);
 
-    // Try to get username from keyring
-    let username_entry = keyring::Entry::new(SERVICE_NAME, &format!("{}_username", host)).ok()?;
-    let username = username_entry.get_password().ok()?;
+    // Check memory cache first (fast path)
+    if let Some(creds) = get_cached_credentials(&host) {
+        tracing::debug!(
+            "Found credentials in cache for host: {} (username len: {}, password len: {})",
+            host,
+            creds.0.len(),
+            creds.1.len()
+        );
+        return Some(creds);
+    }
 
-    // Try to get password from keyring
-    let password_entry = keyring::Entry::new(SERVICE_NAME, &format!("{}_password", host)).ok()?;
-    let password = password_entry.get_password().ok()?;
+    // Try keychain via security CLI
+    let username_key = format!("{}_username", host);
+    let password_key = format!("{}_password", host);
 
+    let username = keychain_get(SERVICE_NAME, &username_key)?;
+    let password = keychain_get(SERVICE_NAME, &password_key)?;
+
+    // Cache for faster future lookups
+    cache_credentials(&host, &username, &password);
+
+    tracing::debug!(
+        "Found credentials in keychain for host: {} (username len: {}, password len: {})",
+        host,
+        username.len(),
+        password.len()
+    );
     Some((username, password))
 }
 
-/// Store credentials in the system keyring
+/// Store credentials in memory cache and keychain
 pub fn store_credentials(url: &str, username: &str, password: &str) -> Result<(), String> {
     let host = extract_host(url).ok_or("Invalid URL")?;
+    tracing::debug!(
+        "Storing credentials for host: {} (username len: {}, password len: {})",
+        host,
+        username.len(),
+        password.len()
+    );
 
-    let username_entry = keyring::Entry::new(SERVICE_NAME, &format!("{}_username", host))
-        .map_err(|e| e.to_string())?;
-    username_entry
-        .set_password(username)
-        .map_err(|e| e.to_string())?;
+    // Store in memory cache
+    cache_credentials(&host, username, password);
 
-    let password_entry = keyring::Entry::new(SERVICE_NAME, &format!("{}_password", host))
-        .map_err(|e| e.to_string())?;
-    password_entry
-        .set_password(password)
-        .map_err(|e| e.to_string())?;
+    // Store in keychain via security CLI
+    let username_key = format!("{}_username", host);
+    let password_key = format!("{}_password", host);
+
+    let username_ok = keychain_set(SERVICE_NAME, &username_key, username);
+    let password_ok = keychain_set(SERVICE_NAME, &password_key, password);
+
+    if username_ok && password_ok {
+        tracing::info!("Stored credentials in keychain for host: {}", host);
+    } else {
+        tracing::warn!(
+            "Failed to store credentials in keychain for host: {} (cached in memory only)",
+            host
+        );
+    }
 
     Ok(())
 }
 
-/// Delete stored credentials from the system keyring
+/// Delete stored credentials from memory cache and keychain
 pub fn delete_credentials(url: &str) -> Result<(), String> {
     let host = extract_host(url).ok_or("Invalid URL")?;
 
-    if let Ok(entry) = keyring::Entry::new(SERVICE_NAME, &format!("{}_username", host)) {
-        let _ = entry.delete_credential();
+    // Remove from memory cache
+    if let Ok(mut cache) = CREDENTIAL_CACHE.lock() {
+        if let Some(map) = cache.as_mut() {
+            map.remove(&host);
+        }
     }
 
-    if let Ok(entry) = keyring::Entry::new(SERVICE_NAME, &format!("{}_password", host)) {
-        let _ = entry.delete_credential();
-    }
+    // Remove from keychain via security CLI
+    let username_key = format!("{}_username", host);
+    let password_key = format!("{}_password", host);
+    keychain_delete(SERVICE_NAME, &username_key);
+    keychain_delete(SERVICE_NAME, &password_key);
 
+    tracing::debug!("Deleted credentials for host: {}", host);
     Ok(())
 }
 

@@ -679,6 +679,20 @@ export class LvAzureDevOpsDialog extends LitElement {
           avatarUrl: result.data.user.imageUrl ?? null,
         });
       }
+
+      // Ensure git credentials are stored in keyring for push/pull operations
+      // This handles the case where token was previously stored only in Stronghold
+      if (result.data.connected && token && org) {
+        try {
+          // Store for both dev.azure.com and {org}.visualstudio.com formats
+          // Username must be non-empty for macOS Keychain - use 'pat' as a placeholder
+          await gitService.storeGitCredentials('https://dev.azure.com', 'pat', token);
+          await gitService.storeGitCredentials(`https://${org}.visualstudio.com`, 'pat', token);
+          console.log(`[AzureDevOps] Synced git credentials to keyring for dev.azure.com and ${org}.visualstudio.com`);
+        } catch (err) {
+          console.warn('[AzureDevOps] Failed to sync git credentials to keyring:', err);
+        }
+      }
     }
   }
 
@@ -871,6 +885,13 @@ export class LvAzureDevOpsDialog extends LitElement {
       this.tokenInput = '';
       this.connectionStatus = verifyResult.data;
 
+      // Store git credentials in keyring for push/pull operations
+      // Username must be non-empty for macOS Keychain - use 'pat' as a placeholder
+      // Store for both dev.azure.com and {org}.visualstudio.com formats
+      await gitService.storeGitCredentials('https://dev.azure.com', 'pat', tokenToSave);
+      await gitService.storeGitCredentials(`https://${organization}.visualstudio.com`, 'pat', tokenToSave);
+      console.log(`[AzureDevOps] Stored git credentials in keyring for dev.azure.com and ${organization}.visualstudio.com`);
+
       // Load data if connected and repo detected
       // Pass the token directly since storage might not be ready yet
       if (this.connectionStatus?.connected && this.detectedRepo) {
@@ -894,6 +915,13 @@ export class LvAzureDevOpsDialog extends LitElement {
       } else {
         await gitService.deleteAdoToken();
       }
+
+      // Also delete git credentials from keyring for both URL formats
+      await gitService.deleteGitCredentials('https://dev.azure.com');
+      if (this.organizationInput) {
+        await gitService.deleteGitCredentials(`https://${this.organizationInput}.visualstudio.com`);
+      }
+      console.log('[AzureDevOps] Deleted git credentials from keyring');
 
       this.connectionStatus = null;
       this.pullRequests = [];
