@@ -7,7 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { loggers } from '../../utils/logger.ts';
+import { loggers, openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 
 const log = loggers.azureDevOps;
 import type {
@@ -988,7 +988,7 @@ export class LvAzureDevOpsDialog extends LitElement {
   }
 
   private openInBrowser(url: string): void {
-    window.open(url, '_blank');
+    openExternalUrl(url);
   }
 
   private formatDate(dateStr: string): string {
@@ -1066,7 +1066,7 @@ export class LvAzureDevOpsDialog extends LitElement {
             <a
               class="help-link"
               href="https://dev.azure.com/${this.organizationInput || '{org}'}/_usersSettings/tokens"
-              target="_blank"
+              @click=${handleExternalLink}
             >Azure DevOps Settings</a>.
             Required scopes: <strong>Code (Read & Write)</strong>, <strong>Work Items (Read)</strong>, <strong>Build (Read)</strong>, and <strong>User Profile (Read)</strong>.
           </span>

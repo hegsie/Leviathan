@@ -7,6 +7,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { handleExternalLink } from '../../utils/index.ts';
 import type { LfsStatus, LfsFile } from '../../services/git.service.ts';
 
 @customElement('lv-lfs-dialog')
@@ -570,7 +571,7 @@ export class LvLfsDialog extends LitElement {
         <div class="message warning">
           Git LFS is not installed. Please install it to manage large files.
           <br><br>
-          <a href="https://git-lfs.github.io/" target="_blank" style="color: inherit; text-decoration: underline;">
+          <a href="https://git-lfs.github.io/" @click=${handleExternalLink} style="color: inherit; text-decoration: underline;">
             Learn more about Git LFS
           </a>
         </div>

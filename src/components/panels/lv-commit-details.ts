@@ -10,7 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { parseIssueReferences, isClosingKeyword } from '../../services/git.service.ts';
 import type { IssueReference } from '../../services/git.service.ts';
 import type { Commit, RefInfo, CommitFileEntry, FileStatus } from '../../types/git.types.ts';
-import { loggers } from '../../utils/logger.ts';
+import { loggers, openExternalUrl } from '../../utils/index.ts';
 
 const log = loggers.ui;
 
@@ -524,7 +524,7 @@ export class LvCommitDetails extends LitElement {
     if (!this.githubOwner || !this.githubRepo) return;
 
     const url = `https://github.com/${this.githubOwner}/${this.githubRepo}/issues/${issueNumber}`;
-    window.open(url, '_blank');
+    openExternalUrl(url);
   }
 
   private renderLinkedIssues() {

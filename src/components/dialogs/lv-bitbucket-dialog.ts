@@ -7,6 +7,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import type {
   BitbucketConnectionStatus,
   DetectedBitbucketRepo,
@@ -646,7 +647,7 @@ export class LvBitbucketDialog extends LitElement {
   }
 
   private openInBrowser(url: string): void {
-    window.open(url, '_blank');
+    openExternalUrl(url);
   }
 
   private formatDate(dateStr: string): string {
@@ -715,7 +716,7 @@ export class LvBitbucketDialog extends LitElement {
             <a
               class="help-link"
               href="https://bitbucket.org/account/settings/app-passwords/"
-              target="_blank"
+              @click=${handleExternalLink}
             >Bitbucket Settings</a>
             with <code>Repositories: Read/Write</code> and <code>Pull requests: Read/Write</code> permissions.
           </span>

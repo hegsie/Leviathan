@@ -1,7 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { loggers } from '../../utils/logger.ts';
+import { loggers, openExternalUrl } from '../../utils/index.ts';
 
 const log = loggers.graph;
 import {
@@ -886,7 +886,7 @@ export class LvGraphCanvas extends LitElement {
       if (refLabelHit && refLabelHit.refType === 'pullRequest') {
         const prUrl = refLabelHit.fullName;
         if (prUrl && prUrl.startsWith('http')) {
-          window.open(prUrl, '_blank');
+          openExternalUrl(prUrl);
         }
         return;
       }

@@ -7,6 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import type {
   GitHubConnectionStatus,
   DetectedGitHubRepo,
@@ -1194,7 +1195,7 @@ export class LvGitHubDialog extends LitElement {
   }
 
   private openInBrowser(url: string): void {
-    window.open(url, '_blank');
+    openExternalUrl(url);
   }
 
   private getPrState(pr: PullRequestSummary): string {
@@ -1263,7 +1264,7 @@ export class LvGitHubDialog extends LitElement {
             <a
               class="help-link"
               href="https://github.com/settings/tokens/new?scopes=repo,read:user"
-              target="_blank"
+              @click=${handleExternalLink}
             >github.com/settings/tokens</a>
             with <code>repo</code> and <code>read:user</code> scopes.
           </span>
@@ -1409,8 +1410,7 @@ export class LvGitHubDialog extends LitElement {
             <a
               class="workflow-link"
               href="${run.htmlUrl}"
-              target="_blank"
-              @click=${(e: Event) => e.stopPropagation()}
+              @click=${(e: Event) => { e.stopPropagation(); handleExternalLink(e); }}
             >
               View →
             </a>

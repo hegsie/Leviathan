@@ -7,6 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import type {
   GitLabConnectionStatus,
   DetectedGitLabRepo,
@@ -944,7 +945,7 @@ export class LvGitLabDialog extends LitElement {
   }
 
   private openInBrowser(url: string): void {
-    window.open(url, '_blank');
+    openExternalUrl(url);
   }
 
   private formatDate(dateStr: string): string {
@@ -1016,7 +1017,7 @@ export class LvGitLabDialog extends LitElement {
             <a
               class="help-link"
               href="${this.instanceUrlInput}/-/user_settings/personal_access_tokens"
-              target="_blank"
+              @click=${handleExternalLink}
             >GitLab Settings</a>
             with <code>api</code> scope.
           </span>
