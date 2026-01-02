@@ -7,6 +7,9 @@
 
 import { Client, Stronghold } from '@tauri-apps/plugin-stronghold';
 import { appDataDir } from '@tauri-apps/api/path';
+import { loggers } from '../utils/logger.ts';
+
+const log = loggers.credential;
 
 const VAULT_PASSWORD = 'leviathan-secure-vault-2024';
 const CLIENT_NAME = 'leviathan-credentials';
@@ -46,21 +49,21 @@ async function ensureInitialized(): Promise<Client> {
       const dataDir = await appDataDir();
       const vaultPath = `${dataDir}credentials.hold`;
 
-      console.log('[CredentialService] Initializing vault at:', vaultPath);
+      log.debug('Initializing vault at:', vaultPath);
 
       strongholdInstance = await Stronghold.load(vaultPath, VAULT_PASSWORD);
 
       // Try to load existing client or create new one
       try {
         clientInstance = await strongholdInstance.loadClient(CLIENT_NAME);
-        console.log('[CredentialService] Loaded existing client');
+        log.debug('Loaded existing client');
       } catch {
         // Client doesn't exist, create it
         clientInstance = await strongholdInstance.createClient(CLIENT_NAME);
-        console.log('[CredentialService] Created new client');
+        log.debug(' Created new client');
       }
     } catch (error) {
-      console.error('[CredentialService] Failed to initialize:', error);
+      log.error(' Failed to initialize:', error);
       throw error;
     }
   })();
@@ -92,9 +95,9 @@ export async function storeCredential(
     await store.insert(key, data);
     await strongholdInstance?.save();
 
-    console.log(`[CredentialService] Stored credential: ${key}`);
+    log.debug(` Stored credential: ${key}`);
   } catch (error) {
-    console.error(`[CredentialService] Failed to store ${key}:`, error);
+    log.error(` Failed to store ${key}:`, error);
     throw error;
   }
 }
@@ -112,7 +115,7 @@ export async function getCredential(
     const data = await store.get(key);
 
     if (!data || data.length === 0) {
-      console.log(`[CredentialService] No credential found for: ${key}`);
+      log.debug(` No credential found for: ${key}`);
       return null;
     }
 
@@ -120,11 +123,11 @@ export async function getCredential(
     const decoder = new TextDecoder();
     const value = decoder.decode(new Uint8Array(data));
 
-    console.log(`[CredentialService] Retrieved credential: ${key}`);
+    log.debug(` Retrieved credential: ${key}`);
     return value;
   } catch {
     // If key doesn't exist, return null instead of throwing
-    console.log(`[CredentialService] Credential not found: ${key}`);
+    log.debug(` Credential not found: ${key}`);
     return null;
   }
 }
@@ -140,10 +143,10 @@ export async function deleteCredential(key: CredentialKey): Promise<void> {
     await store.remove(key);
     await strongholdInstance?.save();
 
-    console.log(`[CredentialService] Deleted credential: ${key}`);
+    log.debug(` Deleted credential: ${key}`);
   } catch {
     // Ignore if key doesn't exist
-    console.log(`[CredentialService] Credential not found for deletion: ${key}`);
+    log.debug(` Credential not found for deletion: ${key}`);
   }
 }
 
@@ -257,9 +260,9 @@ async function storeAccountCredentialInternal(key: string, value: string): Promi
     await store.insert(key, data);
     await strongholdInstance?.save();
 
-    console.log(`[CredentialService] Stored account credential: ${key}`);
+    log.debug(` Stored account credential: ${key}`);
   } catch (error) {
-    console.error(`[CredentialService] Failed to store account credential ${key}:`, error);
+    log.error(` Failed to store account credential ${key}:`, error);
     throw error;
   }
 }
@@ -275,17 +278,17 @@ async function getAccountCredentialInternal(key: string): Promise<string | null>
     const data = await store.get(key);
 
     if (!data || data.length === 0) {
-      console.log(`[CredentialService] No account credential found for: ${key}`);
+      log.debug(` No account credential found for: ${key}`);
       return null;
     }
 
     const decoder = new TextDecoder();
     const value = decoder.decode(new Uint8Array(data));
 
-    console.log(`[CredentialService] Retrieved account credential: ${key}`);
+    log.debug(` Retrieved account credential: ${key}`);
     return value;
   } catch {
-    console.log(`[CredentialService] Account credential not found: ${key}`);
+    log.debug(` Account credential not found: ${key}`);
     return null;
   }
 }
@@ -301,9 +304,9 @@ async function deleteAccountCredentialInternal(key: string): Promise<void> {
     await store.remove(key);
     await strongholdInstance?.save();
 
-    console.log(`[CredentialService] Deleted account credential: ${key}`);
+    log.debug(` Deleted account credential: ${key}`);
   } catch {
-    console.log(`[CredentialService] Account credential not found for deletion: ${key}`);
+    log.debug(` Account credential not found for deletion: ${key}`);
   }
 }
 
@@ -387,7 +390,7 @@ export const AccountCredentials = {
 
     // Store the token with the new namespaced key
     await this.setToken(integrationType, accountId, legacyToken);
-    console.log(`[CredentialService] Migrated legacy ${integrationType} token to account ${accountId}`);
+    log.debug(` Migrated legacy ${integrationType} token to account ${accountId}`);
     return true;
   },
 };

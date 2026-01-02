@@ -7,7 +7,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, type AccountConnectionStatus } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { UnifiedProfile } from '../../types/unified-profile.types.ts';
 import { PROFILE_COLORS } from '../../types/unified-profile.types.ts';
@@ -181,6 +181,68 @@ export class LvProfileSelector extends LitElement {
         color: var(--color-text-tertiary);
         font-size: var(--font-size-sm);
       }
+
+      /* Connection status indicators */
+      .connection-status {
+        display: flex;
+        gap: 2px;
+        margin-left: auto;
+      }
+
+      .status-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+      }
+
+      .status-dot.connected {
+        background: var(--color-success, #22c55e);
+      }
+
+      .status-dot.disconnected {
+        background: var(--color-error, #ef4444);
+      }
+
+      .status-dot.checking {
+        background: var(--color-warning, #f59e0b);
+        animation: pulse 1s ease-in-out infinite;
+      }
+
+      .status-dot.unknown {
+        background: var(--color-text-tertiary);
+        opacity: 0.5;
+      }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+
+      .profile-accounts-status {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-tertiary);
+      }
+
+      .selector-btn.loading {
+        opacity: 0.7;
+        pointer-events: none;
+      }
+
+      .loading-spinner {
+        width: 14px;
+        height: 14px;
+        border: 2px solid var(--color-text-tertiary);
+        border-top-color: transparent;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
     `,
   ];
 
@@ -188,7 +250,9 @@ export class LvProfileSelector extends LitElement {
 
   @state() private profiles: UnifiedProfile[] = [];
   @state() private activeProfile: UnifiedProfile | null = null;
+  @state() private accountConnectionStatus: Record<string, AccountConnectionStatus> = {};
   @state() private isOpen = false;
+  @state() private isApplyingProfile = false;
 
   private unsubscribe?: () => void;
 
@@ -198,11 +262,13 @@ export class LvProfileSelector extends LitElement {
     const initialState = unifiedProfileStore.getState();
     this.profiles = initialState.profiles;
     this.activeProfile = initialState.activeProfile;
+    this.accountConnectionStatus = initialState.accountConnectionStatus;
 
     // Subscribe to store changes
     this.unsubscribe = unifiedProfileStore.subscribe((state) => {
       this.profiles = state.profiles;
       this.activeProfile = state.activeProfile;
+      this.accountConnectionStatus = state.accountConnectionStatus;
     });
 
     // Close dropdown when clicking outside
@@ -227,12 +293,17 @@ export class LvProfileSelector extends LitElement {
   }
 
   private async handleSelectProfile(profile: UnifiedProfile): Promise<void> {
+    if (!this.repoPath || this.isApplyingProfile) return;
+
     this.isOpen = false;
+    this.isApplyingProfile = true;
 
-    if (!this.repoPath) return;
-
-    // Apply the unified profile (sets git identity)
-    await unifiedProfileService.applyUnifiedProfile(this.repoPath, profile.id);
+    try {
+      // Apply the unified profile (sets git identity)
+      await unifiedProfileService.applyUnifiedProfile(this.repoPath, profile.id);
+    } finally {
+      this.isApplyingProfile = false;
+    }
   }
 
   private handleOpenManager(): void {
@@ -245,23 +316,38 @@ export class LvProfileSelector extends LitElement {
     );
   }
 
+  private getAccountStatus(accountId: string): 'connected' | 'disconnected' | 'checking' | 'unknown' {
+    return this.accountConnectionStatus[accountId]?.status ?? 'unknown';
+  }
+
+  private getProfileConnectionSummary(profile: UnifiedProfile): { connected: number; disconnected: number; checking: number; unknown: number } {
+    const summary = { connected: 0, disconnected: 0, checking: 0, unknown: 0 };
+    for (const account of profile.integrationAccounts) {
+      const status = this.getAccountStatus(account.id);
+      summary[status]++;
+    }
+    return summary;
+  }
+
   render() {
     return html`
-      <button class="selector-btn" @click=${this.toggleDropdown} title="Git Profile">
-        ${this.activeProfile
-          ? html`
-              <span
-                class="profile-indicator"
-                style="background: ${this.activeProfile.color ?? PROFILE_COLORS[0]}"
-              ></span>
-              <span class="profile-name">${this.activeProfile.name}</span>
-            `
-          : html`
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-                <circle cx="12" cy="7" r="4"></circle>
-              </svg>
-            `}
+      <button class="selector-btn ${this.isApplyingProfile ? 'loading' : ''}" @click=${this.toggleDropdown} title="Git Profile">
+        ${this.isApplyingProfile
+          ? html`<span class="loading-spinner"></span>`
+          : this.activeProfile
+            ? html`
+                <span
+                  class="profile-indicator"
+                  style="background: ${this.activeProfile.color ?? PROFILE_COLORS[0]}"
+                ></span>
+                <span class="profile-name">${this.activeProfile.name}</span>
+              `
+            : html`
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="12" cy="7" r="4"></circle>
+                </svg>
+              `}
         <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <polyline points="6 9 12 15 18 9"></polyline>
         </svg>
@@ -280,6 +366,7 @@ export class LvProfileSelector extends LitElement {
           : this.profiles.map(
               (profile) => {
                 const totalAccounts = profile.integrationAccounts.length;
+                const connectionSummary = this.getProfileConnectionSummary(profile);
                 return html`
                   <button
                     class="dropdown-item ${this.activeProfile?.id === profile.id ? 'active' : ''}"
@@ -299,6 +386,16 @@ export class LvProfileSelector extends LitElement {
                         ${totalAccounts > 0 ? html` · ${totalAccounts} account${totalAccounts > 1 ? 's' : ''}` : nothing}
                       </span>
                     </span>
+                    ${totalAccounts > 0
+                      ? html`
+                          <span class="connection-status" title="${connectionSummary.connected} connected, ${connectionSummary.disconnected} disconnected">
+                            ${connectionSummary.connected > 0 ? html`<span class="status-dot connected"></span>` : nothing}
+                            ${connectionSummary.checking > 0 ? html`<span class="status-dot checking"></span>` : nothing}
+                            ${connectionSummary.disconnected > 0 ? html`<span class="status-dot disconnected"></span>` : nothing}
+                            ${connectionSummary.unknown > 0 && connectionSummary.connected === 0 && connectionSummary.disconnected === 0 && connectionSummary.checking === 0 ? html`<span class="status-dot unknown"></span>` : nothing}
+                          </span>
+                        `
+                      : nothing}
                     ${this.activeProfile?.id === profile.id
                       ? html`
                           <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

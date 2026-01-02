@@ -12,4 +12,5 @@ import './app-shell.ts';
 // Import component registrations
 import './components/index.ts';
 
-console.log('Leviathan initialized');
+import { loggers } from './utils/logger.ts';
+loggers.app.info('Leviathan initialized');

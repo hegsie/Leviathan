@@ -123,7 +123,8 @@ export class CreateBranchDialogPage extends BaseDialog {
 
   constructor(page: Page) {
     super(page, 'lv-create-branch-dialog');
-    this.nameInput = this.dialog.locator('input[placeholder*="Branch"], input[name="name"]');
+    // Input has id="branch-name-input" and placeholder="feature/my-new-feature"
+    this.nameInput = this.dialog.locator('#branch-name-input, input[placeholder*="feature"]');
     this.createButton = this.dialog.locator('button', { hasText: 'Create' });
     this.checkoutCheckbox = this.dialog.locator('input[type="checkbox"]');
   }
@@ -189,12 +190,12 @@ export class ProfileManagerDialogPage extends BaseDialog {
   readonly emailInput: Locator;
 
   constructor(page: Page) {
-    super(page, 'lv-unified-profile-manager-dialog');
+    super(page, 'lv-profile-manager-dialog');
     // The dialog header contains "Profiles" text - use that to verify visibility
     // Custom element tags aren't in accessibility tree, so use text matching
-    this.dialog = page.locator('lv-unified-profile-manager-dialog[open]');
+    this.dialog = page.locator('lv-profile-manager-dialog[open]');
     // Fallback - check for the New Profile button which is only visible in the dialog
-    this.profileList = page.locator('lv-unified-profile-manager-dialog[open] .profile-list');
+    this.profileList = page.locator('lv-profile-manager-dialog[open] .profile-list');
     // "New Profile" button - use accessible role selector
     this.addProfileButton = page.getByRole('button', { name: 'New Profile' });
     this.nameInput = page.getByRole('textbox', { name: /Profile Name/i });
@@ -202,11 +203,11 @@ export class ProfileManagerDialogPage extends BaseDialog {
   }
 
   async getProfileCount(): Promise<number> {
-    return this.profileList.locator('.profile-card').count();
+    return this.profileList.locator('.profile-item').count();
   }
 
   async selectProfile(name: string): Promise<void> {
-    await this.profileList.locator('.profile-card', { hasText: name }).click();
+    await this.profileList.locator('.profile-item', { hasText: name }).click();
   }
 
   async addProfile(name: string, email: string): Promise<void> {

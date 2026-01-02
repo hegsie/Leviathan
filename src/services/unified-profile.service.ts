@@ -5,12 +5,18 @@
 
 import { invokeCommand } from './tauri-api.ts';
 import { unifiedProfileStore } from '../stores/unified-profile.store.ts';
+import { AccountCredentials } from './credential.service.ts';
+import { checkGitHubConnectionWithToken } from './git.service.ts';
+import { loggers } from '../utils/logger.ts';
+
+const log = loggers.profile;
 import type {
   UnifiedProfile,
   UnifiedProfilesConfig,
   ProfileIntegrationAccount,
   CurrentGitIdentity,
   MigrationPreview,
+  MigrationBackupInfo,
   UnifiedMigrationResult,
   IntegrationType,
   CachedUser,
@@ -381,6 +387,46 @@ export async function executeUnifiedProfilesMigration(
   return result.data!;
 }
 
+/**
+ * Get information about the migration backup (for rollback)
+ */
+export async function getMigrationBackupInfo(): Promise<MigrationBackupInfo> {
+  const result = await invokeCommand<MigrationBackupInfo>('get_migration_backup_info', {});
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to get backup info');
+  }
+  return result.data!;
+}
+
+/**
+ * Restore from migration backup (rollback to pre-migration state)
+ * This will remove the unified profiles config and restore the legacy files
+ */
+export async function restoreMigrationBackup(): Promise<MigrationBackupInfo> {
+  const result = await invokeCommand<MigrationBackupInfo>('restore_migration_backup', {});
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to restore backup');
+  }
+
+  // Reset the store since we've rolled back
+  unifiedProfileStore.getState().reset();
+
+  // Check migration status again (should now need migration)
+  await checkMigrationNeeded();
+
+  return result.data!;
+}
+
+/**
+ * Delete migration backup files (after user confirms rollback is not needed)
+ */
+export async function deleteMigrationBackup(): Promise<void> {
+  const result = await invokeCommand('delete_migration_backup', {});
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to delete backup');
+  }
+}
+
 // =============================================================================
 // Store Loading Functions
 // =============================================================================
@@ -412,7 +458,7 @@ export async function loadUnifiedProfileForRepository(path: string): Promise<voi
     const profile = await getAssignedUnifiedProfile(path);
     store.setActiveProfile(profile);
   } catch (error) {
-    console.error('Failed to load profile for repository:', error);
+    log.error('Failed to load profile for repository:', error);
     store.setActiveProfile(null);
   }
 }
@@ -426,7 +472,7 @@ export async function checkMigrationNeeded(): Promise<boolean> {
     unifiedProfileStore.getState().setNeedsMigration(needs);
     return needs;
   } catch (error) {
-    console.error('Failed to check migration status:', error);
+    log.error('Failed to check migration status:', error);
     return false;
   }
 }
@@ -445,10 +491,209 @@ export async function initializeUnifiedProfiles(): Promise<void> {
     if (!needsMigration) {
       // Load existing unified profiles
       await loadUnifiedProfiles();
+
+      // Refresh cached user info in background (don't await)
+      refreshAllAccountsCachedUser().catch((error) => {
+        log.error('Failed to refresh cached user info:', error);
+      });
     }
 
     store.setLoading(false);
   } catch (error) {
     store.setError(error instanceof Error ? error.message : 'Failed to initialize profiles');
+  }
+}
+
+// =============================================================================
+// Cached User Refresh
+// =============================================================================
+
+/**
+ * Refresh cached user info for a single account
+ * Returns the updated CachedUser or null if unable to fetch
+ */
+export async function refreshAccountCachedUser(
+  profileId: string,
+  account: ProfileIntegrationAccount
+): Promise<CachedUser | null> {
+  const store = unifiedProfileStore.getState();
+
+  try {
+    // Get the token for this account
+    const token = await AccountCredentials.getToken(account.integrationType, account.id);
+    if (!token) {
+      log.debug(` No token for account ${account.id}, skipping refresh`);
+      store.setAccountConnectionStatus(account.id, 'disconnected');
+      return null;
+    }
+
+    // Mark as checking
+    store.setAccountConnectionStatus(account.id, 'checking');
+
+    let cachedUser: CachedUser | null = null;
+    let isConnected = false;
+
+    switch (account.integrationType) {
+      case 'github': {
+        const result = await checkGitHubConnectionWithToken(token);
+        if (result.success && result.data?.connected && result.data.user) {
+          isConnected = true;
+          cachedUser = {
+            username: result.data.user.login,
+            displayName: result.data.user.name,
+            avatarUrl: result.data.user.avatarUrl,
+            email: result.data.user.email,
+          };
+        }
+        break;
+      }
+      case 'gitlab': {
+        // Use Tauri command to check GitLab connection
+        const instanceUrl = account.config.type === 'gitlab' ? account.config.instanceUrl : 'https://gitlab.com';
+        const result = await invokeCommand<{ connected: boolean; user?: { username: string; name: string; avatarUrl: string; email: string } }>(
+          'check_gitlab_connection',
+          { token, instanceUrl }
+        );
+        if (result.success && result.data?.connected && result.data.user) {
+          isConnected = true;
+          cachedUser = {
+            username: result.data.user.username,
+            displayName: result.data.user.name,
+            avatarUrl: result.data.user.avatarUrl,
+            email: result.data.user.email,
+          };
+        }
+        break;
+      }
+      case 'azure-devops': {
+        // Use Tauri command to check Azure DevOps connection
+        const organization = account.config.type === 'azure-devops' ? account.config.organization : '';
+        if (organization) {
+          const result = await invokeCommand<{ connected: boolean; displayName?: string; emailAddress?: string }>(
+            'check_azure_devops_connection',
+            { organization, token }
+          );
+          if (result.success && result.data?.connected) {
+            isConnected = true;
+            cachedUser = {
+              username: result.data.emailAddress?.split('@')[0] || organization,
+              displayName: result.data.displayName || null,
+              avatarUrl: null,
+              email: result.data.emailAddress || null,
+            };
+          }
+        }
+        break;
+      }
+    }
+
+    // Update connection status
+    store.setAccountConnectionStatus(account.id, isConnected ? 'connected' : 'disconnected');
+
+    // If we got user info, update it in the store
+    if (cachedUser) {
+      await updateProfileAccountCachedUser(profileId, account.id, cachedUser);
+      log.debug(` Refreshed cached user for ${account.integrationType} account ${account.id}: @${cachedUser.username}`);
+    }
+
+    return cachedUser;
+  } catch (error) {
+    log.error(` Failed to refresh cached user for account ${account.id}:`, error);
+    store.setAccountConnectionStatus(account.id, 'disconnected');
+    return null;
+  }
+}
+
+/**
+ * Refresh cached user info for all accounts across all profiles
+ * This runs in the background and doesn't block the UI
+ */
+export async function refreshAllAccountsCachedUser(): Promise<void> {
+  const profiles = unifiedProfileStore.getState().profiles;
+
+  log.debug(` Refreshing cached user info for ${profiles.length} profiles`);
+
+  for (const profile of profiles) {
+    for (const account of profile.integrationAccounts) {
+      // Only refresh if cachedUser is missing
+      if (!account.cachedUser) {
+        await refreshAccountCachedUser(profile.id, account);
+      }
+    }
+  }
+
+  log.debug('Finished refreshing cached user info');
+}
+
+// =============================================================================
+// Periodic Token Validation
+// =============================================================================
+
+let tokenValidationInterval: ReturnType<typeof setInterval> | null = null;
+const TOKEN_VALIDATION_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
+
+/**
+ * Validate all account tokens and update connection status
+ * Returns accounts that have become disconnected
+ */
+export async function validateAllAccountTokens(): Promise<{
+  valid: number;
+  invalid: number;
+  invalidAccounts: Array<{ profileName: string; accountName: string; integrationType: string }>;
+}> {
+  const profiles = unifiedProfileStore.getState().profiles;
+  const result = {
+    valid: 0,
+    invalid: 0,
+    invalidAccounts: [] as Array<{ profileName: string; accountName: string; integrationType: string }>,
+  };
+
+  log.debug('Validating all account tokens');
+
+  for (const profile of profiles) {
+    for (const account of profile.integrationAccounts) {
+      const cachedUser = await refreshAccountCachedUser(profile.id, account);
+      if (cachedUser) {
+        result.valid++;
+      } else {
+        result.invalid++;
+        result.invalidAccounts.push({
+          profileName: profile.name,
+          accountName: account.name,
+          integrationType: account.integrationType,
+        });
+      }
+    }
+  }
+
+  log.debug(`Token validation complete: ${result.valid} valid, ${result.invalid} invalid`);
+  return result;
+}
+
+/**
+ * Start periodic token validation
+ * Will check tokens at regular intervals and update connection status
+ */
+export function startPeriodicTokenValidation(): void {
+  if (tokenValidationInterval) {
+    return; // Already running
+  }
+
+  log.debug('Starting periodic token validation');
+
+  // Run validation periodically
+  tokenValidationInterval = setInterval(async () => {
+    await validateAllAccountTokens();
+  }, TOKEN_VALIDATION_INTERVAL_MS);
+}
+
+/**
+ * Stop periodic token validation
+ */
+export function stopPeriodicTokenValidation(): void {
+  if (tokenValidationInterval) {
+    clearInterval(tokenValidationInterval);
+    tokenValidationInterval = null;
+    log.debug('Stopped periodic token validation');
   }
 }

@@ -6,7 +6,10 @@
 import { invokeCommand } from './tauri-api.ts';
 import { integrationAccountsStore } from '../stores/integration-accounts.store.ts';
 import { AccountCredentials } from './credential.service.ts';
+import { loggers } from '../utils/logger.ts';
 import type { CommandResult } from '../types/api.types.ts';
+
+const log = loggers.integration;
 import type {
   IntegrationAccount,
   IntegrationAccountsConfig,
@@ -340,10 +343,10 @@ async function migrateLegacyTokensToAccounts(): Promise<void> {
       if (account.success && account.data) {
         // Migrate the token to the new account
         await AccountCredentials.migrateLegacyToken(type, account.data.id);
-        console.log(`[IntegrationAccounts] Migrated legacy ${type} token to account ${account.data.id}`);
+        log.debug(`Migrated legacy ${type} token to account ${account.data.id}`);
       }
     } catch (error) {
-      console.warn(`[IntegrationAccounts] Failed to migrate ${type} token:`, error);
+      log.warn(`Failed to migrate ${type} token:`, error);
     }
   }
 

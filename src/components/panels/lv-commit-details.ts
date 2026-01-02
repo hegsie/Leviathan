@@ -10,6 +10,9 @@ import * as gitService from '../../services/git.service.ts';
 import { parseIssueReferences, isClosingKeyword } from '../../services/git.service.ts';
 import type { IssueReference } from '../../services/git.service.ts';
 import type { Commit, RefInfo, CommitFileEntry, FileStatus } from '../../types/git.types.ts';
+import { loggers } from '../../utils/logger.ts';
+
+const log = loggers.ui;
 
 @customElement('lv-commit-details')
 export class LvCommitDetails extends LitElement {
@@ -360,7 +363,7 @@ export class LvCommitDetails extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
-    console.log('[commit-details] connectedCallback - initial state:', {
+    log.debug('connectedCallback - initial state:', {
       repositoryPath: this.repositoryPath,
       commitOid: this.commit?.oid,
     });
@@ -370,8 +373,8 @@ export class LvCommitDetails extends LitElement {
     super.updated(changedProperties);
 
     // Debug: log all property changes
-    console.log('[commit-details] updated called, changedProperties:', [...changedProperties.keys()]);
-    console.log('[commit-details] current state:', {
+    log.debug('updated called, changedProperties:', [...changedProperties.keys()]);
+    log.debug('current state:', {
       repositoryPath: this.repositoryPath,
       commitOid: this.commit?.oid,
       currentCommitOid: this.currentCommitOid,
@@ -380,7 +383,7 @@ export class LvCommitDetails extends LitElement {
     // Load files when commit changes
     if (changedProperties.has('commit') && this.commit && this.repositoryPath) {
       if (this.commit.oid !== this.currentCommitOid) {
-        console.log('[commit-details] commit changed, loading files for:', this.commit.oid);
+        log.debug('commit changed, loading files for:', this.commit.oid);
         this.currentCommitOid = this.commit.oid;
         this.selectedFilePath = null;
         this.loadFiles();
@@ -405,20 +408,20 @@ export class LvCommitDetails extends LitElement {
 
   private async loadFiles(): Promise<void> {
     if (!this.repositoryPath || !this.commit) {
-      console.log('loadFiles: missing repositoryPath or commit', { repositoryPath: this.repositoryPath, commit: this.commit?.oid });
+      log.debug('loadFiles: missing repositoryPath or commit', { repositoryPath: this.repositoryPath, commit: this.commit?.oid });
       return;
     }
 
-    console.log('loadFiles: loading files for commit', this.commit.oid);
+    log.debug('loadFiles: loading files for commit', this.commit.oid);
     this.loadingFiles = true;
     this.files = [];
 
     try {
       const result = await gitService.getCommitFiles(this.repositoryPath, this.commit.oid);
-      console.log('loadFiles: result', result);
+      log.debug('loadFiles: result', result);
       if (result.success && result.data) {
         this.files = result.data;
-        console.log('loadFiles: loaded', this.files.length, 'files');
+        log.debug('loadFiles: loaded', this.files.length, 'files');
       } else {
         console.error('loadFiles: failed', result.error);
       }

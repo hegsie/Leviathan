@@ -3,6 +3,9 @@ import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from './styles/shared-styles.ts';
 import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
 import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
+import { loggers } from './utils/logger.ts';
+
+const log = loggers.app;
 import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
@@ -469,6 +472,9 @@ export class AppShell extends LitElement {
     // Check for unified profiles migration
     this.checkUnifiedProfilesMigration();
 
+    // Start periodic token validation for integration accounts
+    unifiedProfileService.startPeriodicTokenValidation();
+
     // Restore previously open repositories
     this.restorePersistedRepositories();
 
@@ -481,6 +487,8 @@ export class AppShell extends LitElement {
       navigateDown: () => this.graphCanvas?.navigateNext?.(),
       navigateFirst: () => this.graphCanvas?.navigateFirst?.(),
       navigateLast: () => this.graphCanvas?.navigateLast?.(),
+      pageUp: () => this.graphCanvas?.navigatePageUp?.(),
+      pageDown: () => this.graphCanvas?.navigatePageDown?.(),
       selectCommit: () => {/* handled by graph canvas */},
       stageAll: () => this.handleStageAll(),
       unstageAll: () => this.handleUnstageAll(),
@@ -510,6 +518,8 @@ export class AppShell extends LitElement {
     document.removeEventListener('keydown', this.boundHandleKeyDown);
     document.removeEventListener('click', this.handleDocumentClick);
     gitService.cleanupRemoteOperationListeners();
+    // Stop periodic token validation
+    unifiedProfileService.stopPeriodicTokenValidation();
     // Clean up update listeners
     this.updateUnlisteners.forEach((unlisten) => unlisten());
     this.updateUnlisteners = [];
@@ -525,7 +535,7 @@ export class AppShell extends LitElement {
         }, 500);
       }
     } catch (error) {
-      console.error('Failed to check migration status:', error);
+      log.error('Failed to check migration status:', error);
     }
   }
 
@@ -658,7 +668,8 @@ export class AppShell extends LitElement {
       this.conflictOperationType = 'cherry-pick';
       this.showConflictDialog = true;
     } else {
-      console.error('Cherry-pick failed:', result.error);
+      log.error('Cherry-pick failed:', result.error);
+      showToast(result.error?.message || 'Cherry-pick failed', 'error');
     }
   }
 
@@ -682,7 +693,8 @@ export class AppShell extends LitElement {
       this.conflictOperationType = 'revert';
       this.showConflictDialog = true;
     } else {
-      console.error('Revert failed:', result.error);
+      log.error('Revert failed:', result.error);
+      showToast(result.error?.message || 'Revert failed', 'error');
     }
   }
 
@@ -711,7 +723,8 @@ export class AppShell extends LitElement {
     if (result.success) {
       this.graphCanvas?.refresh?.();
     } else {
-      console.error('Reset failed:', result.error);
+      log.error('Reset failed:', result.error);
+      showToast(result.error?.message || 'Reset failed', 'error');
     }
   }
 
@@ -774,13 +787,14 @@ export class AppShell extends LitElement {
     if (result.success) {
       this.handleRefresh();
     } else {
-      console.error('Failed to checkout branch:', result.error);
+      log.error('Failed to checkout branch:', result.error);
+      showToast(result.error?.message || 'Failed to checkout branch', 'error');
     }
   }
 
   private handleCopySha(e: CustomEvent<{ sha: string }>): void {
     // Show brief feedback that SHA was copied
-    console.log(`Copied ${e.detail.sha} to clipboard`);
+    log.debug(`Copied ${e.detail.sha} to clipboard`);
   }
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry }>): void {
@@ -1322,6 +1336,7 @@ export class AppShell extends LitElement {
                   <lv-right-panel
                     .commit=${this.selectedCommit}
                     .refs=${this.selectedCommitRefs}
+                    @open-settings=${() => { this.showSettings = true; }}
                   ></lv-right-panel>
                 </aside>
               ` : ''}

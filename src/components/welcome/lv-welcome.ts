@@ -9,6 +9,10 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { repositoryStore, type RecentRepository } from '../../stores/index.ts';
 import { openRepository } from '../../services/git.service.ts';
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
+import { loggers } from '../../utils/logger.ts';
+
+const log = loggers.ui;
 import '../dialogs/lv-clone-dialog.ts';
 import '../dialogs/lv-init-dialog.ts';
 import type { LvCloneDialog } from '../dialogs/lv-clone-dialog.ts';
@@ -251,14 +255,15 @@ export class LvWelcome extends LitElement {
   }
 
   private async handleOpen(): Promise<void> {
-    console.log('handleOpen called');
+    log.debug('handleOpen called');
     try {
       const path = await openRepositoryDialog();
-      console.log('Got path:', path);
+      log.debug('Got path:', path);
       if (!path) return;
       await this.openRepoByPath(path);
     } catch (error) {
-      console.error('Error in handleOpen:', error);
+      log.error('Error in handleOpen:', error);
+      showToast(error instanceof Error ? error.message : 'Failed to open repository', 'error');
     }
   }
 

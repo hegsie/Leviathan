@@ -814,6 +814,189 @@ fn backup_legacy_configs() -> Result<()> {
     Ok(())
 }
 
+// =============================================================================
+// Migration Rollback
+// =============================================================================
+
+/// Information about available migration backup
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationBackupInfo {
+    pub has_backup: bool,
+    pub backup_date: Option<String>,
+    pub profiles_count: Option<usize>,
+    pub accounts_count: Option<usize>,
+}
+
+/// Check if a migration backup exists and get info about it
+#[command]
+pub async fn get_migration_backup_info() -> Result<MigrationBackupInfo> {
+    let profiles_backup_path = get_legacy_profiles_path()?.with_extension("json.bak");
+    let accounts_backup_path = get_legacy_accounts_path()?.with_extension("json.bak");
+
+    let profiles_backup_exists = profiles_backup_path.exists();
+    let accounts_backup_exists = accounts_backup_path.exists();
+
+    if !profiles_backup_exists && !accounts_backup_exists {
+        return Ok(MigrationBackupInfo {
+            has_backup: false,
+            backup_date: None,
+            profiles_count: None,
+            accounts_count: None,
+        });
+    }
+
+    // Get backup modification date
+    let backup_date = if profiles_backup_exists {
+        fs::metadata(&profiles_backup_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| {
+                chrono::DateTime::<chrono::Utc>::from(t)
+                    .format("%Y-%m-%d %H:%M:%S UTC")
+                    .to_string()
+            })
+    } else if accounts_backup_exists {
+        fs::metadata(&accounts_backup_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| {
+                chrono::DateTime::<chrono::Utc>::from(t)
+                    .format("%Y-%m-%d %H:%M:%S UTC")
+                    .to_string()
+            })
+    } else {
+        None
+    };
+
+    // Count items in backup
+    let profiles_count = if profiles_backup_exists {
+        fs::read_to_string(&profiles_backup_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<ProfilesConfig>(&content).ok())
+            .map(|config| config.profiles.len())
+    } else {
+        None
+    };
+
+    let accounts_count = if accounts_backup_exists {
+        fs::read_to_string(&accounts_backup_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<IntegrationAccountsConfig>(&content).ok())
+            .map(|config| config.accounts.len())
+    } else {
+        None
+    };
+
+    Ok(MigrationBackupInfo {
+        has_backup: true,
+        backup_date,
+        profiles_count,
+        accounts_count,
+    })
+}
+
+/// Restore from migration backup (rollback)
+#[command]
+pub async fn restore_migration_backup() -> Result<MigrationBackupInfo> {
+    let profiles_path = get_legacy_profiles_path()?;
+    let accounts_path = get_legacy_accounts_path()?;
+    let unified_path = get_unified_profiles_path()?;
+    let profiles_backup_path = profiles_path.with_extension("json.bak");
+    let accounts_backup_path = accounts_path.with_extension("json.bak");
+
+    // Check if backups exist
+    if !profiles_backup_path.exists() && !accounts_backup_path.exists() {
+        return Err(LeviathanError::OperationFailed(
+            "No migration backup found to restore".to_string(),
+        ));
+    }
+
+    // Restore profiles backup
+    let profiles_count = if profiles_backup_path.exists() {
+        let content = fs::read_to_string(&profiles_backup_path).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to read profiles backup: {}", e))
+        })?;
+
+        // Validate it's valid JSON
+        let config: ProfilesConfig = serde_json::from_str(&content).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Invalid profiles backup format: {}", e))
+        })?;
+
+        let count = config.profiles.len();
+
+        // Restore the backup
+        fs::copy(&profiles_backup_path, &profiles_path).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to restore profiles: {}", e))
+        })?;
+
+        Some(count)
+    } else {
+        None
+    };
+
+    // Restore accounts backup
+    let accounts_count = if accounts_backup_path.exists() {
+        let content = fs::read_to_string(&accounts_backup_path).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to read accounts backup: {}", e))
+        })?;
+
+        // Validate it's valid JSON
+        let config: IntegrationAccountsConfig = serde_json::from_str(&content).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Invalid accounts backup format: {}", e))
+        })?;
+
+        let count = config.accounts.len();
+
+        // Restore the backup
+        fs::copy(&accounts_backup_path, &accounts_path).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to restore accounts: {}", e))
+        })?;
+
+        Some(count)
+    } else {
+        None
+    };
+
+    // Remove the unified profiles config so migration will be needed again
+    if unified_path.exists() {
+        fs::remove_file(&unified_path).map_err(|e| {
+            LeviathanError::OperationFailed(format!(
+                "Failed to remove unified profiles config: {}",
+                e
+            ))
+        })?;
+    }
+
+    Ok(MigrationBackupInfo {
+        has_backup: true,
+        backup_date: None, // Not relevant for restore response
+        profiles_count,
+        accounts_count,
+    })
+}
+
+/// Delete migration backup files
+#[command]
+pub async fn delete_migration_backup() -> Result<()> {
+    let profiles_backup_path = get_legacy_profiles_path()?.with_extension("json.bak");
+    let accounts_backup_path = get_legacy_accounts_path()?.with_extension("json.bak");
+
+    if profiles_backup_path.exists() {
+        fs::remove_file(&profiles_backup_path).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to delete profiles backup: {}", e))
+        })?;
+    }
+
+    if accounts_backup_path.exists() {
+        fs::remove_file(&accounts_backup_path).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to delete accounts backup: {}", e))
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Get an account from any profile (for compatibility during transition)
 #[command]
 pub async fn get_account_from_any_profile(

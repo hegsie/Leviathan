@@ -7,6 +7,9 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { loggers } from '../../utils/logger.ts';
+
+const log = loggers.azureDevOps;
 import type {
   AdoConnectionStatus,
   DetectedAdoRepo,
@@ -688,7 +691,7 @@ export class LvAzureDevOpsDialog extends LitElement {
           // Username must be non-empty for macOS Keychain - use 'pat' as a placeholder
           await gitService.storeGitCredentials('https://dev.azure.com', 'pat', token);
           await gitService.storeGitCredentials(`https://${org}.visualstudio.com`, 'pat', token);
-          console.log(`[AzureDevOps] Synced git credentials to keyring for dev.azure.com and ${org}.visualstudio.com`);
+          log.debug(`Synced git credentials to keyring for dev.azure.com and ${org}.visualstudio.com`);
         } catch (err) {
           console.warn('[AzureDevOps] Failed to sync git credentials to keyring:', err);
         }
@@ -890,7 +893,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       // Store for both dev.azure.com and {org}.visualstudio.com formats
       await gitService.storeGitCredentials('https://dev.azure.com', 'pat', tokenToSave);
       await gitService.storeGitCredentials(`https://${organization}.visualstudio.com`, 'pat', tokenToSave);
-      console.log(`[AzureDevOps] Stored git credentials in keyring for dev.azure.com and ${organization}.visualstudio.com`);
+      log.debug(`Stored git credentials in keyring for dev.azure.com and ${organization}.visualstudio.com`);
 
       // Load data if connected and repo detected
       // Pass the token directly since storage might not be ready yet
@@ -921,7 +924,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       if (this.organizationInput) {
         await gitService.deleteGitCredentials(`https://${this.organizationInput}.visualstudio.com`);
       }
-      console.log('[AzureDevOps] Deleted git credentials from keyring');
+      log.debug('Deleted git credentials from keyring');
 
       this.connectionStatus = null;
       this.pullRequests = [];

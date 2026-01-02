@@ -163,6 +163,16 @@ export interface MigrationPreview {
   unmatchedAccounts: UnmatchedAccount[];
 }
 
+/**
+ * Information about a migration backup (for rollback)
+ */
+export interface MigrationBackupInfo {
+  hasBackup: boolean;
+  backupDate: string | null;
+  profilesCount: number | null;
+  accountsCount: number | null;
+}
+
 // =============================================================================
 // Helper Functions
 // =============================================================================

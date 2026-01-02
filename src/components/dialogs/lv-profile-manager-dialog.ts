@@ -6,13 +6,14 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatus } from '../../stores/unified-profile.store.ts';
+import { repositoryStore, type RecentRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import type { UnifiedProfile, ProfileIntegrationAccount, IntegrationType, IntegrationConfig } from '../../types/unified-profile.types.ts';
+import type { UnifiedProfile, ProfileIntegrationAccount, IntegrationType, IntegrationConfig, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
 import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import { showToast } from '../../services/notification.service.ts';
 
-type ViewMode = 'list' | 'edit' | 'create' | 'add-account' | 'edit-account';
+type ViewMode = 'list' | 'edit' | 'create' | 'add-account' | 'edit-account' | 'assign-repos';
 
 @customElement('lv-profile-manager-dialog')
 export class LvProfileManagerDialog extends LitElement {
@@ -402,6 +403,22 @@ export class LvProfileManagerDialog extends LitElement {
         background: var(--color-bg-hover);
       }
 
+      .account-item.selectable {
+        cursor: pointer;
+      }
+
+      .account-item.selectable input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        cursor: pointer;
+      }
+
+      .account-item.selectable.selected {
+        background: var(--color-accent-bg);
+        border-color: var(--color-accent);
+      }
+
       .account-icon {
         width: 20px;
         height: 20px;
@@ -440,6 +457,16 @@ export class LvProfileManagerDialog extends LitElement {
         border-radius: var(--radius-sm);
       }
 
+      .empty-accounts.warning {
+        background: rgba(245, 158, 11, 0.1);
+        border: 1px solid rgba(245, 158, 11, 0.3);
+        color: var(--color-text-secondary);
+      }
+
+      .empty-accounts.warning svg {
+        color: rgb(245, 158, 11);
+      }
+
       .type-badge {
         font-size: 10px;
         padding: 1px 4px;
@@ -447,6 +474,109 @@ export class LvProfileManagerDialog extends LitElement {
         border-radius: var(--radius-xs);
         color: var(--color-text-tertiary);
         text-transform: uppercase;
+      }
+
+      /* Connection status indicators */
+      .status-indicator {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .status-indicator.connected {
+        background: var(--color-success, #22c55e);
+      }
+
+      .status-indicator.disconnected {
+        background: var(--color-error, #ef4444);
+      }
+
+      .status-indicator.checking {
+        background: var(--color-warning, #f59e0b);
+        animation: pulse 1s ease-in-out infinite;
+      }
+
+      .status-indicator.unknown {
+        background: var(--color-text-tertiary);
+        opacity: 0.5;
+      }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+
+      /* Backup section */
+      .backup-section {
+        margin-top: var(--spacing-lg);
+        padding-top: var(--spacing-md);
+        border-top: 1px solid var(--color-border);
+      }
+
+      .backup-toggle {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-sm);
+        background: none;
+        border: none;
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        width: 100%;
+        text-align: left;
+      }
+
+      .backup-toggle:hover {
+        color: var(--color-text-primary);
+      }
+
+      .backup-toggle svg {
+        transition: transform 0.2s;
+      }
+
+      .backup-toggle.expanded svg {
+        transform: rotate(90deg);
+      }
+
+      .backup-content {
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-md);
+        margin-top: var(--spacing-sm);
+      }
+
+      .backup-info {
+        margin-bottom: var(--spacing-md);
+      }
+
+      .backup-info-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: var(--font-size-sm);
+        margin-bottom: var(--spacing-xs);
+      }
+
+      .backup-info-label {
+        color: var(--color-text-tertiary);
+      }
+
+      .backup-actions {
+        display: flex;
+        gap: var(--spacing-sm);
+      }
+
+      .btn-warning {
+        background: var(--color-warning-bg);
+        border-color: var(--color-warning);
+        color: var(--color-warning);
+      }
+
+      .btn-warning:hover:not(:disabled) {
+        background: var(--color-warning);
+        color: white;
       }
     `,
   ];
@@ -456,30 +586,51 @@ export class LvProfileManagerDialog extends LitElement {
 
   @state() private viewMode: ViewMode = 'list';
   @state() private profiles: UnifiedProfile[] = [];
+  @state() private repositoryAssignments: Record<string, string> = {};
+  @state() private accountConnectionStatus: Record<string, AccountConnectionStatus> = {};
   @state() private editingProfile: Partial<UnifiedProfile> | null = null;
   @state() private editingAccount: Partial<ProfileIntegrationAccount> | null = null;
   @state() private isLoading = false;
   @state() private isSaving = false;
+  @state() private recentRepositories: RecentRepository[] = [];
+  @state() private selectedReposForAssignment: Set<string> = new Set();
+  @state() private backupInfo: MigrationBackupInfo | null = null;
+  @state() private showBackupSection = false;
+  @state() private isRestoringBackup = false;
 
   private unsubscribeStore?: () => void;
+  private unsubscribeRepoStore?: () => void;
 
   connectedCallback(): void {
     super.connectedCallback();
     // Get initial state from unified profile store
     const initialState = unifiedProfileStore.getState();
     this.profiles = initialState.profiles;
+    this.repositoryAssignments = initialState.config?.repositoryAssignments ?? {};
+    this.accountConnectionStatus = initialState.accountConnectionStatus;
     this.isLoading = initialState.isLoading;
+
+    // Get initial state from repository store
+    this.recentRepositories = repositoryStore.getState().recentRepositories;
 
     // Subscribe to store changes
     this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
       this.profiles = state.profiles;
+      this.repositoryAssignments = state.config?.repositoryAssignments ?? {};
+      this.accountConnectionStatus = state.accountConnectionStatus;
       this.isLoading = state.isLoading;
+    });
+
+    // Subscribe to repository store for recent repos
+    this.unsubscribeRepoStore = repositoryStore.subscribe((state) => {
+      this.recentRepositories = state.recentRepositories;
     });
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribeStore?.();
+    this.unsubscribeRepoStore?.();
   }
 
   updated(changedProperties: Map<string, unknown>): void {
@@ -490,6 +641,63 @@ export class LvProfileManagerDialog extends LitElement {
 
   private async loadProfiles(): Promise<void> {
     await unifiedProfileService.loadUnifiedProfiles();
+    // Also load backup info
+    await this.loadBackupInfo();
+  }
+
+  private async loadBackupInfo(): Promise<void> {
+    try {
+      this.backupInfo = await unifiedProfileService.getMigrationBackupInfo();
+    } catch {
+      // Ignore errors - backup info is optional
+      this.backupInfo = null;
+    }
+  }
+
+  private async handleRestoreBackup(): Promise<void> {
+    if (!confirm('Are you sure you want to restore from backup? This will remove your current unified profiles and restore the pre-migration data. You will need to run migration again.')) {
+      return;
+    }
+    this.isRestoringBackup = true;
+    try {
+      const result = await unifiedProfileService.restoreMigrationBackup();
+      showToast(
+        `Restored ${result.profilesCount ?? 0} profiles and ${result.accountsCount ?? 0} accounts from backup`,
+        'success'
+      );
+      this.handleClose();
+      // Dispatch event to trigger migration dialog
+      this.dispatchEvent(
+        new CustomEvent('migration-needed', {
+          bubbles: true,
+          composed: true,
+        })
+      );
+    } catch (error) {
+      showToast(
+        `Failed to restore backup: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'error'
+      );
+    } finally {
+      this.isRestoringBackup = false;
+    }
+  }
+
+  private async handleDeleteBackup(): Promise<void> {
+    if (!confirm('Are you sure you want to delete the migration backup? This action cannot be undone.')) {
+      return;
+    }
+    try {
+      await unifiedProfileService.deleteMigrationBackup();
+      showToast('Migration backup deleted', 'success');
+      this.backupInfo = null;
+      this.showBackupSection = false;
+    } catch (error) {
+      showToast(
+        `Failed to delete backup: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'error'
+      );
+    }
   }
 
   private handleClose(): void {
@@ -519,13 +727,82 @@ export class LvProfileManagerDialog extends LitElement {
     this.viewMode = 'edit';
   }
 
+  private handleDuplicate(profile: UnifiedProfile, e: Event): void {
+    e.stopPropagation();
+    // Create a copy of the profile with a new ID and name
+    this.editingProfile = {
+      ...profile,
+      id: undefined, // Will be generated on save
+      name: `${profile.name} (Copy)`,
+      isDefault: false, // Don't copy default status
+      integrationAccounts: profile.integrationAccounts.map((account) => ({
+        ...account,
+        id: crypto.randomUUID(), // New ID for each account copy
+        isDefaultForType: false, // Don't copy default status
+      })),
+    };
+    this.viewMode = 'create';
+  }
+
   private handleBack(): void {
     if (this.viewMode === 'add-account' || this.viewMode === 'edit-account') {
       this.viewMode = this.editingProfile?.id ? 'edit' : 'create';
       this.editingAccount = null;
+    } else if (this.viewMode === 'assign-repos') {
+      this.viewMode = 'edit';
+      this.selectedReposForAssignment = new Set();
     } else {
       this.viewMode = 'list';
       this.editingProfile = null;
+    }
+  }
+
+  private handleOpenRepoAssignment(): void {
+    this.selectedReposForAssignment = new Set();
+    this.viewMode = 'assign-repos';
+  }
+
+  private toggleRepoSelection(path: string): void {
+    const newSet = new Set(this.selectedReposForAssignment);
+    if (newSet.has(path)) {
+      newSet.delete(path);
+    } else {
+      newSet.add(path);
+    }
+    this.selectedReposForAssignment = newSet;
+  }
+
+  private async handleBulkAssign(): Promise<void> {
+    if (!this.editingProfile?.id || this.selectedReposForAssignment.size === 0) return;
+
+    this.isSaving = true;
+    const profileId = this.editingProfile.id;
+    let successCount = 0;
+    let errorCount = 0;
+
+    try {
+      for (const repoPath of this.selectedReposForAssignment) {
+        try {
+          await unifiedProfileService.assignUnifiedProfileToRepository(repoPath, profileId);
+          successCount++;
+        } catch {
+          errorCount++;
+        }
+      }
+
+      if (errorCount === 0) {
+        showToast(`Assigned ${successCount} repository${successCount !== 1 ? 'ies' : ''}`, 'success');
+      } else {
+        showToast(`Assigned ${successCount}, failed ${errorCount}`, 'warning');
+      }
+
+      // Go back to edit view
+      this.selectedReposForAssignment = new Set();
+      this.viewMode = 'edit';
+    } catch (error) {
+      showToast(`Failed to assign repositories: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
+    } finally {
+      this.isSaving = false;
     }
   }
 
@@ -741,6 +1018,8 @@ export class LvProfileManagerDialog extends LitElement {
         return 'Add Account';
       case 'edit-account':
         return 'Edit Account';
+      case 'assign-repos':
+        return 'Assign Repositories';
       default:
         return 'Profiles';
     }
@@ -756,6 +1035,8 @@ export class LvProfileManagerDialog extends LitElement {
       case 'add-account':
       case 'edit-account':
         return this.renderAccountForm();
+      case 'assign-repos':
+        return this.renderRepoAssignment();
       default:
         return nothing;
     }
@@ -787,6 +1068,13 @@ export class LvProfileManagerDialog extends LitElement {
           <button class="btn btn-secondary" @click=${this.handleBack}>Cancel</button>
           <button class="btn btn-primary" @click=${this.handleSaveAccount}>
             ${this.viewMode === 'add-account' ? 'Add Account' : 'Save Account'}
+          </button>
+        `;
+      case 'assign-repos':
+        return html`
+          <button class="btn btn-secondary" @click=${this.handleBack}>Cancel</button>
+          <button class="btn btn-primary" @click=${this.handleBulkAssign} ?disabled=${this.selectedReposForAssignment.size === 0 || this.isSaving}>
+            ${this.isSaving ? 'Assigning...' : `Assign ${this.selectedReposForAssignment.size} Repository${this.selectedReposForAssignment.size !== 1 ? 'ies' : ''}`}
           </button>
         `;
       default:
@@ -853,6 +1141,16 @@ export class LvProfileManagerDialog extends LitElement {
                     `
                   : nothing}
                 <button
+                  class="action-btn"
+                  @click=${(e: Event) => this.handleDuplicate(profile, e)}
+                  title="Duplicate profile"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                </button>
+                <button
                   class="action-btn delete"
                   @click=${(e: Event) => this.handleDelete(profile, e)}
                   title="Delete profile"
@@ -866,6 +1164,75 @@ export class LvProfileManagerDialog extends LitElement {
             </div>
           `
         )}
+      </div>
+      ${this.renderBackupSection()}
+    `;
+  }
+
+  private renderBackupSection() {
+    // Only show if backup exists
+    if (!this.backupInfo?.hasBackup) {
+      return nothing;
+    }
+
+    return html`
+      <div class="backup-section">
+        <button
+          class="backup-toggle ${this.showBackupSection ? 'expanded' : ''}"
+          @click=${() => (this.showBackupSection = !this.showBackupSection)}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="9 18 15 12 9 6"></polyline>
+          </svg>
+          Migration Backup Available
+        </button>
+        ${this.showBackupSection
+          ? html`
+              <div class="backup-content">
+                <div class="backup-info">
+                  <div class="backup-info-row">
+                    <span class="backup-info-label">Backup Date</span>
+                    <span>${this.backupInfo.backupDate ?? 'Unknown'}</span>
+                  </div>
+                  ${this.backupInfo.profilesCount !== null
+                    ? html`
+                        <div class="backup-info-row">
+                          <span class="backup-info-label">Profiles</span>
+                          <span>${this.backupInfo.profilesCount}</span>
+                        </div>
+                      `
+                    : nothing}
+                  ${this.backupInfo.accountsCount !== null
+                    ? html`
+                        <div class="backup-info-row">
+                          <span class="backup-info-label">Accounts</span>
+                          <span>${this.backupInfo.accountsCount}</span>
+                        </div>
+                      `
+                    : nothing}
+                </div>
+                <p style="font-size: var(--font-size-sm); color: var(--color-text-secondary); margin-bottom: var(--spacing-md);">
+                  A backup of your pre-migration data exists. You can restore it to undo the migration, or delete it if you're satisfied with the current setup.
+                </p>
+                <div class="backup-actions">
+                  <button
+                    class="btn btn-warning"
+                    @click=${this.handleRestoreBackup}
+                    ?disabled=${this.isRestoringBackup}
+                  >
+                    ${this.isRestoringBackup ? 'Restoring...' : 'Restore Backup'}
+                  </button>
+                  <button
+                    class="btn btn-secondary"
+                    @click=${this.handleDeleteBackup}
+                    ?disabled=${this.isRestoringBackup}
+                  >
+                    Delete Backup
+                  </button>
+                </div>
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -985,10 +1352,15 @@ export class LvProfileManagerDialog extends LitElement {
 
         ${(this.editingProfile.integrationAccounts ?? []).length === 0
           ? html`
-              <div class="empty-accounts">
+              <div class="empty-accounts warning">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                  <line x1="12" y1="9" x2="12" y2="13"></line>
+                  <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                </svg>
                 No integration accounts linked to this profile.
                 <br />
-                Add accounts to connect GitHub, GitLab, or Azure DevOps.
+                Add accounts to enable GitHub, GitLab, or Azure DevOps features.
               </div>
             `
           : html`
@@ -997,10 +1369,124 @@ export class LvProfileManagerDialog extends LitElement {
               </div>
             `}
       </div>
+
+      <!-- Assigned Repositories Section (only for existing profiles) -->
+      ${this.editingProfile.id ? this.renderAssignedRepositories() : nothing}
+    `;
+  }
+
+  private renderAssignedRepositories() {
+    const assignedRepos = this.getAssignedRepositories(this.editingProfile?.id);
+
+    return html`
+      <div class="accounts-section">
+        <div class="accounts-header">
+          <div class="form-section-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+            Assigned Repositories
+          </div>
+          <button class="btn btn-secondary btn-sm" @click=${this.handleOpenRepoAssignment}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Assign
+          </button>
+        </div>
+
+        ${assignedRepos.length === 0
+          ? html`
+              <div class="empty-accounts">
+                No repositories are using this profile.
+                <br />
+                Click "Assign" to add repositories from your recent list.
+              </div>
+            `
+          : html`
+              <div class="accounts-list">
+                ${assignedRepos.map(
+                  (repoPath) => html`
+                    <div class="account-item">
+                      <svg class="account-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                      </svg>
+                      <div class="account-info">
+                        <div class="account-name">${this.formatRepoPath(repoPath)}</div>
+                        <div class="account-detail">${repoPath}</div>
+                      </div>
+                    </div>
+                  `
+                )}
+              </div>
+            `}
+      </div>
+    `;
+  }
+
+  private renderRepoAssignment() {
+    const assignedRepos = this.getAssignedRepositories(this.editingProfile?.id);
+    const availableRepos = this.recentRepositories.filter(
+      (repo) => !assignedRepos.includes(repo.path)
+    );
+
+    return html`
+      <div class="form-content">
+        <div class="form-section">
+          <p style="color: var(--color-text-secondary); margin-bottom: var(--spacing-md);">
+            Select repositories to assign to <strong>${this.editingProfile?.name}</strong>:
+          </p>
+
+          ${availableRepos.length === 0
+            ? html`
+                <div class="empty-accounts">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width: 48px; height: 48px; opacity: 0.5; margin-bottom: var(--spacing-sm);">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                  </svg>
+                  <p>No unassigned repositories available.</p>
+                  <p style="font-size: var(--font-size-sm); color: var(--color-text-tertiary);">
+                    Open some repositories first to add them here.
+                  </p>
+                </div>
+              `
+            : html`
+                <div class="accounts-list">
+                  ${availableRepos.map(
+                    (repo) => html`
+                      <label class="account-item selectable ${this.selectedReposForAssignment.has(repo.path) ? 'selected' : ''}">
+                        <input
+                          type="checkbox"
+                          .checked=${this.selectedReposForAssignment.has(repo.path)}
+                          @change=${() => this.toggleRepoSelection(repo.path)}
+                        />
+                        <svg class="account-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        <div class="account-info">
+                          <div class="account-name">${repo.name}</div>
+                          <div class="account-detail">${repo.path}</div>
+                        </div>
+                      </label>
+                    `
+                  )}
+                </div>
+              `}
+        </div>
+      </div>
     `;
   }
 
   private renderAccountItem(account: ProfileIntegrationAccount) {
+    const details = this.getAccountDetails(account);
+    const connectionStatus = this.getAccountConnectionStatus(account.id);
+    const statusTitle = {
+      connected: 'Connected',
+      disconnected: 'Disconnected - token may be invalid',
+      checking: 'Checking connection...',
+      unknown: 'Connection status unknown',
+    }[connectionStatus];
+
     return html`
       <div class="account-item">
         ${this.renderAccountIcon(account.integrationType)}
@@ -1010,12 +1496,9 @@ export class LvProfileManagerDialog extends LitElement {
             ${account.isDefaultForType ? html`<span class="default-badge">Default</span>` : nothing}
             <span class="type-badge">${account.integrationType}</span>
           </div>
-          ${account.cachedUser
-            ? html`<div class="account-detail">${account.cachedUser.username || account.cachedUser.displayName}</div>`
-            : this.getAccountConfigDetail(account)
-              ? html`<div class="account-detail">${this.getAccountConfigDetail(account)}</div>`
-              : nothing}
+          ${details ? html`<div class="account-detail">${details}</div>` : nothing}
         </div>
+        <span class="status-indicator ${connectionStatus}" title="${statusTitle}"></span>
         <div class="account-actions">
           <button class="action-btn" @click=${() => this.handleEditAccount(account)} title="Edit account">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1063,14 +1546,46 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
-  private getAccountConfigDetail(account: ProfileIntegrationAccount): string | null {
+  private getAccountConnectionStatus(accountId: string): ConnectionStatus {
+    return this.accountConnectionStatus[accountId]?.status ?? 'unknown';
+  }
+
+  private getAssignedRepositories(profileId: string | undefined): string[] {
+    if (!profileId) return [];
+    return Object.entries(this.repositoryAssignments)
+      .filter(([, id]) => id === profileId)
+      .map(([path]) => path);
+  }
+
+  private formatRepoPath(path: string): string {
+    // Extract just the repo name from the path
+    const parts = path.split('/');
+    return parts.slice(-2).join('/'); // e.g., "user/repo" from "/path/to/user/repo"
+  }
+
+  private getAccountDetails(account: ProfileIntegrationAccount): string | null {
+    const parts: string[] = [];
+
+    // Add username if available
+    if (account.cachedUser?.username) {
+      parts.push(`@${account.cachedUser.username}`);
+    }
+
+    // Add instance/org info based on type
     if (account.config.type === 'gitlab' && account.config.instanceUrl) {
-      return account.config.instanceUrl;
+      try {
+        const url = new URL(account.config.instanceUrl);
+        if (url.hostname !== 'gitlab.com') {
+          parts.push(url.hostname);
+        }
+      } catch {
+        // Invalid URL, ignore
+      }
+    } else if (account.config.type === 'azure-devops' && account.config.organization) {
+      parts.push(account.config.organization);
     }
-    if (account.config.type === 'azure-devops' && account.config.organization) {
-      return account.config.organization;
-    }
-    return null;
+
+    return parts.length > 0 ? parts.join(' · ') : null;
   }
 
   private getDefaultConfigForType(type: IntegrationType): IntegrationConfig {

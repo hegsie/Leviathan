@@ -172,53 +172,66 @@ test.describe('Tag List', () => {
   });
 });
 
-// Create Branch Dialog tests are skipped because the "Create Branch" command
-// is not available in the command palette. Creating a branch is done via
-// right-click context menu on the branch list or other UI elements.
-test.describe.skip('Create Branch Dialog', () => {
+test.describe('Create Branch Dialog', () => {
   let app: AppPage;
+  let leftPanel: LeftPanelPage;
   let dialogs: DialogsPage;
 
   test.beforeEach(async ({ page }) => {
     app = new AppPage(page);
+    leftPanel = new LeftPanelPage(page);
     dialogs = new DialogsPage(page);
     await setupOpenRepository(page);
   });
 
-  test('should open create branch dialog from command palette', async () => {
-    await app.openCommandPalette();
-    await dialogs.commandPalette.search('Create Branch');
-    await dialogs.commandPalette.executeFirst();
+  test('should open create branch dialog from context menu', async ({ page }) => {
+    // Right-click on main branch to open context menu
+    await leftPanel.openBranchContextMenu('main');
 
-    // The create branch dialog should be visible
-    await expect(dialogs.createBranch.dialog).toBeVisible();
+    // Wait for context menu to appear and click the create branch option
+    const contextMenuItem = page.locator('.context-menu-item', { hasText: 'Create branch from here' });
+    await contextMenuItem.waitFor({ state: 'visible' });
+    await contextMenuItem.click();
+
+    // The create branch dialog's modal should be visible
+    await expect(page.locator('lv-create-branch-dialog lv-modal[open]')).toBeVisible();
   });
 
   test('should allow entering branch name', async ({ page }) => {
-    // Open dialog via command palette
-    await app.openCommandPalette();
-    await dialogs.commandPalette.search('Create Branch');
-    await dialogs.commandPalette.executeFirst();
+    // Open dialog via context menu
+    await leftPanel.openBranchContextMenu('main');
+    const contextMenuItem = page.locator('.context-menu-item', { hasText: 'Create branch from here' });
+    await contextMenuItem.waitFor({ state: 'visible' });
+    await contextMenuItem.click();
+
+    // Wait for modal to be visible
+    await page.locator('lv-create-branch-dialog lv-modal[open]').waitFor({ state: 'visible' });
 
     await dialogs.createBranch.fillName('feature/my-new-feature');
     await expect(dialogs.createBranch.nameInput).toHaveValue('feature/my-new-feature');
   });
 
-  test('should have create button', async () => {
-    await app.openCommandPalette();
-    await dialogs.commandPalette.search('Create Branch');
-    await dialogs.commandPalette.executeFirst();
+  test('should have create button', async ({ page }) => {
+    await leftPanel.openBranchContextMenu('main');
+    const contextMenuItem = page.locator('.context-menu-item', { hasText: 'Create branch from here' });
+    await contextMenuItem.waitFor({ state: 'visible' });
+    await contextMenuItem.click();
+
+    await page.locator('lv-create-branch-dialog lv-modal[open]').waitFor({ state: 'visible' });
 
     await expect(dialogs.createBranch.createButton).toBeVisible();
   });
 
-  test('should close dialog with Escape', async () => {
-    await app.openCommandPalette();
-    await dialogs.commandPalette.search('Create Branch');
-    await dialogs.commandPalette.executeFirst();
+  test('should close dialog with Escape', async ({ page }) => {
+    await leftPanel.openBranchContextMenu('main');
+    const contextMenuItem = page.locator('.context-menu-item', { hasText: 'Create branch from here' });
+    await contextMenuItem.waitFor({ state: 'visible' });
+    await contextMenuItem.click();
 
-    await dialogs.createBranch.closeWithEscape();
-    await expect(dialogs.createBranch.dialog).not.toBeVisible();
+    await page.locator('lv-create-branch-dialog lv-modal[open]').waitFor({ state: 'visible' });
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator('lv-create-branch-dialog lv-modal[open]')).not.toBeVisible();
   });
 });
 

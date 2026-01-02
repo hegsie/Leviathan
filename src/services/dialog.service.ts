@@ -4,6 +4,9 @@
  */
 
 import { open, save, message, ask, confirm } from '@tauri-apps/plugin-dialog';
+import { loggers } from '../utils/logger.ts';
+
+const log = loggers.dialog;
 
 /**
  * Check if running inside Tauri
@@ -36,7 +39,7 @@ export async function openDialog(options: OpenDialogOptions = {}): Promise<strin
     return null;
   }
 
-  console.log('Opening dialog with options:', options);
+  log.debug('Opening dialog with options:', options);
   try {
     const result = await open({
       title: options.title,
@@ -45,10 +48,10 @@ export async function openDialog(options: OpenDialogOptions = {}): Promise<strin
       multiple: options.multiple ?? false,
       filters: options.filters,
     });
-    console.log('Dialog result:', result);
+    log.debug('Dialog result:', result);
     return result;
   } catch (error) {
-    console.error('Dialog error:', error);
+    log.error('Dialog error:', error);
     throw error;
   }
 }
@@ -98,7 +101,7 @@ export async function saveDialog(options: SaveDialogOptions = {}): Promise<strin
     });
     return result;
   } catch (error) {
-    console.error('Save dialog error:', error);
+    log.error('Save dialog error:', error);
     return null;
   }
 }

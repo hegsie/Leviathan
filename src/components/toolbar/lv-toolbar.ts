@@ -9,6 +9,10 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { repositoryStore, type OpenRepository } from '../../stores/index.ts';
 import { openRepository, fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus } from '../../services/git.service.ts';
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
+import { loggers } from '../../utils/logger.ts';
+
+const log = loggers.ui;
 import '../dialogs/lv-clone-dialog.ts';
 import '../dialogs/lv-init-dialog.ts';
 import './lv-search-bar.ts';
@@ -322,10 +326,10 @@ export class LvToolbar extends LitElement {
   }
 
   private async handleOpenRepo(): Promise<void> {
-    console.log('handleOpenRepo called');
+    log.debug('handleOpenRepo called');
     try {
       const path = await openRepositoryDialog();
-      console.log('Got path:', path);
+      log.debug('Got path:', path);
       if (!path) return;
 
       const store = repositoryStore.getState();
@@ -344,7 +348,8 @@ export class LvToolbar extends LitElement {
         store.setLoading(false);
       }
     } catch (error) {
-      console.error('Error in handleOpenRepo:', error);
+      log.error('Error in handleOpenRepo:', error);
+      showToast(error instanceof Error ? error.message : 'Failed to open repository', 'error');
     }
   }
 

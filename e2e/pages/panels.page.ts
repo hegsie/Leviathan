@@ -194,8 +194,8 @@ export class RightPanelPage {
     this.commitPanel = page.locator('lv-commit-panel');
     this.commitMessage = page.getByRole('textbox', { name: /Summary/i });
     this.commitButton = page.getByRole('button', { name: 'Commit', exact: true });
-    // AI generate button might not always be visible
-    this.aiGenerateButton = page.getByRole('button', { name: /Generate|AI/i });
+    // AI generate button - use class selector for reliability (text varies: "Generate with AI" or "Configure AI")
+    this.aiGenerateButton = page.locator('lv-commit-panel .generate-btn');
 
     // Commit details - lv-commit-details component
     this.commitDetails = page.locator('lv-commit-details');

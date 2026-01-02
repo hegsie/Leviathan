@@ -32,11 +32,16 @@ class KeyboardService {
   private listeners: Set<(e: KeyboardEvent) => void> = new Set();
   private vimMode = false;
   private vimPendingKey: string | null = null;
+  private vimPendingTimeout: ReturnType<typeof setTimeout> | null = null;
   private vimActions: {
     navigateUp?: () => void;
     navigateDown?: () => void;
     navigateFirst?: () => void;
     navigateLast?: () => void;
+    pageUp?: () => void;
+    pageDown?: () => void;
+    openSearch?: () => void;
+    select?: () => void;
   } = {};
 
   constructor() {
@@ -115,10 +120,24 @@ class KeyboardService {
   private handleVimKey(e: KeyboardEvent): boolean {
     if (!this.vimMode) return false;
 
-    // Don't process if modifier keys are pressed (except shift for G)
-    if (e.ctrlKey || e.metaKey || e.altKey) return false;
-
     const key = e.key.toLowerCase();
+
+    // Handle Ctrl+d (page down) and Ctrl+u (page up)
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      if (key === 'd' && this.vimActions.pageDown) {
+        e.preventDefault();
+        this.vimActions.pageDown();
+        return true;
+      }
+      if (key === 'u' && this.vimActions.pageUp) {
+        e.preventDefault();
+        this.vimActions.pageUp();
+        return true;
+      }
+    }
+
+    // Don't process other vim keys if modifier keys are pressed (except shift for G)
+    if (e.ctrlKey || e.metaKey || e.altKey) return false;
 
     // Handle pending 'g' for 'gg' command
     if (this.vimPendingKey === 'g') {
@@ -156,10 +175,29 @@ class KeyboardService {
     // g - start of 'gg' command
     if (key === 'g' && !e.shiftKey) {
       this.vimPendingKey = 'g';
+      // Clear any existing timeout
+      if (this.vimPendingTimeout) {
+        clearTimeout(this.vimPendingTimeout);
+      }
       // Set timeout to clear pending key
-      setTimeout(() => {
+      this.vimPendingTimeout = setTimeout(() => {
         this.vimPendingKey = null;
+        this.vimPendingTimeout = null;
       }, 500);
+      return true;
+    }
+
+    // / - open search
+    if (e.key === '/' && this.vimActions.openSearch) {
+      e.preventDefault();
+      this.vimActions.openSearch();
+      return true;
+    }
+
+    // o or Enter - select/open
+    if ((key === 'o' || e.key === 'Enter') && this.vimActions.select) {
+      e.preventDefault();
+      this.vimActions.select();
       return true;
     }
 
@@ -219,6 +257,10 @@ class KeyboardService {
     navigateDown?: () => void;
     navigateFirst?: () => void;
     navigateLast?: () => void;
+    pageUp?: () => void;
+    pageDown?: () => void;
+    openSearch?: () => void;
+    select?: () => void;
   }): void {
     this.vimActions = actions;
   }
@@ -307,6 +349,11 @@ class KeyboardService {
     document.removeEventListener('keydown', this.handleKeyDown);
     this.shortcuts.clear();
     this.listeners.clear();
+    // Clear any pending vim timeout
+    if (this.vimPendingTimeout) {
+      clearTimeout(this.vimPendingTimeout);
+      this.vimPendingTimeout = null;
+    }
   }
 }
 
@@ -319,6 +366,8 @@ export function registerDefaultShortcuts(actions: {
   navigateDown: () => void;
   navigateFirst?: () => void;
   navigateLast?: () => void;
+  pageUp?: () => void;
+  pageDown?: () => void;
   selectCommit: () => void;
   stageAll: () => void;
   unstageAll: () => void;
@@ -344,6 +393,10 @@ export function registerDefaultShortcuts(actions: {
     navigateDown: actions.navigateDown,
     navigateFirst: actions.navigateFirst,
     navigateLast: actions.navigateLast,
+    pageUp: actions.pageUp,
+    pageDown: actions.pageDown,
+    openSearch: actions.search,
+    select: actions.selectCommit,
   });
 
   // Navigation

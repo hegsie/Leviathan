@@ -209,19 +209,33 @@ test.describe('Staging Shortcuts', () => {
   });
 });
 
-// Refresh shortcut tests are skipped because Cmd+R triggers browser refresh
-// which interferes with the test. The app handles this shortcut at the Tauri level.
-test.describe.skip('Refresh Shortcut', () => {
+// Note: Cmd+R cannot be tested directly as it triggers browser refresh.
+// The app handles this shortcut at the Tauri level. We test refresh via command palette instead.
+test.describe('Refresh Command', () => {
   let app: AppPage;
+  let dialogs: DialogsPage;
 
   test.beforeEach(async ({ page }) => {
     app = new AppPage(page);
+    dialogs = new DialogsPage(page);
     await setupOpenRepository(page);
   });
 
-  test('Cmd+R should trigger refresh', async ({ page }) => {
-    await page.keyboard.press('Meta+r');
-    // Refresh should be triggered, app should still be visible
-    await expect(app.appShell).toBeVisible();
+  test('Refresh command should be available in command palette', async ({ page }) => {
+    await app.openCommandPalette();
+    await dialogs.commandPalette.search('Refresh');
+
+    // Refresh command should be visible in results
+    await expect(dialogs.commandPalette.results.first()).toBeVisible();
+    await expect(page.locator('.command-label', { hasText: 'Refresh repository' })).toBeVisible();
+  });
+
+  test('Executing refresh command should close command palette', async ({ page }) => {
+    await app.openCommandPalette();
+    await dialogs.commandPalette.search('Refresh');
+    await dialogs.commandPalette.executeFirst();
+
+    // Command palette should close after execution
+    await expect(dialogs.commandPalette.palette).not.toBeVisible();
   });
 });

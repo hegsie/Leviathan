@@ -1,6 +1,9 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
+import { loggers } from '../../utils/logger.ts';
+
+const log = loggers.graph;
 import {
   computeGraphLayout,
   type GraphLayout,
@@ -475,7 +478,7 @@ export class LvGraphCanvas extends LitElement {
           for (const commit of matchResult.data) {
             this.matchedCommitOids.add(commit.oid);
           }
-          console.log(`Search matched ${this.matchedCommitOids.size} commits`);
+          log.debug(`Search matched ${this.matchedCommitOids.size} commits`);
         }
       }
 
@@ -483,7 +486,7 @@ export class LvGraphCanvas extends LitElement {
       this.commits = commitsResult.data.map(commitToGraphCommit);
       this.processLayout();
       const searchInfo = hasSearch ? ` (${this.matchedCommitOids.size} matches highlighted)` : '';
-      console.log(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
+      log.debug(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
     } catch (err) {
       this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
     } finally {
@@ -1243,6 +1246,40 @@ export class LvGraphCanvas extends LitElement {
   public navigateLast(): void {
     if (this.sortedNodesByRow.length === 0) return;
     this.selectByIndex(this.sortedNodesByRow.length - 1);
+  }
+
+  /**
+   * Navigate up by a page (half viewport height worth of commits)
+   */
+  public navigatePageUp(): void {
+    if (this.sortedNodesByRow.length === 0) return;
+
+    const currentIndex = this.selectedNode
+      ? this.sortedNodesByRow.findIndex((n) => n.oid === this.selectedNode!.oid)
+      : 0;
+
+    // Calculate page size based on viewport (roughly half the visible rows)
+    const viewport = this.getViewport();
+    const pageSize = Math.max(1, Math.floor(viewport.height / this.ROW_HEIGHT / 2));
+    const newIndex = Math.max(0, currentIndex - pageSize);
+    this.selectByIndex(newIndex);
+  }
+
+  /**
+   * Navigate down by a page (half viewport height worth of commits)
+   */
+  public navigatePageDown(): void {
+    if (this.sortedNodesByRow.length === 0) return;
+
+    const currentIndex = this.selectedNode
+      ? this.sortedNodesByRow.findIndex((n) => n.oid === this.selectedNode!.oid)
+      : 0;
+
+    // Calculate page size based on viewport (roughly half the visible rows)
+    const viewport = this.getViewport();
+    const pageSize = Math.max(1, Math.floor(viewport.height / this.ROW_HEIGHT / 2));
+    const newIndex = Math.min(this.sortedNodesByRow.length - 1, currentIndex + pageSize);
+    this.selectByIndex(newIndex);
   }
 
   /**

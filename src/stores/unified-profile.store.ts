@@ -11,6 +11,13 @@ import type {
   IntegrationType,
 } from '../types/unified-profile.types.ts';
 
+export type ConnectionStatus = 'unknown' | 'checking' | 'connected' | 'disconnected';
+
+export interface AccountConnectionStatus {
+  status: ConnectionStatus;
+  lastChecked: number | null; // timestamp
+}
+
 export interface UnifiedProfileState {
   // Config
   config: UnifiedProfilesConfig | null;
@@ -19,6 +26,9 @@ export interface UnifiedProfileState {
   profiles: UnifiedProfile[];
   activeProfile: UnifiedProfile | null;
   currentRepositoryPath: string | null;
+
+  // Connection status for accounts (accountId -> status)
+  accountConnectionStatus: Record<string, AccountConnectionStatus>;
 
   // Loading state
   isLoading: boolean;
@@ -52,6 +62,9 @@ export interface UnifiedProfileState {
   setNeedsMigration: (needs: boolean) => void;
   setMigrating: (migrating: boolean) => void;
 
+  // Actions - Connection status
+  setAccountConnectionStatus: (accountId: string, status: ConnectionStatus) => void;
+
   // Actions - Reset
   reset: () => void;
 }
@@ -61,6 +74,7 @@ const initialState = {
   profiles: [] as UnifiedProfile[],
   activeProfile: null as UnifiedProfile | null,
   currentRepositoryPath: null as string | null,
+  accountConnectionStatus: {} as Record<string, AccountConnectionStatus>,
   isLoading: false,
   error: null as string | null,
   needsMigration: false,
@@ -205,6 +219,18 @@ export const unifiedProfileStore = createStore<UnifiedProfileState>()((set) => (
   setNeedsMigration: (needsMigration) => set({ needsMigration }),
 
   setMigrating: (isMigrating) => set({ isMigrating }),
+
+  // Connection status
+  setAccountConnectionStatus: (accountId, status) =>
+    set((state) => ({
+      accountConnectionStatus: {
+        ...state.accountConnectionStatus,
+        [accountId]: {
+          status,
+          lastChecked: status === 'checking' ? state.accountConnectionStatus[accountId]?.lastChecked ?? null : Date.now(),
+        },
+      },
+    })),
 
   // Reset
   reset: () => set(initialState),
