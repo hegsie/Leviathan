@@ -47,7 +47,6 @@ impl LoopbackServer {
 
     /// Create a loopback server from an existing listener
     fn from_listener(listener: TcpListener) -> Result<Self, LeviathanError> {
-
         let port = listener
             .local_addr()
             .map_err(|e| LeviathanError::OAuth(format!("Failed to get local address: {}", e)))?
@@ -105,9 +104,10 @@ impl LoopbackServer {
     /// Returns the authorization code on success, or an error message on failure.
     /// Times out after 5 minutes.
     pub fn wait_for_callback(mut self, timeout: Duration) -> Result<String, LeviathanError> {
-        let code_rx = self.code_rx.take().ok_or_else(|| {
-            LeviathanError::OAuth("Server already consumed".to_string())
-        })?;
+        let code_rx = self
+            .code_rx
+            .take()
+            .ok_or_else(|| LeviathanError::OAuth("Server already consumed".to_string()))?;
 
         // Wait for the code with timeout
         match code_rx.recv_timeout(timeout) {
@@ -128,11 +128,13 @@ impl LoopbackServer {
                 if let Some(tx) = self.shutdown_tx.take() {
                     let _ = tx.send(());
                 }
-                Err(LeviathanError::OAuth("OAuth callback timed out".to_string()))
+                Err(LeviathanError::OAuth(
+                    "OAuth callback timed out".to_string(),
+                ))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(LeviathanError::OAuth("Server thread disconnected".to_string()))
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(LeviathanError::OAuth(
+                "Server thread disconnected".to_string(),
+            )),
         }
     }
 

@@ -370,9 +370,9 @@ mod tests {
         config
             .accounts
             .push(LegacyIntegrationAccount::new_github("Work GH".to_string()));
-        config
-            .accounts
-            .push(LegacyIntegrationAccount::new_github("Personal GH".to_string()));
+        config.accounts.push(LegacyIntegrationAccount::new_github(
+            "Personal GH".to_string(),
+        ));
         config.accounts.push(LegacyIntegrationAccount::new_gitlab(
             "Work GL".to_string(),
             "https://gitlab.com".to_string(),

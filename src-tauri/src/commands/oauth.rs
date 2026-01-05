@@ -12,16 +12,20 @@ use crate::services::loopback_server::LoopbackServer;
 use crate::services::oauth::{
     generate_state, OAuthConfig, OAuthProvider, OAuthTokenResponse, PKCEChallenge,
 };
+use once_cell::sync::Lazy;
 
 /// Global storage for pending loopback servers (GitHub OAuth)
-static PENDING_SERVERS: std::sync::LazyLock<Mutex<HashMap<u16, LoopbackServer>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static PENDING_SERVERS: Lazy<Mutex<HashMap<u16, LoopbackServer>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Pending OAuth flow data: (provider, verifier, instance_url)
+type PendingOAuthFlow = (OAuthProvider, String, Option<String>);
 
 /// State for pending OAuth flows
 pub struct OAuthState {
     /// Map of state -> (provider, verifier, instance_url)
     #[allow(dead_code)]
-    pending: Mutex<HashMap<String, (OAuthProvider, String, Option<String>)>>,
+    pending: Mutex<HashMap<String, PendingOAuthFlow>>,
 }
 
 impl Default for OAuthState {
@@ -144,9 +148,7 @@ pub async fn oauth_get_authorize_url(
 /// The server will wait for the callback and the frontend should poll
 /// using `oauth_poll_github_callback`.
 #[tauri::command]
-pub async fn oauth_start_github_flow(
-    client_id: String,
-) -> Result<StartOAuthResponse> {
+pub async fn oauth_start_github_flow(client_id: String) -> Result<StartOAuthResponse> {
     oauth_get_authorize_url("github".to_string(), None, client_id).await
 }
 
@@ -229,10 +231,17 @@ pub async fn oauth_exchange_code(
 
     // Try to parse as token response
     tracing::info!("Token exchange raw response: {}", text);
-    let tokens: OAuthTokenResponse = serde_json::from_str(&text)
-        .map_err(|e| LeviathanError::OAuth(format!("Failed to parse token response: {}. Raw response: {}", e, text)))?;
+    let tokens: OAuthTokenResponse = serde_json::from_str(&text).map_err(|e| {
+        LeviathanError::OAuth(format!(
+            "Failed to parse token response: {}. Raw response: {}",
+            e, text
+        ))
+    })?;
 
-    tracing::info!("Parsed token - has access_token: {}", !tokens.access_token.is_empty());
+    tracing::info!(
+        "Parsed token - has access_token: {}",
+        !tokens.access_token.is_empty()
+    );
     Ok(tokens)
 }
 
@@ -304,9 +313,7 @@ pub async fn oauth_refresh_token(
 /// This should be called after opening the authorize URL.
 /// It will wait for the callback on the loopback server and return the authorization code.
 #[tauri::command]
-pub async fn oauth_wait_for_callback(
-    port: u16,
-) -> Result<String> {
+pub async fn oauth_wait_for_callback(port: u16) -> Result<String> {
     // Retrieve the stored server for this port
     let server = PENDING_SERVERS
         .lock()
@@ -318,11 +325,9 @@ pub async fn oauth_wait_for_callback(
     // This runs in a blocking thread to avoid blocking the async runtime
     let timeout = Duration::from_secs(300); // 5 minutes
 
-    tokio::task::spawn_blocking(move || {
-        server.wait_for_callback(timeout)
-    })
-    .await
-    .map_err(|e| LeviathanError::OAuth(format!("Task join error: {}", e)))?
+    tokio::task::spawn_blocking(move || server.wait_for_callback(timeout))
+        .await
+        .map_err(|e| LeviathanError::OAuth(format!("Task join error: {}", e)))?
 }
 
 /// Alias for backward compatibility

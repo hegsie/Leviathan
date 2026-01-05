@@ -49,7 +49,11 @@ async fn gitlab_get(url: &str, token: &str) -> Result<reqwest::Response> {
 
 /// Helper to make authenticated GitLab API POST requests
 /// Tries Bearer auth first (for OAuth tokens), falls back to PRIVATE-TOKEN (for PATs)
-async fn gitlab_post<T: Serialize + ?Sized>(url: &str, token: &str, body: &T) -> Result<reqwest::Response> {
+async fn gitlab_post<T: Serialize + ?Sized>(
+    url: &str,
+    token: &str,
+    body: &T,
+) -> Result<reqwest::Response> {
     let client = reqwest::Client::new();
 
     // Try Bearer auth first (for OAuth tokens)

@@ -37,19 +37,6 @@ pub async fn delete_bitbucket_credentials() -> Result<()> {
     Ok(())
 }
 
-/// Helper to resolve credentials from optional parameters
-fn resolve_credentials(
-    username: Option<String>,
-    app_password: Option<String>,
-) -> Result<(String, String)> {
-    match (username, app_password) {
-        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => Ok((u, p)),
-        _ => Err(LeviathanError::OperationFailed(
-            "Bitbucket credentials not configured".to_string(),
-        )),
-    }
-}
-
 // ============================================================================
 // Types
 // ============================================================================
@@ -161,9 +148,7 @@ fn get_auth_header_with_token(
 
     // Fall back to username/password
     match (username, app_password) {
-        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
-            Ok(get_auth_header(u, p))
-        }
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => Ok(get_auth_header(u, p)),
         _ => Err(LeviathanError::OperationFailed(
             "Bitbucket credentials not configured".to_string(),
         )),

@@ -779,8 +779,13 @@ pub async fn execute_unified_profiles_migration(
             for (account_id, assigned_profile_id) in &account_assignments {
                 if assigned_profile_id == &p.id {
                     // Find the account and add to default_accounts
-                    if let Some(account) = legacy_accounts.accounts.iter().find(|a| &a.id == account_id) {
-                        default_accounts.entry(account.integration_type.clone())
+                    if let Some(account) = legacy_accounts
+                        .accounts
+                        .iter()
+                        .find(|a| &a.id == account_id)
+                    {
+                        default_accounts
+                            .entry(account.integration_type.clone())
                             .or_insert_with(|| account_id.clone());
                     }
                 }

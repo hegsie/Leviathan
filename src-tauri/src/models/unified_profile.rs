@@ -528,7 +528,10 @@ impl UnifiedProfilesConfig {
     }
 
     /// Get all accounts of a specific type
-    pub fn get_accounts_by_type(&self, integration_type: &IntegrationType) -> Vec<&IntegrationAccount> {
+    pub fn get_accounts_by_type(
+        &self,
+        integration_type: &IntegrationType,
+    ) -> Vec<&IntegrationAccount> {
         self.accounts
             .iter()
             .filter(|a| &a.integration_type == integration_type)
@@ -536,7 +539,10 @@ impl UnifiedProfilesConfig {
     }
 
     /// Get the default global account for a specific type
-    pub fn get_default_account(&self, integration_type: &IntegrationType) -> Option<&IntegrationAccount> {
+    pub fn get_default_account(
+        &self,
+        integration_type: &IntegrationType,
+    ) -> Option<&IntegrationAccount> {
         self.accounts
             .iter()
             .find(|a| &a.integration_type == integration_type && a.is_default)
@@ -553,7 +559,9 @@ impl UnifiedProfilesConfig {
         // If this account is being set as default, unset other defaults of same type
         if account.is_default {
             for existing in &mut self.accounts {
-                if existing.integration_type == account.integration_type && existing.id != account.id {
+                if existing.integration_type == account.integration_type
+                    && existing.id != account.id
+                {
                     existing.is_default = false;
                 }
             }
@@ -628,7 +636,10 @@ impl UnifiedProfilesConfigV2 {
             // Extract accounts
             for account in v2_profile.extract_accounts() {
                 // Only add if not already present (by ID)
-                if !accounts.iter().any(|a: &IntegrationAccount| a.id == account.id) {
+                if !accounts
+                    .iter()
+                    .any(|a: &IntegrationAccount| a.id == account.id)
+                {
                     accounts.push(account);
                 }
             }
@@ -736,11 +747,17 @@ mod tests {
             profile.get_default_account_id(&IntegrationType::GitLab),
             Some(&"gitlab-account-id".to_string())
         );
-        assert_eq!(profile.get_default_account_id(&IntegrationType::AzureDevOps), None);
+        assert_eq!(
+            profile.get_default_account_id(&IntegrationType::AzureDevOps),
+            None
+        );
 
         // Remove preference
         profile.remove_default_account(&IntegrationType::GitHub);
-        assert_eq!(profile.get_default_account_id(&IntegrationType::GitHub), None);
+        assert_eq!(
+            profile.get_default_account_id(&IntegrationType::GitHub),
+            None
+        );
     }
 
     // =========================================================================
@@ -766,10 +783,8 @@ mod tests {
             panic!("Expected GitLab config");
         }
 
-        let azure = IntegrationAccount::new_azure_devops(
-            "My Azure".to_string(),
-            "my-org".to_string(),
-        );
+        let azure =
+            IntegrationAccount::new_azure_devops("My Azure".to_string(), "my-org".to_string());
         assert_eq!(azure.integration_type, IntegrationType::AzureDevOps);
         if let IntegrationConfig::AzureDevOps { organization } = &azure.config {
             assert_eq!(organization, "my-org");
@@ -836,7 +851,9 @@ mod tests {
         assert!(acc2.is_default);
 
         // get_default_account should return account2
-        let default = config.get_default_account(&IntegrationType::GitHub).unwrap();
+        let default = config
+            .get_default_account(&IntegrationType::GitHub)
+            .unwrap();
         assert_eq!(default.id, account2_id);
     }
 
@@ -872,7 +889,9 @@ mod tests {
 
         // Profile's default account reference should also be removed
         let profile = config.profiles.first().unwrap();
-        assert!(profile.get_default_account_id(&IntegrationType::GitHub).is_none());
+        assert!(profile
+            .get_default_account_id(&IntegrationType::GitHub)
+            .is_none());
     }
 
     #[test]
@@ -905,7 +924,8 @@ mod tests {
         assert_eq!(preferred.unwrap().id, account2_id);
 
         // For a type with no preference, should fall back to global default
-        let preferred_gitlab = config.get_profile_preferred_account(&profile_id, &IntegrationType::GitLab);
+        let preferred_gitlab =
+            config.get_profile_preferred_account(&profile_id, &IntegrationType::GitLab);
         assert!(preferred_gitlab.is_none()); // No GitLab accounts exist
     }
 
@@ -1129,9 +1149,10 @@ mod tests {
         let v2_config = UnifiedProfilesConfigV2 {
             version: 2,
             profiles: vec![v2_profile],
-            repository_assignments: HashMap::from([
-                ("/path/to/repo".to_string(), "profile-1".to_string()),
-            ]),
+            repository_assignments: HashMap::from([(
+                "/path/to/repo".to_string(),
+                "profile-1".to_string(),
+            )]),
         };
 
         // Migrate to v3

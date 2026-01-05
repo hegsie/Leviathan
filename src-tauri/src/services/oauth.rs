@@ -32,7 +32,10 @@ impl PKCEChallenge {
         hasher.update(verifier.as_bytes());
         let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
 
-        Self { verifier, challenge }
+        Self {
+            verifier,
+            challenge,
+        }
     }
 }
 
@@ -243,9 +246,10 @@ mod tests {
     fn test_pkce_challenge_is_valid_base64url() {
         let pkce = PKCEChallenge::new();
         // Base64url characters: A-Z, a-z, 0-9, -, _
-        assert!(pkce.challenge.chars().all(|c|
-            c.is_ascii_alphanumeric() || c == '-' || c == '_'
-        ));
+        assert!(pkce
+            .challenge
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]
@@ -261,17 +265,38 @@ mod tests {
 
     #[test]
     fn test_provider_parsing() {
-        assert_eq!("github".parse::<OAuthProvider>().unwrap(), OAuthProvider::GitHub);
-        assert_eq!("GitLab".parse::<OAuthProvider>().unwrap(), OAuthProvider::GitLab);
-        assert_eq!("AZURE".parse::<OAuthProvider>().unwrap(), OAuthProvider::Azure);
-        assert_eq!("bitbucket".parse::<OAuthProvider>().unwrap(), OAuthProvider::Bitbucket);
+        assert_eq!(
+            "github".parse::<OAuthProvider>().unwrap(),
+            OAuthProvider::GitHub
+        );
+        assert_eq!(
+            "GitLab".parse::<OAuthProvider>().unwrap(),
+            OAuthProvider::GitLab
+        );
+        assert_eq!(
+            "AZURE".parse::<OAuthProvider>().unwrap(),
+            OAuthProvider::Azure
+        );
+        assert_eq!(
+            "bitbucket".parse::<OAuthProvider>().unwrap(),
+            OAuthProvider::Bitbucket
+        );
     }
 
     #[test]
     fn test_provider_parsing_case_insensitive() {
-        assert_eq!("GITHUB".parse::<OAuthProvider>().unwrap(), OAuthProvider::GitHub);
-        assert_eq!("Github".parse::<OAuthProvider>().unwrap(), OAuthProvider::GitHub);
-        assert_eq!("gitHUB".parse::<OAuthProvider>().unwrap(), OAuthProvider::GitHub);
+        assert_eq!(
+            "GITHUB".parse::<OAuthProvider>().unwrap(),
+            OAuthProvider::GitHub
+        );
+        assert_eq!(
+            "Github".parse::<OAuthProvider>().unwrap(),
+            OAuthProvider::GitHub
+        );
+        assert_eq!(
+            "gitHUB".parse::<OAuthProvider>().unwrap(),
+            OAuthProvider::GitHub
+        );
     }
 
     #[test]
@@ -298,8 +323,14 @@ mod tests {
         let config = OAuthConfig::github("test-client-id", 12345);
 
         assert_eq!(config.client_id, "test-client-id");
-        assert_eq!(config.authorize_url, "https://github.com/login/oauth/authorize");
-        assert_eq!(config.token_url, "https://github.com/login/oauth/access_token");
+        assert_eq!(
+            config.authorize_url,
+            "https://github.com/login/oauth/authorize"
+        );
+        assert_eq!(
+            config.token_url,
+            "https://github.com/login/oauth/access_token"
+        );
         assert_eq!(config.redirect_uri, "http://127.0.0.1:12345/callback");
         assert!(config.scopes.contains(&"repo".to_string()));
         assert!(config.scopes.contains(&"read:user".to_string()));
@@ -318,9 +349,13 @@ mod tests {
 
     #[test]
     fn test_gitlab_config_custom_instance() {
-        let config = OAuthConfig::gitlab("test-client-id", Some("https://gitlab.example.com"), 9000);
+        let config =
+            OAuthConfig::gitlab("test-client-id", Some("https://gitlab.example.com"), 9000);
 
-        assert_eq!(config.authorize_url, "https://gitlab.example.com/oauth/authorize");
+        assert_eq!(
+            config.authorize_url,
+            "https://gitlab.example.com/oauth/authorize"
+        );
         assert_eq!(config.token_url, "https://gitlab.example.com/oauth/token");
         assert_eq!(config.redirect_uri, "http://127.0.0.1:9000/callback");
     }
@@ -348,8 +383,14 @@ mod tests {
         let config = OAuthConfig::bitbucket("test-client-id", 8085);
 
         assert_eq!(config.client_id, "test-client-id");
-        assert_eq!(config.authorize_url, "https://bitbucket.org/site/oauth2/authorize");
-        assert_eq!(config.token_url, "https://bitbucket.org/site/oauth2/access_token");
+        assert_eq!(
+            config.authorize_url,
+            "https://bitbucket.org/site/oauth2/authorize"
+        );
+        assert_eq!(
+            config.token_url,
+            "https://bitbucket.org/site/oauth2/access_token"
+        );
         assert_eq!(config.redirect_uri, "http://127.0.0.1:8085/callback");
         assert!(config.scopes.contains(&"repository".to_string()));
         assert!(config.scopes.contains(&"pullrequest".to_string()));

@@ -2615,7 +2615,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leviathan"
-version = "0.2.34"
+version = "0.2.35"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2626,6 +2626,7 @@ dependencies = [
  "glob",
  "keyring",
  "notify",
+ "once_cell",
  "rand 0.8.5",
  "reqwest 0.13.1",
  "rusqlite",
@@ -4246,6 +4247,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

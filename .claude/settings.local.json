@@ -80,7 +80,11 @@
       "Bash(cargo build:*)",
       "Bash(lsof:*)",
       "Bash(xargs kill -9)",
-      "Bash(npm test:*)"
+      "Bash(npm test:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh release:*)",
+      "Bash(gh api:*)"
     ]
   }
 }
