@@ -2194,36 +2194,42 @@ export async function detectGitLabRepo(
 export async function listGitLabMergeRequests(
   instanceUrl: string,
   projectPath: string,
-  state?: string
+  state?: string,
+  token?: string | null
 ): Promise<CommandResult<GitLabMergeRequest[]>> {
   return invokeCommand<GitLabMergeRequest[]>('list_gitlab_merge_requests', {
     instanceUrl,
     projectPath,
     state,
+    token,
   });
 }
 
 export async function getGitLabMergeRequest(
   instanceUrl: string,
   projectPath: string,
-  mrIid: number
+  mrIid: number,
+  token?: string | null
 ): Promise<CommandResult<GitLabMergeRequest>> {
   return invokeCommand<GitLabMergeRequest>('get_gitlab_merge_request', {
     instanceUrl,
     projectPath,
     mrIid,
+    token,
   });
 }
 
 export async function createGitLabMergeRequest(
   instanceUrl: string,
   projectPath: string,
-  input: CreateMergeRequestInput
+  input: CreateMergeRequestInput,
+  token?: string | null
 ): Promise<CommandResult<GitLabMergeRequest>> {
   return invokeCommand<GitLabMergeRequest>('create_gitlab_merge_request', {
     instanceUrl,
     projectPath,
     input,
+    token,
   });
 }
 
@@ -2233,25 +2239,29 @@ export async function listGitLabIssues(
   instanceUrl: string,
   projectPath: string,
   state?: string,
-  labels?: string
+  labels?: string,
+  token?: string | null
 ): Promise<CommandResult<GitLabIssue[]>> {
   return invokeCommand<GitLabIssue[]>('list_gitlab_issues', {
     instanceUrl,
     projectPath,
     state,
     labels,
+    token,
   });
 }
 
 export async function createGitLabIssue(
   instanceUrl: string,
   projectPath: string,
-  input: CreateGitLabIssueInput
+  input: CreateGitLabIssueInput,
+  token?: string | null
 ): Promise<CommandResult<GitLabIssue>> {
   return invokeCommand<GitLabIssue>('create_gitlab_issue', {
     instanceUrl,
     projectPath,
     input,
+    token,
   });
 }
 
@@ -2260,20 +2270,23 @@ export async function createGitLabIssue(
 export async function listGitLabPipelines(
   instanceUrl: string,
   projectPath: string,
-  status?: string
+  status?: string,
+  token?: string | null
 ): Promise<CommandResult<GitLabPipeline[]>> {
   return invokeCommand<GitLabPipeline[]>('list_gitlab_pipelines', {
     instanceUrl,
     projectPath,
     status,
+    token,
   });
 }
 
 export async function getGitLabLabels(
   instanceUrl: string,
-  projectPath: string
+  projectPath: string,
+  token?: string | null
 ): Promise<CommandResult<string[]>> {
-  return invokeCommand<string[]>('get_gitlab_labels', { instanceUrl, projectPath });
+  return invokeCommand<string[]>('get_gitlab_labels', { instanceUrl, projectPath, token });
 }
 
 // =======================
@@ -2393,6 +2406,30 @@ export async function checkBitbucketConnection(): Promise<CommandResult<Bitbucke
   return invokeCommand<BitbucketConnectionStatus>('check_bitbucket_connection', { username, appPassword });
 }
 
+/**
+ * Check Bitbucket connection with a specific OAuth token
+ */
+export async function checkBitbucketConnectionWithToken(
+  token: string
+): Promise<CommandResult<BitbucketConnectionStatus>> {
+  return invokeCommand<BitbucketConnectionStatus>('check_bitbucket_connection_with_token', { token });
+}
+
+/**
+ * Store Bitbucket OAuth token
+ */
+export async function storeBitbucketOAuthToken(
+  accessToken: string,
+  refreshToken?: string,
+  expiresIn?: number
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>('store_bitbucket_oauth_token', {
+    accessToken,
+    refreshToken,
+    expiresIn,
+  });
+}
+
 export async function detectBitbucketRepo(
   path: string
 ): Promise<CommandResult<DetectedBitbucketRepo | null>> {
@@ -2404,36 +2441,42 @@ export async function detectBitbucketRepo(
 export async function listBitbucketPullRequests(
   workspace: string,
   repoSlug: string,
-  state?: string
+  state?: string,
+  token?: string | null
 ): Promise<CommandResult<BitbucketPullRequest[]>> {
   return invokeCommand<BitbucketPullRequest[]>('list_bitbucket_pull_requests', {
     workspace,
     repoSlug,
     state,
+    token,
   });
 }
 
 export async function getBitbucketPullRequest(
   workspace: string,
   repoSlug: string,
-  prId: number
+  prId: number,
+  token?: string | null
 ): Promise<CommandResult<BitbucketPullRequest>> {
   return invokeCommand<BitbucketPullRequest>('get_bitbucket_pull_request', {
     workspace,
     repoSlug,
     prId,
+    token,
   });
 }
 
 export async function createBitbucketPullRequest(
   workspace: string,
   repoSlug: string,
-  input: CreateBitbucketPullRequestInput
+  input: CreateBitbucketPullRequestInput,
+  token?: string | null
 ): Promise<CommandResult<BitbucketPullRequest>> {
   return invokeCommand<BitbucketPullRequest>('create_bitbucket_pull_request', {
     workspace,
     repoSlug,
     input,
+    token,
   });
 }
 
@@ -2442,12 +2485,14 @@ export async function createBitbucketPullRequest(
 export async function listBitbucketIssues(
   workspace: string,
   repoSlug: string,
-  state?: string
+  state?: string,
+  token?: string | null
 ): Promise<CommandResult<BitbucketIssue[]>> {
   return invokeCommand<BitbucketIssue[]>('list_bitbucket_issues', {
     workspace,
     repoSlug,
     state,
+    token,
   });
 }
 
@@ -2455,11 +2500,13 @@ export async function listBitbucketIssues(
 
 export async function listBitbucketPipelines(
   workspace: string,
-  repoSlug: string
+  repoSlug: string,
+  token?: string | null
 ): Promise<CommandResult<BitbucketPipeline[]>> {
   return invokeCommand<BitbucketPipeline[]>('list_bitbucket_pipelines', {
     workspace,
     repoSlug,
+    token,
   });
 }
 
@@ -2620,6 +2667,7 @@ export function cleanupRemoteOperationListeners(): void {
 
 import type { GitProfile, ProfilesConfig } from '../types/workflow.types.ts';
 import { workflowStore } from '../stores/workflow.store.ts';
+import * as unifiedProfileService from './unified-profile.service.ts';
 
 /**
  * Current identity for a repository
@@ -2763,10 +2811,14 @@ export async function loadProfileForRepository(repoPath: string): Promise<void> 
   const store = workflowStore.getState();
   store.setCurrentRepositoryPath(repoPath);
 
+  // Load legacy profile for workflow store
   const result = await getAssignedProfile(repoPath);
   if (result.success) {
     store.setActiveProfile(result.data ?? null);
   }
+
+  // Also load unified profile for integration accounts
+  await unifiedProfileService.loadUnifiedProfileForRepository(repoPath);
 }
 
 /**

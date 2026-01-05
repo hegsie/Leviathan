@@ -233,6 +233,15 @@ export class GitHubDialogPage extends BaseDialog {
   readonly connectButton: Locator;
   readonly connectionStatus: Locator;
 
+  // OAuth elements
+  readonly authMethodToggle: Locator;
+  readonly oauthButton: Locator;
+  readonly patButton: Locator;
+  readonly oauthSignInButton: Locator;
+  readonly oauthSpinner: Locator;
+  readonly oauthStatus: Locator;
+  readonly oauthDivider: Locator;
+
   // Pull requests tab
   readonly prList: Locator;
   readonly createPrButton: Locator;
@@ -257,6 +266,15 @@ export class GitHubDialogPage extends BaseDialog {
     this.tokenInput = page.locator('lv-github-dialog input[type="password"]');
     this.connectButton = page.locator('lv-github-dialog button:has-text("Connect to GitHub")');
     this.connectionStatus = page.locator('lv-github-dialog .connection-status');
+
+    // OAuth elements
+    this.authMethodToggle = page.locator('lv-github-dialog .auth-method-toggle');
+    this.oauthButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("Sign in with GitHub")');
+    this.patButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("Personal Access Token")');
+    this.oauthSignInButton = page.locator('lv-github-dialog .btn-oauth');
+    this.oauthSpinner = page.locator('lv-github-dialog .oauth-spinner');
+    this.oauthStatus = page.locator('lv-github-dialog .oauth-status');
+    this.oauthDivider = page.locator('lv-github-dialog .oauth-divider');
 
     // PRs
     this.prList = page.locator('lv-github-dialog .pr-list');
@@ -288,13 +306,241 @@ export class GitHubDialogPage extends BaseDialog {
   }
 
   async connect(token: string): Promise<void> {
+    // Switch to PAT mode if OAuth toggle is visible
+    if (await this.authMethodToggle.isVisible()) {
+      await this.patButton.click();
+    }
     await this.tokenInput.fill(token);
     await this.connectButton.click();
+  }
+
+  async selectOAuthMethod(): Promise<void> {
+    await this.oauthButton.click();
+  }
+
+  async selectPATMethod(): Promise<void> {
+    await this.patButton.click();
+  }
+
+  async isOAuthConfigured(): Promise<boolean> {
+    // OAuth is configured if the toggle is visible and the OAuth button is enabled
+    const toggleVisible = await this.authMethodToggle.isVisible();
+    if (!toggleVisible) return false;
+    return this.oauthButton.isEnabled();
+  }
+
+  async isOAuthPending(): Promise<boolean> {
+    return this.oauthSpinner.isVisible();
   }
 
   async isConnected(): Promise<boolean> {
     const status = await this.connectionStatus.textContent();
     return status?.toLowerCase().includes('connected') ?? false;
+  }
+}
+
+/**
+ * GitLab Dialog Page Object
+ */
+export class GitLabDialogPage extends BaseDialog {
+  // Tabs
+  readonly connectionTab: Locator;
+  readonly mergeRequestsTab: Locator;
+  readonly issuesTab: Locator;
+  readonly pipelinesTab: Locator;
+
+  // Connection tab
+  readonly instanceUrlInput: Locator;
+  readonly tokenInput: Locator;
+  readonly connectButton: Locator;
+  readonly connectionStatus: Locator;
+
+  // OAuth elements
+  readonly authMethodToggle: Locator;
+  readonly oauthButton: Locator;
+  readonly patButton: Locator;
+  readonly oauthSignInButton: Locator;
+  readonly oauthSpinner: Locator;
+  readonly oauthStatus: Locator;
+
+  constructor(page: Page) {
+    super(page, 'lv-gitlab-dialog');
+    // Use element locator since the modal title attribute may vary
+    this.dialog = page.locator('lv-gitlab-dialog lv-modal[open]');
+
+    // Tabs
+    this.connectionTab = page.locator('lv-gitlab-dialog .tab:has-text("Connection")');
+    this.mergeRequestsTab = page.locator('lv-gitlab-dialog .tab:has-text("Merge Requests")');
+    this.issuesTab = page.locator('lv-gitlab-dialog .tab:has-text("Issues")');
+    this.pipelinesTab = page.locator('lv-gitlab-dialog .tab:has-text("Pipelines")');
+
+    // Connection
+    this.instanceUrlInput = page.locator('lv-gitlab-dialog input[type="text"]').first();
+    this.tokenInput = page.locator('lv-gitlab-dialog input[type="password"]');
+    this.connectButton = page.locator('lv-gitlab-dialog button:has-text("Connect with Token")');
+    this.connectionStatus = page.locator('lv-gitlab-dialog .connection-status');
+
+    // OAuth
+    this.authMethodToggle = page.locator('lv-gitlab-dialog .auth-method-toggle');
+    this.oauthButton = page.locator('lv-gitlab-dialog .auth-method-toggle button:has-text("Sign in with GitLab")');
+    this.patButton = page.locator('lv-gitlab-dialog .auth-method-toggle button:has-text("Personal Access Token")');
+    this.oauthSignInButton = page.locator('lv-gitlab-dialog .btn-oauth');
+    this.oauthSpinner = page.locator('lv-gitlab-dialog .oauth-spinner');
+    this.oauthStatus = page.locator('lv-gitlab-dialog .oauth-status');
+  }
+
+  async switchToConnectionTab(): Promise<void> {
+    await this.connectionTab.click();
+  }
+
+  async isOAuthConfigured(): Promise<boolean> {
+    return this.authMethodToggle.isVisible();
+  }
+
+  async selectOAuthMethod(): Promise<void> {
+    await this.oauthButton.click();
+  }
+
+  async selectPATMethod(): Promise<void> {
+    await this.patButton.click();
+  }
+}
+
+/**
+ * Azure DevOps Dialog Page Object
+ */
+export class AzureDevOpsDialogPage extends BaseDialog {
+  // Tabs
+  readonly connectionTab: Locator;
+  readonly pullRequestsTab: Locator;
+  readonly workItemsTab: Locator;
+  readonly pipelinesTab: Locator;
+
+  // Connection tab
+  readonly organizationInput: Locator;
+  readonly tokenInput: Locator;
+  readonly connectButton: Locator;
+  readonly connectionStatus: Locator;
+
+  // OAuth elements
+  readonly authMethodToggle: Locator;
+  readonly oauthButton: Locator;
+  readonly patButton: Locator;
+  readonly oauthSignInButton: Locator;
+  readonly oauthSpinner: Locator;
+  readonly oauthStatus: Locator;
+
+  constructor(page: Page) {
+    super(page, 'lv-azure-devops-dialog');
+    // Use element locator since the modal title attribute may vary
+    this.dialog = page.locator('lv-azure-devops-dialog lv-modal[open]');
+
+    // Tabs
+    this.connectionTab = page.locator('lv-azure-devops-dialog .tab:has-text("Connection")');
+    this.pullRequestsTab = page.locator('lv-azure-devops-dialog .tab:has-text("Pull Requests")');
+    this.workItemsTab = page.locator('lv-azure-devops-dialog .tab:has-text("Work Items")');
+    this.pipelinesTab = page.locator('lv-azure-devops-dialog .tab:has-text("Pipelines")');
+
+    // Connection
+    this.organizationInput = page.locator('lv-azure-devops-dialog input[type="text"]').first();
+    this.tokenInput = page.locator('lv-azure-devops-dialog input[type="password"]');
+    this.connectButton = page.locator('lv-azure-devops-dialog button:has-text("Connect with Token")');
+    this.connectionStatus = page.locator('lv-azure-devops-dialog .connection-status');
+
+    // OAuth
+    this.authMethodToggle = page.locator('lv-azure-devops-dialog .auth-method-toggle');
+    this.oauthButton = page.locator('lv-azure-devops-dialog .auth-method-toggle button:has-text("Sign in with Microsoft")');
+    this.patButton = page.locator('lv-azure-devops-dialog .auth-method-toggle button:has-text("Personal Access Token")');
+    this.oauthSignInButton = page.locator('lv-azure-devops-dialog .btn-oauth');
+    this.oauthSpinner = page.locator('lv-azure-devops-dialog .oauth-spinner');
+    this.oauthStatus = page.locator('lv-azure-devops-dialog .oauth-status');
+  }
+
+  async switchToConnectionTab(): Promise<void> {
+    await this.connectionTab.click();
+  }
+
+  async isOAuthConfigured(): Promise<boolean> {
+    return this.authMethodToggle.isVisible();
+  }
+
+  async selectOAuthMethod(): Promise<void> {
+    await this.oauthButton.click();
+  }
+
+  async selectPATMethod(): Promise<void> {
+    await this.patButton.click();
+  }
+}
+
+/**
+ * Bitbucket Dialog Page Object
+ */
+export class BitbucketDialogPage extends BaseDialog {
+  // Tabs
+  readonly connectionTab: Locator;
+  readonly pullRequestsTab: Locator;
+  readonly issuesTab: Locator;
+  readonly pipelinesTab: Locator;
+
+  // Connection tab
+  readonly usernameInput: Locator;
+  readonly appPasswordInput: Locator;
+  readonly connectButton: Locator;
+  readonly connectionStatus: Locator;
+
+  // OAuth elements
+  readonly authMethodToggle: Locator;
+  readonly oauthButton: Locator;
+  readonly appPasswordButton: Locator;
+  readonly oauthSignInButton: Locator;
+  readonly oauthSpinner: Locator;
+  readonly oauthStatus: Locator;
+
+  constructor(page: Page) {
+    super(page, 'lv-bitbucket-dialog');
+    // Use element locator since the modal title attribute may vary
+    this.dialog = page.locator('lv-bitbucket-dialog lv-modal[open]');
+
+    // Tabs
+    this.connectionTab = page.locator('lv-bitbucket-dialog .tab:has-text("Connection")');
+    this.pullRequestsTab = page.locator('lv-bitbucket-dialog .tab:has-text("Pull Requests")');
+    this.issuesTab = page.locator('lv-bitbucket-dialog .tab:has-text("Issues")');
+    this.pipelinesTab = page.locator('lv-bitbucket-dialog .tab:has-text("Pipelines")');
+
+    // Connection
+    this.usernameInput = page.locator('lv-bitbucket-dialog input[type="text"]').first();
+    this.appPasswordInput = page.locator('lv-bitbucket-dialog input[type="password"]');
+    this.connectButton = page.locator('lv-bitbucket-dialog button:has-text("Connect with App Password")');
+    this.connectionStatus = page.locator('lv-bitbucket-dialog .connection-status');
+
+    // OAuth
+    this.authMethodToggle = page.locator('lv-bitbucket-dialog .auth-method-toggle');
+    this.oauthButton = page.locator('lv-bitbucket-dialog .auth-method-toggle button:has-text("Sign in with Bitbucket")');
+    this.appPasswordButton = page.locator('lv-bitbucket-dialog .auth-method-toggle button:has-text("App Password")');
+    this.oauthSignInButton = page.locator('lv-bitbucket-dialog .btn-oauth');
+    this.oauthSpinner = page.locator('lv-bitbucket-dialog .oauth-spinner');
+    this.oauthStatus = page.locator('lv-bitbucket-dialog .oauth-status');
+  }
+
+  async switchToConnectionTab(): Promise<void> {
+    await this.connectionTab.click();
+  }
+
+  async isOAuthConfigured(): Promise<boolean> {
+    return this.authMethodToggle.isVisible();
+  }
+
+  async selectOAuthMethod(): Promise<void> {
+    if (await this.authMethodToggle.isVisible()) {
+      await this.oauthButton.click();
+    }
+  }
+
+  async selectAppPasswordMethod(): Promise<void> {
+    if (await this.authMethodToggle.isVisible()) {
+      await this.appPasswordButton.click();
+    }
   }
 }
 
@@ -413,6 +659,18 @@ export class DialogsPage {
 
   get github(): GitHubDialogPage {
     return new GitHubDialogPage(this.page);
+  }
+
+  get gitlab(): GitLabDialogPage {
+    return new GitLabDialogPage(this.page);
+  }
+
+  get azureDevOps(): AzureDevOpsDialogPage {
+    return new AzureDevOpsDialogPage(this.page);
+  }
+
+  get bitbucket(): BitbucketDialogPage {
+    return new BitbucketDialogPage(this.page);
   }
 
   get keyboardShortcuts(): KeyboardShortcutsDialogPage {

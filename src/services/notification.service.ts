@@ -8,7 +8,7 @@ import {
   requestPermission,
   sendNotification,
 } from '@tauri-apps/plugin-notification';
-import { uiStore } from '../stores/ui.store.ts';
+import { uiStore, type ToastAction } from '../stores/ui.store.ts';
 
 export type NotificationType = 'info' | 'success' | 'warning' | 'error';
 
@@ -99,6 +99,11 @@ export const notifyInfo = (title: string, body: string, toastOnly = false) =>
 /**
  * Show a simple toast message (in-app only, no native notification)
  */
-export function showToast(message: string, type: NotificationType = 'info', duration = 5000): void {
-  uiStore.getState().addToast({ type, message, duration });
+export function showToast(
+  message: string,
+  type: NotificationType = 'info',
+  duration = 5000,
+  action?: ToastAction
+): void {
+  uiStore.getState().addToast({ type, message, duration, action });
 }

@@ -18,9 +18,9 @@ import type {
   AdoPipelineRun,
   CreateAdoPullRequestInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import type { ProfileIntegrationAccount } from '../../types/unified-profile.types.ts';
+import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
@@ -538,6 +538,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         width: 16px;
         height: 16px;
       }
+
     `,
   ];
 
@@ -557,8 +558,8 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private prFilter: 'active' | 'completed' | 'abandoned' | 'all' = 'active';
   @state() private workItemFilter: string = '';
 
-  // Multi-account support (from active unified profile)
-  @state() private accounts: ProfileIntegrationAccount[] = [];
+  // Multi-account support (global accounts)
+  @state() private accounts: IntegrationAccount[] = [];
   @state() private selectedAccountId: string | null = null;
 
   private unsubscribeStore?: () => void;
@@ -573,40 +574,32 @@ export class LvAzureDevOpsDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
 
-    // Subscribe to unified profile store - get accounts from active profile
-    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
-      const activeProfile = state.activeProfile;
-      if (activeProfile) {
-        this.accounts = activeProfile.integrationAccounts.filter((a) => a.integrationType === 'azure-devops');
-        // If no account selected, try to select the default one
-        if (!this.selectedAccountId && this.accounts.length > 0) {
-          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
-          const account = defaultAccount ?? this.accounts[0];
-          if (account) {
-            this.selectedAccountId = account.id;
-            // Update organization from account config
-            if (account.config.type === 'azure-devops' && account.config.organization) {
-              this.organizationInput = account.config.organization;
-            }
+    // Subscribe to unified profile store - get global accounts
+    this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
+      this.accounts = getAccountsByType('azure-devops');
+      // If no account selected, try to select the default one
+      if (!this.selectedAccountId && this.accounts.length > 0) {
+        const defaultAccount = getDefaultGlobalAccount('azure-devops');
+        const account = defaultAccount ?? this.accounts[0];
+        if (account) {
+          this.selectedAccountId = account.id;
+          // Update organization from account config
+          if (account.config.type === 'azure-devops' && account.config.organization) {
+            this.organizationInput = account.config.organization;
           }
         }
-      } else {
-        this.accounts = [];
       }
     });
 
     // Initialize from current state
-    const state = unifiedProfileStore.getState();
-    if (state.activeProfile) {
-      this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'azure-devops');
-      if (this.accounts.length > 0 && !this.selectedAccountId) {
-        const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
-        const account = defaultAccount ?? this.accounts[0];
-        if (account) {
-          this.selectedAccountId = account.id;
-          if (account.config.type === 'azure-devops' && account.config.organization) {
-            this.organizationInput = account.config.organization;
-          }
+    this.accounts = getAccountsByType('azure-devops');
+    if (this.accounts.length > 0 && !this.selectedAccountId) {
+      const defaultAccount = getDefaultGlobalAccount('azure-devops');
+      const account = defaultAccount ?? this.accounts[0];
+      if (account) {
+        this.selectedAccountId = account.id;
+        if (account.config.type === 'azure-devops' && account.config.organization) {
+          this.organizationInput = account.config.organization;
         }
       }
     }
@@ -638,14 +631,16 @@ export class LvAzureDevOpsDialog extends LitElement {
       // Ensure unified profiles are loaded
       await unifiedProfileService.loadUnifiedProfiles();
 
+      // Load the profile for this repository to set activeProfile
+      if (this.repositoryPath) {
+        await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+      }
+
       // Re-sync local state with store after loading
-      const state = unifiedProfileStore.getState();
-      if (state.activeProfile) {
-        this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'azure-devops');
-        if (this.accounts.length > 0 && !this.selectedAccountId) {
-          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
-          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
-        }
+      this.accounts = getAccountsByType('azure-devops');
+      if (this.accounts.length > 0 && !this.selectedAccountId) {
+        const defaultAccount = getDefaultGlobalAccount('azure-devops');
+        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
       }
 
       // Try to detect repo first to get organization
@@ -672,10 +667,9 @@ export class LvAzureDevOpsDialog extends LitElement {
     const result = await gitService.checkAdoConnectionWithToken(org, token);
     if (result.success && result.data) {
       this.connectionStatus = result.data;
-      // Update cached user in account if connected
-      const activeProfile = unifiedProfileStore.getState().activeProfile;
-      if (activeProfile && this.selectedAccountId && result.data.connected && result.data.user) {
-        await unifiedProfileService.updateProfileAccountCachedUser(activeProfile.id, this.selectedAccountId, {
+      // Update cached user in global account if connected
+      if (this.selectedAccountId && result.data.connected && result.data.user) {
+        await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
           username: result.data.user.displayName,
           displayName: result.data.user.displayName,
           email: null, // ADO API doesn't return email in this context
@@ -712,7 +706,7 @@ export class LvAzureDevOpsDialog extends LitElement {
   /**
    * Handle account selection change
    */
-  private async handleAccountChange(e: CustomEvent<{ account: ProfileIntegrationAccount }>): Promise<void> {
+  private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
@@ -855,19 +849,18 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
 
       const user = verifyResult.data.user;
-      const activeProfile = unifiedProfileStore.getState().activeProfile;
 
       // If we have a selected account, save token to that account
       if (this.selectedAccountId) {
         await credentialService.storeAccountToken('azure-devops', this.selectedAccountId, tokenToSave);
-      } else if (activeProfile) {
-        // No account selected - create a new account in the active profile
-        const { createEmptyAzureDevOpsProfileAccount, generateId } = await import('../../types/unified-profile.types.ts');
-        const newAccount = {
-          ...createEmptyAzureDevOpsProfileAccount(organization),
+      } else {
+        // No account selected - create a new global account
+        const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
+        const newAccount: IntegrationAccount = {
+          ...createEmptyIntegrationAccount('azure-devops', organization),
           id: generateId(),
           name: user?.displayName ? `Azure DevOps (${user.displayName})` : `Azure DevOps (${organization})`,
-          isDefaultForType: this.accounts.length === 0,
+          isDefault: this.accounts.length === 0,
           cachedUser: user ? {
             username: user.displayName,
             displayName: user.displayName,
@@ -876,12 +869,13 @@ export class LvAzureDevOpsDialog extends LitElement {
           } : null,
         };
 
-        const savedAccount = await unifiedProfileService.addAccountToProfile(activeProfile.id, newAccount);
+        const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
         await credentialService.storeAccountToken('azure-devops', savedAccount.id, tokenToSave);
         this.selectedAccountId = savedAccount.id;
-      } else {
-        // Fallback to legacy token storage if no profile
-        await gitService.storeAdoToken(tokenToSave);
+
+        // Refresh accounts list
+        await unifiedProfileService.loadUnifiedProfiles();
+        this.accounts = getAccountsByType('azure-devops');
       }
 
       // Token saved, update state
@@ -1053,6 +1047,7 @@ export class LvAzureDevOpsDialog extends LitElement {
             Your Azure DevOps organization name (from dev.azure.com/{organization})
           </span>
         </div>
+
         <div class="form-group">
           <label>Personal Access Token</label>
           <input
@@ -1077,7 +1072,7 @@ export class LvAzureDevOpsDialog extends LitElement {
             @click=${this.handleSaveToken}
             ?disabled=${this.isLoading || !this.tokenInput.trim() || !this.organizationInput.trim()}
           >
-            Connect to Azure DevOps
+            Connect
           </button>
         </div>
       </div>

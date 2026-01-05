@@ -3,7 +3,7 @@
  * Manage Bitbucket connection, view PRs, issues, and pipelines
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
@@ -16,7 +16,15 @@ import type {
   BitbucketPipeline,
   CreateBitbucketPullRequestInput,
 } from '../../services/git.service.ts';
+import * as oauthService from '../../services/oauth.service.ts';
+import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts';
+import type { OAuthFlowState, OAuthTokenResponse } from '../../types/oauth.types.ts';
+import * as credentialService from '../../services/credential.service.ts';
+import * as unifiedProfileService from '../../services/unified-profile.service.ts';
+import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById } from '../../stores/unified-profile.store.ts';
+import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import './lv-modal.ts';
+import './lv-account-selector.ts';
 
 type TabType = 'connection' | 'pull-requests' | 'issues' | 'pipelines' | 'create-pr';
 
@@ -407,6 +415,139 @@ export class LvBitbucketDialog extends LitElement {
         width: 16px;
         height: 16px;
       }
+
+      /* OAuth styles */
+      .auth-method-toggle {
+        display: flex;
+        gap: var(--spacing-sm);
+        margin-bottom: var(--spacing-md);
+      }
+
+      .auth-method-toggle .btn {
+        flex: 1;
+        justify-content: center;
+      }
+
+      .auth-method-toggle .btn.active {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-sm) var(--spacing-md);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-secondary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .btn:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-primary {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
+      .btn-primary:hover:not(:disabled) {
+        background: var(--color-primary-hover);
+      }
+
+      .btn-danger {
+        color: var(--color-error);
+        border-color: var(--color-error);
+      }
+
+      .btn-danger:hover:not(:disabled) {
+        background: var(--color-error-bg);
+      }
+
+      .btn-oauth {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-md);
+        font-weight: var(--font-weight-medium);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .btn-oauth:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        border-color: var(--color-primary);
+      }
+
+      .btn-oauth:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .btn-oauth svg {
+        width: 20px;
+        height: 20px;
+      }
+
+      .oauth-spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid var(--color-border);
+        border-top-color: var(--color-primary);
+        border-radius: 50%;
+        animation: oauth-spin 0.8s linear infinite;
+      }
+
+      @keyframes oauth-spin {
+        to { transform: rotate(360deg); }
+      }
+
+      .oauth-status {
+        text-align: center;
+        padding: var(--spacing-md);
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+      }
+
+      .oauth-status.error {
+        color: var(--color-error);
+      }
+
+      .oauth-divider {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-md);
+        margin: var(--spacing-md) 0;
+        color: var(--color-text-muted);
+        font-size: var(--font-size-sm);
+      }
+
+      .oauth-divider::before,
+      .oauth-divider::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: var(--color-border);
+      }
     `,
   ];
 
@@ -425,6 +566,19 @@ export class LvBitbucketDialog extends LitElement {
   @state() private appPasswordInput = '';
   @state() private prFilter: 'OPEN' | 'MERGED' | 'DECLINED' = 'OPEN';
 
+  // OAuth state
+  @state() private authMethod: 'oauth' | 'app-password' = 'oauth';
+  @state() private oauthState: OAuthFlowState = { status: 'idle' };
+  @state() private oauthToken: string | null = null;
+
+  // Integration accounts (global)
+  @state() private accounts: IntegrationAccount[] = [];
+  @state() private selectedAccountId: string | null = null;
+
+  private oauthCompleteHandler?: EventListener;
+  private oauthStateUnsubscribe?: () => void;
+  private unsubscribeStore?: () => void;
+
   // Create PR form
   @state() private createPrTitle = '';
   @state() private createPrDescription = '';
@@ -434,9 +588,58 @@ export class LvBitbucketDialog extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+
+    // Set up OAuth event listeners
+    this.oauthCompleteHandler = ((e: CustomEvent<{ provider: string; tokens: OAuthTokenResponse }>) => {
+      if (e.detail.provider === 'bitbucket') {
+        this.handleOAuthComplete(e.detail.tokens);
+      }
+    }) as unknown as EventListener;
+    window.addEventListener('oauth-complete', this.oauthCompleteHandler);
+
+    this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
+      if (state.provider === 'bitbucket') {
+        this.oauthState = state;
+      }
+    });
+
+    // Subscribe to unified profile store - get global accounts
+    this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
+      this.accounts = getAccountsByType('bitbucket');
+      // If no account selected, try to select the default one
+      if (!this.selectedAccountId && this.accounts.length > 0) {
+        const defaultAccount = getDefaultGlobalAccount('bitbucket');
+        const account = defaultAccount ?? this.accounts[0];
+        if (account) {
+          this.selectedAccountId = account.id;
+        }
+      }
+    });
+
+    // Initialize from current state
+    this.accounts = getAccountsByType('bitbucket');
+    if (this.accounts.length > 0 && !this.selectedAccountId) {
+      const defaultAccount = getDefaultGlobalAccount('bitbucket');
+      const account = defaultAccount ?? this.accounts[0];
+      if (account) {
+        this.selectedAccountId = account.id;
+      }
+    }
+
     if (this.open) {
       await this.loadInitialData();
     }
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+
+    // Clean up OAuth listeners
+    if (this.oauthCompleteHandler) {
+      window.removeEventListener('oauth-complete', this.oauthCompleteHandler);
+    }
+    this.oauthStateUnsubscribe?.();
+    this.unsubscribeStore?.();
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -453,10 +656,33 @@ export class LvBitbucketDialog extends LitElement {
     this.error = null;
 
     try {
-      await this.checkConnection();
+      // Ensure unified profiles are loaded
+      await unifiedProfileService.loadUnifiedProfiles();
+
+      // Load the profile for this repository to set activeProfile
+      if (this.repositoryPath) {
+        await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+      }
+
+      // Re-sync local state with store after loading
+      this.accounts = getAccountsByType('bitbucket');
+      if (this.accounts.length > 0 && !this.selectedAccountId) {
+        const defaultAccount = getDefaultGlobalAccount('bitbucket');
+        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+      }
+
+      // Load OAuth token for selected account
+      if (this.selectedAccountId) {
+        const token = await this.getSelectedAccountToken();
+        if (token) {
+          this.oauthToken = token;
+        }
+      }
+
       if (this.repositoryPath) {
         await this.detectRepo();
       }
+      await this.checkConnection();
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load data';
     } finally {
@@ -465,10 +691,78 @@ export class LvBitbucketDialog extends LitElement {
   }
 
   private async checkConnection(): Promise<void> {
-    const result = await gitService.checkBitbucketConnection();
-    if (result.success && result.data) {
-      this.connectionStatus = result.data;
+    // Get token for selected account (or use stored OAuth token)
+    const token = this.oauthToken || await this.getSelectedAccountToken();
+
+    if (token) {
+      // Use OAuth token to check connection
+      const result = await gitService.checkBitbucketConnectionWithToken(token);
+      if (result.success && result.data) {
+        this.connectionStatus = result.data;
+        this.oauthToken = token;
+
+        // Update cached user in global account if connected
+        if (this.selectedAccountId && result.data.connected && result.data.user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+            username: result.data.user.username,
+            displayName: result.data.user.displayName ?? null,
+            email: null,
+            avatarUrl: result.data.user.avatarUrl ?? null,
+          });
+        }
+      }
+    } else {
+      // Fall back to legacy credential check
+      const result = await gitService.checkBitbucketConnection();
+      if (result.success && result.data) {
+        this.connectionStatus = result.data;
+      }
     }
+  }
+
+  /**
+   * Get the token for the currently selected account
+   */
+  private async getSelectedAccountToken(): Promise<string | null> {
+    if (this.selectedAccountId) {
+      return credentialService.getAccountToken('bitbucket', this.selectedAccountId);
+    }
+    return null;
+  }
+
+  /**
+   * Handle account selection change
+   */
+  private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
+    const { account } = e.detail;
+    this.selectedAccountId = account.id;
+    this.connectionStatus = null;
+    this.error = null;
+    this.oauthToken = null;
+
+    // Re-check connection with new account
+    await this.loadInitialData();
+  }
+
+  /**
+   * Handle add account request
+   */
+  private handleAddAccount(): void {
+    this.activeTab = 'connection';
+    this.connectionStatus = null;
+  }
+
+  /**
+   * Handle manage accounts request
+   */
+  private handleManageAccounts(): void {
+    this.dispatchEvent(
+      new CustomEvent('manage-accounts', {
+        detail: { integrationType: 'bitbucket' },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private async detectRepo(): Promise<void> {
@@ -501,7 +795,8 @@ export class LvBitbucketDialog extends LitElement {
       const result = await gitService.listBitbucketPullRequests(
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
-        this.prFilter
+        this.prFilter,
+        this.oauthToken
       );
 
       if (result.success && result.data) {
@@ -522,7 +817,9 @@ export class LvBitbucketDialog extends LitElement {
     try {
       const result = await gitService.listBitbucketIssues(
         this.detectedRepo.workspace,
-        this.detectedRepo.repoSlug
+        this.detectedRepo.repoSlug,
+        undefined,
+        this.oauthToken
       );
 
       if (result.success && result.data) {
@@ -539,7 +836,8 @@ export class LvBitbucketDialog extends LitElement {
     try {
       const result = await gitService.listBitbucketPipelines(
         this.detectedRepo.workspace,
-        this.detectedRepo.repoSlug
+        this.detectedRepo.repoSlug,
+        this.oauthToken
       );
 
       if (result.success && result.data) {
@@ -598,6 +896,121 @@ export class LvBitbucketDialog extends LitElement {
     }
   }
 
+  /**
+   * Start OAuth flow for Bitbucket
+   */
+  private async handleStartOAuth(): Promise<void> {
+    const clientId = getClientId('bitbucket');
+    if (!clientId) {
+      this.error = 'Bitbucket OAuth is not configured. Please use an App Password.';
+      this.authMethod = 'app-password';
+      return;
+    }
+
+    this.error = null;
+    await oauthService.startOAuth('bitbucket', clientId);
+  }
+
+  /**
+   * Handle OAuth completion
+   */
+  private async handleOAuthComplete(tokens: OAuthTokenResponse): Promise<void> {
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      // For Bitbucket OAuth, we need to verify the token and get user info
+      const verifyResult = await gitService.checkBitbucketConnectionWithToken(tokens.accessToken);
+
+      if (!verifyResult.success || !verifyResult.data?.connected) {
+        this.error = verifyResult.error?.message ?? 'OAuth token verification failed';
+        return;
+      }
+
+      const user = verifyResult.data.user;
+
+      // Get workspace from detected repo or user
+      const workspace = this.detectedRepo?.workspace || user?.username || '';
+
+      // Find existing account for this workspace, or use selected account
+      const existingAccount = this.selectedAccountId
+        ? getAccountById(this.selectedAccountId)
+        : this.accounts.find((a) =>
+            a.config.type === 'bitbucket' &&
+            a.config.workspace === workspace
+          );
+
+      if (existingAccount) {
+        // Update existing account with OAuth token
+        await credentialService.storeAccountOAuthToken(
+          'bitbucket',
+          existingAccount.id,
+          tokens.accessToken,
+          tokens.refreshToken,
+          tokens.expiresIn
+        );
+
+        // Update cached user info
+        if (user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(existingAccount.id, {
+            username: user.username,
+            displayName: user.displayName ?? null,
+            email: null,
+            avatarUrl: user.avatarUrl ?? null,
+          });
+        }
+
+        this.selectedAccountId = existingAccount.id;
+      } else {
+        // Create new global account
+        const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
+        const newAccount: IntegrationAccount = {
+          ...createEmptyIntegrationAccount('bitbucket', workspace),
+          id: generateId(),
+          name: user?.username ? `Bitbucket (${user.username})` : 'Bitbucket Account',
+          isDefault: this.accounts.length === 0,
+          cachedUser: user ? {
+            username: user.username,
+            displayName: user.displayName ?? null,
+            email: null,
+            avatarUrl: user.avatarUrl ?? null,
+          } : null,
+        };
+
+        const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
+        await credentialService.storeAccountOAuthToken(
+          'bitbucket',
+          savedAccount.id,
+          tokens.accessToken,
+          tokens.refreshToken,
+          tokens.expiresIn
+        );
+
+        this.selectedAccountId = savedAccount.id;
+        // Refresh accounts list
+        await unifiedProfileService.loadUnifiedProfiles();
+        this.accounts = getAccountsByType('bitbucket');
+      }
+
+      // Force UI update
+      this.requestUpdate();
+
+      // Store token in state for API calls
+      this.oauthToken = tokens.accessToken;
+      this.connectionStatus = verifyResult.data;
+      this.oauthState = { status: 'idle' };
+
+      // Load data if connected and repo detected
+      if (this.connectionStatus?.connected && this.detectedRepo) {
+        await this.loadAllData();
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to complete OAuth';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
   private async handlePrFilterChange(e: Event): Promise<void> {
     this.prFilter = (e.target as HTMLSelectElement).value as 'OPEN' | 'MERGED' | 'DECLINED';
     await this.loadPullRequests();
@@ -621,7 +1034,8 @@ export class LvBitbucketDialog extends LitElement {
       const result = await gitService.createBitbucketPullRequest(
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
-        input
+        input,
+        this.oauthToken
       );
 
       if (result.success && result.data) {
@@ -692,8 +1106,54 @@ export class LvBitbucketDialog extends LitElement {
       `;
     }
 
+    const isOAuthPending = this.oauthState.status === 'pending' || this.oauthState.status === 'exchanging';
+    const oauthConfigured = isOAuthConfigured('bitbucket');
+
     return html`
       <div class="token-form">
+        ${oauthConfigured ? html`
+          <div class="auth-method-toggle">
+            <button
+              class="btn ${this.authMethod === 'oauth' ? 'active' : ''}"
+              @click=${() => this.authMethod = 'oauth'}
+              ?disabled=${isOAuthPending}
+            >
+              Sign in with Bitbucket
+            </button>
+            <button
+              class="btn ${this.authMethod === 'app-password' ? 'active' : ''}"
+              @click=${() => this.authMethod = 'app-password'}
+              ?disabled=${isOAuthPending}
+            >
+              App Password
+            </button>
+          </div>
+        ` : ''}
+
+        ${this.authMethod === 'oauth' && oauthConfigured ? html`
+          <button
+            class="btn-oauth"
+            @click=${this.handleStartOAuth}
+            ?disabled=${isOAuthPending || this.isLoading}
+          >
+            ${isOAuthPending ? html`
+              <div class="oauth-spinner"></div>
+              <span>${this.oauthState.status === 'exchanging' ? 'Completing sign in...' : 'Waiting for browser...'}</span>
+            ` : html`
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M.778 1.213a.768.768 0 00-.768.892l3.263 19.81c.084.5.515.868 1.022.873H19.95a.772.772 0 00.77-.646l3.27-20.03a.768.768 0 00-.768-.891zM14.52 15.53H9.522L8.17 8.466h7.561z"/>
+              </svg>
+              <span>Sign in with Bitbucket</span>
+            `}
+          </button>
+
+          ${this.oauthState.status === 'error' ? html`
+            <div class="oauth-status error">${this.oauthState.error}</div>
+          ` : ''}
+
+          <div class="oauth-divider">or</div>
+        ` : ''}
+
         <div class="form-group">
           <label>Bitbucket Username</label>
           <input
@@ -701,6 +1161,7 @@ export class LvBitbucketDialog extends LitElement {
             placeholder="your-username"
             .value=${this.usernameInput}
             @input=${(e: Event) => this.usernameInput = (e.target as HTMLInputElement).value}
+            ?disabled=${isOAuthPending}
           />
         </div>
         <div class="form-group">
@@ -710,6 +1171,7 @@ export class LvBitbucketDialog extends LitElement {
             placeholder="xxxx-xxxx-xxxx-xxxx"
             .value=${this.appPasswordInput}
             @input=${(e: Event) => this.appPasswordInput = (e.target as HTMLInputElement).value}
+            ?disabled=${isOAuthPending}
           />
           <span class="help-text">
             Create an app password at
@@ -725,9 +1187,9 @@ export class LvBitbucketDialog extends LitElement {
           <button
             class="btn btn-primary"
             @click=${this.handleSaveCredentials}
-            ?disabled=${this.isLoading || !this.usernameInput.trim() || !this.appPasswordInput.trim()}
+            ?disabled=${this.isLoading || isOAuthPending || !this.usernameInput.trim() || !this.appPasswordInput.trim()}
           >
-            Connect to Bitbucket
+            Connect with App Password
           </button>
         </div>
       </div>
@@ -983,6 +1445,16 @@ export class LvBitbucketDialog extends LitElement {
       >
         <div class="content">
           ${this.renderDetectedRepo()}
+
+          ${this.accounts.length > 0 || this.connectionStatus?.connected ? html`
+            <lv-account-selector
+              integrationType="bitbucket"
+              .selectedAccountId=${this.selectedAccountId}
+              @account-change=${this.handleAccountChange}
+              @add-account=${this.handleAddAccount}
+              @manage-accounts=${this.handleManageAccounts}
+            ></lv-account-selector>
+          ` : nothing}
 
           <div class="tabs">
             <button

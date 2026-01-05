@@ -73,7 +73,14 @@
       "Bash(npm run:*)",
       "Bash(gh release edit:*)",
       "Bash(security find-generic-password:*)",
-      "Bash(security delete-generic-password:*)"
+      "Bash(security delete-generic-password:*)",
+      "WebFetch(domain:mrlaude.com)",
+      "WebFetch(domain:medium.com)",
+      "Bash(pkill:*)",
+      "Bash(cargo build:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill -9)",
+      "Bash(npm test:*)"
     ]
   }
 }

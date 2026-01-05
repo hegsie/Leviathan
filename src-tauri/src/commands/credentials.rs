@@ -504,3 +504,38 @@ pub async fn erase_credentials(path: String, host: String, protocol: String) -> 
 
     Ok(())
 }
+
+/// Migrate old vault file to new location if needed
+/// Old path was missing the / separator between app dir and filename
+#[command]
+pub async fn migrate_vault_if_needed(data_dir: String, new_vault_path: String) -> Result<()> {
+    use std::fs;
+
+    let new_path = Path::new(&new_vault_path);
+
+    // If new vault already exists, no migration needed
+    if new_path.exists() {
+        return Ok(());
+    }
+
+    // Old path was missing the / separator
+    // data_dir is like: /Users/.../io.github.hegsie.leviathan/
+    // Old vault was at: /Users/.../io.github.hegsie.leviathancredentials.hold
+    let parent_dir = data_dir.trim_end_matches('/');
+    let old_vault_path = format!("{}credentials.hold", parent_dir);
+    let old_path = Path::new(&old_vault_path);
+
+    if old_path.exists() {
+        tracing::info!(
+            "Migrating vault from old location: {} → {}",
+            old_vault_path,
+            new_vault_path
+        );
+        fs::rename(old_path, new_path).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to migrate vault: {}", e))
+        })?;
+        tracing::info!("Vault migration complete");
+    }
+
+    Ok(())
+}

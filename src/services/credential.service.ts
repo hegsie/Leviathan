@@ -7,6 +7,7 @@
 
 import { Client, Stronghold } from '@tauri-apps/plugin-stronghold';
 import { appDataDir } from '@tauri-apps/api/path';
+import { invoke } from '@tauri-apps/api/core';
 import { loggers } from '../utils/logger.ts';
 
 const log = loggers.credential;
@@ -30,6 +31,24 @@ let clientInstance: Client | null = null;
 let initPromise: Promise<void> | null = null;
 
 /**
+ * Migrate old vault file to new location if needed
+ * Old path: ~/Library/Application Support/io.github.hegsie.leviathancredentials.hold (missing /)
+ * New path: ~/Library/Application Support/io.github.hegsie.leviathan/credentials.hold
+ */
+async function migrateOldVaultIfNeeded(dataDir: string, newVaultPath: string): Promise<void> {
+  try {
+    // Use Tauri command to check and migrate vault
+    await invoke('migrate_vault_if_needed', {
+      dataDir,
+      newVaultPath,
+    });
+  } catch (error) {
+    log.warn('Failed to migrate old vault (may not exist):', error);
+    // Continue - we'll create a new vault
+  }
+}
+
+/**
  * Initialize the Stronghold vault
  */
 async function ensureInitialized(): Promise<Client> {
@@ -47,7 +66,10 @@ async function ensureInitialized(): Promise<Client> {
   initPromise = (async () => {
     try {
       const dataDir = await appDataDir();
-      const vaultPath = `${dataDir}credentials.hold`;
+      const vaultPath = `${dataDir}/credentials.hold`;
+
+      // Migrate old vault if it exists at the wrong path
+      await migrateOldVaultIfNeeded(dataDir, vaultPath);
 
       log.debug('Initializing vault at:', vaultPath);
 
@@ -438,4 +460,92 @@ export async function hasAccountToken(
   accountId: string
 ): Promise<boolean> {
   return AccountCredentials.hasToken(integrationType, accountId);
+}
+
+// =============================================================================
+// OAuth Token Support
+// =============================================================================
+
+interface OAuthTokenData {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+}
+
+/**
+ * Store an OAuth token for a specific integration account.
+ * Stores access token, refresh token, and calculates expiry time.
+ */
+export async function storeAccountOAuthToken(
+  integrationType: IntegrationType,
+  accountId: string,
+  accessToken: string,
+  refreshToken?: string,
+  expiresIn?: number
+): Promise<void> {
+  // Calculate expiry timestamp if expiresIn is provided
+  const expiresAt = expiresIn ? Date.now() + expiresIn * 1000 : undefined;
+
+  // Store as JSON with all OAuth data
+  const tokenData: OAuthTokenData = {
+    accessToken,
+    refreshToken,
+    expiresAt,
+  };
+
+  const key = getAccountCredentialKey(integrationType, accountId);
+  const oauthKey = `${key}_oauth`;
+
+  // Store the access token as the main credential (for backward compatibility)
+  await storeAccountCredentialInternal(key, accessToken);
+
+  // Store the full OAuth data separately for refresh handling
+  await storeAccountCredentialInternal(oauthKey, JSON.stringify(tokenData));
+
+  log.debug(` Stored OAuth token for ${integrationType} account ${accountId}`);
+}
+
+/**
+ * Get the full OAuth token data for an account (including refresh token and expiry)
+ */
+export async function getAccountOAuthToken(
+  integrationType: IntegrationType,
+  accountId: string
+): Promise<OAuthTokenData | null> {
+  const key = getAccountCredentialKey(integrationType, accountId);
+  const oauthKey = `${key}_oauth`;
+
+  const data = await getAccountCredentialInternal(oauthKey);
+  if (!data) {
+    // Fall back to just the access token if no OAuth data exists
+    const accessToken = await getAccountCredentialInternal(key);
+    if (accessToken) {
+      return { accessToken };
+    }
+    return null;
+  }
+
+  try {
+    return JSON.parse(data) as OAuthTokenData;
+  } catch {
+    log.warn(` Failed to parse OAuth token data for ${integrationType} account ${accountId}`);
+    return null;
+  }
+}
+
+/**
+ * Check if an OAuth token needs refresh (within 5 minutes of expiry)
+ */
+export async function isOAuthTokenExpiring(
+  integrationType: IntegrationType,
+  accountId: string
+): Promise<boolean> {
+  const tokenData = await getAccountOAuthToken(integrationType, accountId);
+  if (!tokenData?.expiresAt) {
+    return false; // No expiry data, assume token is valid
+  }
+
+  // Check if token expires within 5 minutes
+  const fiveMinutes = 5 * 60 * 1000;
+  return Date.now() > tokenData.expiresAt - fiveMinutes;
 }

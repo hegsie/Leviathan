@@ -1,13 +1,18 @@
 /**
- * Unified Profile Store
- * Manages unified profiles that combine git identity with integration accounts
+ * Unified Profile Store (v3)
+ * Manages unified profiles (git identity) and global integration accounts
+ *
+ * Architecture (v3):
+ * - Profiles contain git identity + default account preferences
+ * - Accounts are GLOBAL - available to all profiles, not owned by profiles
+ * - Repository assignments map repos to profiles (for git identity)
  */
 
 import { createStore } from 'zustand/vanilla';
 import type {
   UnifiedProfile,
   UnifiedProfilesConfig,
-  ProfileIntegrationAccount,
+  IntegrationAccount,
   IntegrationType,
 } from '../types/unified-profile.types.ts';
 
@@ -26,6 +31,9 @@ export interface UnifiedProfileState {
   profiles: UnifiedProfile[];
   activeProfile: UnifiedProfile | null;
   currentRepositoryPath: string | null;
+
+  // Global Accounts (v3)
+  accounts: IntegrationAccount[];
 
   // Connection status for accounts (accountId -> status)
   accountConnectionStatus: Record<string, AccountConnectionStatus>;
@@ -49,10 +57,11 @@ export interface UnifiedProfileState {
   updateProfile: (profile: UnifiedProfile) => void;
   removeProfile: (profileId: string) => void;
 
-  // Actions - Accounts within profiles
-  addAccountToProfile: (profileId: string, account: ProfileIntegrationAccount) => void;
-  updateAccountInProfile: (profileId: string, account: ProfileIntegrationAccount) => void;
-  removeAccountFromProfile: (profileId: string, accountId: string) => void;
+  // Actions - Global Accounts (v3)
+  setAccounts: (accounts: IntegrationAccount[]) => void;
+  addAccount: (account: IntegrationAccount) => void;
+  updateAccount: (account: IntegrationAccount) => void;
+  removeAccount: (accountId: string) => void;
 
   // Actions - Loading state
   setLoading: (loading: boolean) => void;
@@ -74,6 +83,7 @@ const initialState = {
   profiles: [] as UnifiedProfile[],
   activeProfile: null as UnifiedProfile | null,
   currentRepositoryPath: null as string | null,
+  accounts: [] as IntegrationAccount[],
   accountConnectionStatus: {} as Record<string, AccountConnectionStatus>,
   isLoading: false,
   error: null as string | null,
@@ -89,6 +99,7 @@ export const unifiedProfileStore = createStore<UnifiedProfileState>()((set) => (
     set({
       config,
       profiles: config.profiles,
+      accounts: config.accounts ?? [],
       error: null,
     }),
 
@@ -104,7 +115,7 @@ export const unifiedProfileStore = createStore<UnifiedProfileState>()((set) => (
       const profiles = [...state.profiles, profile];
       const config = state.config
         ? { ...state.config, profiles }
-        : { version: 2, profiles, repositoryAssignments: {} };
+        : { version: 3, profiles, accounts: state.accounts, repositoryAssignments: {} };
       return { profiles, config, error: null };
     }),
 
@@ -134,80 +145,64 @@ export const unifiedProfileStore = createStore<UnifiedProfileState>()((set) => (
       return { profiles, config, activeProfile, error: null };
     }),
 
-  // Accounts within profiles
-  addAccountToProfile: (profileId, account) =>
+  // Global Accounts (v3)
+  setAccounts: (accounts) =>
+    set((state) => ({
+      accounts,
+      config: state.config ? { ...state.config, accounts } : null,
+      error: null,
+    })),
+
+  addAccount: (account) =>
     set((state) => {
-      const profiles = state.profiles.map((p) => {
-        if (p.id !== profileId) return p;
+      let accounts = state.accounts;
 
-        // If this account is default for type, unset others
-        let accounts = p.integrationAccounts;
-        if (account.isDefaultForType) {
-          accounts = accounts.map((a) =>
-            a.integrationType === account.integrationType ? { ...a, isDefaultForType: false } : a
-          );
-        }
+      // If this account is default for its type, unset others
+      if (account.isDefault) {
+        accounts = accounts.map((a) =>
+          a.integrationType === account.integrationType ? { ...a, isDefault: false } : a
+        );
+      }
 
-        return {
-          ...p,
-          integrationAccounts: [...accounts, account],
-        };
-      });
-
-      const config = state.config ? { ...state.config, profiles } : null;
-      const activeProfile =
-        state.activeProfile?.id === profileId
-          ? profiles.find((p) => p.id === profileId) || state.activeProfile
-          : state.activeProfile;
-
-      return { profiles, config, activeProfile, error: null };
+      accounts = [...accounts, account];
+      const config = state.config ? { ...state.config, accounts } : null;
+      return { accounts, config, error: null };
     }),
 
-  updateAccountInProfile: (profileId, account) =>
+  updateAccount: (account) =>
     set((state) => {
-      const profiles = state.profiles.map((p) => {
-        if (p.id !== profileId) return p;
+      let accounts = state.accounts.map((a) => (a.id === account.id ? account : a));
 
-        let accounts = p.integrationAccounts.map((a) => (a.id === account.id ? account : a));
+      // If this account is default for its type, unset others
+      if (account.isDefault) {
+        accounts = accounts.map((a) =>
+          a.id !== account.id && a.integrationType === account.integrationType
+            ? { ...a, isDefault: false }
+            : a
+        );
+      }
 
-        // If this account is default for type, unset others
-        if (account.isDefaultForType) {
-          accounts = accounts.map((a) =>
-            a.id !== account.id && a.integrationType === account.integrationType
-              ? { ...a, isDefaultForType: false }
-              : a
-          );
-        }
-
-        return { ...p, integrationAccounts: accounts };
-      });
-
-      const config = state.config ? { ...state.config, profiles } : null;
-      const activeProfile =
-        state.activeProfile?.id === profileId
-          ? profiles.find((p) => p.id === profileId) || state.activeProfile
-          : state.activeProfile;
-
-      return { profiles, config, activeProfile, error: null };
+      const config = state.config ? { ...state.config, accounts } : null;
+      return { accounts, config, error: null };
     }),
 
-  removeAccountFromProfile: (profileId, accountId) =>
+  removeAccount: (accountId) =>
     set((state) => {
+      const accounts = state.accounts.filter((a) => a.id !== accountId);
+
+      // Also remove from any profile's defaultAccounts
       const profiles = state.profiles.map((p) => {
-        if (p.id !== profileId) return p;
-        return {
-          ...p,
-          integrationAccounts: p.integrationAccounts.filter((a) => a.id !== accountId),
-        };
+        const defaultAccounts = { ...p.defaultAccounts };
+        for (const [type, id] of Object.entries(defaultAccounts)) {
+          if (id === accountId) {
+            delete defaultAccounts[type as IntegrationType];
+          }
+        }
+        return { ...p, defaultAccounts };
       });
 
-      const config = state.config ? { ...state.config, profiles } : null;
-      const activeProfile =
-        state.activeProfile?.id === profileId
-          ? profiles.find((p) => p.id === profileId) || state.activeProfile
-          : state.activeProfile;
-
-      return { profiles, config, activeProfile, error: null };
+      const config = state.config ? { ...state.config, accounts, profiles } : null;
+      return { accounts, profiles, config, error: null };
     }),
 
   // Loading state
@@ -262,40 +257,60 @@ export function hasUnifiedProfiles(): boolean {
 }
 
 /**
- * Get an account from any profile by account ID
+ * Get a global account by ID
  */
-export function getAccountFromAnyProfile(
-  accountId: string
-): { profile: UnifiedProfile; account: ProfileIntegrationAccount } | undefined {
-  const { profiles } = unifiedProfileStore.getState();
-  for (const profile of profiles) {
-    const account = profile.integrationAccounts.find((a) => a.id === accountId);
-    if (account) {
-      return { profile, account };
+export function getAccountById(accountId: string): IntegrationAccount | undefined {
+  return unifiedProfileStore.getState().accounts.find((a) => a.id === accountId);
+}
+
+/**
+ * Get all accounts of a specific type (global)
+ */
+export function getAccountsByType(integrationType: IntegrationType): IntegrationAccount[] {
+  return unifiedProfileStore.getState().accounts.filter((a) => a.integrationType === integrationType);
+}
+
+/**
+ * Get the default global account for a type
+ */
+export function getDefaultGlobalAccount(integrationType: IntegrationType): IntegrationAccount | undefined {
+  const accounts = getAccountsByType(integrationType);
+  return accounts.find((a) => a.isDefault) || accounts[0];
+}
+
+/**
+ * Get the profile's preferred account for a specific type
+ * Falls back to global default if profile has no preference
+ */
+export function getProfilePreferredAccount(
+  profileId: string,
+  integrationType: IntegrationType
+): IntegrationAccount | undefined {
+  const { profiles, accounts } = unifiedProfileStore.getState();
+  const profile = profiles.find((p) => p.id === profileId);
+
+  if (profile) {
+    const preferredId = profile.defaultAccounts[integrationType];
+    if (preferredId) {
+      const preferred = accounts.find((a) => a.id === preferredId);
+      if (preferred) return preferred;
     }
   }
-  return undefined;
+
+  // Fall back to global default
+  return getDefaultGlobalAccount(integrationType);
 }
 
 /**
- * Get accounts of a specific type from the active profile
+ * Get accounts for the active profile's preferred account for a type
+ * Falls back to global default
  */
-export function getActiveProfileAccountsByType(
+export function getActiveProfilePreferredAccount(
   integrationType: IntegrationType
-): ProfileIntegrationAccount[] {
+): IntegrationAccount | undefined {
   const { activeProfile } = unifiedProfileStore.getState();
-  if (!activeProfile) return [];
-  return activeProfile.integrationAccounts.filter((a) => a.integrationType === integrationType);
-}
-
-/**
- * Get the default account for a type from the active profile
- */
-export function getActiveProfileDefaultAccount(
-  integrationType: IntegrationType
-): ProfileIntegrationAccount | undefined {
-  const accounts = getActiveProfileAccountsByType(integrationType);
-  return accounts.find((a) => a.isDefaultForType) || accounts[0];
+  if (!activeProfile) return getDefaultGlobalAccount(integrationType);
+  return getProfilePreferredAccount(activeProfile.id, integrationType);
 }
 
 /**
@@ -313,4 +328,23 @@ export function getRepositoryProfile(repoPath: string): UnifiedProfile | undefin
   const profileId = getRepositoryProfileAssignment(repoPath);
   if (!profileId) return undefined;
   return getUnifiedProfileById(profileId);
+}
+
+/**
+ * Get account count by type (global)
+ */
+export function getAccountCountByType(): Record<IntegrationType, number> {
+  const { accounts } = unifiedProfileStore.getState();
+  const counts: Record<IntegrationType, number> = {
+    github: 0,
+    gitlab: 0,
+    'azure-devops': 0,
+    bitbucket: 0,
+  };
+
+  for (const account of accounts) {
+    counts[account.integrationType]++;
+  }
+
+  return counts;
 }

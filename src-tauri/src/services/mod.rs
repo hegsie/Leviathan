@@ -7,6 +7,8 @@ pub mod ai;
 pub mod autofetch_service;
 pub mod credentials_service;
 pub mod git_service;
+pub mod loopback_server;
+pub mod oauth;
 pub mod update_service;
 pub mod watcher_service;
 

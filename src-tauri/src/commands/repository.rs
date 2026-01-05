@@ -80,9 +80,11 @@ pub async fn clone_repository(
             builder.branch(branch);
         }
 
-        // Set up fetch options with progress callbacks
+        // Set up fetch options with credentials and progress callbacks
         let mut fetch_opts = git2::FetchOptions::new();
-        let mut callbacks = git2::RemoteCallbacks::new();
+
+        // Use CredentialsHelper to get callbacks with authentication support
+        let mut callbacks = crate::services::CredentialsHelper::new().get_callbacks();
 
         // Track last emitted percent to avoid spamming events
         let last_percent = Arc::new(AtomicUsize::new(0));

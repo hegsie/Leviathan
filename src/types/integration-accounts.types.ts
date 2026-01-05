@@ -8,7 +8,7 @@
 /**
  * Integration service type
  */
-export type IntegrationType = 'github' | 'gitlab' | 'azure-devops';
+export type IntegrationType = 'github' | 'gitlab' | 'azure-devops' | 'bitbucket';
 
 /**
  * Integration-specific configuration
@@ -16,7 +16,8 @@ export type IntegrationType = 'github' | 'gitlab' | 'azure-devops';
 export type IntegrationConfig =
   | { type: 'github' }
   | { type: 'gitlab'; instanceUrl: string }
-  | { type: 'azure-devops'; organization: string };
+  | { type: 'azure-devops'; organization: string }
+  | { type: 'bitbucket'; workspace: string };
 
 /**
  * Cached user information for quick display without API calls
@@ -97,6 +98,7 @@ export const INTEGRATION_TYPE_NAMES: Record<IntegrationType, string> = {
   github: 'GitHub',
   gitlab: 'GitLab',
   'azure-devops': 'Azure DevOps',
+  bitbucket: 'Bitbucket',
 };
 
 /**
@@ -144,6 +146,23 @@ export function createEmptyAzureDevOpsAccount(
     isDefault: false,
     color: null,
     config: { type: 'azure-devops', organization },
+    cachedUser: null,
+  };
+}
+
+/**
+ * Create an empty Bitbucket account
+ */
+export function createEmptyBitbucketAccount(
+  workspace: string = ''
+): Omit<IntegrationAccount, 'id'> {
+  return {
+    name: '',
+    integrationType: 'bitbucket',
+    urlPatterns: [],
+    isDefault: false,
+    color: null,
+    config: { type: 'bitbucket', workspace },
     cachedUser: null,
   };
 }
@@ -248,6 +267,25 @@ export function createAzureDevOpsAccount(
 }
 
 /**
+ * Create a new Bitbucket account with a generated ID
+ */
+export function createBitbucketAccount(
+  name: string = '',
+  workspace: string = ''
+): IntegrationAccount {
+  return {
+    id: generateAccountId(),
+    name,
+    integrationType: 'bitbucket',
+    urlPatterns: [],
+    isDefault: false,
+    color: null,
+    config: { type: 'bitbucket', workspace },
+    cachedUser: null,
+  };
+}
+
+/**
  * Type guard for GitLab config
  */
 export function isGitLabConfig(
@@ -263,6 +301,15 @@ export function isAzureDevOpsConfig(
   config: IntegrationConfig
 ): config is { type: 'azure-devops'; organization: string } {
   return config.type === 'azure-devops';
+}
+
+/**
+ * Type guard for Bitbucket config
+ */
+export function isBitbucketConfig(
+  config: IntegrationConfig
+): config is { type: 'bitbucket'; workspace: string } {
+  return config.type === 'bitbucket';
 }
 
 /**
@@ -294,5 +341,21 @@ export function safeGetOrganization(account: IntegrationAccount): string | null 
 export function safeSetOrganization(account: IntegrationAccount, organization: string): void {
   if (isAzureDevOpsConfig(account.config)) {
     account.config.organization = organization;
+  }
+}
+
+/**
+ * Safely get workspace from account config
+ */
+export function safeGetWorkspace(account: IntegrationAccount): string | null {
+  return isBitbucketConfig(account.config) ? account.config.workspace : null;
+}
+
+/**
+ * Safely set workspace in account config (mutates the account)
+ */
+export function safeSetWorkspace(account: IntegrationAccount, workspace: string): void {
+  if (isBitbucketConfig(account.config)) {
+    account.config.workspace = workspace;
   }
 }

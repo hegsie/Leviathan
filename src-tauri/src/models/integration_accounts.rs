@@ -15,6 +15,8 @@ pub enum IntegrationType {
     GitLab,
     #[serde(rename = "azure-devops")]
     AzureDevOps,
+    #[serde(rename = "bitbucket")]
+    Bitbucket,
 }
 
 impl std::fmt::Display for IntegrationType {
@@ -23,13 +25,14 @@ impl std::fmt::Display for IntegrationType {
             IntegrationType::GitHub => write!(f, "github"),
             IntegrationType::GitLab => write!(f, "gitlab"),
             IntegrationType::AzureDevOps => write!(f, "azure-devops"),
+            IntegrationType::Bitbucket => write!(f, "bitbucket"),
         }
     }
 }
 
 /// Integration-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(tag = "type")]
 pub enum IntegrationConfig {
     /// GitHub configuration (uses api.github.com by default)
     #[serde(rename = "github")]
@@ -38,6 +41,7 @@ pub enum IntegrationConfig {
     #[serde(rename = "gitlab")]
     GitLab {
         /// Instance URL (e.g., "https://gitlab.com" or self-hosted)
+        #[serde(rename = "instanceUrl")]
         instance_url: String,
     },
     /// Azure DevOps configuration with organization
@@ -45,6 +49,12 @@ pub enum IntegrationConfig {
     AzureDevOps {
         /// Organization name
         organization: String,
+    },
+    /// Bitbucket configuration with workspace
+    #[serde(rename = "bitbucket")]
+    Bitbucket {
+        /// Workspace (typically the username or organization)
+        workspace: String,
     },
 }
 
@@ -55,6 +65,7 @@ impl IntegrationConfig {
             IntegrationConfig::GitHub => IntegrationType::GitHub,
             IntegrationConfig::GitLab { .. } => IntegrationType::GitLab,
             IntegrationConfig::AzureDevOps { .. } => IntegrationType::AzureDevOps,
+            IntegrationConfig::Bitbucket { .. } => IntegrationType::Bitbucket,
         }
     }
 }
@@ -73,10 +84,13 @@ pub struct CachedUser {
     pub email: Option<String>,
 }
 
-/// Integration account for connecting to external services
+/// Legacy integration account for connecting to external services
+///
+/// @deprecated Use unified_profile::IntegrationAccount instead.
+/// This type is kept for backward compatibility with the legacy system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct IntegrationAccount {
+pub struct LegacyIntegrationAccount {
     /// Unique identifier (UUID)
     pub id: String,
     /// Display name (e.g., "Work GitHub", "Personal GitLab")
@@ -95,7 +109,7 @@ pub struct IntegrationAccount {
     pub cached_user: Option<CachedUser>,
 }
 
-impl IntegrationAccount {
+impl LegacyIntegrationAccount {
     /// Create a new GitHub account
     pub fn new_github(name: String) -> Self {
         Self {
@@ -134,6 +148,20 @@ impl IntegrationAccount {
             is_default: false,
             color: None,
             config: IntegrationConfig::AzureDevOps { organization },
+            cached_user: None,
+        }
+    }
+
+    /// Create a new Bitbucket account
+    pub fn new_bitbucket(name: String, workspace: String) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            integration_type: IntegrationType::Bitbucket,
+            url_patterns: Vec::new(),
+            is_default: false,
+            color: None,
+            config: IntegrationConfig::Bitbucket { workspace },
             cached_user: None,
         }
     }
@@ -193,22 +221,24 @@ fn url_matches_pattern(url: &str, pattern: &str) -> bool {
     }
 }
 
-/// Configuration for storing integration accounts
+/// Legacy configuration for storing integration accounts
+///
+/// @deprecated Use unified_profile::UnifiedProfilesConfig instead.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct IntegrationAccountsConfig {
+pub struct LegacyIntegrationAccountsConfig {
     /// All saved accounts
-    pub accounts: Vec<IntegrationAccount>,
+    pub accounts: Vec<LegacyIntegrationAccount>,
     /// Repository to account assignments (repo path -> account id)
     pub repository_assignments: HashMap<String, String>,
 }
 
-impl IntegrationAccountsConfig {
+impl LegacyIntegrationAccountsConfig {
     /// Get accounts by integration type
     pub fn get_accounts_by_type(
         &self,
         integration_type: &IntegrationType,
-    ) -> Vec<&IntegrationAccount> {
+    ) -> Vec<&LegacyIntegrationAccount> {
         self.accounts
             .iter()
             .filter(|a| &a.integration_type == integration_type)
@@ -219,24 +249,24 @@ impl IntegrationAccountsConfig {
     pub fn get_default_account(
         &self,
         integration_type: &IntegrationType,
-    ) -> Option<&IntegrationAccount> {
+    ) -> Option<&LegacyIntegrationAccount> {
         self.accounts
             .iter()
             .find(|a| &a.integration_type == integration_type && a.is_default)
     }
 
     /// Get an account by ID
-    pub fn get_account(&self, account_id: &str) -> Option<&IntegrationAccount> {
+    pub fn get_account(&self, account_id: &str) -> Option<&LegacyIntegrationAccount> {
         self.accounts.iter().find(|a| a.id == account_id)
     }
 
     /// Get a mutable account by ID
-    pub fn get_account_mut(&mut self, account_id: &str) -> Option<&mut IntegrationAccount> {
+    pub fn get_account_mut(&mut self, account_id: &str) -> Option<&mut LegacyIntegrationAccount> {
         self.accounts.iter_mut().find(|a| a.id == account_id)
     }
 
     /// Add or update an account
-    pub fn save_account(&mut self, account: IntegrationAccount) {
+    pub fn save_account(&mut self, account: LegacyIntegrationAccount) {
         // If this account is being set as default, unset other defaults of same type
         if account.is_default {
             for existing in &mut self.accounts {
@@ -268,7 +298,7 @@ impl IntegrationAccountsConfig {
         &self,
         url: &str,
         integration_type: &IntegrationType,
-    ) -> Option<&IntegrationAccount> {
+    ) -> Option<&LegacyIntegrationAccount> {
         self.accounts
             .iter()
             .filter(|a| &a.integration_type == integration_type)
@@ -276,7 +306,7 @@ impl IntegrationAccountsConfig {
     }
 
     /// Get the account assigned to a repository
-    pub fn get_assigned_account(&self, repo_path: &str) -> Option<&IntegrationAccount> {
+    pub fn get_assigned_account(&self, repo_path: &str) -> Option<&LegacyIntegrationAccount> {
         self.repository_assignments
             .get(repo_path)
             .and_then(|account_id| self.get_account(account_id))
@@ -292,6 +322,9 @@ impl IntegrationAccountsConfig {
         self.repository_assignments.remove(repo_path);
     }
 }
+
+// Type aliases for backward compatibility
+pub type IntegrationAccountsConfig = LegacyIntegrationAccountsConfig;
 
 #[cfg(test)]
 mod tests {
@@ -323,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_account_matches_url() {
-        let account = IntegrationAccount::new_github("Work".to_string());
+        let account = LegacyIntegrationAccount::new_github("Work".to_string());
         let mut account = account;
         account.url_patterns = vec!["github.com/mycompany/*".to_string()];
 
@@ -333,14 +366,14 @@ mod tests {
 
     #[test]
     fn test_config_get_accounts_by_type() {
-        let mut config = IntegrationAccountsConfig::default();
+        let mut config = LegacyIntegrationAccountsConfig::default();
         config
             .accounts
-            .push(IntegrationAccount::new_github("Work GH".to_string()));
+            .push(LegacyIntegrationAccount::new_github("Work GH".to_string()));
         config
             .accounts
-            .push(IntegrationAccount::new_github("Personal GH".to_string()));
-        config.accounts.push(IntegrationAccount::new_gitlab(
+            .push(LegacyIntegrationAccount::new_github("Personal GH".to_string()));
+        config.accounts.push(LegacyIntegrationAccount::new_gitlab(
             "Work GL".to_string(),
             "https://gitlab.com".to_string(),
         ));
@@ -354,13 +387,13 @@ mod tests {
 
     #[test]
     fn test_save_account_sets_single_default() {
-        let mut config = IntegrationAccountsConfig::default();
+        let mut config = LegacyIntegrationAccountsConfig::default();
 
-        let mut account1 = IntegrationAccount::new_github("First".to_string());
+        let mut account1 = LegacyIntegrationAccount::new_github("First".to_string());
         account1.is_default = true;
         config.save_account(account1.clone());
 
-        let mut account2 = IntegrationAccount::new_github("Second".to_string());
+        let mut account2 = LegacyIntegrationAccount::new_github("Second".to_string());
         account2.is_default = true;
         config.save_account(account2.clone());
 
@@ -377,5 +410,6 @@ mod tests {
         assert_eq!(IntegrationType::GitHub.to_string(), "github");
         assert_eq!(IntegrationType::GitLab.to_string(), "gitlab");
         assert_eq!(IntegrationType::AzureDevOps.to_string(), "azure-devops");
+        assert_eq!(IntegrationType::Bitbucket.to_string(), "bitbucket");
     }
 }

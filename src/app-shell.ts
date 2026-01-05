@@ -37,6 +37,7 @@ import './components/dialogs/lv-profile-manager-dialog.ts';
 import './components/dialogs/lv-migration-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import './components/common/lv-toast-container.ts';
+import './components/dashboard/lv-context-dashboard.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
@@ -45,6 +46,7 @@ import * as gitService from './services/git.service.ts';
 import * as updateService from './services/update.service.ts';
 import * as unifiedProfileService from './services/unified-profile.service.ts';
 import { showToast } from './services/notification.service.ts';
+import { initOAuthListener } from './services/oauth.service.ts';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
 /**
@@ -450,6 +452,10 @@ export class AppShell extends LitElement {
         if (newActiveRepo) {
           gitService.loadProfileForRepository(newActiveRepo.repository.path);
           this.checkRepositoryIntegration(newActiveRepo.repository.path);
+          // Load remotes if not already loaded
+          if (!newActiveRepo.remotes || newActiveRepo.remotes.length === 0) {
+            this.loadRepositoryRemotes(newActiveRepo.repository.path);
+          }
         }
       }
     });
@@ -480,6 +486,11 @@ export class AppShell extends LitElement {
 
     // Set up update notification listeners
     this.setupUpdateListeners();
+
+    // Initialize OAuth deep link listener
+    initOAuthListener().catch((e) => {
+      log.warn('Failed to initialize OAuth listener:', e);
+    });
 
     // Register keyboard shortcuts
     registerDefaultShortcuts({
@@ -527,6 +538,10 @@ export class AppShell extends LitElement {
 
   private async checkUnifiedProfilesMigration(): Promise<void> {
     try {
+      // Initialize unified profiles - this loads profiles and checks migration
+      await unifiedProfileService.initializeUnifiedProfiles();
+
+      // Check if migration is still needed (user hasn't migrated yet)
       const needsMigration = await unifiedProfileService.checkMigrationNeeded();
       if (needsMigration) {
         // Show migration dialog after a short delay to let the UI settle
@@ -535,7 +550,7 @@ export class AppShell extends LitElement {
         }, 500);
       }
     } catch (error) {
-      log.error('Failed to check migration status:', error);
+      log.error('Failed to initialize unified profiles:', error);
     }
   }
 
@@ -586,13 +601,34 @@ export class AppShell extends LitElement {
 
         const features = suggestion.features.slice(0, 2).join(', ');
         showToast(
-          `${suggestion.providerName} repository detected. Connect to enable ${features}. Click the toolbar icon to configure.`,
+          `${suggestion.providerName} repository detected. Connect to enable ${features}.`,
           'info',
-          12000
+          12000,
+          {
+            label: 'Configure',
+            callback: () => this.openIntegrationDialog(suggestion.provider),
+          }
         );
       }
     } catch {
       // Silently fail - this is a nice-to-have feature
+    }
+  }
+
+  private openIntegrationDialog(provider: string | null): void {
+    switch (provider) {
+      case 'github':
+        this.showGitHub = true;
+        break;
+      case 'gitlab':
+        this.showGitLab = true;
+        break;
+      case 'bitbucket':
+        this.showBitbucket = true;
+        break;
+      case 'ado':
+        this.showAzureDevOps = true;
+        break;
     }
   }
 
@@ -875,6 +911,19 @@ export class AppShell extends LitElement {
     this.graphCanvas?.refresh?.();
   }
 
+  private async handleRefreshAccount(e: CustomEvent<{ accountId: string }>): Promise<void> {
+    const { accountId } = e.detail;
+    try {
+      const account = await unifiedProfileService.getGlobalAccount(accountId);
+      if (account) {
+        await unifiedProfileService.refreshAccountCachedUser(account);
+      }
+    } catch (error) {
+      log.error('Failed to refresh account', error);
+      showToast('Failed to refresh account connection', 'error');
+    }
+  }
+
   private handleToggleSearch(): void {
     const toolbar = this.shadowRoot?.querySelector('lv-toolbar');
     if (toolbar) {
@@ -1154,6 +1203,8 @@ export class AppShell extends LitElement {
         const result = await gitService.openRepository({ path: persisted.path });
         if (result.success && result.data) {
           repositoryStore.getState().addRepository(result.data);
+          // Load remotes for this repository
+          await this.loadRepositoryRemotes(persisted.path);
         }
       } catch (error) {
         console.warn(`Failed to restore repository: ${persisted.path}`, error);
@@ -1161,6 +1212,31 @@ export class AppShell extends LitElement {
     }
 
     // Restore active index (already persisted, will be set from storage)
+  }
+
+  /**
+   * Load remotes for a repository and update the store
+   */
+  private async loadRepositoryRemotes(repoPath: string): Promise<void> {
+    try {
+      const remotesResult = await gitService.getRemotes(repoPath);
+      if (remotesResult.success && remotesResult.data) {
+        // Need to set active index to the repo first, then set remotes
+        const store = repositoryStore.getState();
+        const repoIndex = store.openRepositories.findIndex(r => r.repository.path === repoPath);
+        if (repoIndex >= 0) {
+          const currentIndex = store.activeIndex;
+          store.setActiveIndex(repoIndex);
+          store.setRemotes(remotesResult.data);
+          // Restore active index if different
+          if (currentIndex !== repoIndex && currentIndex >= 0) {
+            store.setActiveIndex(currentIndex);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(`Failed to load remotes for ${repoPath}:`, error);
+    }
   }
 
   private async handleFetch(): Promise<void> {
@@ -1233,6 +1309,15 @@ export class AppShell extends LitElement {
 
       ${this.activeRepository
         ? html`
+            <lv-context-dashboard
+              @open-profile-manager=${() => { this.showProfileManager = true; }}
+              @open-github=${() => { this.showGitHub = true; }}
+              @open-gitlab=${() => { this.showGitLab = true; }}
+              @open-bitbucket=${() => { this.showBitbucket = true; }}
+              @open-azure-devops=${() => { this.showAzureDevOps = true; }}
+              @refresh-account=${this.handleRefreshAccount}
+            ></lv-context-dashboard>
+
             <div class="main-content">
               ${this.leftPanelVisible ? html`
                 <aside
@@ -1530,6 +1615,7 @@ export class AppShell extends LitElement {
           ?open=${this.showGitHub}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGitHub = false; }}
+          @manage-accounts=${() => { this.showProfileManager = true; }}
         ></lv-github-dialog>
       ` : ''}
 
@@ -1538,6 +1624,7 @@ export class AppShell extends LitElement {
           ?open=${this.showGitLab}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGitLab = false; }}
+          @manage-accounts=${() => { this.showProfileManager = true; }}
         ></lv-gitlab-dialog>
       ` : ''}
 
@@ -1546,6 +1633,7 @@ export class AppShell extends LitElement {
           ?open=${this.showBitbucket}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showBitbucket = false; }}
+          @manage-accounts=${() => { this.showProfileManager = true; }}
         ></lv-bitbucket-dialog>
       ` : ''}
 
@@ -1554,6 +1642,7 @@ export class AppShell extends LitElement {
           ?open=${this.showAzureDevOps}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showAzureDevOps = false; }}
+          @manage-accounts=${() => { this.showProfileManager = true; }}
         ></lv-azure-devops-dialog>
       ` : ''}
 
@@ -1561,6 +1650,10 @@ export class AppShell extends LitElement {
         ?open=${this.showProfileManager}
         .repoPath=${this.activeRepository?.repository.path ?? ''}
         @close=${() => { this.showProfileManager = false; }}
+        @open-github=${() => { this.showProfileManager = false; this.showGitHub = true; }}
+        @open-gitlab=${() => { this.showProfileManager = false; this.showGitLab = true; }}
+        @open-bitbucket=${() => { this.showProfileManager = false; this.showBitbucket = true; }}
+        @open-azure-devops=${() => { this.showProfileManager = false; this.showAzureDevOps = true; }}
       ></lv-profile-manager-dialog>
 
       <lv-migration-dialog

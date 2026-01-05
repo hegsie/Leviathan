@@ -17,10 +17,13 @@ import type {
   CreateMergeRequestInput,
   CreateGitLabIssueInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import type { ProfileIntegrationAccount } from '../../types/unified-profile.types.ts';
+import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
+import * as oauthService from '../../services/oauth.service.ts';
+import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts';
+import type { OAuthFlowState, OAuthTokenResponse } from '../../types/oauth.types.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
@@ -475,6 +478,97 @@ export class LvGitLabDialog extends LitElement {
         width: 16px;
         height: 16px;
       }
+
+      /* OAuth styles */
+      .auth-method-toggle {
+        display: flex;
+        gap: var(--spacing-sm);
+        margin-bottom: var(--spacing-md);
+      }
+
+      .auth-method-toggle .btn {
+        flex: 1;
+        justify-content: center;
+      }
+
+      .auth-method-toggle .btn.active {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
+      .btn-oauth {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-md);
+        font-weight: var(--font-weight-medium);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .btn-oauth:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        border-color: var(--color-primary);
+      }
+
+      .btn-oauth:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .btn-oauth svg {
+        width: 20px;
+        height: 20px;
+      }
+
+      .oauth-spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid var(--color-border);
+        border-top-color: var(--color-primary);
+        border-radius: 50%;
+        animation: oauth-spin 0.8s linear infinite;
+      }
+
+      @keyframes oauth-spin {
+        to { transform: rotate(360deg); }
+      }
+
+      .oauth-status {
+        text-align: center;
+        padding: var(--spacing-md);
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+      }
+
+      .oauth-status.error {
+        color: var(--color-error);
+      }
+
+      .oauth-divider {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-md);
+        margin: var(--spacing-md) 0;
+        color: var(--color-text-muted);
+        font-size: var(--font-size-sm);
+      }
+
+      .oauth-divider::before,
+      .oauth-divider::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: var(--color-border);
+      }
     `,
   ];
 
@@ -495,11 +589,17 @@ export class LvGitLabDialog extends LitElement {
   @state() private mrFilter: 'opened' | 'merged' | 'closed' | 'all' = 'opened';
   @state() private issueFilter: 'opened' | 'closed' | 'all' = 'opened';
 
-  // Multi-account support (from active unified profile)
-  @state() private accounts: ProfileIntegrationAccount[] = [];
+  // Multi-account support (global accounts)
+  @state() private accounts: IntegrationAccount[] = [];
   @state() private selectedAccountId: string | null = null;
 
+  // OAuth state
+  @state() private authMethod: 'oauth' | 'pat' = 'oauth';
+  @state() private oauthState: OAuthFlowState = { status: 'idle' };
+
   private unsubscribeStore?: () => void;
+  private oauthCompleteHandler?: EventListener;
+  private oauthStateUnsubscribe?: () => void;
 
   // Create MR form
   @state() private createMrTitle = '';
@@ -516,40 +616,46 @@ export class LvGitLabDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
 
-    // Subscribe to unified profile store - get accounts from active profile
-    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
-      const activeProfile = state.activeProfile;
-      if (activeProfile) {
-        this.accounts = activeProfile.integrationAccounts.filter((a) => a.integrationType === 'gitlab');
-        // If no account selected, try to select the default one
-        if (!this.selectedAccountId && this.accounts.length > 0) {
-          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
-          const account = defaultAccount ?? this.accounts[0];
-          if (account) {
-            this.selectedAccountId = account.id;
-            // Update instance URL from account config
-            if (account.config.type === 'gitlab' && account.config.instanceUrl) {
-              this.instanceUrlInput = account.config.instanceUrl;
-            }
+    // Set up OAuth event listeners
+    this.oauthCompleteHandler = ((e: CustomEvent<{ provider: string; tokens: OAuthTokenResponse; instanceUrl?: string }>) => {
+      if (e.detail.provider === 'gitlab') {
+        this.handleOAuthComplete(e.detail.tokens, e.detail.instanceUrl);
+      }
+    }) as unknown as EventListener;
+    window.addEventListener('oauth-complete', this.oauthCompleteHandler);
+
+    this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
+      if (state.provider === 'gitlab') {
+        this.oauthState = state;
+      }
+    });
+
+    // Subscribe to unified profile store - get global accounts
+    this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
+      this.accounts = getAccountsByType('gitlab');
+      // If no account selected, try to select the default one
+      if (!this.selectedAccountId && this.accounts.length > 0) {
+        const defaultAccount = getDefaultGlobalAccount('gitlab');
+        const account = defaultAccount ?? this.accounts[0];
+        if (account) {
+          this.selectedAccountId = account.id;
+          // Update instance URL from account config
+          if (account.config.type === 'gitlab' && account.config.instanceUrl) {
+            this.instanceUrlInput = account.config.instanceUrl;
           }
         }
-      } else {
-        this.accounts = [];
       }
     });
 
     // Initialize from current state
-    const state = unifiedProfileStore.getState();
-    if (state.activeProfile) {
-      this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'gitlab');
-      if (this.accounts.length > 0 && !this.selectedAccountId) {
-        const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
-        const account = defaultAccount ?? this.accounts[0];
-        if (account) {
-          this.selectedAccountId = account.id;
-          if (account.config.type === 'gitlab' && account.config.instanceUrl) {
-            this.instanceUrlInput = account.config.instanceUrl;
-          }
+    this.accounts = getAccountsByType('gitlab');
+    if (this.accounts.length > 0 && !this.selectedAccountId) {
+      const defaultAccount = getDefaultGlobalAccount('gitlab');
+      const account = defaultAccount ?? this.accounts[0];
+      if (account) {
+        this.selectedAccountId = account.id;
+        if (account.config.type === 'gitlab' && account.config.instanceUrl) {
+          this.instanceUrlInput = account.config.instanceUrl;
         }
       }
     }
@@ -562,6 +668,12 @@ export class LvGitLabDialog extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribeStore?.();
+
+    // Clean up OAuth listeners
+    if (this.oauthCompleteHandler) {
+      window.removeEventListener('oauth-complete', this.oauthCompleteHandler);
+    }
+    this.oauthStateUnsubscribe?.();
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -581,14 +693,16 @@ export class LvGitLabDialog extends LitElement {
       // Ensure unified profiles are loaded
       await unifiedProfileService.loadUnifiedProfiles();
 
+      // Load the profile for this repository to set activeProfile
+      if (this.repositoryPath) {
+        await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+      }
+
       // Re-sync local state with store after loading
-      const state = unifiedProfileStore.getState();
-      if (state.activeProfile) {
-        this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'gitlab');
-        if (this.accounts.length > 0 && !this.selectedAccountId) {
-          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
-          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
-        }
+      this.accounts = getAccountsByType('gitlab');
+      if (this.accounts.length > 0 && !this.selectedAccountId) {
+        const defaultAccount = getDefaultGlobalAccount('gitlab');
+        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
       }
 
       if (this.repositoryPath) {
@@ -613,10 +727,9 @@ export class LvGitLabDialog extends LitElement {
     const result = await gitService.checkGitLabConnectionWithToken(instanceUrl, token);
     if (result.success && result.data) {
       this.connectionStatus = result.data;
-      // Update cached user in account if connected
-      const activeProfile = unifiedProfileStore.getState().activeProfile;
-      if (activeProfile && this.selectedAccountId && result.data.connected && result.data.user) {
-        await unifiedProfileService.updateProfileAccountCachedUser(activeProfile.id, this.selectedAccountId, {
+      // Update cached user in global account if connected
+      if (this.selectedAccountId && result.data.connected && result.data.user) {
+        await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
           username: result.data.user.username,
           displayName: result.data.user.name ?? null,
           email: null, // GitLab API doesn't return email in user object
@@ -639,7 +752,7 @@ export class LvGitLabDialog extends LitElement {
   /**
    * Handle account selection change
    */
-  private async handleAccountChange(e: CustomEvent<{ account: ProfileIntegrationAccount }>): Promise<void> {
+  private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
@@ -704,10 +817,12 @@ export class LvGitLabDialog extends LitElement {
     this.error = null;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.listGitLabMergeRequests(
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
-        this.mrFilter === 'all' ? undefined : this.mrFilter
+        this.mrFilter === 'all' ? undefined : this.mrFilter,
+        token
       );
 
       if (result.success && result.data) {
@@ -726,10 +841,13 @@ export class LvGitLabDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.listGitLabIssues(
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
-        this.issueFilter === 'all' ? undefined : this.issueFilter
+        this.issueFilter === 'all' ? undefined : this.issueFilter,
+        undefined, // labels
+        token
       );
 
       if (result.success && result.data) {
@@ -744,9 +862,12 @@ export class LvGitLabDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.listGitLabPipelines(
         this.detectedRepo.instanceUrl,
-        this.detectedRepo.projectPath
+        this.detectedRepo.projectPath,
+        undefined, // status
+        token
       );
 
       if (result.success && result.data) {
@@ -761,9 +882,11 @@ export class LvGitLabDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const result = await gitService.getGitLabLabels(
         this.detectedRepo.instanceUrl,
-        this.detectedRepo.projectPath
+        this.detectedRepo.projectPath,
+        token
       );
 
       if (result.success && result.data) {
@@ -791,19 +914,18 @@ export class LvGitLabDialog extends LitElement {
       }
 
       const user = verifyResult.data.user;
-      const activeProfile = unifiedProfileStore.getState().activeProfile;
 
       // If we have a selected account, save token to that account
       if (this.selectedAccountId) {
         await credentialService.storeAccountToken('gitlab', this.selectedAccountId, tokenToSave);
-      } else if (activeProfile) {
-        // No account selected - create a new account in the active profile
-        const { createEmptyGitLabProfileAccount, generateId } = await import('../../types/unified-profile.types.ts');
-        const newAccount = {
-          ...createEmptyGitLabProfileAccount(instanceUrl),
+      } else {
+        // No account selected - create a new global account
+        const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
+        const newAccount: IntegrationAccount = {
+          ...createEmptyIntegrationAccount('gitlab', instanceUrl),
           id: generateId(),
           name: user?.username ? `GitLab (${user.username})` : 'GitLab Account',
-          isDefaultForType: this.accounts.length === 0,
+          isDefault: this.accounts.length === 0,
           cachedUser: user ? {
             username: user.username,
             displayName: user.name ?? null,
@@ -812,12 +934,13 @@ export class LvGitLabDialog extends LitElement {
           } : null,
         };
 
-        const savedAccount = await unifiedProfileService.addAccountToProfile(activeProfile.id, newAccount);
+        const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
         await credentialService.storeAccountToken('gitlab', savedAccount.id, tokenToSave);
         this.selectedAccountId = savedAccount.id;
-      } else {
-        // Fallback to legacy token storage if no profile
-        await gitService.storeGitLabToken(tokenToSave);
+
+        // Refresh accounts list
+        await unifiedProfileService.loadUnifiedProfiles();
+        this.accounts = getAccountsByType('gitlab');
       }
 
       // Token saved, update state
@@ -856,6 +979,152 @@ export class LvGitLabDialog extends LitElement {
     }
   }
 
+  /**
+   * Start OAuth flow for GitLab
+   */
+  private async handleStartOAuth(): Promise<void> {
+    const clientId = getClientId('gitlab');
+    if (!clientId) {
+      this.error = 'GitLab OAuth is not configured. Please use a Personal Access Token.';
+      this.authMethod = 'pat';
+      return;
+    }
+
+    this.error = null;
+    // Pass instance URL for self-hosted GitLab
+    const instanceUrl = this.instanceUrlInput !== 'https://gitlab.com' ? this.instanceUrlInput : undefined;
+    await oauthService.startOAuth('gitlab', clientId, instanceUrl);
+  }
+
+  /**
+   * Handle OAuth completion
+   */
+  private async handleOAuthComplete(tokens: OAuthTokenResponse, instanceUrl?: string): Promise<void> {
+    console.log('[GitLab Dialog] handleOAuthComplete called', {
+      hasAccessToken: !!tokens?.accessToken,
+      accessTokenLength: tokens?.accessToken?.length,
+      instanceUrl,
+      currentInstanceUrl: this.instanceUrlInput,
+    });
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      // Update instance URL if provided
+      if (instanceUrl) {
+        this.instanceUrlInput = instanceUrl;
+      }
+
+      console.log('[GitLab Dialog] Verifying token with instanceUrl:', this.instanceUrlInput);
+
+      // Verify the token works
+      const verifyResult = await gitService.checkGitLabConnectionWithToken(
+        this.instanceUrlInput,
+        tokens.accessToken
+      );
+
+      console.log('[GitLab Dialog] Token verification result:', {
+        success: verifyResult.success,
+        connected: verifyResult.data?.connected,
+        error: verifyResult.error,
+        user: verifyResult.data?.user?.username,
+      });
+
+      if (!verifyResult.success || !verifyResult.data?.connected) {
+        this.error = verifyResult.error?.message ?? 'OAuth token verification failed';
+        return;
+      }
+
+      const user = verifyResult.data.user;
+
+      console.log('[GitLab Dialog] Account state:', {
+        selectedAccountId: this.selectedAccountId,
+        accountsCount: this.accounts.length,
+      });
+
+      // Find existing account for this instance URL, or use selected account
+      const existingAccount = this.selectedAccountId
+        ? getAccountById(this.selectedAccountId)
+        : this.accounts.find((a) =>
+            a.config.type === 'gitlab' &&
+            a.config.instanceUrl === this.instanceUrlInput
+          );
+
+      if (existingAccount) {
+        // Update existing account with OAuth token
+        console.log('[GitLab Dialog] Updating existing account:', existingAccount.id);
+        await credentialService.storeAccountOAuthToken(
+          'gitlab',
+          existingAccount.id,
+          tokens.accessToken,
+          tokens.refreshToken,
+          tokens.expiresIn
+        );
+
+        // Update cached user info
+        if (user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(existingAccount.id, {
+            username: user.username,
+            displayName: user.name ?? null,
+            email: null,
+            avatarUrl: user.avatarUrl ?? null,
+          });
+        }
+
+        this.selectedAccountId = existingAccount.id;
+      } else {
+        // Create new global account
+        console.log('[GitLab Dialog] Creating new global account');
+        const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
+        const newAccount: IntegrationAccount = {
+          ...createEmptyIntegrationAccount('gitlab', this.instanceUrlInput),
+          id: generateId(),
+          name: user?.username ? `GitLab (${user.username})` : 'GitLab Account',
+          isDefault: this.accounts.length === 0,
+          cachedUser: user ? {
+            username: user.username,
+            displayName: user.name ?? null,
+            email: null,
+            avatarUrl: user.avatarUrl ?? null,
+          } : null,
+        };
+
+        console.log('[GitLab Dialog] New account to create:', newAccount);
+        const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
+        console.log('[GitLab Dialog] Saved account:', savedAccount);
+        await credentialService.storeAccountOAuthToken(
+          'gitlab',
+          savedAccount.id,
+          tokens.accessToken,
+          tokens.refreshToken,
+          tokens.expiresIn
+        );
+
+        this.selectedAccountId = savedAccount.id;
+        // Refresh accounts list
+        await unifiedProfileService.loadUnifiedProfiles();
+        this.accounts = getAccountsByType('gitlab');
+        console.log('[GitLab Dialog] Account created, accounts:', this.accounts.length);
+      }
+
+      // Force UI update
+      this.requestUpdate();
+
+      this.connectionStatus = verifyResult.data;
+      this.oauthState = { status: 'idle' };
+
+      // Load data if connected and repo detected
+      if (this.connectionStatus?.connected && this.detectedRepo) {
+        await this.loadAllData();
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to complete OAuth';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
   private async handleMrFilterChange(e: Event): Promise<void> {
     this.mrFilter = (e.target as HTMLSelectElement).value as 'opened' | 'merged' | 'closed' | 'all';
     await this.loadMergeRequests();
@@ -873,6 +1142,7 @@ export class LvGitLabDialog extends LitElement {
     this.error = null;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const input: CreateMergeRequestInput = {
         title: this.createMrTitle,
         description: this.createMrDescription || undefined,
@@ -884,7 +1154,8 @@ export class LvGitLabDialog extends LitElement {
       const result = await gitService.createGitLabMergeRequest(
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
-        input
+        input,
+        token
       );
 
       if (result.success && result.data) {
@@ -912,6 +1183,7 @@ export class LvGitLabDialog extends LitElement {
     this.error = null;
 
     try {
+      const token = await this.getSelectedAccountToken();
       const input: CreateGitLabIssueInput = {
         title: this.createIssueTitle,
         description: this.createIssueDescription || undefined,
@@ -921,7 +1193,8 @@ export class LvGitLabDialog extends LitElement {
       const result = await gitService.createGitLabIssue(
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
-        input
+        input,
+        token
       );
 
       if (result.success && result.data) {
@@ -990,6 +1263,9 @@ export class LvGitLabDialog extends LitElement {
       `;
     }
 
+    const isOAuthPending = this.oauthState.status === 'pending' || this.oauthState.status === 'exchanging';
+    const oauthConfigured = isOAuthConfigured('gitlab');
+
     return html`
       <div class="token-form">
         <div class="form-group">
@@ -999,11 +1275,56 @@ export class LvGitLabDialog extends LitElement {
             placeholder="https://gitlab.com"
             .value=${this.instanceUrlInput}
             @input=${(e: Event) => this.instanceUrlInput = (e.target as HTMLInputElement).value}
+            ?disabled=${isOAuthPending}
           />
           <span class="help-text">
             Use https://gitlab.com for GitLab.com or your self-hosted instance URL
           </span>
         </div>
+
+        ${oauthConfigured ? html`
+          <div class="auth-method-toggle">
+            <button
+              class="btn ${this.authMethod === 'oauth' ? 'active' : ''}"
+              @click=${() => this.authMethod = 'oauth'}
+              ?disabled=${isOAuthPending}
+            >
+              Sign in with GitLab
+            </button>
+            <button
+              class="btn ${this.authMethod === 'pat' ? 'active' : ''}"
+              @click=${() => this.authMethod = 'pat'}
+              ?disabled=${isOAuthPending}
+            >
+              Personal Access Token
+            </button>
+          </div>
+        ` : ''}
+
+        ${this.authMethod === 'oauth' && oauthConfigured ? html`
+          <button
+            class="btn-oauth"
+            @click=${this.handleStartOAuth}
+            ?disabled=${isOAuthPending || this.isLoading || !this.instanceUrlInput.trim()}
+          >
+            ${isOAuthPending ? html`
+              <div class="oauth-spinner"></div>
+              <span>${this.oauthState.status === 'exchanging' ? 'Completing sign in...' : 'Waiting for browser...'}</span>
+            ` : html`
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.387 9.452.045 13.587a.924.924 0 00.331 1.023L12 23.054l11.624-8.443a.92.92 0 00.331-1.024"/>
+              </svg>
+              <span>Sign in with GitLab</span>
+            `}
+          </button>
+
+          ${this.oauthState.status === 'error' ? html`
+            <div class="oauth-status error">${this.oauthState.error}</div>
+          ` : ''}
+
+          <div class="oauth-divider">or</div>
+        ` : ''}
+
         <div class="form-group">
           <label>Personal Access Token</label>
           <input
@@ -1011,6 +1332,7 @@ export class LvGitLabDialog extends LitElement {
             placeholder="glpat-xxxxxxxxxxxxxxxxxxxx"
             .value=${this.tokenInput}
             @input=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
+            ?disabled=${isOAuthPending}
           />
           <span class="help-text">
             Create a token at
@@ -1026,9 +1348,9 @@ export class LvGitLabDialog extends LitElement {
           <button
             class="btn btn-primary"
             @click=${this.handleSaveToken}
-            ?disabled=${this.isLoading || !this.tokenInput.trim() || !this.instanceUrlInput.trim()}
+            ?disabled=${this.isLoading || isOAuthPending || !this.tokenInput.trim() || !this.instanceUrlInput.trim()}
           >
-            Connect to GitLab
+            Connect with Token
           </button>
         </div>
       </div>

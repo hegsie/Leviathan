@@ -9,8 +9,9 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatus } from '../../stores/unified-profile.store.ts';
 import { repositoryStore, type RecentRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import type { UnifiedProfile, ProfileIntegrationAccount, IntegrationType, IntegrationConfig, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
+import type { UnifiedProfile, IntegrationAccount, IntegrationType, IntegrationConfig, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
 import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
+import { getAccountsByType, getAccountById } from '../../stores/unified-profile.store.ts';
 import { showToast } from '../../services/notification.service.ts';
 
 type ViewMode = 'list' | 'edit' | 'create' | 'add-account' | 'edit-account' | 'assign-repos';
@@ -589,7 +590,7 @@ export class LvProfileManagerDialog extends LitElement {
   @state() private repositoryAssignments: Record<string, string> = {};
   @state() private accountConnectionStatus: Record<string, AccountConnectionStatus> = {};
   @state() private editingProfile: Partial<UnifiedProfile> | null = null;
-  @state() private editingAccount: Partial<ProfileIntegrationAccount> | null = null;
+  @state() private editingAccount: Partial<IntegrationAccount> | null = null;
   @state() private isLoading = false;
   @state() private isSaving = false;
   @state() private recentRepositories: RecentRepository[] = [];
@@ -717,13 +718,13 @@ export class LvProfileManagerDialog extends LitElement {
       urlPatterns: [],
       isDefault: false,
       color: PROFILE_COLORS[0],
-      integrationAccounts: [],
+      defaultAccounts: {},
     };
     this.viewMode = 'create';
   }
 
   private handleEdit(profile: UnifiedProfile): void {
-    this.editingProfile = { ...profile, integrationAccounts: [...profile.integrationAccounts] };
+    this.editingProfile = { ...profile, defaultAccounts: { ...profile.defaultAccounts } };
     this.viewMode = 'edit';
   }
 
@@ -735,11 +736,7 @@ export class LvProfileManagerDialog extends LitElement {
       id: undefined, // Will be generated on save
       name: `${profile.name} (Copy)`,
       isDefault: false, // Don't copy default status
-      integrationAccounts: profile.integrationAccounts.map((account) => ({
-        ...account,
-        id: crypto.randomUUID(), // New ID for each account copy
-        isDefaultForType: false, // Don't copy default status
-      })),
+      defaultAccounts: { ...profile.defaultAccounts }, // Copy default account preferences
     };
     this.viewMode = 'create';
   }
@@ -795,6 +792,9 @@ export class LvProfileManagerDialog extends LitElement {
       } else {
         showToast(`Assigned ${successCount}, failed ${errorCount}`, 'warning');
       }
+
+      // Reload profiles to update repositoryAssignments in the store
+      await unifiedProfileService.loadUnifiedProfiles();
 
       // Go back to edit view
       this.selectedReposForAssignment = new Set();
@@ -869,7 +869,7 @@ export class LvProfileManagerDialog extends LitElement {
       urlPatterns: this.editingProfile.urlPatterns ?? [],
       isDefault: this.editingProfile.isDefault ?? false,
       color: this.editingProfile.color ?? PROFILE_COLORS[0],
-      integrationAccounts: this.editingProfile.integrationAccounts ?? [],
+      defaultAccounts: this.editingProfile.defaultAccounts ?? {},
     };
 
     try {
@@ -892,7 +892,14 @@ export class LvProfileManagerDialog extends LitElement {
     this.updateEditingProfile('urlPatterns', patterns);
   }
 
-  // Account management
+  /**
+   * Get all global accounts from the store
+   */
+  private getGlobalAccounts(): IntegrationAccount[] {
+    return unifiedProfileStore.getState().accounts;
+  }
+
+  // Account management - now works with global accounts
   private handleAddAccount(): void {
     this.editingAccount = {
       name: '',
@@ -900,31 +907,36 @@ export class LvProfileManagerDialog extends LitElement {
       config: { type: 'github' },
       color: null,
       cachedUser: null,
-      isDefaultForType: false,
+      urlPatterns: [],
+      isDefault: false,
     };
     this.viewMode = 'add-account';
   }
 
-  private handleEditAccount(account: ProfileIntegrationAccount): void {
+  private handleEditAccount(account: IntegrationAccount): void {
     this.editingAccount = { ...account };
     this.viewMode = 'edit-account';
   }
 
-  private handleRemoveAccount(accountId: string): void {
-    if (!this.editingProfile || !confirm('Remove this account from the profile?')) return;
+  private async handleRemoveAccount(accountId: string): Promise<void> {
+    if (!confirm('Remove this account? This will delete the account for all profiles.')) return;
 
-    const accounts = this.editingProfile.integrationAccounts?.filter((a) => a.id !== accountId) ?? [];
-    this.editingProfile = { ...this.editingProfile, integrationAccounts: accounts };
+    try {
+      await unifiedProfileService.deleteGlobalAccount(accountId);
+      showToast('Account removed', 'success');
+    } catch (error) {
+      showToast(`Failed to remove account: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
+    }
   }
 
-  private updateEditingAccount(field: keyof ProfileIntegrationAccount, value: unknown): void {
+  private updateEditingAccount(field: keyof IntegrationAccount, value: unknown): void {
     if (this.editingAccount) {
       this.editingAccount = { ...this.editingAccount, [field]: value };
     }
   }
 
-  private handleSaveAccount(): void {
-    if (!this.editingAccount || !this.editingProfile) return;
+  private async handleSaveAccount(): Promise<void> {
+    if (!this.editingAccount) return;
 
     // Validation
     if (!this.editingAccount.name?.trim()) {
@@ -933,36 +945,25 @@ export class LvProfileManagerDialog extends LitElement {
     }
 
     const integrationType = this.editingAccount.integrationType ?? 'github';
-    const account: ProfileIntegrationAccount = {
+    const account: IntegrationAccount = {
       id: this.editingAccount.id ?? crypto.randomUUID(),
       name: this.editingAccount.name.trim(),
       integrationType,
       config: this.editingAccount.config ?? this.getDefaultConfigForType(integrationType),
       color: this.editingAccount.color ?? null,
       cachedUser: this.editingAccount.cachedUser ?? null,
-      isDefaultForType: this.editingAccount.isDefaultForType ?? false,
+      urlPatterns: this.editingAccount.urlPatterns ?? [],
+      isDefault: this.editingAccount.isDefault ?? false,
     };
 
-    const accounts = [...(this.editingProfile.integrationAccounts ?? [])];
-    const existingIndex = accounts.findIndex((a) => a.id === account.id);
-
-    if (existingIndex >= 0) {
-      accounts[existingIndex] = account;
-    } else {
-      accounts.push(account);
+    try {
+      // Save to global accounts
+      await unifiedProfileService.saveGlobalAccount(account);
+      showToast('Account saved', 'success');
+      this.handleBack();
+    } catch (error) {
+      showToast(`Failed to save account: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     }
-
-    // If this is default for type, unset others of same type
-    if (account.isDefaultForType) {
-      accounts.forEach((a) => {
-        if (a.id !== account.id && a.integrationType === account.integrationType) {
-          a.isDefaultForType = false;
-        }
-      });
-    }
-
-    this.editingProfile = { ...this.editingProfile, integrationAccounts: accounts };
-    this.handleBack();
   }
 
   render() {
@@ -1063,12 +1064,14 @@ export class LvProfileManagerDialog extends LitElement {
           </button>
         `;
       case 'add-account':
+        // Add account mode just shows instructions, only need back button
+        return html`
+          <button class="btn btn-secondary" @click=${this.handleBack}>Back</button>
+        `;
       case 'edit-account':
         return html`
           <button class="btn btn-secondary" @click=${this.handleBack}>Cancel</button>
-          <button class="btn btn-primary" @click=${this.handleSaveAccount}>
-            ${this.viewMode === 'add-account' ? 'Add Account' : 'Save Account'}
-          </button>
+          <button class="btn btn-primary" @click=${this.handleSaveAccount}>Save Account</button>
         `;
       case 'assign-repos':
         return html`
@@ -1118,9 +1121,9 @@ export class LvProfileManagerDialog extends LitElement {
                 </div>
                 <div class="profile-email">${profile.gitName} &lt;${profile.gitEmail}&gt;</div>
                 <div class="profile-meta">
-                  ${profile.integrationAccounts.length > 0
-                    ? html`<span>${profile.integrationAccounts.length} account${profile.integrationAccounts.length > 1 ? 's' : ''}</span>`
-                    : html`<span>No accounts</span>`}
+                  ${Object.keys(profile.defaultAccounts).length > 0
+                    ? html`<span>${Object.keys(profile.defaultAccounts).length} default account${Object.keys(profile.defaultAccounts).length > 1 ? 's' : ''}</span>`
+                    : nothing}
                   ${profile.urlPatterns.length > 0
                     ? html`<span>· ${profile.urlPatterns.length} pattern${profile.urlPatterns.length > 1 ? 's' : ''}</span>`
                     : nothing}
@@ -1350,7 +1353,7 @@ export class LvProfileManagerDialog extends LitElement {
           </button>
         </div>
 
-        ${(this.editingProfile.integrationAccounts ?? []).length === 0
+        ${this.getGlobalAccounts().length === 0
           ? html`
               <div class="empty-accounts warning">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;">
@@ -1358,14 +1361,14 @@ export class LvProfileManagerDialog extends LitElement {
                   <line x1="12" y1="9" x2="12" y2="13"></line>
                   <line x1="12" y1="17" x2="12.01" y2="17"></line>
                 </svg>
-                No integration accounts linked to this profile.
+                No integration accounts configured.
                 <br />
-                Add accounts to enable GitHub, GitLab, or Azure DevOps features.
+                Connect accounts from the GitHub, GitLab, Azure DevOps, or Bitbucket dialogs.
               </div>
             `
           : html`
               <div class="accounts-list">
-                ${(this.editingProfile.integrationAccounts ?? []).map((account) => this.renderAccountItem(account))}
+                ${this.getGlobalAccounts().map((account) => this.renderAccountItem(account))}
               </div>
             `}
       </div>
@@ -1477,7 +1480,7 @@ export class LvProfileManagerDialog extends LitElement {
     `;
   }
 
-  private renderAccountItem(account: ProfileIntegrationAccount) {
+  private renderAccountItem(account: IntegrationAccount) {
     const details = this.getAccountDetails(account);
     const connectionStatus = this.getAccountConnectionStatus(account.id);
     const statusTitle = {
@@ -1493,7 +1496,7 @@ export class LvProfileManagerDialog extends LitElement {
         <div class="account-info">
           <div class="account-name">
             ${account.name}
-            ${account.isDefaultForType ? html`<span class="default-badge">Default</span>` : nothing}
+            ${account.isDefault ? html`<span class="default-badge">Default</span>` : nothing}
             <span class="type-badge">${account.integrationType}</span>
           </div>
           ${details ? html`<div class="account-detail">${details}</div>` : nothing}
@@ -1537,6 +1540,12 @@ export class LvProfileManagerDialog extends LitElement {
             <path d="M0 8.877L2.247 5.91l8.405-3.416V.022l7.37 5.393L2.966 8.338v8.225L0 15.707zm24-4.45v14.651l-5.753 4.9-9.303-3.057v3.056l-5.978-7.416 15.057 1.798V5.415z"/>
           </svg>
         `;
+      case 'bitbucket':
+        return html`
+          <svg class="account-icon" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M.778 1.213a.768.768 0 00-.768.892l3.263 19.81c.084.5.515.868 1.022.873H19.95a.772.772 0 00.77-.646l3.27-20.03a.768.768 0 00-.768-.891zM14.52 15.53H9.522L8.17 8.466h7.561z"/>
+          </svg>
+        `;
       default:
         return html`
           <svg class="account-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1563,7 +1572,7 @@ export class LvProfileManagerDialog extends LitElement {
     return parts.slice(-2).join('/'); // e.g., "user/repo" from "/path/to/user/repo"
   }
 
-  private getAccountDetails(account: ProfileIntegrationAccount): string | null {
+  private getAccountDetails(account: IntegrationAccount): string | null {
     const parts: string[] = [];
 
     // Add username if available
@@ -1596,12 +1605,54 @@ export class LvProfileManagerDialog extends LitElement {
         return { type: 'gitlab', instanceUrl: 'https://gitlab.com' };
       case 'azure-devops':
         return { type: 'azure-devops', organization: '' };
+      case 'bitbucket':
+        return { type: 'bitbucket', workspace: '' };
     }
   }
 
   private renderAccountForm() {
     if (!this.editingAccount) return nothing;
 
+    const isEditMode = this.viewMode === 'edit-account';
+
+    // In add mode, show message directing user to integration dialogs
+    if (!isEditMode) {
+      return html`
+        <div class="empty-state" style="padding: var(--spacing-lg);">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width: 48px; height: 48px; opacity: 0.5; margin-bottom: var(--spacing-md);">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+          </svg>
+          <div style="font-weight: var(--font-weight-medium); margin-bottom: var(--spacing-sm);">
+            Add accounts via integration dialogs
+          </div>
+          <p style="font-size: var(--font-size-sm); color: var(--color-text-secondary); margin-bottom: var(--spacing-lg); max-width: 400px;">
+            To add a new account, use the GitHub, GitLab, Bitbucket, or Azure DevOps dialogs from the toolbar.
+            Accounts are automatically linked to your active profile when you authenticate.
+          </p>
+          <div style="display: flex; gap: var(--spacing-sm); flex-wrap: wrap; justify-content: center;">
+            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('github')}>
+              ${this.renderAccountIcon('github')}
+              GitHub
+            </button>
+            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('gitlab')}>
+              ${this.renderAccountIcon('gitlab')}
+              GitLab
+            </button>
+            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('bitbucket')}>
+              ${this.renderAccountIcon('bitbucket')}
+              Bitbucket
+            </button>
+            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('azure-devops')}>
+              ${this.renderAccountIcon('azure-devops')}
+              Azure DevOps
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Edit mode - show form for editing existing account metadata
     return html`
       <div class="form-group">
         <label>Account Name</label>
@@ -1617,15 +1668,15 @@ export class LvProfileManagerDialog extends LitElement {
         <label>Integration Type</label>
         <select
           .value=${this.editingAccount.integrationType ?? 'github'}
-          @change=${(e: Event) => this.updateEditingAccount('integrationType', (e.target as HTMLSelectElement).value as IntegrationType)}
+          disabled
         >
           <option value="github" ?selected=${this.editingAccount.integrationType === 'github'}>GitHub</option>
           <option value="gitlab" ?selected=${this.editingAccount.integrationType === 'gitlab'}>GitLab</option>
           <option value="azure-devops" ?selected=${this.editingAccount.integrationType === 'azure-devops'}>Azure DevOps</option>
+          <option value="bitbucket" ?selected=${this.editingAccount.integrationType === 'bitbucket'}>Bitbucket</option>
         </select>
+        <div class="form-hint">Integration type cannot be changed</div>
       </div>
-
-      ${this.renderAccountConfigFields()}
 
       <div class="form-group">
         <label>Color (optional)</label>
@@ -1652,17 +1703,23 @@ export class LvProfileManagerDialog extends LitElement {
       <div class="checkbox-row">
         <input
           type="checkbox"
-          id="isDefaultForType"
-          .checked=${this.editingAccount.isDefaultForType ?? false}
-          @change=${(e: Event) => this.updateEditingAccount('isDefaultForType', (e.target as HTMLInputElement).checked)}
+          id="isDefault"
+          .checked=${this.editingAccount.isDefault ?? false}
+          @change=${(e: Event) => this.updateEditingAccount('isDefault', (e.target as HTMLInputElement).checked)}
         />
-        <label for="isDefaultForType">Set as default ${INTEGRATION_TYPE_NAMES[this.editingAccount.integrationType ?? 'github']} account for this profile</label>
-      </div>
-
-      <div class="form-hint" style="margin-top: var(--spacing-sm);">
-        Note: Authentication tokens are configured separately in the integration dialogs (GitHub, GitLab, Azure DevOps).
+        <label for="isDefault">Set as default ${INTEGRATION_TYPE_NAMES[this.editingAccount.integrationType ?? 'github']} account globally</label>
       </div>
     `;
+  }
+
+  private dispatchIntegrationOpen(type: IntegrationType): void {
+    this.handleBack(); // Go back to edit view
+    this.dispatchEvent(
+      new CustomEvent(`open-${type === 'azure-devops' ? 'azure-devops' : type}`, {
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private renderAccountConfigFields() {
@@ -1703,6 +1760,25 @@ export class LvProfileManagerDialog extends LitElement {
             })}
           />
           <div class="form-hint">Your Azure DevOps organization name</div>
+        </div>
+      `;
+    }
+
+    if (type === 'bitbucket') {
+      const workspace = config?.type === 'bitbucket' ? config.workspace : '';
+      return html`
+        <div class="form-group">
+          <label>Workspace (optional)</label>
+          <input
+            type="text"
+            placeholder="my-workspace"
+            .value=${workspace ?? ''}
+            @input=${(e: Event) => this.updateEditingAccount('config', {
+              type: 'bitbucket',
+              workspace: (e.target as HTMLInputElement).value || '',
+            })}
+          />
+          <div class="form-hint">Your Bitbucket workspace (usually your username or organization)</div>
         </div>
       `;
     }

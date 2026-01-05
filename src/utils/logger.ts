@@ -3,7 +3,8 @@
  * Logs are only shown in development mode
  */
 
-const isDev = import.meta.env.DEV;
+// Handle case where import.meta.env may be undefined (e.g., in test environments)
+const isDev = typeof import.meta !== 'undefined' && import.meta.env?.DEV === true;
 
 interface LoggerOptions {
   prefix?: string;

@@ -70,6 +70,11 @@
         "https://github.com/hegsie/Leviathan/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI3MTNGRTQ2NTVGRUI5QzMKUldURHVmNVZSdjRUSnlkZHlCRWRtR0lxRVdMeFByU3JHRFlXNlQ4VmY2RUx2OUhGUFBmWW1ReUYK"
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["leviathan"]
+      }
     }
   }
 }

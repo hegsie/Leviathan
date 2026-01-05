@@ -16,7 +16,7 @@ const log = loggers.ui;
 import '../dialogs/lv-clone-dialog.ts';
 import '../dialogs/lv-init-dialog.ts';
 import './lv-search-bar.ts';
-import './lv-profile-selector.ts';
+// Profile selector moved to context dashboard
 import type { LvCloneDialog } from '../dialogs/lv-clone-dialog.ts';
 import type { LvInitDialog } from '../dialogs/lv-init-dialog.ts';
 import type { LvSearchBar, SearchFilter } from './lv-search-bar.ts';
@@ -108,7 +108,9 @@ export class LvToolbar extends LitElement {
         cursor: pointer;
         transition: all var(--transition-fast);
         white-space: nowrap;
-        max-width: 200px;
+        flex: 1;
+        min-width: 0;
+        max-width: 300px;
       }
 
       .tab:hover {
@@ -124,6 +126,8 @@ export class LvToolbar extends LitElement {
       .tab-name {
         overflow: hidden;
         text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
       }
 
       .provider-icon {
@@ -626,10 +630,6 @@ export class LvToolbar extends LitElement {
 
       <div class="toolbar-section">
         ${this.activeRepo ? html`
-          <lv-profile-selector
-            .repoPath=${this.activeRepo.repository.path}
-            @open-profile-manager=${this.handleOpenProfileManager}
-          ></lv-profile-selector>
           <button
             class="menu-btn ${this.showSearch ? 'active' : ''}"
             title="Search commits (Ctrl+F)"

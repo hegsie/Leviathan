@@ -175,10 +175,20 @@ This document outlines planned features and improvements for future releases. Fo
 ## Authentication Improvements
 
 ### OAuth Authentication
-- **GitHub OAuth** - Browser-based login via OAuth 2.0 device flow (no PAT required)
+- **GitHub OAuth** - Browser-based login via OAuth 2.0 with PKCE ✅
 - **GitLab OAuth** - OAuth authentication for GitLab.com and self-hosted instances
-- **Azure DevOps OAuth** - Microsoft Entra ID (Azure AD) authentication
 - **Bitbucket OAuth** - Atlassian account authentication
+
+### Azure DevOps Authentication
+> **Note:** Microsoft deprecated Azure DevOps native OAuth (vssps.visualstudio.com) in April 2025, with full removal in 2026.
+> Microsoft Entra ID OAuth only supports work/school accounts for Azure DevOps - personal Microsoft accounts cannot use OAuth.
+> GitKraken and similar apps that support personal accounts have legacy app registrations that predate the deprecation.
+
+**Current approach:** PAT (Personal Access Token) authentication only
+**Future:** Monitor Microsoft's promised "native MSA support" for Entra ID OAuth with Azure DevOps. When available:
+- Implement Microsoft Entra ID OAuth for Azure DevOps
+- Support both personal Microsoft accounts and work/school accounts
+- See: https://learn.microsoft.com/en-us/azure/devops/integrate/get-started/authentication/entra-oauth
 
 ### GitHub Apps
 - Install as a GitHub App instead of personal OAuth

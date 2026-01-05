@@ -156,3 +156,37 @@ export const inputStyles = css`
     cursor: not-allowed;
   }
 `;
+
+/**
+ * Animation styles mixin
+ * Common animations used across dashboard and status components
+ */
+export const animationStyles = css`
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  @keyframes slideDown {
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-pulse {
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  .animate-spin {
+    animation: spin 1s linear infinite;
+  }
+`;

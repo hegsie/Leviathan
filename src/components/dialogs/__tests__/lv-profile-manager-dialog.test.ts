@@ -1,12 +1,18 @@
 import { expect } from '@open-wc/testing';
-import type { UnifiedProfile, ProfileIntegrationAccount } from '../../../types/unified-profile.types.ts';
+import type {
+  UnifiedProfile,
+  IntegrationAccount,
+  UnifiedProfilesConfig,
+} from '../../../types/unified-profile.types.ts';
 import { PROFILE_COLORS } from '../../../types/unified-profile.types.ts';
 
 // Mock Tauri API before importing any modules that use it
 const mockProfiles: UnifiedProfile[] = [];
-const mockConfig = {
-  version: 2,
+const mockAccounts: IntegrationAccount[] = [];
+const mockConfig: UnifiedProfilesConfig = {
+  version: 3,
   profiles: mockProfiles,
+  accounts: mockAccounts,
   repositoryAssignments: {},
 };
 
@@ -20,11 +26,11 @@ const mockInvoke = (command: string, args?: Record<string, unknown>): Promise<un
       return Promise.resolve({ success: true, data: args?.profile });
     case 'delete_unified_profile':
       return Promise.resolve({ success: true, data: null });
-    case 'add_account_to_profile':
+    case 'get_global_accounts':
+      return Promise.resolve({ success: true, data: mockAccounts });
+    case 'save_global_account':
       return Promise.resolve({ success: true, data: args?.account });
-    case 'update_account_in_profile':
-      return Promise.resolve({ success: true, data: args?.account });
-    case 'remove_account_from_profile':
+    case 'delete_global_account':
       return Promise.resolve({ success: true, data: null });
     default:
       return Promise.resolve({ success: true, data: null });
@@ -37,7 +43,7 @@ const mockInvoke = (command: string, args?: Record<string, unknown>): Promise<un
 };
 
 describe('Profile Manager Dialog Data Structures', () => {
-  describe('UnifiedProfile', () => {
+  describe('UnifiedProfile (v3)', () => {
     it('should have correct structure for a complete profile', () => {
       const profile: UnifiedProfile = {
         id: 'test-profile-id',
@@ -48,7 +54,10 @@ describe('Profile Manager Dialog Data Structures', () => {
         urlPatterns: ['github.com/company/*', 'gitlab.company.com/*'],
         isDefault: true,
         color: '#3b82f6',
-        integrationAccounts: [],
+        defaultAccounts: {
+          github: 'github-account-1',
+          gitlab: 'gitlab-account-1',
+        },
       };
 
       expect(profile.id).to.equal('test-profile-id');
@@ -59,7 +68,8 @@ describe('Profile Manager Dialog Data Structures', () => {
       expect(profile.urlPatterns).to.have.lengthOf(2);
       expect(profile.isDefault).to.be.true;
       expect(profile.color).to.equal('#3b82f6');
-      expect(profile.integrationAccounts).to.deep.equal([]);
+      expect(profile.defaultAccounts.github).to.equal('github-account-1');
+      expect(profile.defaultAccounts.gitlab).to.equal('gitlab-account-1');
     });
 
     it('should allow null signing key', () => {
@@ -72,34 +82,13 @@ describe('Profile Manager Dialog Data Structures', () => {
         urlPatterns: [],
         isDefault: false,
         color: PROFILE_COLORS[0],
-        integrationAccounts: [],
+        defaultAccounts: {},
       };
 
       expect(profile.signingKey).to.be.null;
     });
 
-    it('should support multiple integration accounts', () => {
-      const accounts: ProfileIntegrationAccount[] = [
-        {
-          id: 'github-1',
-          name: 'Work GitHub',
-          integrationType: 'github',
-          config: { type: 'github' },
-          color: null,
-          cachedUser: null,
-          isDefaultForType: true,
-        },
-        {
-          id: 'gitlab-1',
-          name: 'Company GitLab',
-          integrationType: 'gitlab',
-          config: { type: 'gitlab', instanceUrl: 'https://gitlab.company.com' },
-          color: null,
-          cachedUser: null,
-          isDefaultForType: true,
-        },
-      ];
-
+    it('should allow empty defaultAccounts', () => {
       const profile: UnifiedProfile = {
         id: 'test',
         name: 'Work',
@@ -109,18 +98,37 @@ describe('Profile Manager Dialog Data Structures', () => {
         urlPatterns: [],
         isDefault: true,
         color: PROFILE_COLORS[0],
-        integrationAccounts: accounts,
+        defaultAccounts: {},
       };
 
-      expect(profile.integrationAccounts).to.have.lengthOf(2);
-      expect(profile.integrationAccounts[0].integrationType).to.equal('github');
-      expect(profile.integrationAccounts[1].integrationType).to.equal('gitlab');
+      expect(profile.defaultAccounts).to.deep.equal({});
+    });
+
+    it('should allow partial defaultAccounts', () => {
+      const profile: UnifiedProfile = {
+        id: 'test',
+        name: 'Work',
+        gitName: 'User',
+        gitEmail: 'user@company.com',
+        signingKey: null,
+        urlPatterns: [],
+        isDefault: true,
+        color: PROFILE_COLORS[0],
+        defaultAccounts: {
+          github: 'github-1',
+          // gitlab and azure-devops not set
+        },
+      };
+
+      expect(profile.defaultAccounts.github).to.equal('github-1');
+      expect(profile.defaultAccounts.gitlab).to.be.undefined;
+      expect(profile.defaultAccounts['azure-devops']).to.be.undefined;
     });
   });
 
-  describe('ProfileIntegrationAccount', () => {
+  describe('IntegrationAccount (global)', () => {
     it('should have correct structure for GitHub account', () => {
-      const account: ProfileIntegrationAccount = {
+      const account: IntegrationAccount = {
         id: 'github-account-1',
         name: 'Personal GitHub',
         integrationType: 'github',
@@ -132,18 +140,19 @@ describe('Profile Manager Dialog Data Structures', () => {
           avatarUrl: 'https://github.com/octocat.png',
           email: null,
         },
-        isDefaultForType: true,
+        urlPatterns: [],
+        isDefault: true,
       };
 
       expect(account.id).to.equal('github-account-1');
       expect(account.integrationType).to.equal('github');
       expect(account.config.type).to.equal('github');
       expect(account.cachedUser?.username).to.equal('octocat');
-      expect(account.isDefaultForType).to.be.true;
+      expect(account.isDefault).to.be.true;
     });
 
     it('should have correct structure for GitLab account', () => {
-      const account: ProfileIntegrationAccount = {
+      const account: IntegrationAccount = {
         id: 'gitlab-account-1',
         name: 'Self-hosted GitLab',
         integrationType: 'gitlab',
@@ -153,7 +162,8 @@ describe('Profile Manager Dialog Data Structures', () => {
         },
         color: null,
         cachedUser: null,
-        isDefaultForType: false,
+        urlPatterns: [],
+        isDefault: false,
       };
 
       expect(account.integrationType).to.equal('gitlab');
@@ -163,7 +173,7 @@ describe('Profile Manager Dialog Data Structures', () => {
     });
 
     it('should have correct structure for Azure DevOps account', () => {
-      const account: ProfileIntegrationAccount = {
+      const account: IntegrationAccount = {
         id: 'azure-account-1',
         name: 'Company Azure',
         integrationType: 'azure-devops',
@@ -173,7 +183,8 @@ describe('Profile Manager Dialog Data Structures', () => {
         },
         color: null,
         cachedUser: null,
-        isDefaultForType: true,
+        urlPatterns: [],
+        isDefault: true,
       };
 
       expect(account.integrationType).to.equal('azure-devops');
@@ -182,18 +193,41 @@ describe('Profile Manager Dialog Data Structures', () => {
       }
     });
 
-    it('should allow null color to inherit from profile', () => {
-      const account: ProfileIntegrationAccount = {
-        id: 'test',
-        name: 'Test',
+    it('should have correct structure for Bitbucket account', () => {
+      const account: IntegrationAccount = {
+        id: 'bitbucket-account-1',
+        name: 'Company Bitbucket',
+        integrationType: 'bitbucket',
+        config: {
+          type: 'bitbucket',
+          workspace: 'myworkspace',
+        },
+        color: null,
+        cachedUser: null,
+        urlPatterns: [],
+        isDefault: true,
+      };
+
+      expect(account.integrationType).to.equal('bitbucket');
+      if (account.config.type === 'bitbucket') {
+        expect(account.config.workspace).to.equal('myworkspace');
+      }
+    });
+
+    it('should support URL patterns for auto-detection', () => {
+      const account: IntegrationAccount = {
+        id: 'github-account-1',
+        name: 'Work GitHub',
         integrationType: 'github',
         config: { type: 'github' },
         color: null,
         cachedUser: null,
-        isDefaultForType: false,
+        urlPatterns: ['github.com/mycompany/*', 'github.com/myorg/*'],
+        isDefault: false,
       };
 
-      expect(account.color).to.be.null;
+      expect(account.urlPatterns).to.have.lengthOf(2);
+      expect(account.urlPatterns).to.include('github.com/mycompany/*');
     });
   });
 
@@ -248,7 +282,7 @@ describe('Profile Manager Dialog Data Structures', () => {
 
   describe('Account validation rules', () => {
     it('account name should be required', () => {
-      const account: Partial<ProfileIntegrationAccount> = {
+      const account: Partial<IntegrationAccount> = {
         name: '',
         integrationType: 'github',
       };
@@ -258,7 +292,7 @@ describe('Profile Manager Dialog Data Structures', () => {
     });
 
     it('valid account should pass validation', () => {
-      const account: Partial<ProfileIntegrationAccount> = {
+      const account: Partial<IntegrationAccount> = {
         name: 'Work GitHub',
         integrationType: 'github',
         config: { type: 'github' },
@@ -269,9 +303,9 @@ describe('Profile Manager Dialog Data Structures', () => {
     });
   });
 
-  describe('Default account management', () => {
-    it('only one account per type should be default', () => {
-      const accounts: ProfileIntegrationAccount[] = [
+  describe('Default account management (global)', () => {
+    it('only one account per type should be default globally', () => {
+      const accounts: IntegrationAccount[] = [
         {
           id: '1',
           name: 'GitHub 1',
@@ -279,7 +313,8 @@ describe('Profile Manager Dialog Data Structures', () => {
           config: { type: 'github' },
           color: null,
           cachedUser: null,
-          isDefaultForType: true,
+          urlPatterns: [],
+          isDefault: true,
         },
         {
           id: '2',
@@ -288,7 +323,8 @@ describe('Profile Manager Dialog Data Structures', () => {
           config: { type: 'github' },
           color: null,
           cachedUser: null,
-          isDefaultForType: false,
+          urlPatterns: [],
+          isDefault: false,
         },
         {
           id: '3',
@@ -297,7 +333,8 @@ describe('Profile Manager Dialog Data Structures', () => {
           config: { type: 'gitlab', instanceUrl: 'https://gitlab.com' },
           color: null,
           cachedUser: null,
-          isDefaultForType: true,
+          urlPatterns: [],
+          isDefault: true,
         },
       ];
 
@@ -308,10 +345,10 @@ describe('Profile Manager Dialog Data Structures', () => {
 
         return accounts.map((a) => {
           if (a.id === accountId) {
-            return { ...a, isDefaultForType: true };
+            return { ...a, isDefault: true };
           }
           if (a.integrationType === account.integrationType) {
-            return { ...a, isDefaultForType: false };
+            return { ...a, isDefault: false };
           }
           return a;
         });
@@ -319,17 +356,113 @@ describe('Profile Manager Dialog Data Structures', () => {
 
       const updated = setNewDefault('2');
 
-      const githubDefaults = updated.filter(
-        (a) => a.integrationType === 'github' && a.isDefaultForType
-      );
+      const githubDefaults = updated.filter((a) => a.integrationType === 'github' && a.isDefault);
       expect(githubDefaults).to.have.lengthOf(1);
       expect(githubDefaults[0].id).to.equal('2');
 
       // GitLab default should be unchanged
-      const gitlabDefaults = updated.filter(
-        (a) => a.integrationType === 'gitlab' && a.isDefaultForType
-      );
+      const gitlabDefaults = updated.filter((a) => a.integrationType === 'gitlab' && a.isDefault);
       expect(gitlabDefaults).to.have.lengthOf(1);
+    });
+  });
+
+  describe('Profile default account preferences', () => {
+    it('profile can override global default for a type', () => {
+      const accounts: IntegrationAccount[] = [
+        {
+          id: 'gh-1',
+          name: 'GitHub 1',
+          integrationType: 'github',
+          config: { type: 'github' },
+          color: null,
+          cachedUser: null,
+          urlPatterns: [],
+          isDefault: true, // Global default
+        },
+        {
+          id: 'gh-2',
+          name: 'GitHub 2',
+          integrationType: 'github',
+          config: { type: 'github' },
+          color: null,
+          cachedUser: null,
+          urlPatterns: [],
+          isDefault: false,
+        },
+      ];
+
+      const profile: UnifiedProfile = {
+        id: 'profile-1',
+        name: 'Work',
+        gitName: 'User',
+        gitEmail: 'user@example.com',
+        signingKey: null,
+        urlPatterns: [],
+        isDefault: true,
+        color: PROFILE_COLORS[0],
+        defaultAccounts: {
+          github: 'gh-2', // Profile prefers GitHub 2 over global default
+        },
+      };
+
+      // Helper to get profile's preferred account
+      const getProfilePreferredAccount = (
+        prof: UnifiedProfile,
+        accts: IntegrationAccount[],
+        type: 'github' | 'gitlab' | 'azure-devops' | 'bitbucket'
+      ) => {
+        const preferredId = prof.defaultAccounts[type];
+        if (preferredId) {
+          return accts.find((a) => a.id === preferredId);
+        }
+        // Fall back to global default
+        return accts.find((a) => a.integrationType === type && a.isDefault);
+      };
+
+      const preferred = getProfilePreferredAccount(profile, accounts, 'github');
+      expect(preferred?.id).to.equal('gh-2');
+    });
+
+    it('profile falls back to global default when no preference set', () => {
+      const accounts: IntegrationAccount[] = [
+        {
+          id: 'gh-1',
+          name: 'GitHub 1',
+          integrationType: 'github',
+          config: { type: 'github' },
+          color: null,
+          cachedUser: null,
+          urlPatterns: [],
+          isDefault: true,
+        },
+      ];
+
+      const profile: UnifiedProfile = {
+        id: 'profile-1',
+        name: 'Work',
+        gitName: 'User',
+        gitEmail: 'user@example.com',
+        signingKey: null,
+        urlPatterns: [],
+        isDefault: true,
+        color: PROFILE_COLORS[0],
+        defaultAccounts: {}, // No preferences set
+      };
+
+      const getProfilePreferredAccount = (
+        prof: UnifiedProfile,
+        accts: IntegrationAccount[],
+        type: 'github' | 'gitlab' | 'azure-devops' | 'bitbucket'
+      ) => {
+        const preferredId = prof.defaultAccounts[type];
+        if (preferredId) {
+          return accts.find((a) => a.id === preferredId);
+        }
+        return accts.find((a) => a.integrationType === type && a.isDefault);
+      };
+
+      const preferred = getProfilePreferredAccount(profile, accounts, 'github');
+      expect(preferred?.id).to.equal('gh-1');
     });
   });
 
@@ -374,6 +507,49 @@ describe('Profile Manager Dialog Data Structures', () => {
 
     it('default color should be first in array', () => {
       expect(PROFILE_COLORS[0]).to.equal('#3b82f6'); // blue
+    });
+  });
+
+  describe('Config structure (v3)', () => {
+    it('should have correct v3 config structure', () => {
+      const config: UnifiedProfilesConfig = {
+        version: 3,
+        profiles: [
+          {
+            id: 'profile-1',
+            name: 'Work',
+            gitName: 'User',
+            gitEmail: 'user@work.com',
+            signingKey: null,
+            urlPatterns: [],
+            isDefault: true,
+            color: PROFILE_COLORS[0],
+            defaultAccounts: {
+              github: 'gh-1',
+            },
+          },
+        ],
+        accounts: [
+          {
+            id: 'gh-1',
+            name: 'Work GitHub',
+            integrationType: 'github',
+            config: { type: 'github' },
+            color: null,
+            cachedUser: null,
+            urlPatterns: [],
+            isDefault: true,
+          },
+        ],
+        repositoryAssignments: {
+          '/path/to/repo': 'profile-1',
+        },
+      };
+
+      expect(config.version).to.equal(3);
+      expect(config.profiles).to.have.lengthOf(1);
+      expect(config.accounts).to.have.lengthOf(1);
+      expect(config.repositoryAssignments['/path/to/repo']).to.equal('profile-1');
     });
   });
 });

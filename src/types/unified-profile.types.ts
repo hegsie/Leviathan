@@ -1,13 +1,11 @@
 /**
- * Unified profile types - combines git identity with integration accounts
+ * Unified profile types - combines git identity with global integration accounts
  *
- * A unified profile is the top-level entity containing:
- * - Git identity (name, email, signing key)
- * - Multiple integration accounts (GitHub, GitLab, Azure DevOps)
- * - URL patterns for auto-detection
- * - Repository assignments
- *
- * This replaces the separate GitProfile and IntegrationAccount systems.
+ * Architecture (v3):
+ * - Profiles contain git identity (name, email, signing key) + default account preferences
+ * - Integration accounts are GLOBAL - available to all profiles, not owned by profiles
+ * - Repository assignments map repos to profiles (for git identity)
+ * - Any account can be used regardless of active profile
  */
 
 // Re-export common types and constants from integration accounts
@@ -17,8 +15,9 @@ import type { IntegrationType, IntegrationConfig, CachedUser } from './integrati
 
 /**
  * Current version of the unified profiles config format
+ * v3: Global accounts (accounts no longer nested in profiles)
  */
-export const UNIFIED_PROFILES_CONFIG_VERSION = 2;
+export const UNIFIED_PROFILES_CONFIG_VERSION = 3;
 
 /**
  * Profile colors for UI display
@@ -35,10 +34,34 @@ export const PROFILE_COLORS = [
 ] as const;
 
 /**
- * Integration account linked to a unified profile
+ * Global integration account (v3)
  *
- * Unlike standalone IntegrationAccount, this doesn't have its own URL patterns -
- * it inherits the profile's patterns for auto-detection.
+ * Accounts are now global - not owned by profiles. Any account can be used
+ * regardless of which profile is active. Profiles only reference accounts
+ * via their defaultAccounts preferences.
+ */
+export interface IntegrationAccount {
+  /** Unique identifier (UUID) */
+  id: string;
+  /** Display name (e.g., "Work GitHub", "GitHub Enterprise SSO") */
+  name: string;
+  /** Integration type */
+  integrationType: IntegrationType;
+  /** Integration-specific configuration */
+  config: IntegrationConfig;
+  /** Optional color for UI display */
+  color: string | null;
+  /** Cached user info (updated on connection check) */
+  cachedUser: CachedUser | null;
+  /** URL patterns for auto-detection (e.g., "github.com/mycompany/*") */
+  urlPatterns: string[];
+  /** Whether this is the default account for this integration type globally */
+  isDefault: boolean;
+}
+
+/**
+ * @deprecated Use IntegrationAccount instead. This type is kept for migration from v2.
+ * Integration account linked to a unified profile (v2 format)
  */
 export interface ProfileIntegrationAccount {
   /** Unique identifier (UUID) */
@@ -58,10 +81,11 @@ export interface ProfileIntegrationAccount {
 }
 
 /**
- * Unified profile containing git identity and integration accounts
+ * Unified profile containing git identity and default account preferences (v3)
  *
- * A profile represents a complete "context" (e.g., "Work", "Personal") that includes
- * both the git identity and all associated platform accounts.
+ * A profile represents a git identity context (e.g., "Work", "Personal").
+ * Accounts are now global - profiles only store preferences for which account
+ * to use as default for each integration type.
  */
 export interface UnifiedProfile {
   /** Unique identifier */
@@ -85,20 +109,52 @@ export interface UnifiedProfile {
   /** Color for UI display */
   color: string;
 
-  // Linked Integration Accounts
-  /** Integration accounts associated with this profile */
+  // Default Account Preferences (v3)
+  /** Default account ID for each integration type (optional per type) */
+  defaultAccounts: Partial<Record<IntegrationType, string>>;
+}
+
+/**
+ * @deprecated Use UnifiedProfile instead. This type is kept for migration from v2.
+ * Unified profile with embedded accounts (v2 format)
+ */
+export interface UnifiedProfileV2 {
+  id: string;
+  name: string;
+  gitName: string;
+  gitEmail: string;
+  signingKey: string | null;
+  urlPatterns: string[];
+  isDefault: boolean;
+  color: string;
   integrationAccounts: ProfileIntegrationAccount[];
 }
 
 /**
- * Configuration for storing unified profiles
+ * Configuration for storing unified profiles and global accounts (v3)
  */
 export interface UnifiedProfilesConfig {
-  /** Version number for migration support */
+  /** Version number for migration support (currently 3) */
   version: number;
   /** All saved profiles */
   profiles: UnifiedProfile[];
+  /** Global integration accounts (available to all profiles) */
+  accounts: IntegrationAccount[];
   /** Repository to profile assignments (repo path -> profile id) */
+  repositoryAssignments: Record<string, string>;
+}
+
+/**
+ * How a profile was assigned to a repository
+ */
+export type ProfileAssignmentSource = 'manual' | 'url-pattern' | 'default' | 'none';
+
+/**
+ * @deprecated Use UnifiedProfilesConfig instead. This type is kept for migration from v2.
+ */
+export interface UnifiedProfilesConfigV2 {
+  version: number;
+  profiles: UnifiedProfileV2[];
   repositoryAssignments: Record<string, string>;
 }
 
@@ -178,7 +234,7 @@ export interface MigrationBackupInfo {
 // =============================================================================
 
 /**
- * Create an empty unified profile
+ * Create an empty unified profile (v3)
  */
 export function createEmptyUnifiedProfile(): Omit<UnifiedProfile, 'id'> {
   return {
@@ -189,55 +245,107 @@ export function createEmptyUnifiedProfile(): Omit<UnifiedProfile, 'id'> {
     urlPatterns: [],
     isDefault: false,
     color: PROFILE_COLORS[0],
-    integrationAccounts: [],
+    defaultAccounts: {},
   };
 }
 
 /**
- * Create an empty GitHub account for a profile
+ * Create an empty GitHub account (global)
  */
-export function createEmptyGitHubProfileAccount(): Omit<ProfileIntegrationAccount, 'id'> {
+export function createEmptyGitHubAccount(): Omit<IntegrationAccount, 'id'> {
   return {
     name: '',
     integrationType: 'github',
     config: { type: 'github' },
     color: null,
     cachedUser: null,
-    isDefaultForType: false,
+    urlPatterns: [],
+    isDefault: false,
   };
 }
 
 /**
- * Create an empty GitLab account for a profile
+ * Create an empty GitLab account (global)
  */
-export function createEmptyGitLabProfileAccount(
+export function createEmptyGitLabAccount(
   instanceUrl: string = 'https://gitlab.com'
-): Omit<ProfileIntegrationAccount, 'id'> {
+): Omit<IntegrationAccount, 'id'> {
   return {
     name: '',
     integrationType: 'gitlab',
     config: { type: 'gitlab', instanceUrl },
     color: null,
     cachedUser: null,
-    isDefaultForType: false,
+    urlPatterns: [],
+    isDefault: false,
   };
 }
 
 /**
- * Create an empty Azure DevOps account for a profile
+ * Create an empty Azure DevOps account (global)
  */
-export function createEmptyAzureDevOpsProfileAccount(
+export function createEmptyAzureDevOpsAccount(
   organization: string = ''
-): Omit<ProfileIntegrationAccount, 'id'> {
+): Omit<IntegrationAccount, 'id'> {
   return {
     name: '',
     integrationType: 'azure-devops',
     config: { type: 'azure-devops', organization },
     color: null,
     cachedUser: null,
-    isDefaultForType: false,
+    urlPatterns: [],
+    isDefault: false,
   };
 }
+
+/**
+ * Create an empty Bitbucket account (global)
+ */
+export function createEmptyBitbucketAccount(
+  workspace: string = ''
+): Omit<IntegrationAccount, 'id'> {
+  return {
+    name: '',
+    integrationType: 'bitbucket',
+    config: { type: 'bitbucket', workspace },
+    color: null,
+    cachedUser: null,
+    urlPatterns: [],
+    isDefault: false,
+  };
+}
+
+/**
+ * Create an empty integration account of any type (global)
+ * This is a generic factory that calls the type-specific factory functions
+ */
+export function createEmptyIntegrationAccount(
+  integrationType: IntegrationType,
+  instanceOrOrg?: string
+): Omit<IntegrationAccount, 'id'> {
+  switch (integrationType) {
+    case 'github':
+      return createEmptyGitHubAccount();
+    case 'gitlab':
+      return createEmptyGitLabAccount(instanceOrOrg ?? 'https://gitlab.com');
+    case 'azure-devops':
+      return createEmptyAzureDevOpsAccount(instanceOrOrg ?? '');
+    case 'bitbucket':
+      return createEmptyBitbucketAccount(instanceOrOrg ?? '');
+    default:
+      throw new Error(`Unknown integration type: ${integrationType}`);
+  }
+}
+
+// Deprecated aliases for backward compatibility during migration
+/** @deprecated Use createEmptyGitHubAccount instead */
+export const createEmptyGitHubProfileAccount = createEmptyGitHubAccount;
+/** @deprecated Use createEmptyGitLabAccount instead */
+export const createEmptyGitLabProfileAccount = createEmptyGitLabAccount;
+/** @deprecated Use createEmptyAzureDevOpsAccount instead */
+export const createEmptyAzureDevOpsProfileAccount = createEmptyAzureDevOpsAccount;
+/** @deprecated Use createEmptyBitbucketAccount instead */
+export const createEmptyBitbucketProfileAccount = createEmptyBitbucketAccount;
 
 /**
  * Generate a UUID for profile/account IDs
@@ -246,38 +354,63 @@ export function generateId(): string {
   return crypto.randomUUID();
 }
 
+// =============================================================================
+// Global Account Helper Functions (v3)
+// =============================================================================
+
 /**
- * Get accounts of a specific type from a profile
+ * Filter global accounts by integration type
  */
-export function getAccountsByType(
-  profile: UnifiedProfile,
+export function filterAccountsByType(
+  accounts: IntegrationAccount[],
   integrationType: IntegrationType
-): ProfileIntegrationAccount[] {
-  return profile.integrationAccounts.filter((a) => a.integrationType === integrationType);
+): IntegrationAccount[] {
+  return accounts.filter((a) => a.integrationType === integrationType);
 }
 
 /**
- * Get the default account for a specific type from a profile
+ * Get the default global account for a specific type
  */
-export function getDefaultAccountForType(
-  profile: UnifiedProfile,
+export function getDefaultGlobalAccount(
+  accounts: IntegrationAccount[],
   integrationType: IntegrationType
-): ProfileIntegrationAccount | undefined {
-  const accounts = getAccountsByType(profile, integrationType);
-  return accounts.find((a) => a.isDefaultForType) || accounts[0];
+): IntegrationAccount | undefined {
+  const typeAccounts = filterAccountsByType(accounts, integrationType);
+  return typeAccounts.find((a) => a.isDefault) || typeAccounts[0];
 }
 
 /**
- * Get account count by type for a profile
+ * Get the profile's preferred account for a specific type
+ * Falls back to global default if profile has no preference
  */
-export function getAccountCountByType(profile: UnifiedProfile): Record<IntegrationType, number> {
+export function getProfilePreferredAccount(
+  profile: UnifiedProfile,
+  accounts: IntegrationAccount[],
+  integrationType: IntegrationType
+): IntegrationAccount | undefined {
+  const preferredId = profile.defaultAccounts[integrationType];
+  if (preferredId) {
+    const preferred = accounts.find((a) => a.id === preferredId);
+    if (preferred) return preferred;
+  }
+  // Fall back to global default
+  return getDefaultGlobalAccount(accounts, integrationType);
+}
+
+/**
+ * Get account count by type from global accounts
+ */
+export function getGlobalAccountCountByType(
+  accounts: IntegrationAccount[]
+): Record<IntegrationType, number> {
   const counts: Record<IntegrationType, number> = {
     github: 0,
     gitlab: 0,
     'azure-devops': 0,
+    bitbucket: 0,
   };
 
-  for (const account of profile.integrationAccounts) {
+  for (const account of accounts) {
     counts[account.integrationType]++;
   }
 
@@ -285,16 +418,9 @@ export function getAccountCountByType(profile: UnifiedProfile): Record<Integrati
 }
 
 /**
- * Get total account count for a profile
- */
-export function getAccountCount(profile: UnifiedProfile): number {
-  return profile.integrationAccounts.length;
-}
-
-/**
  * Get display label for an account (name + context info)
  */
-export function getAccountDisplayLabel(account: ProfileIntegrationAccount): string {
+export function getAccountDisplayLabel(account: IntegrationAccount | ProfileIntegrationAccount): string {
   const parts = [account.name];
 
   if (account.config.type === 'gitlab' && account.config.instanceUrl) {
@@ -313,6 +439,58 @@ export function getAccountDisplayLabel(account: ProfileIntegrationAccount): stri
   return parts.join(' ');
 }
 
+// =============================================================================
+// Deprecated Helper Functions (v2 - for migration only)
+// =============================================================================
+
+/**
+ * @deprecated Use filterAccountsByType with global accounts instead
+ */
+export function getAccountsByType(
+  profile: UnifiedProfileV2,
+  integrationType: IntegrationType
+): ProfileIntegrationAccount[] {
+  return profile.integrationAccounts.filter((a) => a.integrationType === integrationType);
+}
+
+/**
+ * @deprecated Use getProfilePreferredAccount instead
+ */
+export function getDefaultAccountForType(
+  profile: UnifiedProfileV2,
+  integrationType: IntegrationType
+): ProfileIntegrationAccount | undefined {
+  const accounts = getAccountsByType(profile, integrationType);
+  return accounts.find((a) => a.isDefaultForType) || accounts[0];
+}
+
+/**
+ * @deprecated Use getGlobalAccountCountByType instead
+ */
+export function getAccountCountByType(
+  profile: UnifiedProfileV2
+): Record<IntegrationType, number> {
+  const counts: Record<IntegrationType, number> = {
+    github: 0,
+    gitlab: 0,
+    'azure-devops': 0,
+    bitbucket: 0,
+  };
+
+  for (const account of profile.integrationAccounts) {
+    counts[account.integrationType]++;
+  }
+
+  return counts;
+}
+
+/**
+ * @deprecated Accounts are now global, use accounts.length instead
+ */
+export function getAccountCount(profile: UnifiedProfileV2): number {
+  return profile.integrationAccounts.length;
+}
+
 /**
  * Integration type display names
  */
@@ -320,4 +498,5 @@ export const INTEGRATION_TYPE_NAMES: Record<IntegrationType, string> = {
   github: 'GitHub',
   gitlab: 'GitLab',
   'azure-devops': 'Azure DevOps',
+  bitbucket: 'Bitbucket',
 };

@@ -68,6 +68,9 @@ pub enum LeviathanError {
 
     #[error("{0}")]
     Custom(String),
+
+    #[error("OAuth error: {0}")]
+    OAuth(String),
 }
 
 /// Serializable error response for IPC
@@ -102,6 +105,7 @@ impl From<LeviathanError> for ErrorResponse {
             LeviathanError::RevertInProgress => "REVERT_IN_PROGRESS",
             LeviathanError::InvalidReference => "INVALID_REFERENCE",
             LeviathanError::Custom(_) => "CUSTOM_ERROR",
+            LeviathanError::OAuth(_) => "OAUTH_ERROR",
         };
 
         ErrorResponse {
@@ -141,6 +145,7 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::RevertInProgress => "REVERT_IN_PROGRESS",
                 LeviathanError::InvalidReference => "INVALID_REFERENCE",
                 LeviathanError::Custom(_) => "CUSTOM_ERROR",
+                LeviathanError::OAuth(_) => "OAUTH_ERROR",
             }
             .to_string(),
             message: self.to_string(),

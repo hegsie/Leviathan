@@ -44,11 +44,17 @@ export interface UIState {
   removeToast: (id: string) => void;
 }
 
+export interface ToastAction {
+  label: string;
+  callback: () => void;
+}
+
 export interface Toast {
   id: string;
   type: 'info' | 'success' | 'warning' | 'error';
   message: string;
   duration?: number;
+  action?: ToastAction;
 }
 
 const defaultPanelState: Record<PanelId, PanelState> = {

@@ -21,6 +21,62 @@ fn resolve_token(token: Option<String>) -> Result<String> {
     }
 }
 
+/// Helper to make authenticated GitLab API GET requests
+/// Tries Bearer auth first (for OAuth tokens), falls back to PRIVATE-TOKEN (for PATs)
+async fn gitlab_get(url: &str, token: &str) -> Result<reqwest::Response> {
+    let client = reqwest::Client::new();
+
+    // Try Bearer auth first (for OAuth tokens)
+    let response = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Request failed: {}", e)))?;
+
+    // If Bearer auth fails with 401, try PRIVATE-TOKEN (for PATs)
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return client
+            .get(url)
+            .header("PRIVATE-TOKEN", token)
+            .send()
+            .await
+            .map_err(|e| LeviathanError::OperationFailed(format!("Request failed: {}", e)));
+    }
+
+    Ok(response)
+}
+
+/// Helper to make authenticated GitLab API POST requests
+/// Tries Bearer auth first (for OAuth tokens), falls back to PRIVATE-TOKEN (for PATs)
+async fn gitlab_post<T: Serialize + ?Sized>(url: &str, token: &str, body: &T) -> Result<reqwest::Response> {
+    let client = reqwest::Client::new();
+
+    // Try Bearer auth first (for OAuth tokens)
+    let response = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Request failed: {}", e)))?;
+
+    // If Bearer auth fails with 401, try PRIVATE-TOKEN (for PATs)
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return client
+            .post(url)
+            .header("PRIVATE-TOKEN", token)
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| LeviathanError::OperationFailed(format!("Request failed: {}", e)));
+    }
+
+    Ok(response)
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -139,6 +195,7 @@ fn url_encode(s: &str) -> String {
 // ============================================================================
 
 /// Check GitLab connection status
+/// Supports both OAuth tokens (Bearer auth) and Personal Access Tokens (PRIVATE-TOKEN header)
 #[command]
 pub async fn check_gitlab_connection(
     instance_url: String,
@@ -157,15 +214,32 @@ pub async fn check_gitlab_connection(
     };
 
     let client = reqwest::Client::new();
+    let api_url = build_api_url(&instance_url, "user");
 
+    // Try Bearer auth first (for OAuth tokens)
     let response = client
-        .get(build_api_url(&instance_url, "user"))
-        .header("PRIVATE-TOKEN", &token)
+        .get(&api_url)
+        .header("Authorization", format!("Bearer {}", token))
         .send()
         .await
         .map_err(|e| {
             LeviathanError::OperationFailed(format!("Failed to check connection: {}", e))
         })?;
+
+    // If Bearer auth fails with 401, try PRIVATE-TOKEN (for PATs)
+    let response = if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        tracing::debug!("Bearer auth failed, trying PRIVATE-TOKEN header");
+        client
+            .get(&api_url)
+            .header("PRIVATE-TOKEN", &token)
+            .send()
+            .await
+            .map_err(|e| {
+                LeviathanError::OperationFailed(format!("Failed to check connection: {}", e))
+            })?
+    } else {
+        response
+    };
 
     if !response.status().is_success() {
         return Ok(GitLabConnectionStatus {
@@ -300,15 +374,7 @@ pub async fn list_gitlab_merge_requests(
         state_param
     );
 
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .header("PRIVATE-TOKEN", &token)
-        .send()
-        .await
-        .map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to fetch merge requests: {}", e))
-        })?;
+    let response = gitlab_get(&url, &token).await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -387,15 +453,7 @@ pub async fn get_gitlab_merge_request(
         &format!("projects/{}/merge_requests/{}", encoded_path, mr_iid),
     );
 
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .header("PRIVATE-TOKEN", &token)
-        .send()
-        .await
-        .map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to fetch merge request: {}", e))
-        })?;
+    let response = gitlab_get(&url, &token).await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -492,17 +550,7 @@ pub async fn create_gitlab_merge_request(
         description: input.description,
     };
 
-    let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("PRIVATE-TOKEN", &token)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to create merge request: {}", e))
-        })?;
+    let response = gitlab_post(&url, &token, &body).await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -589,13 +637,7 @@ pub async fn list_gitlab_issues(
         url.push_str(&format!("&labels={}", url_encode(&label_str)));
     }
 
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .header("PRIVATE-TOKEN", &token)
-        .send()
-        .await
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch issues: {}", e)))?;
+    let response = gitlab_get(&url, &token).await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -693,15 +735,7 @@ pub async fn create_gitlab_issue(
         labels: input.labels.map(|l| l.join(",")),
     };
 
-    let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("PRIVATE-TOKEN", &token)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to create issue: {}", e)))?;
+    let response = gitlab_post(&url, &token, &body).await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -795,15 +829,7 @@ pub async fn list_gitlab_pipelines(
         url.push_str(&format!("&status={}", status_str));
     }
 
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .header("PRIVATE-TOKEN", &token)
-        .send()
-        .await
-        .map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to fetch pipelines: {}", e))
-        })?;
+    let response = gitlab_get(&url, &token).await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -863,13 +889,7 @@ pub async fn get_gitlab_labels(
         build_api_url(&instance_url, &format!("projects/{}/labels", encoded_path))
     );
 
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .header("PRIVATE-TOKEN", &token)
-        .send()
-        .await
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch labels: {}", e)))?;
+    let response = gitlab_get(&url, &token).await?;
 
     if !response.status().is_success() {
         return Ok(vec![]);

@@ -146,6 +146,30 @@ fn get_auth_header(username: &str, password: &str) -> String {
     format!("Basic {}", BASE64.encode(credentials.as_bytes()))
 }
 
+/// Get auth header - prefer OAuth token if provided, otherwise use username/password
+fn get_auth_header_with_token(
+    token: Option<&str>,
+    username: Option<&str>,
+    app_password: Option<&str>,
+) -> Result<String> {
+    // Prefer OAuth token if provided
+    if let Some(t) = token {
+        if !t.is_empty() {
+            return Ok(format!("Bearer {}", t));
+        }
+    }
+
+    // Fall back to username/password
+    match (username, app_password) {
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
+            Ok(get_auth_header(u, p))
+        }
+        _ => Err(LeviathanError::OperationFailed(
+            "Bitbucket credentials not configured".to_string(),
+        )),
+    }
+}
+
 // ============================================================================
 // Connection Commands
 // ============================================================================
@@ -224,6 +248,72 @@ pub async fn check_bitbucket_connection(
     })
 }
 
+/// Check Bitbucket connection status using OAuth token
+#[command]
+pub async fn check_bitbucket_connection_with_token(
+    token: Option<String>,
+) -> Result<BitbucketConnectionStatus> {
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return Ok(BitbucketConnectionStatus {
+                connected: false,
+                user: None,
+            })
+        }
+    };
+
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{}/user", BITBUCKET_API_BASE))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to check connection: {}", e))
+        })?;
+
+    if !response.status().is_success() {
+        return Ok(BitbucketConnectionStatus {
+            connected: false,
+            user: None,
+        });
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        uuid: String,
+        username: String,
+        display_name: String,
+        links: ApiLinks,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiLinks {
+        avatar: Option<ApiLink>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiLink {
+        href: String,
+    }
+
+    let api_user: ApiUser = response.json().await.map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to parse user data: {}", e))
+    })?;
+
+    Ok(BitbucketConnectionStatus {
+        connected: true,
+        user: Some(BitbucketUser {
+            uuid: api_user.uuid,
+            username: api_user.username,
+            display_name: api_user.display_name,
+            avatar_url: api_user.links.avatar.map(|a| a.href),
+        }),
+    })
+}
+
 /// Detect Bitbucket repository from git remotes
 #[command]
 pub async fn detect_bitbucket_repo(path: String) -> Result<Option<DetectedBitbucketRepo>> {
@@ -255,6 +345,7 @@ pub async fn detect_bitbucket_repo(path: String) -> Result<Option<DetectedBitbuc
 fn parse_bitbucket_url(url: &str) -> Option<(String, String)> {
     // Bitbucket URLs can be:
     // https://bitbucket.org/{workspace}/{repo}.git
+    // https://username@bitbucket.org/{workspace}/{repo}.git
     // git@bitbucket.org:{workspace}/{repo}.git
 
     // SSH format
@@ -267,11 +358,19 @@ fn parse_bitbucket_url(url: &str) -> Option<(String, String)> {
         }
     }
 
-    // HTTPS format
+    // HTTPS format (with or without username@)
     if url.contains("bitbucket.org") {
         let url = url
             .trim_start_matches("https://")
             .trim_start_matches("http://");
+
+        // Handle username@bitbucket.org format - strip everything before bitbucket.org
+        let url = if let Some(pos) = url.find("bitbucket.org") {
+            &url[pos..]
+        } else {
+            url
+        };
+
         let url = url.trim_start_matches("bitbucket.org/");
         let path = url.trim_end_matches(".git");
         let parts: Vec<&str> = path.split('/').collect();
@@ -293,10 +392,15 @@ pub async fn list_bitbucket_pull_requests(
     workspace: String,
     repo_slug: String,
     state: Option<String>,
+    token: Option<String>,
     username: Option<String>,
     app_password: Option<String>,
 ) -> Result<Vec<BitbucketPullRequest>> {
-    let credentials = resolve_credentials(username, app_password)?;
+    let auth_header = get_auth_header_with_token(
+        token.as_deref(),
+        username.as_deref(),
+        app_password.as_deref(),
+    )?;
 
     let state_param = state.unwrap_or_else(|| "OPEN".to_string());
     let url = format!(
@@ -304,13 +408,16 @@ pub async fn list_bitbucket_pull_requests(
         BITBUCKET_API_BASE, workspace, repo_slug, state_param
     );
 
+    tracing::debug!(
+        "Fetching Bitbucket PRs: url={}, has_token={}",
+        url,
+        token.is_some()
+    );
+
     let client = reqwest::Client::new();
     let response = client
         .get(&url)
-        .header(
-            "Authorization",
-            get_auth_header(&credentials.0, &credentials.1),
-        )
+        .header("Authorization", auth_header)
         .send()
         .await
         .map_err(|e| {
@@ -409,10 +516,15 @@ pub async fn get_bitbucket_pull_request(
     workspace: String,
     repo_slug: String,
     pr_id: u64,
+    token: Option<String>,
     username: Option<String>,
     app_password: Option<String>,
 ) -> Result<BitbucketPullRequest> {
-    let credentials = resolve_credentials(username, app_password)?;
+    let auth_header = get_auth_header_with_token(
+        token.as_deref(),
+        username.as_deref(),
+        app_password.as_deref(),
+    )?;
 
     let url = format!(
         "{}/repositories/{}/{}/pullrequests/{}",
@@ -422,10 +534,7 @@ pub async fn get_bitbucket_pull_request(
     let client = reqwest::Client::new();
     let response = client
         .get(&url)
-        .header(
-            "Authorization",
-            get_auth_header(&credentials.0, &credentials.1),
-        )
+        .header("Authorization", auth_header)
         .send()
         .await
         .map_err(|e| {
@@ -515,10 +624,15 @@ pub async fn create_bitbucket_pull_request(
     workspace: String,
     repo_slug: String,
     input: CreateBitbucketPullRequestInput,
+    token: Option<String>,
     username: Option<String>,
     app_password: Option<String>,
 ) -> Result<BitbucketPullRequest> {
-    let credentials = resolve_credentials(username, app_password)?;
+    let auth_header = get_auth_header_with_token(
+        token.as_deref(),
+        username.as_deref(),
+        app_password.as_deref(),
+    )?;
 
     let url = format!(
         "{}/repositories/{}/{}/pullrequests",
@@ -565,10 +679,7 @@ pub async fn create_bitbucket_pull_request(
     let client = reqwest::Client::new();
     let response = client
         .post(&url)
-        .header(
-            "Authorization",
-            get_auth_header(&credentials.0, &credentials.1),
-        )
+        .header("Authorization", auth_header)
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -664,10 +775,15 @@ pub async fn list_bitbucket_issues(
     workspace: String,
     repo_slug: String,
     state: Option<String>,
+    token: Option<String>,
     username: Option<String>,
     app_password: Option<String>,
 ) -> Result<Vec<BitbucketIssue>> {
-    let credentials = resolve_credentials(username, app_password)?;
+    let auth_header = get_auth_header_with_token(
+        token.as_deref(),
+        username.as_deref(),
+        app_password.as_deref(),
+    )?;
 
     let mut url = format!(
         "{}/repositories/{}/{}/issues?pagelen=30",
@@ -681,10 +797,7 @@ pub async fn list_bitbucket_issues(
     let client = reqwest::Client::new();
     let response = client
         .get(&url)
-        .header(
-            "Authorization",
-            get_auth_header(&credentials.0, &credentials.1),
-        )
+        .header("Authorization", auth_header)
         .send()
         .await
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch issues: {}", e)))?;
@@ -783,10 +896,15 @@ pub async fn list_bitbucket_issues(
 pub async fn list_bitbucket_pipelines(
     workspace: String,
     repo_slug: String,
+    token: Option<String>,
     username: Option<String>,
     app_password: Option<String>,
 ) -> Result<Vec<BitbucketPipeline>> {
-    let credentials = resolve_credentials(username, app_password)?;
+    let auth_header = get_auth_header_with_token(
+        token.as_deref(),
+        username.as_deref(),
+        app_password.as_deref(),
+    )?;
 
     let url = format!(
         "{}/repositories/{}/{}/pipelines/?pagelen=20&sort=-created_on",
@@ -796,10 +914,7 @@ pub async fn list_bitbucket_pipelines(
     let client = reqwest::Client::new();
     let response = client
         .get(&url)
-        .header(
-            "Authorization",
-            get_auth_header(&credentials.0, &credentials.1),
-        )
+        .header("Authorization", auth_header)
         .send()
         .await
         .map_err(|e| {

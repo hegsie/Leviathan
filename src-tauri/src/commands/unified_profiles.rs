@@ -9,8 +9,9 @@ use tauri::command;
 
 use crate::error::{LeviathanError, Result};
 use crate::models::{
-    CachedUser, IntegrationAccountsConfig, IntegrationType, ProfileIntegrationAccount,
-    ProfilesConfig, UnifiedProfile, UnifiedProfilesConfig, UNIFIED_PROFILES_CONFIG_VERSION,
+    CachedUser, IntegrationAccount, IntegrationAccountsConfig, IntegrationType,
+    ProfileIntegrationAccount, ProfilesConfig, UnifiedProfile, UnifiedProfilesConfig,
+    UNIFIED_PROFILES_CONFIG_VERSION,
 };
 use crate::utils::create_command;
 
@@ -252,95 +253,72 @@ pub async fn set_default_unified_profile(profile_id: String) -> Result<()> {
 }
 
 // =============================================================================
-// Account Within Profile Commands
+// Global Account Commands (v3)
 // =============================================================================
 
-/// Add an integration account to a profile
+/// Get all global accounts
 #[command]
-pub async fn add_account_to_profile(
-    profile_id: String,
-    account: ProfileIntegrationAccount,
-) -> Result<ProfileIntegrationAccount> {
+pub async fn get_global_accounts() -> Result<Vec<IntegrationAccount>> {
+    let config = load_unified_profiles_config()?;
+    Ok(config.accounts)
+}
+
+/// Get global accounts by integration type
+#[command]
+pub async fn get_global_accounts_by_type(
+    integration_type: IntegrationType,
+) -> Result<Vec<IntegrationAccount>> {
+    let config = load_unified_profiles_config()?;
+    Ok(config
+        .accounts
+        .into_iter()
+        .filter(|a| a.integration_type == integration_type)
+        .collect())
+}
+
+/// Get a single global account by ID
+#[command]
+pub async fn get_global_account(account_id: String) -> Result<Option<IntegrationAccount>> {
+    let config = load_unified_profiles_config()?;
+    Ok(config.accounts.into_iter().find(|a| a.id == account_id))
+}
+
+/// Save a global account (create or update)
+#[command]
+pub async fn save_global_account(account: IntegrationAccount) -> Result<IntegrationAccount> {
     let mut config = load_unified_profiles_config()?;
-
-    let profile = config
-        .get_profile_mut(&profile_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Profile not found".to_string()))?;
-
-    profile.save_account(account.clone());
+    config.save_account(account.clone());
     save_unified_profiles_config(&config)?;
     Ok(account)
 }
 
-/// Update an integration account within a profile
+/// Delete a global account
 #[command]
-pub async fn update_account_in_profile(
-    profile_id: String,
-    account: ProfileIntegrationAccount,
-) -> Result<ProfileIntegrationAccount> {
+pub async fn delete_global_account(account_id: String) -> Result<()> {
     let mut config = load_unified_profiles_config()?;
-
-    let profile = config
-        .get_profile_mut(&profile_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Profile not found".to_string()))?;
-
-    if profile.get_account(&account.id).is_none() {
-        return Err(LeviathanError::OperationFailed(
-            "Account not found in profile".to_string(),
-        ));
-    }
-
-    profile.save_account(account.clone());
-    save_unified_profiles_config(&config)?;
-    Ok(account)
-}
-
-/// Remove an integration account from a profile
-#[command]
-pub async fn remove_account_from_profile(profile_id: String, account_id: String) -> Result<()> {
-    let mut config = load_unified_profiles_config()?;
-
-    let profile = config
-        .get_profile_mut(&profile_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Profile not found".to_string()))?;
-
-    profile.delete_account(&account_id);
+    config.delete_account(&account_id);
     save_unified_profiles_config(&config)?;
     Ok(())
 }
 
-/// Set an account as the default for its type within a profile
+/// Set the default global account for an integration type
 #[command]
-pub async fn set_default_account_in_profile(profile_id: String, account_id: String) -> Result<()> {
-    let mut config = load_unified_profiles_config()?;
-
-    let profile = config
-        .get_profile_mut(&profile_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Profile not found".to_string()))?;
-
-    // Find the account to get its type
-    let integration_type = profile
-        .get_account(&account_id)
-        .map(|a| a.integration_type.clone())
-        .ok_or_else(|| LeviathanError::OperationFailed("Account not found".to_string()))?;
-
-    // Update defaults
-    for acc in &mut profile.integration_accounts {
-        if acc.integration_type == integration_type {
-            acc.is_default_for_type = acc.id == account_id;
-        }
-    }
-
-    save_unified_profiles_config(&config)?;
-    Ok(())
-}
-
-/// Update cached user info for an account within a profile
-#[command]
-pub async fn update_profile_account_cached_user(
-    profile_id: String,
+pub async fn set_default_global_account(
+    integration_type: IntegrationType,
     account_id: String,
-    user: CachedUser,
+) -> Result<()> {
+    let mut config = load_unified_profiles_config()?;
+    config.set_default_account(&integration_type, &account_id);
+    save_unified_profiles_config(&config)?;
+    Ok(())
+}
+
+/// Set the default account for a profile (profile preference)
+#[command]
+pub async fn set_profile_default_account(
+    profile_id: String,
+    integration_type: IntegrationType,
+    account_id: String,
 ) -> Result<()> {
     let mut config = load_unified_profiles_config()?;
 
@@ -348,7 +326,149 @@ pub async fn update_profile_account_cached_user(
         .get_profile_mut(&profile_id)
         .ok_or_else(|| LeviathanError::OperationFailed("Profile not found".to_string()))?;
 
-    let account = profile
+    profile.set_default_account(integration_type, account_id);
+    save_unified_profiles_config(&config)?;
+    Ok(())
+}
+
+/// Remove the default account preference for a profile
+#[command]
+pub async fn remove_profile_default_account(
+    profile_id: String,
+    integration_type: IntegrationType,
+) -> Result<()> {
+    let mut config = load_unified_profiles_config()?;
+
+    let profile = config
+        .get_profile_mut(&profile_id)
+        .ok_or_else(|| LeviathanError::OperationFailed("Profile not found".to_string()))?;
+
+    profile.remove_default_account(&integration_type);
+    save_unified_profiles_config(&config)?;
+    Ok(())
+}
+
+/// Update cached user info for a global account
+#[command]
+pub async fn update_global_account_cached_user(account_id: String, user: CachedUser) -> Result<()> {
+    let mut config = load_unified_profiles_config()?;
+
+    let account = config
+        .get_account_mut(&account_id)
+        .ok_or_else(|| LeviathanError::OperationFailed("Account not found".to_string()))?;
+
+    account.update_cached_user(user);
+    save_unified_profiles_config(&config)?;
+    Ok(())
+}
+
+/// Get the profile's preferred account for an integration type
+#[command]
+pub async fn get_profile_preferred_account(
+    profile_id: String,
+    integration_type: IntegrationType,
+) -> Result<Option<IntegrationAccount>> {
+    let config = load_unified_profiles_config()?;
+    Ok(config
+        .get_profile_preferred_account(&profile_id, &integration_type)
+        .cloned())
+}
+
+// =============================================================================
+// Deprecated Profile-Scoped Account Commands (kept for backward compatibility)
+// =============================================================================
+
+/// Add an integration account to a profile
+/// @deprecated Use save_global_account instead
+#[command]
+pub async fn add_account_to_profile(
+    _profile_id: String,
+    account: ProfileIntegrationAccount,
+) -> Result<ProfileIntegrationAccount> {
+    // Convert to global account and save
+    let global_account = IntegrationAccount {
+        id: account.id.clone(),
+        name: account.name.clone(),
+        integration_type: account.integration_type.clone(),
+        config: account.config.clone(),
+        color: account.color.clone(),
+        cached_user: account.cached_user.clone(),
+        url_patterns: Vec::new(),
+        is_default: account.is_default_for_type,
+    };
+
+    let mut config = load_unified_profiles_config()?;
+    config.save_account(global_account);
+    save_unified_profiles_config(&config)?;
+    Ok(account)
+}
+
+/// Update an integration account within a profile
+/// @deprecated Use save_global_account instead
+#[command]
+pub async fn update_account_in_profile(
+    _profile_id: String,
+    account: ProfileIntegrationAccount,
+) -> Result<ProfileIntegrationAccount> {
+    let global_account = IntegrationAccount {
+        id: account.id.clone(),
+        name: account.name.clone(),
+        integration_type: account.integration_type.clone(),
+        config: account.config.clone(),
+        color: account.color.clone(),
+        cached_user: account.cached_user.clone(),
+        url_patterns: Vec::new(),
+        is_default: account.is_default_for_type,
+    };
+
+    let mut config = load_unified_profiles_config()?;
+    config.save_account(global_account);
+    save_unified_profiles_config(&config)?;
+    Ok(account)
+}
+
+/// Remove an integration account from a profile
+/// @deprecated Use delete_global_account instead
+#[command]
+pub async fn remove_account_from_profile(_profile_id: String, account_id: String) -> Result<()> {
+    let mut config = load_unified_profiles_config()?;
+    config.delete_account(&account_id);
+    save_unified_profiles_config(&config)?;
+    Ok(())
+}
+
+/// Set an account as the default for its type within a profile
+/// @deprecated Use set_profile_default_account instead
+#[command]
+pub async fn set_default_account_in_profile(profile_id: String, account_id: String) -> Result<()> {
+    let mut config = load_unified_profiles_config()?;
+
+    // Find the account to get its type
+    let integration_type = config
+        .get_account(&account_id)
+        .map(|a| a.integration_type.clone())
+        .ok_or_else(|| LeviathanError::OperationFailed("Account not found".to_string()))?;
+
+    // Set as profile's preferred account
+    if let Some(profile) = config.get_profile_mut(&profile_id) {
+        profile.set_default_account(integration_type, account_id);
+    }
+
+    save_unified_profiles_config(&config)?;
+    Ok(())
+}
+
+/// Update cached user info for an account within a profile
+/// @deprecated Use update_global_account_cached_user instead
+#[command]
+pub async fn update_profile_account_cached_user(
+    _profile_id: String,
+    account_id: String,
+    user: CachedUser,
+) -> Result<()> {
+    let mut config = load_unified_profiles_config()?;
+
+    let account = config
         .get_account_mut(&account_id)
         .ok_or_else(|| LeviathanError::OperationFailed("Account not found".to_string()))?;
 
@@ -617,6 +737,8 @@ pub struct MigrationPreviewAccount {
 pub async fn execute_unified_profiles_migration(
     account_assignments: std::collections::HashMap<String, String>, // account_id -> profile_id
 ) -> Result<UnifiedMigrationResult> {
+    use std::collections::HashMap;
+
     let legacy_profiles = load_legacy_profiles_config()?;
     let legacy_accounts = load_legacy_accounts_config()?;
 
@@ -628,123 +750,66 @@ pub async fn execute_unified_profiles_migration(
         errors: Vec::new(),
     };
 
-    // Create unified profiles from legacy profiles
-    let mut unified_profiles: Vec<UnifiedProfile> = legacy_profiles
+    // Convert legacy accounts to global IntegrationAccount (v3)
+    let mut global_accounts: Vec<IntegrationAccount> = Vec::new();
+
+    for account in &legacy_accounts.accounts {
+        global_accounts.push(IntegrationAccount {
+            id: account.id.clone(),
+            name: account.name.clone(),
+            integration_type: account.integration_type.clone(),
+            config: account.config.clone(),
+            color: account.color.clone(),
+            cached_user: account.cached_user.clone(),
+            url_patterns: account.url_patterns.clone(),
+            is_default: account.is_default,
+        });
+        result.accounts_migrated += 1;
+    }
+
+    // Create unified profiles from legacy profiles (v3 format)
+    let unified_profiles: Vec<UnifiedProfile> = legacy_profiles
         .profiles
         .iter()
-        .map(|p| UnifiedProfile {
-            id: p.id.clone(),
-            name: p.name.clone(),
-            git_name: p.git_name.clone(),
-            git_email: p.git_email.clone(),
-            signing_key: p.signing_key.clone(),
-            url_patterns: p.url_patterns.clone(),
-            is_default: p.is_default,
-            color: p.color.clone().unwrap_or_else(|| "#3b82f6".to_string()),
-            integration_accounts: Vec::new(),
+        .map(|p| {
+            // Build default_accounts map based on account_assignments
+            let mut default_accounts: HashMap<IntegrationType, String> = HashMap::new();
+
+            // Check which accounts are assigned to this profile
+            for (account_id, assigned_profile_id) in &account_assignments {
+                if assigned_profile_id == &p.id {
+                    // Find the account and add to default_accounts
+                    if let Some(account) = legacy_accounts.accounts.iter().find(|a| &a.id == account_id) {
+                        default_accounts.entry(account.integration_type.clone())
+                            .or_insert_with(|| account_id.clone());
+                    }
+                }
+            }
+
+            UnifiedProfile {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                git_name: p.git_name.clone(),
+                git_email: p.git_email.clone(),
+                signing_key: p.signing_key.clone(),
+                url_patterns: p.url_patterns.clone(),
+                is_default: p.is_default,
+                color: p.color.clone().unwrap_or_else(|| "#3b82f6".to_string()),
+                default_accounts,
+            }
         })
         .collect();
 
     result.profiles_migrated = unified_profiles.len();
 
-    // Assign accounts to profiles based on the provided assignments
-    for account in &legacy_accounts.accounts {
-        let profile_id = account_assignments.get(&account.id);
-
-        if let Some(profile_id) = profile_id {
-            if let Some(profile) = unified_profiles.iter_mut().find(|p| &p.id == profile_id) {
-                profile
-                    .integration_accounts
-                    .push(ProfileIntegrationAccount {
-                        id: account.id.clone(),
-                        name: account.name.clone(),
-                        integration_type: account.integration_type.clone(),
-                        config: account.config.clone(),
-                        color: account.color.clone(),
-                        cached_user: account.cached_user.clone(),
-                        is_default_for_type: account.is_default,
-                    });
-                result.accounts_migrated += 1;
-            } else {
-                result.unmatched_accounts.push(UnmatchedAccount {
-                    account_id: account.id.clone(),
-                    account_name: account.name.clone(),
-                    integration_type: account.integration_type.clone(),
-                    suggested_profile_id: None,
-                });
-            }
-        } else {
-            // No assignment provided - try to match by URL patterns or use default
-            let mut assigned = false;
-
-            // Try URL pattern matching
-            for profile in &mut unified_profiles {
-                if has_pattern_overlap(&profile.url_patterns, &account.url_patterns) {
-                    profile
-                        .integration_accounts
-                        .push(ProfileIntegrationAccount {
-                            id: account.id.clone(),
-                            name: account.name.clone(),
-                            integration_type: account.integration_type.clone(),
-                            config: account.config.clone(),
-                            color: account.color.clone(),
-                            cached_user: account.cached_user.clone(),
-                            is_default_for_type: account.is_default,
-                        });
-                    result.accounts_migrated += 1;
-                    assigned = true;
-                    break;
-                }
-            }
-
-            // Fall back to default profile
-            if !assigned {
-                if let Some(profile) = unified_profiles.iter_mut().find(|p| p.is_default) {
-                    profile
-                        .integration_accounts
-                        .push(ProfileIntegrationAccount {
-                            id: account.id.clone(),
-                            name: account.name.clone(),
-                            integration_type: account.integration_type.clone(),
-                            config: account.config.clone(),
-                            color: account.color.clone(),
-                            cached_user: account.cached_user.clone(),
-                            is_default_for_type: account.is_default,
-                        });
-                    result.accounts_migrated += 1;
-                } else if let Some(profile) = unified_profiles.first_mut() {
-                    // Use first profile as fallback
-                    profile
-                        .integration_accounts
-                        .push(ProfileIntegrationAccount {
-                            id: account.id.clone(),
-                            name: account.name.clone(),
-                            integration_type: account.integration_type.clone(),
-                            config: account.config.clone(),
-                            color: account.color.clone(),
-                            cached_user: account.cached_user.clone(),
-                            is_default_for_type: account.is_default,
-                        });
-                    result.accounts_migrated += 1;
-                } else {
-                    result.unmatched_accounts.push(UnmatchedAccount {
-                        account_id: account.id.clone(),
-                        account_name: account.name.clone(),
-                        integration_type: account.integration_type.clone(),
-                        suggested_profile_id: None,
-                    });
-                }
-            }
-        }
-    }
-
-    // Use profile repository assignments (account assignments become implicit via profile)
+    // Use profile repository assignments
     let repository_assignments = legacy_profiles.repository_assignments.clone();
 
-    // Save the unified config
+    // Save the unified config (v3 format)
     let unified_config = UnifiedProfilesConfig {
         version: UNIFIED_PROFILES_CONFIG_VERSION,
         profiles: unified_profiles,
+        accounts: global_accounts,
         repository_assignments,
     };
 
@@ -997,17 +1062,17 @@ pub async fn delete_migration_backup() -> Result<()> {
     Ok(())
 }
 
-/// Get an account from any profile (for compatibility during transition)
+/// Get an account from global accounts (for compatibility during transition)
+/// @deprecated Use get_global_account instead
 #[command]
 pub async fn get_account_from_any_profile(
     account_id: String,
-) -> Result<Option<(String, ProfileIntegrationAccount)>> {
+) -> Result<Option<(String, IntegrationAccount)>> {
     let config = load_unified_profiles_config()?;
 
-    for profile in &config.profiles {
-        if let Some(account) = profile.get_account(&account_id) {
-            return Ok(Some((profile.id.clone(), account.clone())));
-        }
+    // In v3, accounts are global - just find the account and return with empty profile id
+    if let Some(account) = config.get_account(&account_id) {
+        return Ok(Some(("".to_string(), account.clone())));
     }
 
     Ok(None)
@@ -1018,13 +1083,18 @@ pub async fn get_account_from_any_profile(
 pub async fn get_repository_account(
     path: String,
     integration_type: IntegrationType,
-) -> Result<Option<ProfileIntegrationAccount>> {
+) -> Result<Option<IntegrationAccount>> {
+    let config = load_unified_profiles_config()?;
     let profile = detect_unified_profile_for_repository(path).await?;
 
     if let Some(profile) = profile {
-        Ok(profile.get_default_account(&integration_type).cloned())
+        // Get the profile's preferred account for this type
+        Ok(config
+            .get_profile_preferred_account(&profile.id, &integration_type)
+            .cloned())
     } else {
-        Ok(None)
+        // No profile, return global default
+        Ok(config.get_default_account(&integration_type).cloned())
     }
 }
 

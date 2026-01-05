@@ -20,10 +20,13 @@ import type {
   ReleaseSummary,
   CreateReleaseInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import type { ProfileIntegrationAccount } from '../../types/unified-profile.types.ts';
+import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
+import * as oauthService from '../../services/oauth.service.ts';
+import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts';
+import type { OAuthFlowState, OAuthTokenResponse } from '../../types/oauth.types.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
@@ -125,6 +128,109 @@ export class LvGitHubDialog extends LitElement {
         display: flex;
         flex-direction: column;
         gap: var(--spacing-md);
+      }
+
+      /* Auth method toggle */
+      .auth-method-toggle {
+        display: flex;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-xs);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-md);
+      }
+
+      .auth-method-btn {
+        flex: 1;
+        padding: var(--spacing-sm) var(--spacing-md);
+        border: none;
+        background: transparent;
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        border-radius: var(--radius-sm);
+        transition: all var(--transition-fast);
+      }
+
+      .auth-method-btn:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .auth-method-btn.active {
+        background: var(--color-bg-primary);
+        color: var(--color-text-primary);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .auth-method-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      /* OAuth section */
+      .oauth-section {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--spacing-md);
+        padding: var(--spacing-lg);
+      }
+
+      .btn-oauth {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-md) var(--spacing-xl);
+        background: #24292e;
+        border: none;
+        border-radius: var(--radius-md);
+        color: white;
+        font-size: var(--font-size-md);
+        font-weight: var(--font-weight-medium);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .btn-oauth:hover:not(:disabled) {
+        background: #2f363d;
+      }
+
+      .btn-oauth:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-oauth .github-icon {
+        width: 20px;
+        height: 20px;
+      }
+
+      .oauth-hint {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-muted);
+        text-align: center;
+        margin: 0;
+      }
+
+      .oauth-pending {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--spacing-md);
+        padding: var(--spacing-lg);
+      }
+
+      .oauth-spinner {
+        width: 32px;
+        height: 32px;
+        border: 3px solid var(--color-border);
+        border-top-color: var(--color-primary);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
       }
 
       .form-group {
@@ -633,8 +739,14 @@ export class LvGitHubDialog extends LitElement {
   @state() private prFilter: 'open' | 'closed' | 'all' = 'open';
   @state() private issueFilter: 'open' | 'closed' | 'all' = 'open';
 
-  // Multi-account support (from active unified profile)
-  @state() private accounts: ProfileIntegrationAccount[] = [];
+  // OAuth state
+  @state() private authMethod: 'oauth' | 'pat' = 'oauth';
+  @state() private oauthState: OAuthFlowState = { status: 'idle' };
+  private oauthUnsubscribe?: () => void;
+  private boundOAuthComplete = this.handleOAuthComplete.bind(this);
+
+  // Multi-account support (global accounts)
+  @state() private accounts: IntegrationAccount[] = [];
   @state() private selectedAccountId: string | null = null;
 
   private unsubscribeStore?: () => void;
@@ -665,29 +777,31 @@ export class LvGitHubDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
 
-    // Subscribe to unified profile store - get accounts from active profile
-    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
-      const activeProfile = state.activeProfile;
-      if (activeProfile) {
-        this.accounts = activeProfile.integrationAccounts.filter((a) => a.integrationType === 'github');
-        // If no account selected, try to select the default one
-        if (!this.selectedAccountId && this.accounts.length > 0) {
-          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
-          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
-        }
-      } else {
-        this.accounts = [];
+    // Subscribe to OAuth state changes
+    this.oauthUnsubscribe = oauthService.onOAuthStateChange((state) => {
+      if (state.provider === 'github') {
+        this.oauthState = state;
+      }
+    });
+
+    // Listen for OAuth complete events
+    window.addEventListener('oauth-complete', this.boundOAuthComplete as unknown as EventListener);
+
+    // Subscribe to unified profile store - get global accounts
+    this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
+      this.accounts = getAccountsByType('github');
+      // If no account selected, try to select the default one
+      if (!this.selectedAccountId && this.accounts.length > 0) {
+        const defaultAccount = getDefaultGlobalAccount('github');
+        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
       }
     });
 
     // Initialize from current state
-    const state = unifiedProfileStore.getState();
-    if (state.activeProfile) {
-      this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'github');
-      if (this.accounts.length > 0 && !this.selectedAccountId) {
-        const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
-        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
-      }
+    this.accounts = getAccountsByType('github');
+    if (this.accounts.length > 0 && !this.selectedAccountId) {
+      const defaultAccount = getDefaultGlobalAccount('github');
+      this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
     }
 
     if (this.open) {
@@ -698,6 +812,8 @@ export class LvGitHubDialog extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribeStore?.();
+    this.oauthUnsubscribe?.();
+    window.removeEventListener('oauth-complete', this.boundOAuthComplete as unknown as EventListener);
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -714,17 +830,31 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
+      console.log('[GitHub Dialog] loadInitialData starting...');
+
       // Ensure unified profiles are loaded
       await unifiedProfileService.loadUnifiedProfiles();
 
+      // Load the profile for this repository to set activeProfile
+      if (this.repositoryPath) {
+        await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+      }
+
       // Re-sync local state with store after loading
       const state = unifiedProfileStore.getState();
-      if (state.activeProfile) {
-        this.accounts = state.activeProfile.integrationAccounts.filter((a) => a.integrationType === 'github');
-        if (this.accounts.length > 0 && !this.selectedAccountId) {
-          const defaultAccount = this.accounts.find((a) => a.isDefaultForType);
-          this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
-        }
+      console.log('[GitHub Dialog] Store state:', {
+        hasActiveProfile: !!state.activeProfile,
+        activeProfileId: state.activeProfile?.id,
+        globalAccountsCount: state.accounts?.length ?? 0,
+        githubAccounts: state.accounts?.filter((a) => a.integrationType === 'github').length ?? 0,
+      });
+
+      this.accounts = getAccountsByType('github');
+      console.log('[GitHub Dialog] Loaded accounts:', this.accounts.map(a => ({ id: a.id, name: a.name })));
+      if (this.accounts.length > 0 && !this.selectedAccountId) {
+        const defaultAccount = getDefaultGlobalAccount('github');
+        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+        console.log('[GitHub Dialog] Selected account:', this.selectedAccountId);
       }
 
       await this.checkConnection();
@@ -745,10 +875,9 @@ export class LvGitHubDialog extends LitElement {
       const result = await gitService.checkGitHubConnectionWithToken(token);
       if (result.success && result.data) {
         this.connectionStatus = result.data;
-        // Update cached user in account if connected
-        const activeProfile = unifiedProfileStore.getState().activeProfile;
-        if (activeProfile && this.selectedAccountId && result.data.connected && result.data.user) {
-          await unifiedProfileService.updateProfileAccountCachedUser(activeProfile.id, this.selectedAccountId, {
+        // Update cached user in global account if connected
+        if (this.selectedAccountId && result.data.connected && result.data.user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
             username: result.data.user.login,
             displayName: result.data.user.name ?? null,
             email: result.data.user.email ?? null,
@@ -778,7 +907,7 @@ export class LvGitHubDialog extends LitElement {
   /**
    * Handle account selection change
    */
-  private async handleAccountChange(e: CustomEvent<{ account: ProfileIntegrationAccount }>): Promise<void> {
+  private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
@@ -943,6 +1072,108 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
+  private async handleStartOAuth(): Promise<void> {
+    const clientId = getClientId('github');
+    if (!clientId) {
+      this.error = 'GitHub OAuth is not configured. Please use a Personal Access Token.';
+      this.authMethod = 'pat';
+      return;
+    }
+
+    this.error = null;
+    await oauthService.startOAuth('github', clientId);
+  }
+
+  private async handleOAuthComplete(event: CustomEvent<{ provider: string; tokens: OAuthTokenResponse }>): Promise<void> {
+    const { provider, tokens } = event.detail;
+    console.log('[GitHub Dialog] OAuth complete event received:', {
+      provider,
+      hasTokens: !!tokens,
+      accessToken: tokens?.accessToken?.substring(0, 10) + '...',
+      tokenKeys: tokens ? Object.keys(tokens) : [],
+    });
+    if (provider !== 'github') return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      // IMPORTANT: Ensure profiles are loaded before trying to save the account
+      // The OAuth callback fires via window event and may complete before loadInitialData
+      await unifiedProfileService.loadUnifiedProfiles();
+      if (this.repositoryPath) {
+        await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+      }
+
+      // Verify the token works
+      console.log('[GitHub Dialog] Verifying token...');
+      const verifyResult = await gitService.checkGitHubConnectionWithToken(tokens.accessToken);
+      console.log('[GitHub Dialog] Verify result:', verifyResult);
+      if (!verifyResult.success || !verifyResult.data?.connected) {
+        this.error = verifyResult.error?.message ?? 'OAuth token verification failed';
+        return;
+      }
+
+      const user = verifyResult.data.user;
+
+      // Create or update global account with OAuth token
+      console.log('[GitHub Dialog] Creating/updating account:', {
+        hasSelectedAccountId: !!this.selectedAccountId,
+        existingAccountsCount: this.accounts.length,
+      });
+
+      if (this.selectedAccountId) {
+        console.log('[GitHub Dialog] Storing token for existing account:', this.selectedAccountId);
+        await credentialService.storeAccountToken('github', this.selectedAccountId, tokens.accessToken);
+      } else {
+        // Create a new global account
+        console.log('[GitHub Dialog] Creating new global account');
+        const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
+        const newAccount: IntegrationAccount = {
+          ...createEmptyIntegrationAccount('github'),
+          id: generateId(),
+          name: user?.login ? `GitHub (${user.login})` : 'GitHub Account',
+          isDefault: this.accounts.length === 0,
+          cachedUser: user ? {
+            username: user.login,
+            displayName: user.name ?? null,
+            email: user.email ?? null,
+            avatarUrl: user.avatarUrl ?? null,
+          } : null,
+        };
+
+        console.log('[GitHub Dialog] New account:', newAccount);
+        const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
+        console.log('[GitHub Dialog] Saved account:', savedAccount);
+        await credentialService.storeAccountToken('github', savedAccount.id, tokens.accessToken);
+        this.selectedAccountId = savedAccount.id;
+
+        // Refresh accounts list from store after adding new account
+        await unifiedProfileService.loadUnifiedProfiles();
+        this.accounts = getAccountsByType('github');
+        console.log('[GitHub Dialog] Refreshed accounts list:', this.accounts.length, 'accounts');
+      }
+
+      this.connectionStatus = verifyResult.data;
+      this.oauthState = { status: 'idle' };
+
+      // Load data if connected and repo detected
+      if (this.connectionStatus?.connected && this.detectedRepo) {
+        await Promise.all([
+          this.loadPullRequests(tokens.accessToken),
+          this.loadWorkflowRuns(tokens.accessToken),
+          this.loadIssues(tokens.accessToken),
+          this.loadLabels(tokens.accessToken),
+          this.loadReleases(tokens.accessToken),
+        ]);
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'OAuth authentication failed';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
   private async handleSaveToken(): Promise<void> {
     if (!this.tokenInput.trim()) return;
 
@@ -959,19 +1190,18 @@ export class LvGitHubDialog extends LitElement {
       }
 
       const user = verifyResult.data.user;
-      const activeProfile = unifiedProfileStore.getState().activeProfile;
 
       // If we have a selected account, save token to that account
       if (this.selectedAccountId) {
         await credentialService.storeAccountToken('github', this.selectedAccountId, tokenToSave);
-      } else if (activeProfile) {
-        // No account selected - create a new account in the active profile
-        const { createEmptyGitHubProfileAccount, generateId } = await import('../../types/unified-profile.types.ts');
-        const newAccount = {
-          ...createEmptyGitHubProfileAccount(),
+      } else {
+        // No account selected - create a new global account
+        const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
+        const newAccount: IntegrationAccount = {
+          ...createEmptyIntegrationAccount('github'),
           id: generateId(),
           name: user?.login ? `GitHub (${user.login})` : 'GitHub Account',
-          isDefaultForType: this.accounts.length === 0,
+          isDefault: this.accounts.length === 0,
           cachedUser: user ? {
             username: user.login,
             displayName: user.name ?? null,
@@ -980,12 +1210,13 @@ export class LvGitHubDialog extends LitElement {
           } : null,
         };
 
-        const savedAccount = await unifiedProfileService.addAccountToProfile(activeProfile.id, newAccount);
+        const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
         await credentialService.storeAccountToken('github', savedAccount.id, tokenToSave);
         this.selectedAccountId = savedAccount.id;
-      } else {
-        // Fallback to legacy token storage if no profile
-        await gitService.storeGitHubToken(tokenToSave);
+
+        // Refresh accounts list
+        await unifiedProfileService.loadUnifiedProfiles();
+        this.accounts = getAccountsByType('github');
       }
 
       // Token saved, update state
@@ -1244,40 +1475,91 @@ export class LvGitHubDialog extends LitElement {
       `;
     }
 
+    const oauthConfigured = isOAuthConfigured('github');
+    const isOAuthPending = this.oauthState.status === 'pending' || this.oauthState.status === 'exchanging';
+
     return html`
       <div class="token-form">
-        <div class="form-group">
-          <label>Personal Access Token</label>
-          <input
-            type="password"
-            placeholder="ghp_xxxxxxxxxxxx"
-            .value=${this.tokenInput}
-            @input=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
-            @change=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
-            @paste=${(e: Event) => {
-              const target = e.target as HTMLInputElement;
-              setTimeout(() => this.tokenInput = target.value, 0);
-            }}
-          />
-          <span class="help-text">
-            Create a token at
-            <a
-              class="help-link"
-              href="https://github.com/settings/tokens/new?scopes=repo,read:user"
-              @click=${handleExternalLink}
-            >github.com/settings/tokens</a>
-            with <code>repo</code> and <code>read:user</code> scopes.
-          </span>
-        </div>
-        <div class="btn-row">
+        <!-- Auth method toggle -->
+        <div class="auth-method-toggle">
           <button
-            class="btn btn-primary"
-            @click=${() => this.handleSaveToken()}
-            ?disabled=${this.isLoading || !this.tokenInput.trim()}
+            class="auth-method-btn ${this.authMethod === 'oauth' ? 'active' : ''}"
+            @click=${() => this.authMethod = 'oauth'}
+            ?disabled=${!oauthConfigured}
           >
-            Connect to GitHub
+            Sign in with GitHub
+          </button>
+          <button
+            class="auth-method-btn ${this.authMethod === 'pat' ? 'active' : ''}"
+            @click=${() => this.authMethod = 'pat'}
+          >
+            Personal Access Token
           </button>
         </div>
+
+        ${this.authMethod === 'oauth' ? html`
+          <!-- OAuth Flow -->
+          <div class="oauth-section">
+            ${isOAuthPending ? html`
+              <div class="oauth-pending">
+                <div class="oauth-spinner"></div>
+                <p>${this.oauthState.status === 'exchanging' ? 'Completing sign in...' : 'Waiting for authorization...'}</p>
+                <p class="oauth-hint">Complete the sign in in your browser</p>
+                <button class="btn" @click=${() => oauthService.cancelOAuth()}>Cancel</button>
+              </div>
+            ` : html`
+              <button
+                class="btn btn-oauth"
+                @click=${() => this.handleStartOAuth()}
+                ?disabled=${this.isLoading || !oauthConfigured}
+              >
+                <svg class="github-icon" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                </svg>
+                Sign in with GitHub
+              </button>
+              ${!oauthConfigured ? html`
+                <p class="oauth-hint">OAuth is not configured. Use a Personal Access Token instead.</p>
+              ` : html`
+                <p class="oauth-hint">Opens GitHub in your browser to sign in</p>
+              `}
+            `}
+          </div>
+        ` : html`
+          <!-- PAT Form -->
+          <div class="form-group">
+            <label>Personal Access Token</label>
+            <input
+              type="password"
+              placeholder="ghp_xxxxxxxxxxxx"
+              .value=${this.tokenInput}
+              @input=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
+              @change=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
+              @paste=${(e: Event) => {
+                const target = e.target as HTMLInputElement;
+                setTimeout(() => this.tokenInput = target.value, 0);
+              }}
+            />
+            <span class="help-text">
+              Create a token at
+              <a
+                class="help-link"
+                href="https://github.com/settings/tokens/new?scopes=repo,read:user"
+                @click=${handleExternalLink}
+              >github.com/settings/tokens</a>
+              with <code>repo</code> and <code>read:user</code> scopes.
+            </span>
+          </div>
+          <div class="btn-row">
+            <button
+              class="btn btn-primary"
+              @click=${() => this.handleSaveToken()}
+              ?disabled=${this.isLoading || !this.tokenInput.trim()}
+            >
+              Connect to GitHub
+            </button>
+          </div>
+        `}
       </div>
     `;
   }

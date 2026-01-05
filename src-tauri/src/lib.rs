@@ -12,7 +12,7 @@ pub mod utils;
 #[cfg(test)]
 mod test_utils;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use commands::watcher::WatcherState;
@@ -108,7 +108,8 @@ pub fn run() {
 
     tracing::info!("Starting Leviathan");
 
-    tauri::Builder::default()
+    // Build the app with plugins
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -119,7 +120,30 @@ pub fn run() {
                 derive_stronghold_key(password).to_vec()
             })
             .build(),
-        )
+        );
+
+    // Single-instance and deep-link plugins (desktop only)
+    // Single-instance must be registered BEFORE deep-link for proper callback handling
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder
+            .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+                // On Windows/Linux, deep links arrive as command line arguments
+                if let Some(url) = argv.get(1) {
+                    if url.starts_with("leviathan://") {
+                        tracing::info!("Received deep link via single-instance: {}", url);
+                        let _ = app.emit("deep-link", url);
+                    }
+                }
+                // Focus the main window when another instance is opened
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_focus();
+                }
+            }))
+            .plugin(tauri_plugin_deep_link::init());
+    }
+
+    builder
         .manage(WatcherState::default())
         .manage(create_autofetch_state())
         .manage(create_update_state())
@@ -286,29 +310,25 @@ pub fn run() {
             commands::profiles::assign_profile_to_repository,
             commands::profiles::unassign_profile_from_repository,
             commands::profiles::get_current_identity,
-            // Integration accounts (multi-account support)
-            commands::integration_accounts::get_integration_accounts,
-            commands::integration_accounts::get_integration_accounts_config,
-            commands::integration_accounts::get_accounts_by_type,
-            commands::integration_accounts::get_integration_account,
-            commands::integration_accounts::save_integration_account,
-            commands::integration_accounts::delete_integration_account,
-            commands::integration_accounts::set_default_account,
-            commands::integration_accounts::detect_account_for_repository,
-            commands::integration_accounts::get_assigned_account,
-            commands::integration_accounts::assign_account_to_repository,
-            commands::integration_accounts::unassign_account_from_repository,
-            commands::integration_accounts::update_account_cached_user,
-            commands::integration_accounts::clear_account_cached_user,
-            commands::integration_accounts::migrate_legacy_tokens,
-            commands::integration_accounts::create_migrated_account,
-            // Unified profiles (combines git identity + integration accounts)
+            // Unified profiles (git identity + global accounts)
             commands::unified_profiles::get_unified_profiles_config,
             commands::unified_profiles::get_unified_profiles,
             commands::unified_profiles::get_unified_profile,
             commands::unified_profiles::save_unified_profile,
             commands::unified_profiles::delete_unified_profile,
             commands::unified_profiles::set_default_unified_profile,
+            // Global account commands (v3)
+            commands::unified_profiles::get_global_accounts,
+            commands::unified_profiles::get_global_accounts_by_type,
+            commands::unified_profiles::get_global_account,
+            commands::unified_profiles::save_global_account,
+            commands::unified_profiles::delete_global_account,
+            commands::unified_profiles::set_default_global_account,
+            commands::unified_profiles::set_profile_default_account,
+            commands::unified_profiles::remove_profile_default_account,
+            commands::unified_profiles::update_global_account_cached_user,
+            commands::unified_profiles::get_profile_preferred_account,
+            // Deprecated profile-scoped account commands (kept for compatibility)
             commands::unified_profiles::add_account_to_profile,
             commands::unified_profiles::update_account_in_profile,
             commands::unified_profiles::remove_account_from_profile,
@@ -336,6 +356,7 @@ pub fn run() {
             commands::credentials::erase_credentials,
             commands::credentials::store_git_credentials,
             commands::credentials::delete_git_credentials,
+            commands::credentials::migrate_vault_if_needed,
             // GitHub integration
             commands::github::check_github_connection,
             commands::github::detect_github_repo,
@@ -384,6 +405,7 @@ pub fn run() {
             commands::bitbucket::get_bitbucket_credentials,
             commands::bitbucket::delete_bitbucket_credentials,
             commands::bitbucket::check_bitbucket_connection,
+            commands::bitbucket::check_bitbucket_connection_with_token,
             commands::bitbucket::detect_bitbucket_repo,
             commands::bitbucket::list_bitbucket_pull_requests,
             commands::bitbucket::get_bitbucket_pull_request,
@@ -418,6 +440,13 @@ pub fn run() {
             commands::ai::auto_detect_ai_providers,
             commands::ai::generate_commit_message,
             commands::ai::is_ai_available,
+            // OAuth authentication
+            commands::oauth::oauth_get_authorize_url,
+            commands::oauth::oauth_start_github_flow,
+            commands::oauth::oauth_exchange_code,
+            commands::oauth::oauth_refresh_token,
+            commands::oauth::oauth_wait_for_callback,
+            commands::oauth::oauth_wait_for_github_callback,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

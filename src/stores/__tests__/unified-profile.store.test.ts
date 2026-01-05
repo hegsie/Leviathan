@@ -4,30 +4,36 @@ import {
   getUnifiedProfileById,
   getDefaultUnifiedProfile,
   hasUnifiedProfiles,
-  getAccountFromAnyProfile,
-  getActiveProfileAccountsByType,
-  getActiveProfileDefaultAccount,
+  getAccountById,
+  getAccountsByType,
+  getDefaultGlobalAccount,
+  getProfilePreferredAccount,
+  getActiveProfilePreferredAccount,
   getRepositoryProfileAssignment,
   getRepositoryProfile,
+  getAccountCountByType,
 } from '../unified-profile.store.ts';
 import type {
   UnifiedProfile,
-  ProfileIntegrationAccount,
+  IntegrationAccount,
   UnifiedProfilesConfig,
+  IntegrationType,
 } from '../../types/unified-profile.types.ts';
 
 describe('unified-profile.store', () => {
-  // Mock factories
+  // Mock factories for v3 structure
   function createMockAccount(
     id: string,
-    type: 'github' | 'gitlab' | 'azure-devops' = 'github',
+    type: IntegrationType = 'github',
     isDefault = false
-  ): ProfileIntegrationAccount {
+  ): IntegrationAccount {
     const config = type === 'github'
       ? { type: 'github' as const }
       : type === 'gitlab'
         ? { type: 'gitlab' as const, instanceUrl: 'https://gitlab.com' }
-        : { type: 'azure-devops' as const, organization: 'test-org' };
+        : type === 'azure-devops'
+          ? { type: 'azure-devops' as const, organization: 'test-org' }
+          : { type: 'bitbucket' as const, workspace: 'test-workspace' };
 
     return {
       id,
@@ -36,7 +42,8 @@ describe('unified-profile.store', () => {
       config,
       color: null,
       cachedUser: null,
-      isDefaultForType: isDefault,
+      urlPatterns: [],
+      isDefault,
     };
   }
 
@@ -45,7 +52,7 @@ describe('unified-profile.store', () => {
     name: string,
     options: {
       isDefault?: boolean;
-      accounts?: ProfileIntegrationAccount[];
+      defaultAccounts?: Partial<Record<IntegrationType, string>>;
       urlPatterns?: string[];
     } = {}
   ): UnifiedProfile {
@@ -58,14 +65,18 @@ describe('unified-profile.store', () => {
       urlPatterns: options.urlPatterns ?? [],
       isDefault: options.isDefault ?? false,
       color: '#3b82f6',
-      integrationAccounts: options.accounts ?? [],
+      defaultAccounts: options.defaultAccounts ?? {},
     };
   }
 
-  function createMockConfig(profiles: UnifiedProfile[] = []): UnifiedProfilesConfig {
+  function createMockConfig(
+    profiles: UnifiedProfile[] = [],
+    accounts: IntegrationAccount[] = []
+  ): UnifiedProfilesConfig {
     return {
-      version: 2,
+      version: 3,
       profiles,
+      accounts,
       repositoryAssignments: {},
     };
   }
@@ -82,6 +93,10 @@ describe('unified-profile.store', () => {
 
     it('starts with empty profiles', () => {
       expect(unifiedProfileStore.getState().profiles).to.deep.equal([]);
+    });
+
+    it('starts with empty accounts', () => {
+      expect(unifiedProfileStore.getState().accounts).to.deep.equal([]);
     });
 
     it('starts with no active profile', () => {
@@ -106,15 +121,17 @@ describe('unified-profile.store', () => {
   });
 
   describe('setConfig', () => {
-    it('sets config and extracts profiles', () => {
+    it('sets config and extracts profiles and accounts', () => {
       const profiles = [createMockProfile('p1', 'Work')];
-      const config = createMockConfig(profiles);
+      const accounts = [createMockAccount('a1', 'github')];
+      const config = createMockConfig(profiles, accounts);
 
       unifiedProfileStore.getState().setConfig(config);
 
       const state = unifiedProfileStore.getState();
       expect(state.config).to.deep.equal(config);
       expect(state.profiles).to.deep.equal(profiles);
+      expect(state.accounts).to.deep.equal(accounts);
     });
 
     it('clears any existing error', () => {
@@ -197,7 +214,7 @@ describe('unified-profile.store', () => {
 
       const config = unifiedProfileStore.getState().config;
       expect(config).to.not.be.null;
-      expect(config?.version).to.equal(2);
+      expect(config?.version).to.equal(3);
       expect(config?.profiles).to.have.lengthOf(1);
     });
 
@@ -294,107 +311,110 @@ describe('unified-profile.store', () => {
     });
   });
 
-  describe('addAccountToProfile', () => {
-    it('adds account to profile', () => {
-      const profile = createMockProfile('p1', 'Work');
-      unifiedProfileStore.getState().setProfiles([profile]);
+  // Global accounts tests (v3)
+  describe('setAccounts', () => {
+    it('sets global accounts', () => {
+      const accounts = [createMockAccount('a1', 'github'), createMockAccount('a2', 'gitlab')];
 
-      const account = createMockAccount('a1', 'github');
-      unifiedProfileStore.getState().addAccountToProfile('p1', account);
+      unifiedProfileStore.getState().setAccounts(accounts);
 
-      const updatedProfile = unifiedProfileStore.getState().profiles[0];
-      expect(updatedProfile.integrationAccounts).to.have.lengthOf(1);
-      expect(updatedProfile.integrationAccounts[0].id).to.equal('a1');
+      expect(unifiedProfileStore.getState().accounts).to.deep.equal(accounts);
     });
 
-    it('unsets other defaults when adding default account', () => {
-      const existingAccount = createMockAccount('a1', 'github', true);
-      const profile = createMockProfile('p1', 'Work', { accounts: [existingAccount] });
-      unifiedProfileStore.getState().setProfiles([profile]);
+    it('updates config with accounts', () => {
+      const config = createMockConfig([createMockProfile('p1', 'Work')]);
+      unifiedProfileStore.getState().setConfig(config);
 
-      const newAccount = createMockAccount('a2', 'github', true);
-      unifiedProfileStore.getState().addAccountToProfile('p1', newAccount);
+      const accounts = [createMockAccount('a1', 'github')];
+      unifiedProfileStore.getState().setAccounts(accounts);
 
-      const accounts = unifiedProfileStore.getState().profiles[0].integrationAccounts;
-      expect(accounts[0].isDefaultForType).to.be.false;
-      expect(accounts[1].isDefaultForType).to.be.true;
-    });
-
-    it('does not affect accounts of different type', () => {
-      const existingAccount = createMockAccount('a1', 'github', true);
-      const profile = createMockProfile('p1', 'Work', { accounts: [existingAccount] });
-      unifiedProfileStore.getState().setProfiles([profile]);
-
-      const newAccount = createMockAccount('a2', 'gitlab', true);
-      unifiedProfileStore.getState().addAccountToProfile('p1', newAccount);
-
-      const accounts = unifiedProfileStore.getState().profiles[0].integrationAccounts;
-      expect(accounts[0].isDefaultForType).to.be.true; // GitHub still default
-      expect(accounts[1].isDefaultForType).to.be.true; // GitLab is default
-    });
-
-    it('updates active profile if it matches', () => {
-      const profile = createMockProfile('p1', 'Work');
-      unifiedProfileStore.getState().setProfiles([profile]);
-      unifiedProfileStore.getState().setActiveProfile(profile);
-
-      unifiedProfileStore.getState().addAccountToProfile('p1', createMockAccount('a1'));
-
-      expect(unifiedProfileStore.getState().activeProfile?.integrationAccounts).to.have.lengthOf(1);
+      expect(unifiedProfileStore.getState().config?.accounts).to.deep.equal(accounts);
     });
   });
 
-  describe('updateAccountInProfile', () => {
+  describe('addAccount', () => {
+    it('adds account to global list', () => {
+      const account = createMockAccount('a1', 'github');
+
+      unifiedProfileStore.getState().addAccount(account);
+
+      expect(unifiedProfileStore.getState().accounts).to.have.lengthOf(1);
+      expect(unifiedProfileStore.getState().accounts[0]).to.deep.equal(account);
+    });
+
+    it('unsets other defaults when adding default account of same type', () => {
+      const existing = createMockAccount('a1', 'github', true);
+      unifiedProfileStore.getState().setAccounts([existing]);
+
+      const newAccount = createMockAccount('a2', 'github', true);
+      unifiedProfileStore.getState().addAccount(newAccount);
+
+      const accounts = unifiedProfileStore.getState().accounts;
+      expect(accounts[0].isDefault).to.be.false;
+      expect(accounts[1].isDefault).to.be.true;
+    });
+
+    it('does not affect defaults of different type', () => {
+      const existing = createMockAccount('a1', 'github', true);
+      unifiedProfileStore.getState().setAccounts([existing]);
+
+      const newAccount = createMockAccount('a2', 'gitlab', true);
+      unifiedProfileStore.getState().addAccount(newAccount);
+
+      const accounts = unifiedProfileStore.getState().accounts;
+      expect(accounts[0].isDefault).to.be.true; // GitHub still default
+      expect(accounts[1].isDefault).to.be.true; // GitLab is default
+    });
+  });
+
+  describe('updateAccount', () => {
     it('updates existing account', () => {
       const account = createMockAccount('a1', 'github');
-      const profile = createMockProfile('p1', 'Work', { accounts: [account] });
-      unifiedProfileStore.getState().setProfiles([profile]);
+      unifiedProfileStore.getState().setAccounts([account]);
 
       const updated = { ...account, name: 'Updated Account' };
-      unifiedProfileStore.getState().updateAccountInProfile('p1', updated);
+      unifiedProfileStore.getState().updateAccount(updated);
 
-      const accounts = unifiedProfileStore.getState().profiles[0].integrationAccounts;
-      expect(accounts[0].name).to.equal('Updated Account');
+      expect(unifiedProfileStore.getState().accounts[0].name).to.equal('Updated Account');
     });
 
     it('handles setting new default', () => {
       const account1 = createMockAccount('a1', 'github', true);
       const account2 = createMockAccount('a2', 'github', false);
-      const profile = createMockProfile('p1', 'Work', { accounts: [account1, account2] });
-      unifiedProfileStore.getState().setProfiles([profile]);
+      unifiedProfileStore.getState().setAccounts([account1, account2]);
 
-      const updated = { ...account2, isDefaultForType: true };
-      unifiedProfileStore.getState().updateAccountInProfile('p1', updated);
+      const updated = { ...account2, isDefault: true };
+      unifiedProfileStore.getState().updateAccount(updated);
 
-      const accounts = unifiedProfileStore.getState().profiles[0].integrationAccounts;
-      expect(accounts[0].isDefaultForType).to.be.false;
-      expect(accounts[1].isDefaultForType).to.be.true;
+      const accounts = unifiedProfileStore.getState().accounts;
+      expect(accounts[0].isDefault).to.be.false;
+      expect(accounts[1].isDefault).to.be.true;
     });
   });
 
-  describe('removeAccountFromProfile', () => {
-    it('removes account from profile', () => {
+  describe('removeAccount', () => {
+    it('removes account from global list', () => {
       const account1 = createMockAccount('a1', 'github');
       const account2 = createMockAccount('a2', 'gitlab');
-      const profile = createMockProfile('p1', 'Work', { accounts: [account1, account2] });
-      unifiedProfileStore.getState().setProfiles([profile]);
+      unifiedProfileStore.getState().setAccounts([account1, account2]);
 
-      unifiedProfileStore.getState().removeAccountFromProfile('p1', 'a1');
+      unifiedProfileStore.getState().removeAccount('a1');
 
-      const accounts = unifiedProfileStore.getState().profiles[0].integrationAccounts;
+      const accounts = unifiedProfileStore.getState().accounts;
       expect(accounts).to.have.lengthOf(1);
       expect(accounts[0].id).to.equal('a2');
     });
 
-    it('updates active profile if it matches', () => {
+    it('removes account from profile defaultAccounts', () => {
       const account = createMockAccount('a1', 'github');
-      const profile = createMockProfile('p1', 'Work', { accounts: [account] });
-      unifiedProfileStore.getState().setProfiles([profile]);
-      unifiedProfileStore.getState().setActiveProfile(profile);
+      const profile = createMockProfile('p1', 'Work', { defaultAccounts: { github: 'a1' } });
+      const config = createMockConfig([profile], [account]);
+      unifiedProfileStore.getState().setConfig(config);
 
-      unifiedProfileStore.getState().removeAccountFromProfile('p1', 'a1');
+      unifiedProfileStore.getState().removeAccount('a1');
 
-      expect(unifiedProfileStore.getState().activeProfile?.integrationAccounts).to.have.lengthOf(0);
+      const profiles = unifiedProfileStore.getState().profiles;
+      expect(profiles[0].defaultAccounts.github).to.be.undefined;
     });
   });
 
@@ -445,10 +465,32 @@ describe('unified-profile.store', () => {
     });
   });
 
+  describe('setAccountConnectionStatus', () => {
+    it('sets connection status for account', () => {
+      unifiedProfileStore.getState().setAccountConnectionStatus('a1', 'connected');
+
+      const status = unifiedProfileStore.getState().accountConnectionStatus['a1'];
+      expect(status?.status).to.equal('connected');
+      expect(status?.lastChecked).to.be.a('number');
+    });
+
+    it('does not update lastChecked when checking', () => {
+      unifiedProfileStore.getState().setAccountConnectionStatus('a1', 'connected');
+      const firstChecked = unifiedProfileStore.getState().accountConnectionStatus['a1']?.lastChecked;
+
+      unifiedProfileStore.getState().setAccountConnectionStatus('a1', 'checking');
+
+      const status = unifiedProfileStore.getState().accountConnectionStatus['a1'];
+      expect(status?.status).to.equal('checking');
+      expect(status?.lastChecked).to.equal(firstChecked);
+    });
+  });
+
   describe('reset', () => {
     it('resets store to initial state', () => {
       // Set various state
       unifiedProfileStore.getState().setProfiles([createMockProfile('p1', 'Work')]);
+      unifiedProfileStore.getState().setAccounts([createMockAccount('a1', 'github')]);
       unifiedProfileStore.getState().setActiveProfile(createMockProfile('p1', 'Work'));
       unifiedProfileStore.getState().setLoading(true);
       unifiedProfileStore.getState().setError('Error');
@@ -459,6 +501,7 @@ describe('unified-profile.store', () => {
       const state = unifiedProfileStore.getState();
       expect(state.config).to.be.null;
       expect(state.profiles).to.deep.equal([]);
+      expect(state.accounts).to.deep.equal([]);
       expect(state.activeProfile).to.be.null;
       expect(state.isLoading).to.be.false;
       expect(state.error).to.be.null;
@@ -514,73 +557,112 @@ describe('unified-profile.store', () => {
     });
   });
 
-  describe('getAccountFromAnyProfile', () => {
-    it('finds account across profiles', () => {
+  describe('getAccountById', () => {
+    it('returns account by ID', () => {
       const account = createMockAccount('a1', 'github');
-      const profile1 = createMockProfile('p1', 'Work', { accounts: [] });
-      const profile2 = createMockProfile('p2', 'Personal', { accounts: [account] });
-      unifiedProfileStore.getState().setProfiles([profile1, profile2]);
+      unifiedProfileStore.getState().setAccounts([account]);
 
-      const result = getAccountFromAnyProfile('a1');
-      expect(result?.profile.id).to.equal('p2');
-      expect(result?.account.id).to.equal('a1');
+      const found = getAccountById('a1');
+      expect(found).to.deep.equal(account);
     });
 
-    it('returns undefined for unknown account', () => {
-      unifiedProfileStore.getState().setProfiles([createMockProfile('p1', 'Work')]);
+    it('returns undefined for unknown ID', () => {
+      unifiedProfileStore.getState().setAccounts([createMockAccount('a1', 'github')]);
 
-      expect(getAccountFromAnyProfile('unknown')).to.be.undefined;
+      expect(getAccountById('unknown')).to.be.undefined;
     });
   });
 
-  describe('getActiveProfileAccountsByType', () => {
-    it('returns accounts of specified type from active profile', () => {
+  describe('getAccountsByType', () => {
+    it('returns accounts of specified type', () => {
       const github1 = createMockAccount('g1', 'github');
       const github2 = createMockAccount('g2', 'github');
       const gitlab = createMockAccount('gl1', 'gitlab');
-      const profile = createMockProfile('p1', 'Work', { accounts: [github1, github2, gitlab] });
-      unifiedProfileStore.getState().setProfiles([profile]);
-      unifiedProfileStore.getState().setActiveProfile(profile);
+      unifiedProfileStore.getState().setAccounts([github1, github2, gitlab]);
 
-      const githubAccounts = getActiveProfileAccountsByType('github');
+      const githubAccounts = getAccountsByType('github');
       expect(githubAccounts).to.have.lengthOf(2);
       expect(githubAccounts.every((a) => a.integrationType === 'github')).to.be.true;
     });
 
-    it('returns empty array when no active profile', () => {
-      expect(getActiveProfileAccountsByType('github')).to.deep.equal([]);
+    it('returns empty array when no accounts of type', () => {
+      unifiedProfileStore.getState().setAccounts([createMockAccount('a1', 'github')]);
+
+      expect(getAccountsByType('gitlab')).to.deep.equal([]);
     });
   });
 
-  describe('getActiveProfileDefaultAccount', () => {
+  describe('getDefaultGlobalAccount', () => {
     it('returns default account for type', () => {
       const github1 = createMockAccount('g1', 'github', false);
       const github2 = createMockAccount('g2', 'github', true);
-      const profile = createMockProfile('p1', 'Work', { accounts: [github1, github2] });
-      unifiedProfileStore.getState().setProfiles([profile]);
-      unifiedProfileStore.getState().setActiveProfile(profile);
+      unifiedProfileStore.getState().setAccounts([github1, github2]);
 
-      const defaultAccount = getActiveProfileDefaultAccount('github');
+      const defaultAccount = getDefaultGlobalAccount('github');
       expect(defaultAccount?.id).to.equal('g2');
     });
 
     it('falls back to first account if no default', () => {
       const github1 = createMockAccount('g1', 'github', false);
       const github2 = createMockAccount('g2', 'github', false);
-      const profile = createMockProfile('p1', 'Work', { accounts: [github1, github2] });
-      unifiedProfileStore.getState().setProfiles([profile]);
-      unifiedProfileStore.getState().setActiveProfile(profile);
+      unifiedProfileStore.getState().setAccounts([github1, github2]);
 
-      const defaultAccount = getActiveProfileDefaultAccount('github');
+      const defaultAccount = getDefaultGlobalAccount('github');
       expect(defaultAccount?.id).to.equal('g1');
     });
 
     it('returns undefined when no accounts of type', () => {
+      unifiedProfileStore.getState().setAccounts([]);
+
+      expect(getDefaultGlobalAccount('github')).to.be.undefined;
+    });
+  });
+
+  describe('getProfilePreferredAccount', () => {
+    it('returns profile preferred account', () => {
+      const github1 = createMockAccount('g1', 'github');
+      const github2 = createMockAccount('g2', 'github', true);
+      unifiedProfileStore.getState().setAccounts([github1, github2]);
+
+      const profile = createMockProfile('p1', 'Work', { defaultAccounts: { github: 'g1' } });
+      unifiedProfileStore.getState().setProfiles([profile]);
+
+      const preferred = getProfilePreferredAccount('p1', 'github');
+      expect(preferred?.id).to.equal('g1');
+    });
+
+    it('falls back to global default when no profile preference', () => {
+      const github1 = createMockAccount('g1', 'github', false);
+      const github2 = createMockAccount('g2', 'github', true);
+      unifiedProfileStore.getState().setAccounts([github1, github2]);
+
       const profile = createMockProfile('p1', 'Work');
+      unifiedProfileStore.getState().setProfiles([profile]);
+
+      const preferred = getProfilePreferredAccount('p1', 'github');
+      expect(preferred?.id).to.equal('g2');
+    });
+  });
+
+  describe('getActiveProfilePreferredAccount', () => {
+    it('returns preferred account for active profile', () => {
+      const github = createMockAccount('g1', 'github');
+      unifiedProfileStore.getState().setAccounts([github]);
+
+      const profile = createMockProfile('p1', 'Work', { defaultAccounts: { github: 'g1' } });
       unifiedProfileStore.getState().setProfiles([profile]);
       unifiedProfileStore.getState().setActiveProfile(profile);
 
-      expect(getActiveProfileDefaultAccount('github')).to.be.undefined;
+      const preferred = getActiveProfilePreferredAccount('github');
+      expect(preferred?.id).to.equal('g1');
+    });
+
+    it('falls back to global default when no active profile', () => {
+      const github = createMockAccount('g1', 'github', true);
+      unifiedProfileStore.getState().setAccounts([github]);
+
+      const preferred = getActiveProfilePreferredAccount('github');
+      expect(preferred?.id).to.equal('g1');
     });
   });
 
@@ -617,6 +699,31 @@ describe('unified-profile.store', () => {
       unifiedProfileStore.getState().setConfig(config);
 
       expect(getRepositoryProfile('/unknown')).to.be.undefined;
+    });
+  });
+
+  describe('getAccountCountByType', () => {
+    it('returns count of accounts by type', () => {
+      const accounts = [
+        createMockAccount('g1', 'github'),
+        createMockAccount('g2', 'github'),
+        createMockAccount('gl1', 'gitlab'),
+      ];
+      unifiedProfileStore.getState().setAccounts(accounts);
+
+      const counts = getAccountCountByType();
+      expect(counts.github).to.equal(2);
+      expect(counts.gitlab).to.equal(1);
+      expect(counts['azure-devops']).to.equal(0);
+      expect(counts.bitbucket).to.equal(0);
+    });
+
+    it('returns all zeros when no accounts', () => {
+      const counts = getAccountCountByType();
+      expect(counts.github).to.equal(0);
+      expect(counts.gitlab).to.equal(0);
+      expect(counts['azure-devops']).to.equal(0);
+      expect(counts.bitbucket).to.equal(0);
     });
   });
 });

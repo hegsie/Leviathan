@@ -131,6 +131,26 @@ export class LvToastContainer extends LitElement {
         height: 14px;
       }
 
+      .toast-action {
+        margin-top: var(--spacing-xs);
+      }
+
+      .toast-action-btn {
+        background: transparent;
+        border: 1px solid var(--color-primary);
+        color: var(--color-primary);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .toast-action-btn:hover {
+        background: var(--color-primary);
+        color: white;
+      }
+
       /* Border colors by type */
       .toast.info {
         border-left: 3px solid var(--color-primary);
@@ -256,6 +276,13 @@ export class LvToastContainer extends LitElement {
     }
   }
 
+  private handleAction(toast: Toast): void {
+    if (toast.action?.callback) {
+      toast.action.callback();
+    }
+    this.handleClose(toast.id);
+  }
+
   render() {
     return html`
       ${this.toasts.map(
@@ -266,6 +293,16 @@ export class LvToastContainer extends LitElement {
             </div>
             <div class="toast-content">
               <span class="toast-message">${toast.message}</span>
+              ${toast.action ? html`
+                <div class="toast-action">
+                  <button
+                    class="toast-action-btn"
+                    @click=${() => this.handleAction(toast)}
+                  >
+                    ${toast.action.label}
+                  </button>
+                </div>
+              ` : ''}
             </div>
             <button
               class="toast-close"

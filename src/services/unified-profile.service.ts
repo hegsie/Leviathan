@@ -1,6 +1,10 @@
 /**
- * Unified Profile Service
- * Provides operations for managing unified profiles (git identity + integration accounts)
+ * Unified Profile Service (v3)
+ * Provides operations for managing unified profiles (git identity) and global integration accounts
+ *
+ * Architecture (v3):
+ * - Profiles contain git identity + default account preferences
+ * - Accounts are GLOBAL - available to all profiles, not owned by profiles
  */
 
 import { invokeCommand } from './tauri-api.ts';
@@ -13,7 +17,7 @@ const log = loggers.profile;
 import type {
   UnifiedProfile,
   UnifiedProfilesConfig,
-  ProfileIntegrationAccount,
+  IntegrationAccount,
   CurrentGitIdentity,
   MigrationPreview,
   MigrationBackupInfo,
@@ -113,99 +117,161 @@ export async function setDefaultUnifiedProfile(profileId: string): Promise<void>
 }
 
 // =============================================================================
-// Account Within Profile Operations
+// Global Account Operations (v3)
 // =============================================================================
 
 /**
- * Add an integration account to a profile
+ * Get all global accounts
  */
-export async function addAccountToProfile(
-  profileId: string,
-  account: ProfileIntegrationAccount
-): Promise<ProfileIntegrationAccount> {
-  const result = await invokeCommand<ProfileIntegrationAccount>('add_account_to_profile', {
-    profileId,
-    account,
-  });
+export async function getGlobalAccounts(): Promise<IntegrationAccount[]> {
+  const result = await invokeCommand<IntegrationAccount[]>('get_global_accounts', {});
   if (!result.success) {
-    throw new Error(result.error?.message || 'Failed to add account to profile');
+    throw new Error(result.error?.message || 'Failed to get global accounts');
   }
-
-  // Update store
-  unifiedProfileStore.getState().addAccountToProfile(profileId, result.data!);
-
   return result.data!;
 }
 
 /**
- * Update an integration account within a profile
+ * Get global accounts by integration type
  */
-export async function updateAccountInProfile(
-  profileId: string,
-  account: ProfileIntegrationAccount
-): Promise<ProfileIntegrationAccount> {
-  const result = await invokeCommand<ProfileIntegrationAccount>('update_account_in_profile', {
-    profileId,
-    account,
+export async function getGlobalAccountsByType(
+  integrationType: IntegrationType
+): Promise<IntegrationAccount[]> {
+  const result = await invokeCommand<IntegrationAccount[]>('get_global_accounts_by_type', {
+    integrationType,
   });
   if (!result.success) {
-    throw new Error(result.error?.message || 'Failed to update account in profile');
+    throw new Error(result.error?.message || 'Failed to get accounts by type');
   }
-
-  // Update store
-  unifiedProfileStore.getState().updateAccountInProfile(profileId, result.data!);
-
   return result.data!;
 }
 
 /**
- * Remove an integration account from a profile
+ * Get a single global account by ID
  */
-export async function removeAccountFromProfile(
-  profileId: string,
-  accountId: string
-): Promise<void> {
-  const result = await invokeCommand<void>('remove_account_from_profile', {
-    profileId,
+export async function getGlobalAccount(accountId: string): Promise<IntegrationAccount | null> {
+  const result = await invokeCommand<IntegrationAccount | null>('get_global_account', {
     accountId,
   });
   if (!result.success) {
-    throw new Error(result.error?.message || 'Failed to remove account from profile');
+    throw new Error(result.error?.message || 'Failed to get account');
   }
-
-  // Update store
-  unifiedProfileStore.getState().removeAccountFromProfile(profileId, accountId);
+  return result.data!;
 }
 
 /**
- * Set an account as the default for its type within a profile
+ * Save a global account (create or update)
  */
-export async function setDefaultAccountInProfile(
-  profileId: string,
+export async function saveGlobalAccount(account: IntegrationAccount): Promise<IntegrationAccount> {
+  const result = await invokeCommand<IntegrationAccount>('save_global_account', { account });
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to save account');
+  }
+
+  // Update store
+  const existingAccount = unifiedProfileStore.getState().accounts.find((a) => a.id === account.id);
+  if (existingAccount) {
+    unifiedProfileStore.getState().updateAccount(result.data!);
+  } else {
+    unifiedProfileStore.getState().addAccount(result.data!);
+  }
+
+  return result.data!;
+}
+
+/**
+ * Delete a global account
+ */
+export async function deleteGlobalAccount(accountId: string): Promise<void> {
+  const result = await invokeCommand<void>('delete_global_account', { accountId });
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to delete account');
+  }
+
+  // Update store
+  unifiedProfileStore.getState().removeAccount(accountId);
+}
+
+/**
+ * Set the default global account for an integration type
+ */
+export async function setDefaultGlobalAccount(
+  integrationType: IntegrationType,
   accountId: string
 ): Promise<void> {
-  const result = await invokeCommand<void>('set_default_account_in_profile', {
-    profileId,
+  const result = await invokeCommand<void>('set_default_global_account', {
+    integrationType,
     accountId,
   });
   if (!result.success) {
     throw new Error(result.error?.message || 'Failed to set default account');
   }
 
-  // Refresh profile in store
+  // Reload accounts to get updated defaults
   await loadUnifiedProfiles();
 }
 
 /**
- * Update cached user info for an account within a profile
+ * Set the default account for a profile (profile preference)
  */
-export async function updateProfileAccountCachedUser(
+export async function setProfileDefaultAccount(
   profileId: string,
+  integrationType: IntegrationType,
+  accountId: string
+): Promise<void> {
+  const result = await invokeCommand<void>('set_profile_default_account', {
+    profileId,
+    integrationType,
+    accountId,
+  });
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to set profile default account');
+  }
+
+  // Update profile in store
+  const { profiles, updateProfile } = unifiedProfileStore.getState();
+  const profile = profiles.find((p) => p.id === profileId);
+  if (profile) {
+    updateProfile({
+      ...profile,
+      defaultAccounts: { ...profile.defaultAccounts, [integrationType]: accountId },
+    });
+  }
+}
+
+/**
+ * Remove the default account preference for a profile
+ */
+export async function removeProfileDefaultAccount(
+  profileId: string,
+  integrationType: IntegrationType
+): Promise<void> {
+  const result = await invokeCommand<void>('remove_profile_default_account', {
+    profileId,
+    integrationType,
+  });
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to remove profile default account');
+  }
+
+  // Update profile in store
+  const { profiles, updateProfile } = unifiedProfileStore.getState();
+  const profile = profiles.find((p) => p.id === profileId);
+  if (profile) {
+    const defaultAccounts = { ...profile.defaultAccounts };
+    delete defaultAccounts[integrationType];
+    updateProfile({ ...profile, defaultAccounts });
+  }
+}
+
+/**
+ * Update cached user info for a global account
+ */
+export async function updateGlobalAccountCachedUser(
   accountId: string,
   user: CachedUser
 ): Promise<void> {
-  const result = await invokeCommand<void>('update_profile_account_cached_user', {
-    profileId,
+  const result = await invokeCommand<void>('update_global_account_cached_user', {
     accountId,
     user,
   });
@@ -213,8 +279,25 @@ export async function updateProfileAccountCachedUser(
     throw new Error(result.error?.message || 'Failed to update cached user');
   }
 
-  // Refresh profile in store
+  // Refresh accounts in store
   await loadUnifiedProfiles();
+}
+
+/**
+ * Get the profile's preferred account for an integration type
+ */
+export async function getProfilePreferredAccount(
+  profileId: string,
+  integrationType: IntegrationType
+): Promise<IntegrationAccount | null> {
+  const result = await invokeCommand<IntegrationAccount | null>('get_profile_preferred_account', {
+    profileId,
+    integrationType,
+  });
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to get preferred account');
+  }
+  return result.data!;
 }
 
 // =============================================================================
@@ -308,13 +391,13 @@ export async function getCurrentGitIdentity(path: string): Promise<CurrentGitIde
 // =============================================================================
 
 /**
- * Get an account for a repository by integration type (from the assigned/detected profile)
+ * Get account for a repository by integration type (from the assigned/detected profile)
  */
 export async function getRepositoryAccount(
   path: string,
   integrationType: IntegrationType
-): Promise<ProfileIntegrationAccount | null> {
-  const result = await invokeCommand<ProfileIntegrationAccount | null>('get_repository_account', {
+): Promise<IntegrationAccount | null> {
+  const result = await invokeCommand<IntegrationAccount | null>('get_repository_account', {
     path,
     integrationType,
   });
@@ -322,23 +405,6 @@ export async function getRepositoryAccount(
     throw new Error(result.error?.message || 'Failed to get repository account');
   }
   return result.data!;
-}
-
-/**
- * Get an account from any profile by account ID
- */
-export async function getAccountFromAnyProfile(
-  accountId: string
-): Promise<{ profileId: string; account: ProfileIntegrationAccount } | null> {
-  const result = await invokeCommand<[string, ProfileIntegrationAccount] | null>(
-    'get_account_from_any_profile',
-    { accountId }
-  );
-  if (!result.success) {
-    throw new Error(result.error?.message || 'Failed to get account');
-  }
-  if (!result.data) return null;
-  return { profileId: result.data[0], account: result.data[1] };
 }
 
 // =============================================================================
@@ -449,13 +515,21 @@ export async function loadUnifiedProfiles(): Promise<void> {
 
 /**
  * Load the profile for a specific repository and set it as active
+ * Falls back to default profile if no specific assignment exists
  */
 export async function loadUnifiedProfileForRepository(path: string): Promise<void> {
   const store = unifiedProfileStore.getState();
   store.setCurrentRepositoryPath(path);
 
   try {
-    const profile = await getAssignedUnifiedProfile(path);
+    let profile = await getAssignedUnifiedProfile(path);
+
+    // If no profile is assigned, fall back to default or first profile
+    if (!profile) {
+      const { profiles } = store;
+      profile = profiles.find(p => p.isDefault) || profiles[0] || null;
+    }
+
     store.setActiveProfile(profile);
   } catch (error) {
     log.error('Failed to load profile for repository:', error);
@@ -505,16 +579,15 @@ export async function initializeUnifiedProfiles(): Promise<void> {
 }
 
 // =============================================================================
-// Cached User Refresh
+// Cached User Refresh (v3 - Global Accounts)
 // =============================================================================
 
 /**
- * Refresh cached user info for a single account
+ * Refresh cached user info for a single global account
  * Returns the updated CachedUser or null if unable to fetch
  */
 export async function refreshAccountCachedUser(
-  profileId: string,
-  account: ProfileIntegrationAccount
+  account: IntegrationAccount
 ): Promise<CachedUser | null> {
   const store = unifiedProfileStore.getState();
 
@@ -585,6 +658,23 @@ export async function refreshAccountCachedUser(
         }
         break;
       }
+      case 'bitbucket': {
+        // Use Tauri command to check Bitbucket connection
+        const result = await invokeCommand<{ connected: boolean; user?: { uuid: string; username: string; displayName: string; avatarUrl?: string } }>(
+          'check_bitbucket_connection_with_token',
+          { token }
+        );
+        if (result.success && result.data?.connected && result.data.user) {
+          isConnected = true;
+          cachedUser = {
+            username: result.data.user.username,
+            displayName: result.data.user.displayName,
+            avatarUrl: result.data.user.avatarUrl || null,
+            email: null, // Bitbucket API doesn't return email in user endpoint
+          };
+        }
+        break;
+      }
     }
 
     // Update connection status
@@ -592,7 +682,7 @@ export async function refreshAccountCachedUser(
 
     // If we got user info, update it in the store
     if (cachedUser) {
-      await updateProfileAccountCachedUser(profileId, account.id, cachedUser);
+      await updateGlobalAccountCachedUser(account.id, cachedUser);
       log.debug(` Refreshed cached user for ${account.integrationType} account ${account.id}: @${cachedUser.username}`);
     }
 
@@ -605,20 +695,18 @@ export async function refreshAccountCachedUser(
 }
 
 /**
- * Refresh cached user info for all accounts across all profiles
+ * Refresh cached user info for all global accounts
  * This runs in the background and doesn't block the UI
  */
 export async function refreshAllAccountsCachedUser(): Promise<void> {
-  const profiles = unifiedProfileStore.getState().profiles;
+  const accounts = unifiedProfileStore.getState().accounts;
 
-  log.debug(` Refreshing cached user info for ${profiles.length} profiles`);
+  log.debug(` Refreshing cached user info for ${accounts.length} accounts`);
 
-  for (const profile of profiles) {
-    for (const account of profile.integrationAccounts) {
-      // Only refresh if cachedUser is missing
-      if (!account.cachedUser) {
-        await refreshAccountCachedUser(profile.id, account);
-      }
+  for (const account of accounts) {
+    // Only refresh if cachedUser is missing
+    if (!account.cachedUser) {
+      await refreshAccountCachedUser(account);
     }
   }
 
@@ -639,30 +727,27 @@ const TOKEN_VALIDATION_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 export async function validateAllAccountTokens(): Promise<{
   valid: number;
   invalid: number;
-  invalidAccounts: Array<{ profileName: string; accountName: string; integrationType: string }>;
+  invalidAccounts: Array<{ accountName: string; integrationType: string }>;
 }> {
-  const profiles = unifiedProfileStore.getState().profiles;
+  const accounts = unifiedProfileStore.getState().accounts;
   const result = {
     valid: 0,
     invalid: 0,
-    invalidAccounts: [] as Array<{ profileName: string; accountName: string; integrationType: string }>,
+    invalidAccounts: [] as Array<{ accountName: string; integrationType: string }>,
   };
 
   log.debug('Validating all account tokens');
 
-  for (const profile of profiles) {
-    for (const account of profile.integrationAccounts) {
-      const cachedUser = await refreshAccountCachedUser(profile.id, account);
-      if (cachedUser) {
-        result.valid++;
-      } else {
-        result.invalid++;
-        result.invalidAccounts.push({
-          profileName: profile.name,
-          accountName: account.name,
-          integrationType: account.integrationType,
-        });
-      }
+  for (const account of accounts) {
+    const cachedUser = await refreshAccountCachedUser(account);
+    if (cachedUser) {
+      result.valid++;
+    } else {
+      result.invalid++;
+      result.invalidAccounts.push({
+        accountName: account.name,
+        integrationType: account.integrationType,
+      });
     }
   }
 
@@ -696,4 +781,63 @@ export function stopPeriodicTokenValidation(): void {
     tokenValidationInterval = null;
     log.debug('Stopped periodic token validation');
   }
+}
+
+// =============================================================================
+// Deprecated Functions (kept for backward compatibility)
+// =============================================================================
+
+/**
+ * @deprecated Use saveGlobalAccount instead
+ */
+export async function addAccountToProfile(
+  _profileId: string,
+  account: IntegrationAccount
+): Promise<IntegrationAccount> {
+  return saveGlobalAccount(account);
+}
+
+/**
+ * @deprecated Use saveGlobalAccount instead
+ */
+export async function updateAccountInProfile(
+  _profileId: string,
+  account: IntegrationAccount
+): Promise<IntegrationAccount> {
+  return saveGlobalAccount(account);
+}
+
+/**
+ * @deprecated Use deleteGlobalAccount instead
+ */
+export async function removeAccountFromProfile(
+  _profileId: string,
+  accountId: string
+): Promise<void> {
+  return deleteGlobalAccount(accountId);
+}
+
+/**
+ * @deprecated Use setProfileDefaultAccount instead
+ */
+export async function setDefaultAccountInProfile(
+  profileId: string,
+  accountId: string
+): Promise<void> {
+  // Get the account to find its type
+  const account = unifiedProfileStore.getState().accounts.find((a) => a.id === accountId);
+  if (account) {
+    return setProfileDefaultAccount(profileId, account.integrationType, accountId);
+  }
+}
+
+/**
+ * @deprecated Use updateGlobalAccountCachedUser instead
+ */
+export async function updateProfileAccountCachedUser(
+  _profileId: string,
+  accountId: string,
+  user: CachedUser
+): Promise<void> {
+  return updateGlobalAccountCachedUser(accountId, user);
 }
