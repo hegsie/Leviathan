@@ -30,12 +30,15 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             name: macOS-ARM64
+            bundles: app
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             name: Linux-x64
+            bundles: deb,appimage,rpm
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             name: Windows-x64
+            bundles: msi,nsis
 
     runs-on: ${{ matrix.platform }}
 
@@ -80,10 +83,10 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # Build without release for non-tag pushes (skip signing)
+      # Build without release for non-tag pushes (skip signing, use specific bundles)
       - name: Build Tauri app
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: npm run tauri build -- --target ${{ matrix.target }} --no-sign
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --no-sign
 
       # Build with release for tagged pushes
       - name: Build Tauri app (Release)
