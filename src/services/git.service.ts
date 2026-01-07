@@ -2840,6 +2840,15 @@ export interface IntegrationSuggestion {
  * Detect repository hosting provider and check if integration is configured
  */
 export async function detectRepositoryIntegration(repoPath: string): Promise<IntegrationSuggestion | null> {
+  // Import the store to check for configured accounts
+  const { unifiedProfileStore } = await import('../stores/unified-profile.store.ts');
+  const accounts = unifiedProfileStore.getState().accounts;
+
+  // Helper to check if an account of a given type exists
+  const hasAccountOfType = (type: 'github' | 'gitlab' | 'azure-devops' | 'bitbucket'): boolean => {
+    return accounts.some(account => account.integrationType === type);
+  };
+
   // Try to detect each provider in parallel
   const [githubResult, adoResult, gitlabResult, bitbucketResult] = await Promise.all([
     detectGitHubRepo(repoPath),
@@ -2850,44 +2859,40 @@ export async function detectRepositoryIntegration(repoPath: string): Promise<Int
 
   // Check GitHub
   if (githubResult.success && githubResult.data) {
-    const connectionResult = await checkGitHubConnection();
     return {
       provider: 'github',
       providerName: 'GitHub',
-      isConfigured: connectionResult.success && connectionResult.data?.connected === true,
+      isConfigured: hasAccountOfType('github'),
       features: ['Pull request overlays', 'Create PRs from branches', 'Link issues'],
     };
   }
 
   // Check Azure DevOps
   if (adoResult.success && adoResult.data) {
-    const connectionResult = await checkAdoConnection(adoResult.data.organization);
     return {
       provider: 'ado',
       providerName: 'Azure DevOps',
-      isConfigured: connectionResult.success && connectionResult.data?.connected === true,
+      isConfigured: hasAccountOfType('azure-devops'),
       features: ['Pull request overlays', 'Work item linking'],
     };
   }
 
   // Check GitLab
   if (gitlabResult.success && gitlabResult.data) {
-    const connectionResult = await checkGitLabConnection(gitlabResult.data.instanceUrl);
     return {
       provider: 'gitlab',
       providerName: 'GitLab',
-      isConfigured: connectionResult.success && connectionResult.data?.connected === true,
+      isConfigured: hasAccountOfType('gitlab'),
       features: ['Merge request overlays', 'Issue linking'],
     };
   }
 
   // Check Bitbucket
   if (bitbucketResult.success && bitbucketResult.data) {
-    const connectionResult = await checkBitbucketConnection();
     return {
       provider: 'bitbucket',
       providerName: 'Bitbucket',
-      isConfigured: connectionResult.success && connectionResult.data?.connected === true,
+      isConfigured: hasAccountOfType('bitbucket'),
       features: ['Pull request overlays'],
     };
   }

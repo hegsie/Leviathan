@@ -12,6 +12,7 @@ import { sharedStyles, animationStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatus } from '../../stores/unified-profile.store.ts';
 import { repositoryStore, type OpenRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
+import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus } from '../../services/git.service.ts';
 import type { UnifiedProfile, IntegrationAccount, IntegrationType, ProfileAssignmentSource } from '../../types/unified-profile.types.ts';
 import { INTEGRATION_TYPE_NAMES } from '../../types/integration-accounts.types.ts';
 import './lv-profile-card.ts';
@@ -481,6 +482,83 @@ export class LvContextDashboard extends LitElement {
         border-radius: 50%;
         animation: spin 0.8s linear infinite;
       }
+
+      /* Remote buttons */
+      .remote-buttons {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        margin-left: auto;
+        padding-right: var(--spacing-sm);
+      }
+
+      .remote-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-xs);
+        height: 24px;
+        padding: 0 var(--spacing-sm);
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .remote-btn:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .remote-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .remote-btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .remote-btn.loading svg {
+        animation: spin 1s linear infinite;
+      }
+
+      @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+
+      .remote-btn-wrapper {
+        position: relative;
+        display: inline-flex;
+      }
+
+      .badge {
+        position: absolute;
+        top: -4px;
+        right: -4px;
+        min-width: 14px;
+        height: 14px;
+        padding: 0 3px;
+        font-size: 9px;
+        font-weight: 600;
+        line-height: 14px;
+        text-align: center;
+        border-radius: var(--radius-full);
+        color: white;
+      }
+
+      .badge.push {
+        background: var(--color-success);
+      }
+
+      .badge.pull {
+        background: var(--color-primary);
+      }
     `,
   ];
 
@@ -493,6 +571,11 @@ export class LvContextDashboard extends LitElement {
   @state() private repositoryAssignments: Record<string, string> = {};
   @state() private isProfileDropdownOpen = false;
   @state() private isApplyingProfile = false;
+  @state() private isFetching = false;
+  @state() private isPulling = false;
+  @state() private isPushing = false;
+  @state() private ahead = 0;
+  @state() private behind = 0;
 
   private unsubscribeProfile?: () => void;
   private unsubscribeRepo?: () => void;
@@ -528,8 +611,21 @@ export class LvContextDashboard extends LitElement {
     });
 
     this.unsubscribeRepo = repositoryStore.subscribe((state) => {
+      const prevRepo = this.activeRepository;
       this.activeRepository = state.getActiveRepository();
+      // Refresh remote status when active repo changes
+      if (prevRepo?.repository.path !== this.activeRepository?.repository.path) {
+        this.loadRemoteStatus();
+      }
     });
+
+    // Listen for repository-refresh events to update badges
+    window.addEventListener('repository-refresh', this.handleRepoRefresh);
+
+    // Initial load if there's an active repo
+    if (this.activeRepository) {
+      this.loadRemoteStatus();
+    }
 
     // Close dropdown when clicking outside
     document.addEventListener('click', this.handleDocumentClick);
@@ -540,13 +636,111 @@ export class LvContextDashboard extends LitElement {
     this.unsubscribeProfile?.();
     this.unsubscribeRepo?.();
     document.removeEventListener('click', this.handleDocumentClick);
+    window.removeEventListener('repository-refresh', this.handleRepoRefresh);
   }
+
+  private handleRepoRefresh = (): void => {
+    this.loadRemoteStatus();
+  };
 
   private handleDocumentClick = (e: MouseEvent): void => {
     if (!this.contains(e.target as Node)) {
       this.isProfileDropdownOpen = false;
     }
   };
+
+  private async loadRemoteStatus(): Promise<void> {
+    if (!this.activeRepository) {
+      this.ahead = 0;
+      this.behind = 0;
+      return;
+    }
+
+    try {
+      const result = await getRemoteStatus(this.activeRepository.repository.path);
+      if (result.success && result.data) {
+        this.ahead = result.data.ahead;
+        this.behind = result.data.behind;
+      } else {
+        this.ahead = 0;
+        this.behind = 0;
+      }
+    } catch {
+      this.ahead = 0;
+      this.behind = 0;
+    }
+  }
+
+  private get isRemoteOperationInProgress(): boolean {
+    return this.isFetching || this.isPulling || this.isPushing;
+  }
+
+  private async handleFetch(): Promise<void> {
+    if (!this.activeRepository || this.isFetching) return;
+
+    this.isFetching = true;
+    try {
+      const result = await gitFetch({ path: this.activeRepository.repository.path });
+      if (!result.success) {
+        repositoryStore.getState().setError(result.error?.message ?? 'Fetch failed');
+      } else {
+        // Refresh repository data after fetch
+        this.dispatchEvent(new CustomEvent('repository-refresh', {
+          bubbles: true,
+          composed: true,
+        }));
+        await this.loadRemoteStatus();
+      }
+    } catch (err) {
+      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Fetch failed');
+    } finally {
+      this.isFetching = false;
+    }
+  }
+
+  private async handlePull(): Promise<void> {
+    if (!this.activeRepository || this.isPulling) return;
+
+    this.isPulling = true;
+    try {
+      const result = await gitPull({ path: this.activeRepository.repository.path });
+      if (!result.success) {
+        repositoryStore.getState().setError(result.error?.message ?? 'Pull failed');
+      } else {
+        this.dispatchEvent(new CustomEvent('repository-refresh', {
+          bubbles: true,
+          composed: true,
+        }));
+        await this.loadRemoteStatus();
+      }
+    } catch (err) {
+      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Pull failed');
+    } finally {
+      this.isPulling = false;
+    }
+  }
+
+  private async handlePush(): Promise<void> {
+    if (!this.activeRepository || this.isPushing) return;
+
+    this.isPushing = true;
+    try {
+      const result = await gitPush({ path: this.activeRepository.repository.path });
+      if (!result.success) {
+        repositoryStore.getState().setError(result.error?.message ?? 'Push failed');
+      } else {
+        this.dispatchEvent(new CustomEvent('repository-refresh', {
+          bubbles: true,
+          composed: true,
+        }));
+        await this.loadRemoteStatus();
+      }
+    } catch (err) {
+      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Push failed');
+    } finally {
+      this.isPushing = false;
+    }
+  }
 
   private toggleExpanded(): void {
     this.isExpanded = !this.isExpanded;
@@ -835,6 +1029,53 @@ export class LvContextDashboard extends LitElement {
 
           return nothing;
         })()}
+
+        <div class="remote-buttons">
+          <button
+            class="remote-btn ${this.isFetching ? 'loading' : ''}"
+            title="Fetch from remote"
+            @click=${this.handleFetch}
+            ?disabled=${this.isRemoteOperationInProgress}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+              <path d="M3 3v5h5"></path>
+              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"></path>
+              <path d="M16 16h5v5"></path>
+            </svg>
+            Fetch
+          </button>
+          <div class="remote-btn-wrapper">
+            <button
+              class="remote-btn ${this.isPulling ? 'loading' : ''}"
+              title="Pull from remote${this.behind > 0 ? ` (${this.behind} commits behind)` : ''}"
+              @click=${this.handlePull}
+              ?disabled=${this.isRemoteOperationInProgress}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 3v18"></path>
+                <path d="M5 16l7 7 7-7"></path>
+              </svg>
+              Pull
+            </button>
+            ${this.behind > 0 ? html`<span class="badge pull">${this.behind}</span>` : nothing}
+          </div>
+          <div class="remote-btn-wrapper">
+            <button
+              class="remote-btn ${this.isPushing ? 'loading' : ''}"
+              title="Push to remote${this.ahead > 0 ? ` (${this.ahead} commits ahead)` : ''}"
+              @click=${this.handlePush}
+              ?disabled=${this.isRemoteOperationInProgress}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 3v18"></path>
+                <path d="M5 8l7-7 7 7"></path>
+              </svg>
+              Push
+            </button>
+            ${this.ahead > 0 ? html`<span class="badge push">${this.ahead}</span>` : nothing}
+          </div>
+        </div>
 
         <button
           class="expand-btn ${this.isExpanded ? 'expanded' : ''}"

@@ -7,7 +7,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { repositoryStore, type OpenRepository } from '../../stores/index.ts';
-import { openRepository, fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus } from '../../services/git.service.ts';
+import { openRepository } from '../../services/git.service.ts';
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { loggers } from '../../utils/logger.ts';
@@ -73,25 +73,53 @@ export class LvToolbar extends LitElement {
         height: 18px;
       }
 
-      .logo {
+      .tabs-container {
         display: flex;
         align-items: center;
-        padding: 0 var(--spacing-md);
-        font-size: var(--font-size-lg);
-        font-weight: 600;
-        color: var(--color-text-primary);
+        flex: 1;
+        min-width: 0;
+        position: relative;
       }
 
       .tabs {
         display: flex;
         flex: 1;
-        overflow-x: auto;
-        padding: 0 var(--spacing-sm);
+        overflow-x: hidden;
+        padding: 0 var(--spacing-xs);
         gap: var(--spacing-xs);
+        scroll-behavior: smooth;
       }
 
-      .tabs::-webkit-scrollbar {
-        display: none;
+      .scroll-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: all var(--transition-fast);
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .scroll-btn.visible {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .scroll-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .scroll-btn svg {
+        width: 14px;
+        height: 14px;
       }
 
       .tab {
@@ -108,9 +136,7 @@ export class LvToolbar extends LitElement {
         cursor: pointer;
         transition: all var(--transition-fast);
         white-space: nowrap;
-        flex: 1;
-        min-width: 0;
-        max-width: 300px;
+        flex-shrink: 0;
       }
 
       .tab:hover {
@@ -124,10 +150,7 @@ export class LvToolbar extends LitElement {
       }
 
       .tab-name {
-        overflow: hidden;
-        text-overflow: ellipsis;
         white-space: nowrap;
-        min-width: 0;
       }
 
       .provider-icon {
@@ -161,6 +184,8 @@ export class LvToolbar extends LitElement {
         border-radius: var(--radius-sm);
         opacity: 0.5;
         transition: opacity var(--transition-fast);
+        margin-left: auto;
+        flex-shrink: 0;
       }
 
       .tab:hover .tab-close {
@@ -176,99 +201,11 @@ export class LvToolbar extends LitElement {
         height: 12px;
       }
 
-      .spacer {
-        flex: 1;
-      }
-
       .no-repos {
         padding: 0 var(--spacing-md);
         color: var(--color-text-muted);
         font-size: var(--font-size-sm);
         font-style: italic;
-      }
-
-      .remote-buttons {
-        display: flex;
-        gap: var(--spacing-xs);
-        padding: 0 var(--spacing-sm);
-        border-left: 1px solid var(--color-border);
-      }
-
-      .remote-btn {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-xs);
-        height: 32px;
-        padding: 0 var(--spacing-sm);
-        border: none;
-        border-radius: var(--radius-sm);
-        background: transparent;
-        color: var(--color-text-secondary);
-        font-size: var(--font-size-sm);
-        cursor: pointer;
-        transition: all var(--transition-fast);
-      }
-
-      .remote-btn:hover:not(:disabled) {
-        background: var(--color-bg-hover);
-        color: var(--color-text-primary);
-      }
-
-      .remote-btn:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-      }
-
-      .remote-btn svg {
-        width: 16px;
-        height: 16px;
-      }
-
-      .remote-btn.loading svg {
-        animation: spin 1s linear infinite;
-      }
-
-      @keyframes spin {
-        from { transform: rotate(0deg); }
-        to { transform: rotate(360deg); }
-      }
-
-      .remote-btn-label {
-        display: none;
-      }
-
-      @media (min-width: 800px) {
-        .remote-btn-label {
-          display: inline;
-        }
-      }
-
-      .remote-btn-wrapper {
-        position: relative;
-        display: inline-flex;
-      }
-
-      .badge {
-        position: absolute;
-        top: -4px;
-        right: -4px;
-        min-width: 16px;
-        height: 16px;
-        padding: 0 4px;
-        font-size: 10px;
-        font-weight: 600;
-        line-height: 16px;
-        text-align: center;
-        border-radius: var(--radius-full);
-        color: white;
-      }
-
-      .badge.push {
-        background: var(--color-success);
-      }
-
-      .badge.pull {
-        background: var(--color-primary);
       }
     `,
   ];
@@ -276,17 +213,15 @@ export class LvToolbar extends LitElement {
   @state() private openRepositories: OpenRepository[] = [];
   @state() private activeIndex = -1;
   @state() private isLoading = false;
-  @state() private isFetching = false;
-  @state() private isPulling = false;
-  @state() private isPushing = false;
-  @state() private ahead = 0;
-  @state() private behind = 0;
 
   @query('lv-clone-dialog') private cloneDialog!: LvCloneDialog;
   @query('lv-init-dialog') private initDialog!: LvInitDialog;
   @query('lv-search-bar') private searchBar!: LvSearchBar;
+  @query('.tabs') private tabsContainer!: HTMLElement;
 
   @state() private showSearch = false;
+  @state() private canScrollLeft = false;
+  @state() private canScrollRight = false;
 
   private unsubscribe?: () => void;
 
@@ -294,15 +229,9 @@ export class LvToolbar extends LitElement {
     super.connectedCallback();
     // Subscribe to store changes
     this.unsubscribe = repositoryStore.subscribe((state) => {
-      const prevActiveIndex = this.activeIndex;
       this.openRepositories = state.openRepositories;
       this.activeIndex = state.activeIndex;
       this.isLoading = state.isLoading;
-
-      // Refresh remote status when active repo changes
-      if (prevActiveIndex !== state.activeIndex && state.activeIndex >= 0) {
-        this.loadRemoteStatus();
-      }
     });
 
     // Listen for focus-search event from app-shell
@@ -312,16 +241,6 @@ export class LvToolbar extends LitElement {
         this.searchBar?.focus();
       });
     });
-
-    // Listen for repository-refresh events to update badges
-    window.addEventListener('repository-refresh', () => {
-      this.loadRemoteStatus();
-    });
-
-    // Initial load if there's an active repo
-    if (this.activeRepo) {
-      this.loadRemoteStatus();
-    }
   }
 
   disconnectedCallback(): void {
@@ -376,102 +295,6 @@ export class LvToolbar extends LitElement {
 
   private get activeRepo(): OpenRepository | undefined {
     return this.openRepositories[this.activeIndex];
-  }
-
-  private async loadRemoteStatus(): Promise<void> {
-    if (!this.activeRepo) {
-      this.ahead = 0;
-      this.behind = 0;
-      return;
-    }
-
-    try {
-      const result = await getRemoteStatus(this.activeRepo.repository.path);
-      if (result.success && result.data) {
-        this.ahead = result.data.ahead;
-        this.behind = result.data.behind;
-      } else {
-        this.ahead = 0;
-        this.behind = 0;
-      }
-    } catch {
-      this.ahead = 0;
-      this.behind = 0;
-    }
-  }
-
-  private async handleFetch(): Promise<void> {
-    if (!this.activeRepo || this.isFetching) return;
-
-    this.isFetching = true;
-    try {
-      const result = await gitFetch({ path: this.activeRepo.repository.path });
-      if (!result.success) {
-        repositoryStore.getState().setError(result.error?.message ?? 'Fetch failed');
-      } else {
-        // Refresh repository data after fetch
-        this.dispatchEvent(new CustomEvent('repository-refresh', {
-          bubbles: true,
-          composed: true,
-        }));
-        // Update ahead/behind counts
-        await this.loadRemoteStatus();
-      }
-    } catch (err) {
-      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Fetch failed');
-    } finally {
-      this.isFetching = false;
-    }
-  }
-
-  private async handlePull(): Promise<void> {
-    if (!this.activeRepo || this.isPulling) return;
-
-    this.isPulling = true;
-    try {
-      const result = await gitPull({ path: this.activeRepo.repository.path });
-      if (!result.success) {
-        repositoryStore.getState().setError(result.error?.message ?? 'Pull failed');
-      } else {
-        this.dispatchEvent(new CustomEvent('repository-refresh', {
-          bubbles: true,
-          composed: true,
-        }));
-        // Update ahead/behind counts
-        await this.loadRemoteStatus();
-      }
-    } catch (err) {
-      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Pull failed');
-    } finally {
-      this.isPulling = false;
-    }
-  }
-
-  private async handlePush(): Promise<void> {
-    if (!this.activeRepo || this.isPushing) return;
-
-    this.isPushing = true;
-    try {
-      const result = await gitPush({ path: this.activeRepo.repository.path });
-      if (!result.success) {
-        repositoryStore.getState().setError(result.error?.message ?? 'Push failed');
-      } else {
-        this.dispatchEvent(new CustomEvent('repository-refresh', {
-          bubbles: true,
-          composed: true,
-        }));
-        // Update ahead/behind counts
-        await this.loadRemoteStatus();
-      }
-    } catch (err) {
-      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Push failed');
-    } finally {
-      this.isPushing = false;
-    }
-  }
-
-  private get isRemoteOperationInProgress(): boolean {
-    return this.isFetching || this.isPulling || this.isPushing;
   }
 
   private handleToggleSearch(): void {
@@ -558,6 +381,40 @@ export class LvToolbar extends LitElement {
     }));
   }
 
+  private updateScrollButtons(): void {
+    if (!this.tabsContainer) return;
+    const { scrollLeft, scrollWidth, clientWidth } = this.tabsContainer;
+    this.canScrollLeft = scrollLeft > 0;
+    this.canScrollRight = scrollLeft + clientWidth < scrollWidth - 1;
+  }
+
+  private handleScrollLeft(): void {
+    if (!this.tabsContainer) return;
+    this.tabsContainer.scrollBy({ left: -150, behavior: 'smooth' });
+  }
+
+  private handleScrollRight(): void {
+    if (!this.tabsContainer) return;
+    this.tabsContainer.scrollBy({ left: 150, behavior: 'smooth' });
+  }
+
+  private handleTabsScroll(): void {
+    this.updateScrollButtons();
+  }
+
+  protected updated(changedProperties: Map<string, unknown>): void {
+    super.updated(changedProperties);
+    if (changedProperties.has('openRepositories')) {
+      this.updateComplete.then(() => this.updateScrollButtons());
+    }
+  }
+
+  protected firstUpdated(): void {
+    this.updateScrollButtons();
+    // Listen for resize to update scroll buttons
+    new ResizeObserver(() => this.updateScrollButtons()).observe(this);
+  }
+
   render() {
     return html`
       <lv-clone-dialog></lv-clone-dialog>
@@ -599,34 +456,50 @@ export class LvToolbar extends LitElement {
         </button>
       </div>
 
-      <div class="logo">Leviathan</div>
-
-      <div class="tabs toolbar-section">
-        ${this.openRepositories.length === 0
-          ? html`<span class="no-repos">No repositories open</span>`
-          : this.openRepositories.map(
-              (repo, index) => html`
-                <button
-                  class="tab ${index === this.activeIndex ? 'active' : ''}"
-                  @click=${() => this.handleTabClick(index)}
-                >
-                  ${this.renderProviderIcon(repo)}
-                  <span class="tab-name">${repo.repository.name}</span>
-                  <span
-                    class="tab-close"
-                    @click=${(e: Event) => this.handleTabClose(e, repo.repository.path)}
+      <div class="tabs-container toolbar-section">
+        <button
+          class="scroll-btn ${this.canScrollLeft ? 'visible' : ''}"
+          @click=${this.handleScrollLeft}
+          title="Scroll left"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+        </button>
+        <div class="tabs" @scroll=${this.handleTabsScroll}>
+          ${this.openRepositories.length === 0
+            ? html`<span class="no-repos">No repositories open</span>`
+            : this.openRepositories.map(
+                (repo, index) => html`
+                  <button
+                    class="tab ${index === this.activeIndex ? 'active' : ''}"
+                    @click=${() => this.handleTabClick(index)}
                   >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <line x1="18" y1="6" x2="6" y2="18"></line>
-                      <line x1="6" y1="6" x2="18" y2="18"></line>
-                    </svg>
-                  </span>
-                </button>
-              `
-            )}
+                    ${this.renderProviderIcon(repo)}
+                    <span class="tab-name">${repo.repository.name}</span>
+                    <span
+                      class="tab-close"
+                      @click=${(e: Event) => this.handleTabClose(e, repo.repository.path)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                      </svg>
+                    </span>
+                  </button>
+                `
+              )}
+        </div>
+        <button
+          class="scroll-btn ${this.canScrollRight ? 'visible' : ''}"
+          @click=${this.handleScrollRight}
+          title="Scroll right"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="9 18 15 12 9 6"></polyline>
+          </svg>
+        </button>
       </div>
-
-      <div class="spacer"></div>
 
       <div class="toolbar-section">
         ${this.activeRepo ? html`
@@ -670,55 +543,6 @@ export class LvToolbar extends LitElement {
           @search-change=${this.handleSearchChange}
           @close=${this.handleSearchClose}
         ></lv-search-bar>
-      ` : ''}
-
-      ${this.activeRepo ? html`
-        <div class="toolbar-section remote-buttons">
-          <button
-            class="remote-btn ${this.isFetching ? 'loading' : ''}"
-            title="Fetch from remote"
-            @click=${this.handleFetch}
-            ?disabled=${this.isRemoteOperationInProgress}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
-              <path d="M3 3v5h5"></path>
-              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"></path>
-              <path d="M16 16h5v5"></path>
-            </svg>
-            <span class="remote-btn-label">Fetch</span>
-          </button>
-          <div class="remote-btn-wrapper">
-            <button
-              class="remote-btn ${this.isPulling ? 'loading' : ''}"
-              title="Pull from remote${this.behind > 0 ? ` (${this.behind} commits behind)` : ''}"
-              @click=${this.handlePull}
-              ?disabled=${this.isRemoteOperationInProgress}
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 3v18"></path>
-                <path d="M5 16l7 7 7-7"></path>
-              </svg>
-              <span class="remote-btn-label">Pull</span>
-            </button>
-            ${this.behind > 0 ? html`<span class="badge pull">${this.behind}</span>` : ''}
-          </div>
-          <div class="remote-btn-wrapper">
-            <button
-              class="remote-btn ${this.isPushing ? 'loading' : ''}"
-              title="Push to remote${this.ahead > 0 ? ` (${this.ahead} commits ahead)` : ''}"
-              @click=${this.handlePush}
-              ?disabled=${this.isRemoteOperationInProgress}
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 3v18"></path>
-                <path d="M5 8l7-7 7 7"></path>
-              </svg>
-              <span class="remote-btn-label">Push</span>
-            </button>
-            ${this.ahead > 0 ? html`<span class="badge push">${this.ahead}</span>` : ''}
-          </div>
-        </div>
       ` : ''}
     `;
   }

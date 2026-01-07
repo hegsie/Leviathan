@@ -7,7 +7,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { sharedStyles, animationStyles } from '../../styles/shared-styles.ts';
 import type { IntegrationAccount, IntegrationType } from '../../types/unified-profile.types.ts';
-import { INTEGRATION_TYPE_NAMES } from '../../types/integration-accounts.types.ts';
 import type { ConnectionStatus } from '../../stores/unified-profile.store.ts';
 
 @customElement('lv-integration-card')
@@ -81,16 +80,12 @@ export class LvIntegrationCard extends LitElement {
         color: var(--color-text-primary);
       }
 
-      .type-badge {
-        display: inline-flex;
-        align-items: center;
-        padding: 2px 6px;
-        font-size: 10px;
-        font-weight: var(--font-weight-medium);
+      .secondary-info {
+        font-size: var(--font-size-xs);
         color: var(--color-text-tertiary);
-        background: var(--color-bg-tertiary);
-        border-radius: var(--radius-xs);
-        text-transform: uppercase;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .default-badge {
@@ -293,12 +288,37 @@ export class LvIntegrationCard extends LitElement {
     }
   }
 
+  private getSecondaryInfo(): string | null {
+    if (!this.account) return null;
+    const config = this.account.config;
+
+    switch (config.type) {
+      case 'azure-devops':
+        return config.organization ? `org: ${config.organization}` : null;
+      case 'gitlab':
+        if (config.instanceUrl && config.instanceUrl !== 'https://gitlab.com') {
+          try {
+            const url = new URL(config.instanceUrl);
+            return url.hostname;
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      case 'bitbucket':
+        return config.workspace ? `workspace: ${config.workspace}` : null;
+      default:
+        return null;
+    }
+  }
+
   render() {
     if (!this.account) {
       return nothing;
     }
 
     const { integrationType, name, cachedUser } = this.account;
+    const secondaryInfo = this.getSecondaryInfo();
 
     return html`
       <div class="card ${this.connectionStatus}">
@@ -314,7 +334,9 @@ export class LvIntegrationCard extends LitElement {
                   ? html`<span class="default-badge">Default</span>`
                   : nothing}
               </div>
-              <span class="type-badge">${INTEGRATION_TYPE_NAMES[integrationType]}</span>
+              ${secondaryInfo
+                ? html`<span class="secondary-info">${secondaryInfo}</span>`
+                : nothing}
             </div>
           </div>
 
@@ -330,7 +352,7 @@ export class LvIntegrationCard extends LitElement {
                 <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
               </svg>
             </button>
-            <button class="action-btn" @click=${this.handleOpenDialog} title="Open ${INTEGRATION_TYPE_NAMES[integrationType]}">
+            <button class="action-btn" @click=${this.handleOpenDialog} title="Configure account">
               <svg viewBox="0 0 16 16" fill="currentColor">
                 <path fill-rule="evenodd" d="M8.636 3.5a.5.5 0 0 0-.5-.5H1.5A1.5 1.5 0 0 0 0 4.5v10A1.5 1.5 0 0 0 1.5 16h10a1.5 1.5 0 0 0 1.5-1.5V7.864a.5.5 0 0 0-1 0V14.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h6.636a.5.5 0 0 0 .5-.5z"/>
                 <path fill-rule="evenodd" d="M16 .5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1h3.793L6.146 9.146a.5.5 0 1 0 .708.708L15 1.707V5.5a.5.5 0 0 0 1 0v-5z"/>

@@ -1,6 +1,6 @@
 [package]
 name = "leviathan"
-version = "0.2.35"
+version = "0.2.36"
 description = "A fully-featured, open-source, cross-platform Git GUI client"
 authors = ["Leviathan Contributors"]
 edition = "2021"
@@ -32,7 +32,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 keyring = { version = "3", features = ["apple-native"] }
 notify = "8"
-reqwest = { version = "0.13", features = ["json", "query", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "query", "form", "http2"] }
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 url = "2"

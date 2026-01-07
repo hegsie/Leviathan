@@ -415,6 +415,7 @@ export class AppShell extends LitElement {
   private unsubscribeUi?: () => void;
   private updateUnlisteners: UnlistenFn[] = [];
   private shownIntegrationSuggestions: Set<string> = new Set();
+  private isRestoringRepositories = false;
 
   // Bound event handlers for cleanup
   private boundHandleMouseMove = this.handleResizeMove.bind(this);
@@ -451,7 +452,10 @@ export class AppShell extends LitElement {
         // Load profile for new repository and check integration
         if (newActiveRepo) {
           gitService.loadProfileForRepository(newActiveRepo.repository.path);
-          this.checkRepositoryIntegration(newActiveRepo.repository.path);
+          // Only check integration if not restoring repos on startup
+          if (!this.isRestoringRepositories) {
+            this.checkRepositoryIntegration(newActiveRepo.repository.path);
+          }
           // Load remotes if not already loaded
           if (!newActiveRepo.remotes || newActiveRepo.remotes.length === 0) {
             this.loadRepositoryRemotes(newActiveRepo.repository.path);
@@ -1197,6 +1201,9 @@ export class AppShell extends LitElement {
     const persistedRepos = repositoryStore.getState().getPersistedOpenRepos();
     if (persistedRepos.length === 0) return;
 
+    // Set flag to prevent duplicate notifications during restore
+    this.isRestoringRepositories = true;
+
     // Open each persisted repository
     for (const persisted of persistedRepos) {
       try {
@@ -1212,6 +1219,13 @@ export class AppShell extends LitElement {
     }
 
     // Restore active index (already persisted, will be set from storage)
+    this.isRestoringRepositories = false;
+
+    // Check integration for the final active repo only
+    const activeRepo = repositoryStore.getState().getActiveRepository();
+    if (activeRepo) {
+      this.checkRepositoryIntegration(activeRepo.repository.path);
+    }
   }
 
   /**

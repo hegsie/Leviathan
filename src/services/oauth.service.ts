@@ -79,7 +79,7 @@ export async function initOAuthListener(): Promise<void> {
 
   // Listen for deep links while app is running
   try {
-    await onOpenUrl((urls) => {
+    await onOpenUrl((urls: string[]) => {
       if (urls.length) {
         handleDeepLink(urls[0]);
       }

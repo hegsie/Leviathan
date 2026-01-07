@@ -555,6 +555,7 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private error: string | null = null;
   @state() private tokenInput = '';
   @state() private organizationInput = '';
+  @state() private hasStoredToken = false;
   @state() private prFilter: 'active' | 'completed' | 'abandoned' | 'all' = 'active';
   @state() private workItemFilter: string = '';
 
@@ -643,6 +644,9 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
       }
 
+      // Check if selected account has a stored token
+      await this.checkStoredToken();
+
       // Try to detect repo first to get organization
       if (this.repositoryPath) {
         await this.detectRepo();
@@ -655,6 +659,31 @@ export class LvAzureDevOpsDialog extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load data';
     } finally {
       this.isLoading = false;
+    }
+  }
+
+  private async checkStoredToken(): Promise<void> {
+    log.debug('checkStoredToken called, selectedAccountId:', this.selectedAccountId);
+    if (this.selectedAccountId) {
+      // First check account-specific token
+      let token = await credentialService.getAccountToken('azure-devops', this.selectedAccountId);
+      log.debug('Account-specific token found:', !!token);
+
+      // If not found, check legacy token and migrate it
+      if (!token) {
+        const legacyToken = await credentialService.AzureDevOpsCredentials.getToken();
+        log.debug('Legacy token found:', !!legacyToken);
+        if (legacyToken) {
+          await credentialService.storeAccountToken('azure-devops', this.selectedAccountId, legacyToken);
+          token = legacyToken;
+        }
+      }
+
+      this.hasStoredToken = !!token;
+      log.debug('hasStoredToken set to:', this.hasStoredToken);
+    } else {
+      this.hasStoredToken = false;
+      log.debug('No selectedAccountId, hasStoredToken = false');
     }
   }
 
@@ -697,9 +726,13 @@ export class LvAzureDevOpsDialog extends LitElement {
    * Get the token for the currently selected account
    */
   private async getSelectedAccountToken(): Promise<string | null> {
+    log.debug('getSelectedAccountToken called, selectedAccountId:', this.selectedAccountId);
     if (this.selectedAccountId) {
-      return credentialService.getAccountToken('azure-devops', this.selectedAccountId);
+      const token = await credentialService.getAccountToken('azure-devops', this.selectedAccountId);
+      log.debug('getSelectedAccountToken result:', !!token);
+      return token;
     }
+    log.debug('getSelectedAccountToken: no selectedAccountId');
     return null;
   }
 
@@ -711,11 +744,15 @@ export class LvAzureDevOpsDialog extends LitElement {
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
     this.error = null;
+    this.tokenInput = ''; // Clear any manually entered token
 
     // Update organization from account config
     if (account.config.type === 'azure-devops' && account.config.organization) {
       this.organizationInput = account.config.organization;
     }
+
+    // Check if this account has a stored token
+    await this.checkStoredToken();
 
     // Re-check connection with new account
     await this.loadInitialData();
@@ -832,6 +869,62 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
   }
 
+  private async handleConnectWithStoredToken(): Promise<void> {
+    if (!this.organizationInput.trim()) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      // If user entered a new token, save it first
+      if (this.tokenInput.trim()) {
+        await this.handleSaveToken();
+        return;
+      }
+
+      // Otherwise use the stored token
+      const token = await this.getSelectedAccountToken();
+      if (!token) {
+        this.error = 'No stored token found';
+        return;
+      }
+
+      const organization = this.organizationInput.trim();
+
+      // Verify the stored token works
+      const verifyResult = await gitService.checkAdoConnectionWithToken(organization, token);
+      if (!verifyResult.success || !verifyResult.data?.connected) {
+        this.error = verifyResult.error?.message ?? 'Connection failed - token may have expired';
+        return;
+      }
+
+      this.connectionStatus = verifyResult.data;
+
+      // Update cached user if we got user info
+      if (this.selectedAccountId && verifyResult.data.user) {
+        await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+          username: verifyResult.data.user.displayName,
+          displayName: verifyResult.data.user.displayName,
+          email: null,
+          avatarUrl: verifyResult.data.user.imageUrl ?? null,
+        });
+      }
+
+      // Sync git credentials
+      await gitService.storeGitCredentials('https://dev.azure.com', 'pat', token);
+      await gitService.storeGitCredentials(`https://${organization}.visualstudio.com`, 'pat', token);
+
+      // Load data if connected and repo detected
+      if (this.connectionStatus?.connected && this.detectedRepo) {
+        await this.loadAllData(token);
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to connect';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
   private async handleSaveToken(): Promise<void> {
     if (!this.tokenInput.trim() || !this.organizationInput.trim()) return;
 
@@ -841,10 +934,28 @@ export class LvAzureDevOpsDialog extends LitElement {
     const organization = this.organizationInput.trim();
 
     try {
+      log.debug('handleSaveToken: verifying token for org:', organization, 'token length:', tokenToSave.length);
       // First verify the token works by checking connection
-      const verifyResult = await gitService.checkAdoConnectionWithToken(organization, tokenToSave);
+      // Add timeout because Tauri IPC can hang on Windows
+      let verifyResult;
+      try {
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Connection timed out - please try again')), 15000)
+        );
+        verifyResult = await Promise.race([
+          gitService.checkAdoConnectionWithToken(organization, tokenToSave),
+          timeoutPromise
+        ]);
+      } catch (ipcError) {
+        log.error('handleSaveToken: IPC error:', ipcError);
+        this.error = `Connection failed: ${ipcError instanceof Error ? ipcError.message : String(ipcError)}`;
+        this.isLoading = false;
+        return;
+      }
+      log.debug('handleSaveToken: verifyResult:', verifyResult);
       if (!verifyResult.success || !verifyResult.data?.connected) {
         this.error = verifyResult.error?.message ?? 'Invalid token or connection failed';
+        this.isLoading = false;
         return;
       }
 
@@ -1052,25 +1163,28 @@ export class LvAzureDevOpsDialog extends LitElement {
           <label>Personal Access Token</label>
           <input
             type="password"
-            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            placeholder=${this.hasStoredToken ? '••••••••••••••••••••••••••••••••' : 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'}
             .value=${this.tokenInput}
             @input=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
           />
           <span class="help-text">
-            Create a token at
-            <a
-              class="help-link"
-              href="https://dev.azure.com/${this.organizationInput || '{org}'}/_usersSettings/tokens"
-              @click=${handleExternalLink}
-            >Azure DevOps Settings</a>.
-            Required scopes: <strong>Code (Read & Write)</strong>, <strong>Work Items (Read)</strong>, <strong>Build (Read)</strong>, and <strong>User Profile (Read)</strong>.
+            ${this.hasStoredToken
+              ? html`Token saved securely. Enter a new token to update, or click Connect to use the saved token.`
+              : html`Create a token at
+                <a
+                  class="help-link"
+                  href="https://dev.azure.com/${this.organizationInput || '{org}'}/_usersSettings/tokens"
+                  @click=${handleExternalLink}
+                >Azure DevOps Settings</a>.
+                Required scopes: <strong>Code (Read & Write)</strong>, <strong>Work Items (Read)</strong>, <strong>Build (Read)</strong>, and <strong>User Profile (Read)</strong>.`
+            }
           </span>
         </div>
         <div class="btn-row">
           <button
             class="btn btn-primary"
-            @click=${this.handleSaveToken}
-            ?disabled=${this.isLoading || !this.tokenInput.trim() || !this.organizationInput.trim()}
+            @click=${this.tokenInput.trim() ? this.handleSaveToken : this.handleConnectWithStoredToken}
+            ?disabled=${this.isLoading || !this.organizationInput.trim() || (!this.tokenInput.trim() && !this.hasStoredToken)}
           >
             Connect
           </button>

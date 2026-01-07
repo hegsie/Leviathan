@@ -566,9 +566,9 @@ export async function initializeUnifiedProfiles(): Promise<void> {
       // Load existing unified profiles
       await loadUnifiedProfiles();
 
-      // Refresh cached user info in background (don't await)
-      refreshAllAccountsCachedUser().catch((error) => {
-        log.error('Failed to refresh cached user info:', error);
+      // Validate all account tokens and update connection status in background (don't await)
+      validateAllAccountTokens().catch((error) => {
+        log.error('Failed to validate account tokens:', error);
       });
     }
 
@@ -642,17 +642,17 @@ export async function refreshAccountCachedUser(
         // Use Tauri command to check Azure DevOps connection
         const organization = account.config.type === 'azure-devops' ? account.config.organization : '';
         if (organization) {
-          const result = await invokeCommand<{ connected: boolean; displayName?: string; emailAddress?: string }>(
-            'check_azure_devops_connection',
+          const result = await invokeCommand<{ connected: boolean; user?: { displayName: string; uniqueName: string } }>(
+            'check_ado_connection',
             { organization, token }
           );
-          if (result.success && result.data?.connected) {
+          if (result.success && result.data?.connected && result.data.user) {
             isConnected = true;
             cachedUser = {
-              username: result.data.emailAddress?.split('@')[0] || organization,
-              displayName: result.data.displayName || null,
+              username: result.data.user.uniqueName?.split('@')[0] || organization,
+              displayName: result.data.user.displayName || null,
               avatarUrl: null,
-              email: result.data.emailAddress || null,
+              email: result.data.user.uniqueName || null,
             };
           }
         }
