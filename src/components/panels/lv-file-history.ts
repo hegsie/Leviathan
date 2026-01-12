@@ -9,6 +9,13 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
 
+interface HistoryContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  commit: Commit | null;
+}
+
 @customElement('lv-file-history')
 export class LvFileHistory extends LitElement {
   static styles = [
@@ -198,6 +205,48 @@ export class LvFileHistory extends LitElement {
         background: var(--color-bg-tertiary);
         border-radius: var(--radius-sm);
       }
+
+      /* Context menu */
+      .context-menu {
+        position: fixed;
+        z-index: var(--z-dropdown, 100);
+        min-width: 180px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        padding: var(--spacing-xs) 0;
+      }
+
+      .context-menu-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .context-menu-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .context-menu-item svg {
+        width: 14px;
+        height: 14px;
+        color: var(--color-text-muted);
+      }
+
+      .context-menu-divider {
+        height: 1px;
+        background: var(--color-border);
+        margin: var(--spacing-xs) 0;
+      }
     `,
   ];
 
@@ -207,6 +256,23 @@ export class LvFileHistory extends LitElement {
   @state() private commits: Commit[] = [];
   @state() private loading = false;
   @state() private selectedCommit: string | null = null;
+  @state() private contextMenu: HistoryContextMenuState = { visible: false, x: 0, y: 0, commit: null };
+
+  private handleDocumentClick = (): void => {
+    if (this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    document.addEventListener('click', this.handleDocumentClick);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('click', this.handleDocumentClick);
+  }
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     if (changedProps.has('filePath') || changedProps.has('repositoryPath')) {
@@ -283,6 +349,38 @@ export class LvFileHistory extends LitElement {
     }
   }
 
+  // Context menu handlers
+  private handleContextMenuOpen(e: MouseEvent, commit: Commit): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.contextMenu = { visible: true, x: e.clientX, y: e.clientY, commit };
+  }
+
+  private handleContextViewDiff(): void {
+    const commit = this.contextMenu.commit;
+    if (!commit) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.handleViewDiff(new Event('click'), commit);
+  }
+
+  private handleContextShowCommit(): void {
+    const commit = this.contextMenu.commit;
+    if (!commit) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.handleCommitClick(commit);
+  }
+
+  private async handleContextCopyHash(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      await navigator.clipboard.writeText(commit.oid);
+    } catch (err) {
+      console.error('Failed to copy hash:', err);
+    }
+  }
+
   render() {
     return html`
       <div class="header">
@@ -319,6 +417,7 @@ export class LvFileHistory extends LitElement {
                     <div
                       class="commit-item ${this.selectedCommit === commit.oid ? 'selected' : ''}"
                       @click=${() => this.handleCommitClick(commit)}
+                      @contextmenu=${(e: MouseEvent) => this.handleContextMenuOpen(e, commit)}
                     >
                       <div class="commit-row">
                         <span class="commit-oid">${commit.shortId}</span>
@@ -351,6 +450,40 @@ export class LvFileHistory extends LitElement {
                   `)}
                 </div>
               `}
+      </div>
+      ${this.renderContextMenu()}
+    `;
+  }
+
+  private renderContextMenu() {
+    if (!this.contextMenu.visible || !this.contextMenu.commit) return nothing;
+
+    const { x, y } = this.contextMenu;
+
+    return html`
+      <div class="context-menu" style="left: ${x}px; top: ${y}px">
+        <button class="context-menu-item" @click=${this.handleContextViewDiff}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 3v18M3 12h18"></path>
+          </svg>
+          View diff
+        </button>
+        <button class="context-menu-item" @click=${this.handleContextShowCommit}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <line x1="12" y1="3" x2="12" y2="9"></line>
+            <line x1="12" y1="15" x2="12" y2="21"></line>
+          </svg>
+          Show commit details
+        </button>
+        <div class="context-menu-divider"></div>
+        <button class="context-menu-item" @click=${this.handleContextCopyHash}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy commit hash
+        </button>
       </div>
     `;
   }

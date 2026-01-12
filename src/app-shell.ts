@@ -423,6 +423,21 @@ export class AppShell extends LitElement {
 
   private boundHandleKeyDown = this.handleKeyDown.bind(this);
 
+  // Prevent browser default context menu globally
+  private handleContextMenu = (e: MouseEvent): void => {
+    // Allow context menu in text inputs/textareas for copy/paste
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+      return;
+    }
+    e.preventDefault();
+  };
+
+  // Handle repository-refresh events from window (e.g., after commit)
+  private handleWindowRefresh = (): void => {
+    this.graphCanvas?.refresh?.();
+  };
+
   connectedCallback(): void {
     super.connectedCallback();
     this.unsubscribe = repositoryStore.subscribe((state) => {
@@ -469,6 +484,8 @@ export class AppShell extends LitElement {
     });
     document.addEventListener('keydown', this.boundHandleKeyDown);
     document.addEventListener('click', this.handleDocumentClick);
+    document.addEventListener('contextmenu', this.handleContextMenu);
+    window.addEventListener('repository-refresh', this.handleWindowRefresh);
 
     // Load vim mode from keyboard service
     this.vimMode = keyboardService.isVimMode();
@@ -532,6 +549,8 @@ export class AppShell extends LitElement {
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
     document.removeEventListener('keydown', this.boundHandleKeyDown);
     document.removeEventListener('click', this.handleDocumentClick);
+    document.removeEventListener('contextmenu', this.handleContextMenu);
+    window.removeEventListener('repository-refresh', this.handleWindowRefresh);
     gitService.cleanupRemoteOperationListeners();
     // Stop periodic token validation
     unifiedProfileService.stopPeriodicTokenValidation();
@@ -592,17 +611,16 @@ export class AppShell extends LitElement {
    * Check if repository has integration configured and suggest if not
    */
   private async checkRepositoryIntegration(repoPath: string): Promise<void> {
-    // Don't show the same suggestion twice
+    // Don't check the same repo twice - add immediately to prevent race conditions
     if (this.shownIntegrationSuggestions.has(repoPath)) {
       return;
     }
+    this.shownIntegrationSuggestions.add(repoPath);
 
     try {
       const suggestion = await gitService.detectRepositoryIntegration(repoPath);
 
       if (suggestion && !suggestion.isConfigured) {
-        this.shownIntegrationSuggestions.add(repoPath);
-
         const features = suggestion.features.slice(0, 2).join(', ');
         showToast(
           `${suggestion.providerName} repository detected. Connect to enable ${features}.`,
@@ -913,6 +931,8 @@ export class AppShell extends LitElement {
   private handleRefresh(): void {
     // Trigger refresh of the graph
     this.graphCanvas?.refresh?.();
+    // Dispatch event for other components (like context dashboard) to update
+    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private async handleRefreshAccount(e: CustomEvent<{ accountId: string }>): Promise<void> {
@@ -1330,6 +1350,7 @@ export class AppShell extends LitElement {
               @open-bitbucket=${() => { this.showBitbucket = true; }}
               @open-azure-devops=${() => { this.showAzureDevOps = true; }}
               @refresh-account=${this.handleRefreshAccount}
+              @repository-refresh=${() => this.handleRefresh()}
             ></lv-context-dashboard>
 
             <div class="main-content">

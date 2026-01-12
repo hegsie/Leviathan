@@ -9,6 +9,13 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
 
+interface ReflogContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  entry: ReflogEntry | null;
+}
+
 @customElement('lv-reflog-dialog')
 export class LvReflogDialog extends LitElement {
   static styles = [
@@ -261,6 +268,48 @@ export class LvReflogDialog extends LitElement {
       .help-text strong {
         color: var(--color-text-secondary);
       }
+
+      /* Context menu */
+      .context-menu {
+        position: fixed;
+        z-index: var(--z-dropdown, 300);
+        min-width: 180px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        padding: var(--spacing-xs) 0;
+      }
+
+      .context-menu-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .context-menu-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .context-menu-item svg {
+        width: 14px;
+        height: 14px;
+        color: var(--color-text-muted);
+      }
+
+      .context-menu-divider {
+        height: 1px;
+        background: var(--color-border);
+        margin: var(--spacing-xs) 0;
+      }
     `,
   ];
 
@@ -271,6 +320,13 @@ export class LvReflogDialog extends LitElement {
   @state() private loading = false;
   @state() private selectedIndex: number | null = null;
   @state() private resetting = false;
+  @state() private contextMenu: ReflogContextMenuState = { visible: false, x: 0, y: 0, entry: null };
+
+  private handleDocumentClick = (): void => {
+    if (this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     if (changedProps.has('open') && this.open) {
@@ -311,11 +367,13 @@ export class LvReflogDialog extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
+    document.addEventListener('click', this.handleDocumentClick);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this.handleKeyDown);
+    document.removeEventListener('click', this.handleDocumentClick);
   }
 
   public close(): void {
@@ -371,6 +429,42 @@ export class LvReflogDialog extends LitElement {
     return date.toLocaleDateString();
   }
 
+  // Context menu handlers
+  private handleEntryContextMenu(e: MouseEvent, entry: ReflogEntry): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.contextMenu = { visible: true, x: e.clientX, y: e.clientY, entry };
+  }
+
+  private handleContextCheckout(): void {
+    const entry = this.contextMenu.entry;
+    if (!entry) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.handleReset(entry, 'mixed');
+  }
+
+  private async handleContextCopyHash(): Promise<void> {
+    const entry = this.contextMenu.entry;
+    if (!entry) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      await navigator.clipboard.writeText(entry.oid);
+    } catch (err) {
+      console.error('Failed to copy hash:', err);
+    }
+  }
+
+  private handleContextShowCommit(): void {
+    const entry = this.contextMenu.entry;
+    if (!entry) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.dispatchEvent(new CustomEvent('show-commit', {
+      detail: { oid: entry.oid },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   private renderEntry(entry: ReflogEntry) {
     const isCurrent = entry.index === 0;
 
@@ -378,6 +472,7 @@ export class LvReflogDialog extends LitElement {
       <div
         class="entry ${this.selectedIndex === entry.index ? 'selected' : ''}"
         @click=${() => { this.selectedIndex = entry.index; }}
+        @contextmenu=${(e: MouseEvent) => this.handleEntryContextMenu(e, entry)}
       >
         <span class="entry-index">HEAD@{${entry.index}}</span>
 
@@ -456,6 +551,44 @@ export class LvReflogDialog extends LitElement {
         <div class="help-text">
           <strong>Undo</strong> resets HEAD but keeps your changes. <strong>Hard</strong> discards all changes.
         </div>
+      </div>
+      ${this.renderContextMenu()}
+    `;
+  }
+
+  private renderContextMenu() {
+    if (!this.contextMenu.visible || !this.contextMenu.entry) return nothing;
+
+    const { x, y, entry } = this.contextMenu;
+    const isCurrent = entry.index === 0;
+
+    return html`
+      <div class="context-menu" style="left: ${x}px; top: ${y}px">
+        ${!isCurrent ? html`
+          <button class="context-menu-item" @click=${this.handleContextCheckout}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="1 4 1 10 7 10"></polyline>
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+            </svg>
+            Undo to this state
+          </button>
+          <div class="context-menu-divider"></div>
+        ` : nothing}
+        <button class="context-menu-item" @click=${this.handleContextShowCommit}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <line x1="12" y1="3" x2="12" y2="9"></line>
+            <line x1="12" y1="15" x2="12" y2="21"></line>
+          </svg>
+          Show commit details
+        </button>
+        <button class="context-menu-item" @click=${this.handleContextCopyHash}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy commit hash
+        </button>
       </div>
     `;
   }

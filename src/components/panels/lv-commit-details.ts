@@ -11,8 +11,17 @@ import { parseIssueReferences, isClosingKeyword } from '../../services/git.servi
 import type { IssueReference } from '../../services/git.service.ts';
 import type { Commit, RefInfo, CommitFileEntry, FileStatus } from '../../types/git.types.ts';
 import { loggers, openExternalUrl } from '../../utils/index.ts';
+import { open as shellOpen } from '@tauri-apps/plugin-shell';
+import { join } from '@tauri-apps/api/path';
 
 const log = loggers.ui;
+
+interface FileContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  file: CommitFileEntry | null;
+}
 
 @customElement('lv-commit-details')
 export class LvCommitDetails extends LitElement {
@@ -345,6 +354,48 @@ export class LvCommitDetails extends LitElement {
         width: 12px;
         height: 12px;
       }
+
+      /* Context menu */
+      .context-menu {
+        position: fixed;
+        z-index: var(--z-dropdown, 100);
+        min-width: 180px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        padding: var(--spacing-xs) 0;
+      }
+
+      .context-menu-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .context-menu-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .context-menu-item svg {
+        width: 14px;
+        height: 14px;
+        color: var(--color-text-muted);
+      }
+
+      .context-menu-divider {
+        height: 1px;
+        background: var(--color-border);
+        margin: var(--spacing-xs) 0;
+      }
     `,
   ];
 
@@ -358,15 +409,28 @@ export class LvCommitDetails extends LitElement {
   @state() private loadingFiles = false;
   @state() private selectedFilePath: string | null = null;
   @state() private issueReferences: IssueReference[] = [];
+  @state() private contextMenu: FileContextMenuState = { visible: false, x: 0, y: 0, file: null };
 
   private currentCommitOid: string | null = null;
 
+  private handleDocumentClick = (): void => {
+    if (this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
+
   connectedCallback(): void {
     super.connectedCallback();
+    document.addEventListener('click', this.handleDocumentClick);
     log.debug('connectedCallback - initial state:', {
       repositoryPath: this.repositoryPath,
       commitOid: this.commit?.oid,
     });
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('click', this.handleDocumentClick);
   }
 
   updated(changedProperties: Map<string, unknown>): void {
@@ -527,6 +591,65 @@ export class LvCommitDetails extends LitElement {
     openExternalUrl(url);
   }
 
+  // Context menu handlers
+  private handleFileContextMenu(e: MouseEvent, file: CommitFileEntry): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.contextMenu = { visible: true, x: e.clientX, y: e.clientY, file };
+  }
+
+  private handleContextViewDiff(): void {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.handleFileClick(file);
+  }
+
+  private handleContextViewBlame(): void {
+    const file = this.contextMenu.file;
+    if (!file || file.status === 'deleted') return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.dispatchEvent(new CustomEvent('show-blame', {
+      detail: { filePath: file.path, commitOid: this.commit?.oid },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
+  private handleContextViewHistory(): void {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.dispatchEvent(new CustomEvent('show-file-history', {
+      detail: { filePath: file.path },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
+  private async handleContextOpenInEditor(): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file || file.status === 'deleted') return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      const fullPath = await join(this.repositoryPath, file.path);
+      await shellOpen(fullPath);
+    } catch (err) {
+      console.error('Failed to open file:', err);
+    }
+  }
+
+  private async handleContextCopyPath(): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      await navigator.clipboard.writeText(file.path);
+    } catch (err) {
+      console.error('Failed to copy path:', err);
+    }
+  }
+
   private renderLinkedIssues() {
     if (this.issueReferences.length === 0) return nothing;
     if (!this.githubOwner || !this.githubRepo) return nothing;
@@ -594,6 +717,7 @@ export class LvCommitDetails extends LitElement {
       <li
         class="file-item ${this.selectedFilePath === file.path ? 'selected' : ''}"
         @click=${() => this.handleFileClick(file)}
+        @contextmenu=${(e: MouseEvent) => this.handleFileContextMenu(e, file)}
         title="${file.path}"
       >
         <span class="file-status ${file.status}">${this.getStatusLabel(file.status)}</span>
@@ -627,6 +751,59 @@ export class LvCommitDetails extends LitElement {
           ` : nothing}
         </div>
       </li>
+    `;
+  }
+
+  private renderContextMenu() {
+    if (!this.contextMenu.visible || !this.contextMenu.file) return nothing;
+
+    const { x, y, file } = this.contextMenu;
+    const canBlame = file.status !== 'deleted';
+    const canOpen = file.status !== 'deleted';
+
+    return html`
+      <div class="context-menu" style="left: ${x}px; top: ${y}px">
+        <button class="context-menu-item" @click=${this.handleContextViewDiff}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 3v18M3 12h18"></path>
+          </svg>
+          View diff
+        </button>
+        ${canBlame ? html`
+          <button class="context-menu-item" @click=${this.handleContextViewBlame}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+            View blame
+          </button>
+        ` : nothing}
+        <button class="context-menu-item" @click=${this.handleContextViewHistory}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          View history
+        </button>
+        <div class="context-menu-divider"></div>
+        ${canOpen ? html`
+          <button class="context-menu-item" @click=${this.handleContextOpenInEditor}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+              <polyline points="15 3 21 3 21 9"></polyline>
+              <line x1="10" y1="14" x2="21" y2="3"></line>
+            </svg>
+            Open current version
+          </button>
+        ` : nothing}
+        <button class="context-menu-item" @click=${this.handleContextCopyPath}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy file path
+        </button>
+      </div>
     `;
   }
 
@@ -755,6 +932,8 @@ export class LvCommitDetails extends LitElement {
             `
           : ''}
       </div>
+
+      ${this.renderContextMenu()}
     `;
   }
 }

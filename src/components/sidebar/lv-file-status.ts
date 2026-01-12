@@ -4,7 +4,17 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as watcherService from '../../services/watcher.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { open as shellOpen } from '@tauri-apps/plugin-shell';
+import { join } from '@tauri-apps/api/path';
 import type { StatusEntry, FileStatus } from '../../types/git.types.ts';
+
+interface FileContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  file: StatusEntry | null;
+  isStaged: boolean;
+}
 
 /**
  * File status component
@@ -17,6 +27,10 @@ export class LvFileStatus extends LitElement {
     css`
       :host {
         display: block;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
       }
 
       .section {
@@ -33,6 +47,7 @@ export class LvFileStatus extends LitElement {
         gap: 6px;
         padding: 4px 8px;
         cursor: pointer;
+        -webkit-user-select: none;
         user-select: none;
         font-size: var(--font-size-xs);
         color: var(--color-text-secondary);
@@ -89,6 +104,8 @@ export class LvFileStatus extends LitElement {
         list-style: none;
         margin: 0;
         padding: 0;
+        -webkit-user-select: none;
+        user-select: none;
       }
 
       .file-item {
@@ -100,6 +117,10 @@ export class LvFileStatus extends LitElement {
         cursor: default;
         font-size: var(--font-size-xs);
         min-height: 22px;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-backface-visibility: hidden;
+        backface-visibility: hidden;
       }
 
       .file-item:hover {
@@ -161,24 +182,30 @@ export class LvFileStatus extends LitElement {
         gap: 6px;
         overflow: hidden;
         min-width: 0;
+        -webkit-user-select: none;
+        user-select: none;
       }
 
       .file-name {
         font-family: var(--font-family-mono);
-        font-size: 11px;
+        font-size: 12px;
         white-space: nowrap;
         flex-shrink: 0;
+        -webkit-user-select: none;
+        user-select: none;
       }
 
       .file-dir {
         color: var(--color-text-muted);
         font-family: var(--font-family-mono);
-        font-size: 10px;
+        font-size: 11px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
         flex-shrink: 1;
         min-width: 0;
+        -webkit-user-select: none;
+        user-select: none;
       }
 
       .file-actions {
@@ -266,6 +293,7 @@ export class LvFileStatus extends LitElement {
         cursor: pointer;
         font-size: var(--font-size-xs);
         color: var(--color-text-secondary);
+        -webkit-user-select: none;
         user-select: none;
       }
 
@@ -370,6 +398,56 @@ export class LvFileStatus extends LitElement {
         color: var(--color-error);
         border-color: var(--color-error);
       }
+
+      /* Context menu */
+      .context-menu {
+        position: fixed;
+        z-index: var(--z-dropdown, 100);
+        min-width: 180px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        padding: var(--spacing-xs) 0;
+      }
+
+      .context-menu-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .context-menu-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .context-menu-item.danger {
+        color: var(--color-error);
+      }
+
+      .context-menu-item svg {
+        width: 14px;
+        height: 14px;
+        color: var(--color-text-muted);
+      }
+
+      .context-menu-item.danger svg {
+        color: var(--color-error);
+      }
+
+      .context-menu-divider {
+        height: 1px;
+        background: var(--color-border);
+        margin: var(--spacing-xs) 0;
+      }
     `,
   ];
 
@@ -386,6 +464,13 @@ export class LvFileStatus extends LitElement {
   @state() private focusedIndex: number = -1;
   @state() private viewMode: 'flat' | 'tree' = 'flat';
   @state() private expandedFolders: Set<string> = new Set();
+  @state() private contextMenu: FileContextMenuState = { visible: false, x: 0, y: 0, file: null, isStaged: false };
+
+  private handleDocumentClick = (): void => {
+    if (this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
 
   /** Tree node structure for tree view */
   private buildFileTree(files: StatusEntry[]): Map<string, { file?: StatusEntry; children: Map<string, unknown> }> {
@@ -452,6 +537,9 @@ export class LvFileStatus extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+
+    // Add document click listener for closing context menu
+    document.addEventListener('click', this.handleDocumentClick);
 
     // Subscribe to file change events with debouncing
     this.unsubscribeWatcher = watcherService.onFileChange((event) => {
@@ -583,6 +671,9 @@ export class LvFileStatus extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+
+    // Remove document click listener
+    document.removeEventListener('click', this.handleDocumentClick);
 
     // Clear debounce timeout
     if (this.statusRefreshTimeout) {
@@ -884,6 +975,74 @@ export class LvFileStatus extends LitElement {
     }
   }
 
+  // Context menu handlers
+  private handleContextMenu(e: MouseEvent, file: StatusEntry, isStaged: boolean): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.contextMenu = { visible: true, x: e.clientX, y: e.clientY, file, isStaged };
+  }
+
+  private async handleContextStage(): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    const result = await gitService.stageFiles(this.repositoryPath, { paths: [file.path] });
+    if (result.success) await this.loadStatus();
+  }
+
+  private async handleContextUnstage(): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    const result = await gitService.unstageFiles(this.repositoryPath, { paths: [file.path] });
+    if (result.success) await this.loadStatus();
+  }
+
+  private handleContextViewDiff(): void {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.dispatchEvent(new CustomEvent('file-selected', { detail: { file }, bubbles: true, composed: true }));
+  }
+
+  private async handleContextOpenInEditor(): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      const fullPath = await join(this.repositoryPath, file.path);
+      await shellOpen(fullPath);
+    } catch (err) { console.error('Failed to open file:', err); }
+  }
+
+  private async handleContextRevealInFinder(): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      const fullPath = await join(this.repositoryPath, file.path);
+      const dirPath = fullPath.substring(0, fullPath.lastIndexOf('/'));
+      await shellOpen(dirPath);
+    } catch (err) { console.error('Failed to reveal:', err); }
+  }
+
+  private async handleContextCopyPath(): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try { await navigator.clipboard.writeText(file.path); } catch (err) { console.error('Failed to copy:', err); }
+  }
+
+  private async handleContextDiscard(): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    const confirmed = await showConfirm('Discard Changes', `Discard changes to "${file.path}"? This cannot be undone.`, 'warning');
+    if (!confirmed) return;
+    const result = await gitService.discardChanges(this.repositoryPath, [file.path]);
+    if (result.success) await this.loadStatus();
+  }
+
   private getFileNameAndDir(path: string): { name: string; dir: string } {
     const lastSlash = path.lastIndexOf('/');
     if (lastSlash === -1) {
@@ -904,6 +1063,7 @@ export class LvFileStatus extends LitElement {
       <li
         class="file-item ${isSelected ? 'selected' : ''} ${isFocused ? 'focused' : ''}"
         @click=${(e: MouseEvent) => this.handleFileClick(file, e)}
+        @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, file, staged)}
         title="${file.path}"
         data-index="${index}"
       >
@@ -970,6 +1130,7 @@ export class LvFileStatus extends LitElement {
           class="file-item tree-file-item ${isSelected ? 'selected' : ''} ${isFocused ? 'focused' : ''}"
           style="--tree-depth: ${depth}"
           @click=${(e: MouseEvent) => this.handleFileClick(file, e)}
+          @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, file, staged)}
           title="${file.path}"
           data-index="${index}"
         >
@@ -1121,6 +1282,68 @@ export class LvFileStatus extends LitElement {
     `;
   }
 
+  private renderContextMenu() {
+    if (!this.contextMenu.visible || !this.contextMenu.file) return nothing;
+
+    const { x, y, isStaged } = this.contextMenu;
+
+    return html`
+      <div class="context-menu" style="left: ${x}px; top: ${y}px">
+        ${isStaged ? html`
+          <button class="context-menu-item" @click=${this.handleContextUnstage}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Unstage
+          </button>
+        ` : html`
+          <button class="context-menu-item" @click=${this.handleContextStage}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Stage
+          </button>
+        `}
+        <button class="context-menu-item" @click=${this.handleContextViewDiff}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 3v18M3 12h18"></path>
+          </svg>
+          View diff
+        </button>
+        <button class="context-menu-item" @click=${this.handleContextOpenInEditor}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+            <polyline points="15 3 21 3 21 9"></polyline>
+            <line x1="10" y1="14" x2="21" y2="3"></line>
+          </svg>
+          Open in editor
+        </button>
+        <button class="context-menu-item" @click=${this.handleContextRevealInFinder}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+          Reveal in Finder
+        </button>
+        <button class="context-menu-item" @click=${this.handleContextCopyPath}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy file path
+        </button>
+        <div class="context-menu-divider"></div>
+        <button class="context-menu-item danger" @click=${this.handleContextDiscard}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+          Discard changes
+        </button>
+      </div>
+    `;
+  }
+
   render() {
     if (this.loading) {
       return html`<div class="loading">Loading changes...</div>`;
@@ -1215,6 +1438,8 @@ export class LvFileStatus extends LitElement {
           ? this.renderFileList(this.unstagedFiles, false, this.stagedExpanded ? this.stagedFiles.length : 0)
           : nothing}
       </div>
+
+      ${this.renderContextMenu()}
     `;
   }
 }

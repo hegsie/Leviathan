@@ -31,6 +31,14 @@ interface ConflictRegion {
   theirsContent: string;
 }
 
+interface DiffContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  line: DiffLine | null;
+  hunk: DiffHunk | null;
+}
+
 /**
  * Diff view component
  * Displays file diff with syntax highlighting and line numbers
@@ -641,6 +649,49 @@ export class LvDiffView extends LitElement {
         border: 1px solid #a855f7;
         color: #a855f7;
       }
+
+      /* Context menu */
+      .context-menu {
+        position: fixed;
+        z-index: var(--z-dropdown, 100);
+        min-width: 180px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        padding: var(--spacing-xs) 0;
+      }
+
+      .context-menu-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        font-family: var(--font-family-base);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .context-menu-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .context-menu-item svg {
+        width: 14px;
+        height: 14px;
+        color: var(--color-text-muted);
+      }
+
+      .context-menu-divider {
+        height: 1px;
+        background: var(--color-border);
+        margin: var(--spacing-xs) 0;
+      }
     `,
   ];
 
@@ -658,8 +709,25 @@ export class LvDiffView extends LitElement {
   @state() private saving = false;
   @state() private conflictRegions: ConflictRegion[] = [];
   @state() private hasConflicts = false;
+  @state() private contextMenu: DiffContextMenuState = { visible: false, x: 0, y: 0, line: null, hunk: null };
 
   private language: BundledLanguage | null = null;
+
+  private handleDocumentClick = (): void => {
+    if (this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    document.addEventListener('click', this.handleDocumentClick);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('click', this.handleDocumentClick);
+  }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('file') && this.file) {
@@ -1188,6 +1256,51 @@ export class LvDiffView extends LitElement {
     }
   }
 
+  // Context menu handlers
+  private handleLineContextMenu(e: MouseEvent, line: DiffLine, hunk: DiffHunk): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.contextMenu = { visible: true, x: e.clientX, y: e.clientY, line, hunk };
+  }
+
+  private async handleContextCopyLine(): Promise<void> {
+    const line = this.contextMenu.line;
+    if (!line) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      await navigator.clipboard.writeText(line.content);
+    } catch (err) {
+      console.error('Failed to copy line:', err);
+    }
+  }
+
+  private async handleContextCopySelection(): Promise<void> {
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      const selection = window.getSelection()?.toString() ?? '';
+      if (selection) {
+        await navigator.clipboard.writeText(selection);
+      }
+    } catch (err) {
+      console.error('Failed to copy selection:', err);
+    }
+  }
+
+  private async handleContextStageHunk(): Promise<void> {
+    const hunk = this.contextMenu.hunk;
+    if (!hunk) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    // Use the existing handleStageHunk method
+    await this.handleStageHunk(hunk, new Event('click'));
+  }
+
+  private async handleContextUnstageHunk(): Promise<void> {
+    const hunk = this.contextMenu.hunk;
+    if (!hunk) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    await this.handleUnstageHunk(hunk, new Event('click'));
+  }
+
   private renderHighlightedContent(content: string): TemplateResult {
     const tokens = highlightLineSync(content, this.language);
     return html`${tokens.map(
@@ -1195,12 +1308,15 @@ export class LvDiffView extends LitElement {
     )}`;
   }
 
-  private renderLine(line: DiffLine) {
+  private renderLine(line: DiffLine, hunk: DiffHunk) {
     const lineClass = this.getLineClass(line.origin);
     const originChar = this.getOriginChar(line.origin);
 
     return html`
-      <div class="line ${lineClass}">
+      <div
+        class="line ${lineClass}"
+        @contextmenu=${(e: MouseEvent) => this.handleLineContextMenu(e, line, hunk)}
+      >
         <div class="line-numbers">
           <span class="line-no old">${line.oldLineNo ?? ''}</span>
           <span class="line-no new">${line.newLineNo ?? ''}</span>
@@ -1249,7 +1365,7 @@ export class LvDiffView extends LitElement {
             </div>
           ` : nothing}
         </div>
-        ${hunk.lines.map((line) => this.renderLine(line))}
+        ${hunk.lines.map((line) => this.renderLine(line, hunk))}
       </div>
     `;
   }
@@ -1356,6 +1472,52 @@ export class LvDiffView extends LitElement {
         ${this.diff.hunks.length === 0
           ? html`<div class="empty">No changes in this file</div>`
           : this.diff.hunks.map((hunk, i) => this.renderHunk(hunk, i))}
+      </div>
+    `;
+  }
+
+  private renderContextMenu() {
+    if (!this.contextMenu.visible) return nothing;
+
+    const { x, y, hunk } = this.contextMenu;
+    const showStageButton = this.file !== null && !this.commitFile && hunk;
+    const isStaged = this.file?.isStaged ?? false;
+
+    return html`
+      <div class="context-menu" style="left: ${x}px; top: ${y}px">
+        <button class="context-menu-item" @click=${this.handleContextCopySelection}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy selection
+        </button>
+        <button class="context-menu-item" @click=${this.handleContextCopyLine}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy line
+        </button>
+        ${showStageButton ? html`
+          <div class="context-menu-divider"></div>
+          ${isStaged ? html`
+            <button class="context-menu-item" @click=${this.handleContextUnstageHunk}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Unstage hunk
+            </button>
+          ` : html`
+            <button class="context-menu-item" @click=${this.handleContextStageHunk}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Stage hunk
+            </button>
+          `}
+        ` : nothing}
       </div>
     `;
   }
@@ -1521,6 +1683,7 @@ export class LvDiffView extends LitElement {
           `
         : nothing}
       ${this.viewMode === 'split' ? this.renderSplitView() : this.renderUnifiedView()}
+      ${this.renderContextMenu()}
     `;
   }
 

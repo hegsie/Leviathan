@@ -1,6 +1,6 @@
 {
   "name": "leviathan",
-  "version": "0.2.37",
+  "version": "0.2.38",
   "description": "A fully-featured, open-source, cross-platform Git GUI client",
   "type": "module",
   "scripts": {

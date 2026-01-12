@@ -606,6 +606,9 @@ export class LvCommitPanel extends LitElement {
         // Trigger file status refresh immediately
         window.dispatchEvent(new CustomEvent('status-refresh'));
 
+        // Trigger graph refresh and badge update
+        window.dispatchEvent(new CustomEvent('repository-refresh'));
+
         // Clear success message after a delay
         setTimeout(() => {
           this.success = null;

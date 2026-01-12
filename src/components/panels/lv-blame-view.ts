@@ -23,6 +23,14 @@ interface BlameGroup {
   lines: BlameLine[];
 }
 
+interface BlameContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  group: BlameGroup | null;
+  line: BlameLine | null;
+}
+
 // Generate consistent color for author
 function getAuthorColor(name: string): string {
   let hash = 0;
@@ -324,6 +332,49 @@ export class LvBlameView extends LitElement {
         color: var(--color-text-primary);
         font-weight: var(--font-weight-medium);
       }
+
+      /* Context menu */
+      .context-menu {
+        position: fixed;
+        z-index: var(--z-dropdown, 100);
+        min-width: 180px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        padding: var(--spacing-xs) 0;
+      }
+
+      .context-menu-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        font-family: var(--font-family-base);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .context-menu-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .context-menu-item svg {
+        width: 14px;
+        height: 14px;
+        color: var(--color-text-muted);
+      }
+
+      .context-menu-divider {
+        height: 1px;
+        background: var(--color-border);
+        margin: var(--spacing-xs) 0;
+      }
     `,
   ];
 
@@ -335,8 +386,25 @@ export class LvBlameView extends LitElement {
   @state() private groups: BlameGroup[] = [];
   @state() private isLoading = false;
   @state() private error: string | null = null;
+  @state() private contextMenu: BlameContextMenuState = { visible: false, x: 0, y: 0, group: null, line: null };
 
   private language: BundledLanguage | null = null;
+
+  private handleDocumentClick = (): void => {
+    if (this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    document.addEventListener('click', this.handleDocumentClick);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('click', this.handleDocumentClick);
+  }
   private authorColors: Map<string, string> = new Map();
   private uniqueAuthors: Set<string> = new Set();
   private uniqueCommits: Set<string> = new Set();
@@ -435,6 +503,42 @@ export class LvBlameView extends LitElement {
         composed: true,
       })
     );
+  }
+
+  // Context menu handlers
+  private handleContextMenu(e: MouseEvent, group: BlameGroup, line: BlameLine): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.contextMenu = { visible: true, x: e.clientX, y: e.clientY, group, line };
+  }
+
+  private handleContextShowCommit(): void {
+    const group = this.contextMenu.group;
+    if (!group) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.handleCommitClick(group);
+  }
+
+  private async handleContextCopyHash(): Promise<void> {
+    const group = this.contextMenu.group;
+    if (!group) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      await navigator.clipboard.writeText(group.commitOid);
+    } catch (err) {
+      console.error('Failed to copy hash:', err);
+    }
+  }
+
+  private async handleContextCopyLine(): Promise<void> {
+    const line = this.contextMenu.line;
+    if (!line) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    try {
+      await navigator.clipboard.writeText(line.content);
+    } catch (err) {
+      console.error('Failed to copy line:', err);
+    }
   }
 
   private renderHighlightedContent(content: string) {
@@ -574,7 +678,10 @@ export class LvBlameView extends LitElement {
                 <div class="group-lines">
                   ${group.lines.map(
                     (line) => html`
-                      <div class="blame-line">
+                      <div
+                        class="blame-line"
+                        @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, group, line)}
+                      >
                         <div class="line-number">${line.lineNumber}</div>
                         <div class="line-content">${this.renderHighlightedContent(line.content)}</div>
                       </div>
@@ -585,6 +692,41 @@ export class LvBlameView extends LitElement {
             `;
           })}
         </div>
+      </div>
+      ${this.renderContextMenu()}
+    `;
+  }
+
+  private renderContextMenu() {
+    if (!this.contextMenu.visible) return nothing;
+
+    const { x, y } = this.contextMenu;
+
+    return html`
+      <div class="context-menu" style="left: ${x}px; top: ${y}px">
+        <button class="context-menu-item" @click=${this.handleContextShowCommit}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <line x1="12" y1="3" x2="12" y2="9"></line>
+            <line x1="12" y1="15" x2="12" y2="21"></line>
+          </svg>
+          Show commit details
+        </button>
+        <button class="context-menu-item" @click=${this.handleContextCopyHash}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy commit hash
+        </button>
+        <div class="context-menu-divider"></div>
+        <button class="context-menu-item" @click=${this.handleContextCopyLine}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy line
+        </button>
       </div>
     `;
   }
