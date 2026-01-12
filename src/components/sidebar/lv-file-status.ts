@@ -334,6 +334,42 @@ export class LvFileStatus extends LitElement {
         width: 14px;
         height: 14px;
       }
+
+      .selection-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 8px;
+        background: var(--color-bg-secondary);
+        border-bottom: 1px solid var(--color-border);
+        font-size: var(--font-size-xs);
+      }
+
+      .selection-count {
+        color: var(--color-text-secondary);
+        flex: 1;
+      }
+
+      .selection-action-btn {
+        padding: 2px 8px;
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+        background: transparent;
+        border: 1px solid var(--color-border);
+        cursor: pointer;
+      }
+
+      .selection-action-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .selection-action-btn.danger:hover {
+        background: var(--color-error-bg);
+        color: var(--color-error);
+        border-color: var(--color-error);
+      }
     `,
   ];
 
@@ -345,7 +381,8 @@ export class LvFileStatus extends LitElement {
   @state() private error: string | null = null;
   @state() private stagedExpanded = true;
   @state() private unstagedExpanded = true;
-  @state() private selectedFile: string | null = null;
+  @state() private selectedFiles: Set<string> = new Set();
+  @state() private lastSelectedFile: string | null = null;
   @state() private focusedIndex: number = -1;
   @state() private viewMode: 'flat' | 'tree' = 'flat';
   @state() private expandedFolders: Set<string> = new Set();
@@ -460,30 +497,49 @@ export class LvFileStatus extends LitElement {
         break;
 
       case 'Enter':
-      case ' ':
         e.preventDefault();
         if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
           this.handleFileClick(allFiles[this.focusedIndex]);
         }
         break;
 
-      case 's':
-        // Stage focused file
+      case ' ':
+        // Toggle selection on focused file
+        e.preventDefault();
         if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
           const file = allFiles[this.focusedIndex];
-          if (!this.stagedFiles.some(f => f.path === file.path)) {
-            e.preventDefault();
+          const newSelected = new Set(this.selectedFiles);
+          if (newSelected.has(file.path)) {
+            newSelected.delete(file.path);
+          } else {
+            newSelected.add(file.path);
+          }
+          this.selectedFiles = newSelected;
+          this.lastSelectedFile = file.path;
+        }
+        break;
+
+      case 's':
+        // Stage selected files or focused file
+        e.preventDefault();
+        if (this.selectedFiles.size > 0) {
+          this.handleStageSelected();
+        } else if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
+          const file = allFiles[this.focusedIndex];
+          if (!this.stagedFiles.some((f) => f.path === file.path)) {
             this.handleStageFile(file, e);
           }
         }
         break;
 
       case 'u':
-        // Unstage focused file
-        if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
+        // Unstage selected files or focused file
+        e.preventDefault();
+        if (this.selectedFiles.size > 0) {
+          this.handleUnstageSelected();
+        } else if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
           const file = allFiles[this.focusedIndex];
-          if (this.stagedFiles.some(f => f.path === file.path)) {
-            e.preventDefault();
+          if (this.stagedFiles.some((f) => f.path === file.path)) {
             this.handleUnstageFile(file, e);
           }
         }
@@ -727,13 +783,105 @@ export class LvFileStatus extends LitElement {
     }
   }
 
-  private handleFileClick(file: StatusEntry): void {
-    this.selectedFile = file.path;
+  // Multi-select helper methods
+  private getSelectedFilesInSection(staged: boolean): StatusEntry[] {
+    const files = staged ? this.stagedFiles : this.unstagedFiles;
+    return files.filter((f) => this.selectedFiles.has(f.path));
+  }
+
+  private handleFileClick(file: StatusEntry, e?: MouseEvent): void {
+    const allFiles = this.getAllVisibleFiles();
+    const clickedIndex = allFiles.findIndex((f) => f.path === file.path);
+
+    if (e?.ctrlKey || e?.metaKey) {
+      // Toggle selection
+      const newSelected = new Set(this.selectedFiles);
+      if (newSelected.has(file.path)) {
+        newSelected.delete(file.path);
+      } else {
+        newSelected.add(file.path);
+      }
+      this.selectedFiles = newSelected;
+    } else if (e?.shiftKey && this.lastSelectedFile) {
+      // Range select
+      const lastIndex = allFiles.findIndex((f) => f.path === this.lastSelectedFile);
+      if (lastIndex !== -1 && clickedIndex !== -1) {
+        const start = Math.min(lastIndex, clickedIndex);
+        const end = Math.max(lastIndex, clickedIndex);
+        const newSelected = new Set(this.selectedFiles);
+        for (let i = start; i <= end; i++) {
+          newSelected.add(allFiles[i].path);
+        }
+        this.selectedFiles = newSelected;
+      }
+    } else {
+      // Single select (clear others)
+      this.selectedFiles = new Set([file.path]);
+    }
+
+    this.lastSelectedFile = file.path;
+    this.focusedIndex = clickedIndex;
+
+    // Dispatch event with selected files
     this.dispatchEvent(new CustomEvent('file-selected', {
-      detail: { file },
+      detail: { file, selectedFiles: Array.from(this.selectedFiles) },
       bubbles: true,
       composed: true,
     }));
+  }
+
+  // Batch operation handlers
+  private async handleStageSelected(): Promise<void> {
+    const paths = this.unstagedFiles
+      .filter((f) => this.selectedFiles.has(f.path))
+      .map((f) => f.path);
+    if (paths.length === 0) return;
+
+    const result = await gitService.stageFiles(this.repositoryPath, { paths });
+    if (result.success) {
+      // Remove staged files from selection
+      const newSelected = new Set(this.selectedFiles);
+      paths.forEach((p) => newSelected.delete(p));
+      this.selectedFiles = newSelected;
+      await this.loadStatus();
+    }
+  }
+
+  private async handleUnstageSelected(): Promise<void> {
+    const paths = this.stagedFiles
+      .filter((f) => this.selectedFiles.has(f.path))
+      .map((f) => f.path);
+    if (paths.length === 0) return;
+
+    const result = await gitService.unstageFiles(this.repositoryPath, { paths });
+    if (result.success) {
+      const newSelected = new Set(this.selectedFiles);
+      paths.forEach((p) => newSelected.delete(p));
+      this.selectedFiles = newSelected;
+      await this.loadStatus();
+    }
+  }
+
+  private async handleDiscardSelected(): Promise<void> {
+    const paths = this.unstagedFiles
+      .filter((f) => this.selectedFiles.has(f.path))
+      .map((f) => f.path);
+    if (paths.length === 0) return;
+
+    const confirmed = await showConfirm(
+      'Discard Changes',
+      `Discard changes to ${paths.length} file${paths.length > 1 ? 's' : ''}? This cannot be undone.`,
+      'warning'
+    );
+    if (!confirmed) return;
+
+    const result = await gitService.discardChanges(this.repositoryPath, paths);
+    if (result.success) {
+      const newSelected = new Set(this.selectedFiles);
+      paths.forEach((p) => newSelected.delete(p));
+      this.selectedFiles = newSelected;
+      await this.loadStatus();
+    }
   }
 
   private getFileNameAndDir(path: string): { name: string; dir: string } {
@@ -749,13 +897,13 @@ export class LvFileStatus extends LitElement {
 
   private renderFileItem(file: StatusEntry, staged: boolean, index: number) {
     const isFocused = this.focusedIndex === index;
-    const isSelected = this.selectedFile === file.path;
+    const isSelected = this.selectedFiles.has(file.path);
     const { name, dir } = this.getFileNameAndDir(file.path);
 
     return html`
       <li
         class="file-item ${isSelected ? 'selected' : ''} ${isFocused ? 'focused' : ''}"
-        @click=${() => this.handleFileClick(file)}
+        @click=${(e: MouseEvent) => this.handleFileClick(file, e)}
         title="${file.path}"
         data-index="${index}"
       >
@@ -815,13 +963,13 @@ export class LvFileStatus extends LitElement {
       const file = node.file;
       const index = indexOffset;
       const isFocused = this.focusedIndex === index;
-      const isSelected = this.selectedFile === file.path;
+      const isSelected = this.selectedFiles.has(file.path);
 
       return html`
         <li
           class="file-item tree-file-item ${isSelected ? 'selected' : ''} ${isFocused ? 'focused' : ''}"
           style="--tree-depth: ${depth}"
-          @click=${() => this.handleFileClick(file)}
+          @click=${(e: MouseEvent) => this.handleFileClick(file, e)}
           title="${file.path}"
           data-index="${index}"
         >
@@ -909,6 +1057,35 @@ export class LvFileStatus extends LitElement {
           })}
         </ul>
       ` : nothing}
+    `;
+  }
+
+  private renderSelectionActions(staged: boolean) {
+    const selectedInSection = this.getSelectedFilesInSection(staged);
+    if (selectedInSection.length === 0) return nothing;
+
+    return html`
+      <div class="selection-actions">
+        <span class="selection-count">${selectedInSection.length} selected</span>
+        ${staged ? html`
+          <button
+            class="selection-action-btn"
+            @click=${() => this.handleUnstageSelected()}
+            title="Unstage selected files"
+          >Unstage</button>
+        ` : html`
+          <button
+            class="selection-action-btn"
+            @click=${() => this.handleStageSelected()}
+            title="Stage selected files"
+          >Stage</button>
+          <button
+            class="selection-action-btn danger"
+            @click=${() => this.handleDiscardSelected()}
+            title="Discard selected files"
+          >Discard</button>
+        `}
+      </div>
     `;
   }
 
@@ -1004,6 +1181,7 @@ export class LvFileStatus extends LitElement {
             </div>
           ` : nothing}
         </div>
+        ${this.stagedExpanded ? this.renderSelectionActions(true) : nothing}
         ${this.stagedFiles.length > 0 && this.stagedExpanded
           ? this.renderFileList(this.stagedFiles, true, 0)
           : nothing}
@@ -1032,6 +1210,7 @@ export class LvFileStatus extends LitElement {
             </div>
           ` : nothing}
         </div>
+        ${this.unstagedExpanded ? this.renderSelectionActions(false) : nothing}
         ${this.unstagedFiles.length > 0 && this.unstagedExpanded
           ? this.renderFileList(this.unstagedFiles, false, this.stagedExpanded ? this.stagedFiles.length : 0)
           : nothing}
