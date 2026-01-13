@@ -204,6 +204,15 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'rename_branch':
         return null;
 
+      case 'get_remote_status': {
+        // Get ahead/behind from the current branch
+        const headBranch = mocks.branches.find((b) => b.isHead);
+        if (headBranch?.aheadBehind) {
+          return { ahead: headBranch.aheadBehind.ahead, behind: headBranch.aheadBehind.behind };
+        }
+        return { ahead: 0, behind: 0 };
+      }
+
       // Commit commands
       case 'get_commit_history':
         return mocks.commits;
@@ -355,6 +364,13 @@ export async function setupTauriMocks(
             return data.branches;
           case 'get_current_branch':
             return data.branches.find((b: MockBranch) => b.isHead) || null;
+          case 'get_remote_status': {
+            const headBranch = data.branches.find((b: MockBranch) => b.isHead);
+            if (headBranch?.aheadBehind) {
+              return { ahead: headBranch.aheadBehind.ahead, behind: headBranch.aheadBehind.behind };
+            }
+            return { ahead: 0, behind: 0 };
+          }
           case 'get_commit_history':
             return data.commits;
           case 'get_commit':
@@ -613,4 +629,140 @@ export function withVimMode(): Partial<typeof defaultMockData> {
       vimMode: true,
     },
   };
+}
+
+// =============================================================================
+// Profile and Account Types for E2E Tests
+// =============================================================================
+
+export interface MockUnifiedProfile {
+  id: string;
+  name: string;
+  gitName: string;
+  gitEmail: string;
+  signingKey: string | null;
+  urlPatterns: string[];
+  isDefault: boolean;
+  color: string;
+  defaultAccounts: Partial<Record<'github' | 'gitlab' | 'azure-devops' | 'bitbucket', string>>;
+}
+
+export interface MockIntegrationAccount {
+  id: string;
+  name: string;
+  integrationType: 'github' | 'gitlab' | 'azure-devops' | 'bitbucket';
+  config: { type: string; instanceUrl?: string; organization?: string; workspace?: string };
+  color: string | null;
+  cachedUser: { username: string; displayName: string; avatarUrl: string | null } | null;
+  urlPatterns: string[];
+  isDefault: boolean;
+}
+
+export interface ProfilesAndAccountsOptions {
+  profiles: MockUnifiedProfile[];
+  accounts: MockIntegrationAccount[];
+  repositoryAssignments?: Record<string, string>;
+  /** Account IDs that are connected (have valid tokens) */
+  connectedAccounts?: string[];
+}
+
+/**
+ * Initialize the unified profile store with profiles and accounts.
+ * Call this after page.goto() to set up test profiles and accounts.
+ *
+ * @param page - Playwright page instance
+ * @param options - Profiles and accounts configuration
+ */
+export async function initializeUnifiedProfileStore(
+  page: Page,
+  options: ProfilesAndAccountsOptions
+): Promise<void> {
+  // Wait for stores to be available
+  await page.waitForFunction(() => {
+    return typeof (window as Record<string, unknown>).__LEVIATHAN_STORES__ !== 'undefined' &&
+           typeof ((window as Record<string, unknown>).__LEVIATHAN_STORES__ as Record<string, unknown>).unifiedProfileStore !== 'undefined';
+  }, { timeout: 10000 });
+
+  // Initialize the unified profile store with test data
+  await page.evaluate(
+    ({ profiles, accounts, repositoryAssignments, connectedAccounts }) => {
+      const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        unifiedProfileStore: {
+          getState: () => {
+            setConfig: (config: unknown) => void;
+            setProfiles: (profiles: unknown[]) => void;
+            setAccounts: (accounts: unknown[]) => void;
+            setActiveProfile: (profile: unknown) => void;
+            setAccountConnectionStatus: (accountId: string, status: string) => void;
+          };
+        };
+      };
+
+      if (!stores?.unifiedProfileStore) {
+        throw new Error('Unified profile store not available');
+      }
+
+      const state = stores.unifiedProfileStore.getState();
+
+      // Set the full config
+      const config = {
+        version: 3,
+        profiles,
+        accounts,
+        repositoryAssignments: repositoryAssignments ?? {},
+      };
+      state.setConfig(config);
+
+      // Set the active profile (first default or first profile)
+      const defaultProfile = profiles.find((p: { isDefault?: boolean }) => p.isDefault) || profiles[0];
+      if (defaultProfile) {
+        state.setActiveProfile(defaultProfile);
+      }
+
+      // Set connection status for connected accounts
+      if (connectedAccounts && connectedAccounts.length > 0) {
+        for (const accountId of connectedAccounts) {
+          state.setAccountConnectionStatus(accountId, 'connected');
+        }
+      }
+    },
+    {
+      profiles: options.profiles,
+      accounts: options.accounts,
+      repositoryAssignments: options.repositoryAssignments ?? {},
+      connectedAccounts: options.connectedAccounts ?? [],
+    }
+  );
+
+  // Wait for the UI to update
+  await page.waitForTimeout(100);
+}
+
+/**
+ * Combined setup: Tauri mocks + repository store + unified profile store.
+ * Use this to set up tests that need an open repository with specific profiles/accounts.
+ *
+ * @param page - Playwright page instance
+ * @param options - Profiles and accounts configuration
+ * @param customMocks - Optional custom mock data for repository
+ */
+export async function setupProfilesAndAccounts(
+  page: Page,
+  options: ProfilesAndAccountsOptions,
+  customMocks?: Partial<typeof defaultMockData>
+): Promise<void> {
+  // First set up Tauri IPC mocks - include profile/account data in mocks
+  await setupTauriMocks(page, customMocks);
+
+  // Navigate to the app
+  await page.goto('/');
+
+  // Wait for app to load
+  await page.waitForLoadState('domcontentloaded');
+
+  // Initialize the repository store
+  await initializeRepositoryStore(page, customMocks);
+
+  // Initialize the unified profile store with profiles and accounts
+  await initializeUnifiedProfileStore(page, options);
 }

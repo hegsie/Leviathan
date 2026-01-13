@@ -187,7 +187,17 @@ export class ProfileManagerDialogPage extends BaseDialog {
   readonly profileList: Locator;
   readonly addProfileButton: Locator;
   readonly nameInput: Locator;
+  readonly gitNameInput: Locator;
   readonly emailInput: Locator;
+  readonly signingKeyInput: Locator;
+  readonly urlPatternsInput: Locator;
+  readonly colorOptions: Locator;
+  readonly saveButton: Locator;
+  readonly cancelButton: Locator;
+  readonly deleteButton: Locator;
+  readonly setDefaultButton: Locator;
+  readonly accountsSection: Locator;
+  readonly addAccountButton: Locator;
 
   constructor(page: Page) {
     super(page, 'lv-profile-manager-dialog');
@@ -198,22 +208,89 @@ export class ProfileManagerDialogPage extends BaseDialog {
     this.profileList = page.locator('lv-profile-manager-dialog[open] .profile-list');
     // "New Profile" button - use accessible role selector
     this.addProfileButton = page.getByRole('button', { name: 'New Profile' });
-    this.nameInput = page.getByRole('textbox', { name: /Profile Name/i });
-    this.emailInput = page.getByRole('textbox', { name: /Git Email/i });
+    // Profile name input (placeholder: "e.g., Work, Personal, Open Source")
+    this.nameInput = page.getByPlaceholder(/Work, Personal/i);
+    // Git name input (placeholder: "John Doe")
+    this.gitNameInput = page.getByPlaceholder('John Doe');
+    // Git email input (placeholder: "john@example.com")
+    this.emailInput = page.getByPlaceholder('john@example.com');
+    // Signing key input (placeholder: "Key ID or fingerprint")
+    this.signingKeyInput = page.getByPlaceholder(/Key ID|fingerprint/i);
+    // URL patterns textarea
+    this.urlPatternsInput = page.getByPlaceholder(/github.com\/mycompany/i);
+    this.colorOptions = page.locator('.color-option, .color-swatch');
+    this.saveButton = page.getByRole('button', { name: /save|create|done/i });
+    this.cancelButton = page.getByRole('button', { name: /cancel|back/i });
+    this.deleteButton = page.getByRole('button', { name: /delete/i });
+    this.setDefaultButton = page.getByRole('button', { name: /set as default|make default/i });
+    this.accountsSection = page.locator('.accounts-section, [data-section="accounts"]');
+    this.addAccountButton = page.getByRole('button', { name: /add account/i });
   }
 
   async getProfileCount(): Promise<number> {
-    return this.profileList.locator('.profile-item').count();
+    return this.profileList.locator('.profile-item, .profile-card').count();
+  }
+
+  async getProfileNames(): Promise<string[]> {
+    const items = this.profileList.locator('.profile-item, .profile-card');
+    const count = await items.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const name = await items.nth(i).locator('.profile-name, .name').textContent();
+      if (name) names.push(name.trim());
+    }
+    return names;
   }
 
   async selectProfile(name: string): Promise<void> {
-    await this.profileList.locator('.profile-item', { hasText: name }).click();
+    await this.profileList.locator('.profile-item, .profile-card', { hasText: name }).click();
   }
 
-  async addProfile(name: string, email: string): Promise<void> {
+  async addProfile(name: string, gitName: string, email: string): Promise<void> {
     await this.addProfileButton.click();
     await this.nameInput.fill(name);
+    await this.gitNameInput.fill(gitName);
     await this.emailInput.fill(email);
+  }
+
+  async fillProfileForm(data: {
+    name?: string;
+    gitName?: string;
+    gitEmail?: string;
+    signingKey?: string;
+    urlPatterns?: string;
+  }): Promise<void> {
+    if (data.name) await this.nameInput.fill(data.name);
+    if (data.gitName) await this.gitNameInput.fill(data.gitName);
+    if (data.gitEmail) await this.emailInput.fill(data.gitEmail);
+    if (data.signingKey) await this.signingKeyInput.fill(data.signingKey);
+    if (data.urlPatterns) await this.urlPatternsInput.fill(data.urlPatterns);
+  }
+
+  async selectColor(index: number): Promise<void> {
+    await this.colorOptions.nth(index).click();
+  }
+
+  async save(): Promise<void> {
+    await this.saveButton.click();
+  }
+
+  async cancel(): Promise<void> {
+    await this.cancelButton.click();
+  }
+
+  async deleteProfile(): Promise<void> {
+    await this.deleteButton.click();
+  }
+
+  async setAsDefault(): Promise<void> {
+    await this.setDefaultButton.click();
+  }
+
+  async isDefaultProfile(name: string): Promise<boolean> {
+    const profile = this.profileList.locator('.profile-item, .profile-card', { hasText: name });
+    const defaultBadge = profile.locator('.default-badge, :text("Default")');
+    return defaultBadge.isVisible();
   }
 }
 
