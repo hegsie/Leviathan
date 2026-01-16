@@ -3,11 +3,15 @@
  * Manage GPG signing configuration
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { GpgConfig, GpgKey } from '../../services/git.service.ts';
+import { getPlatform, type Platform } from '../../utils/platform.ts';
+import { handleExternalLink, openExternalUrl } from '../../utils/external-link.ts';
+
+type SetupStep = 'install-guide' | 'generate-guide' | 'configure' | 'complete';
 
 @customElement('lv-gpg-dialog')
 export class LvGpgDialog extends LitElement {
@@ -376,6 +380,258 @@ export class LvGpgDialog extends LitElement {
         border-color: var(--color-primary);
         color: white;
       }
+
+      /* Setup wizard styles */
+      .setup-header {
+        text-align: center;
+        margin-bottom: var(--spacing-lg);
+      }
+
+      .setup-icon {
+        width: 48px;
+        height: 48px;
+        margin: 0 auto var(--spacing-md);
+        color: var(--color-primary);
+      }
+
+      .setup-title {
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-semibold);
+        margin-bottom: var(--spacing-xs);
+      }
+
+      .setup-description {
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+        line-height: 1.5;
+      }
+
+      /* Install method cards */
+      .install-methods {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-sm);
+        margin-top: var(--spacing-md);
+      }
+
+      .install-method {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--spacing-md);
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        transition: all var(--transition-fast);
+      }
+
+      .install-method:hover {
+        border-color: var(--color-primary);
+        background: var(--color-bg-hover);
+      }
+
+      .method-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .method-name {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+        margin-bottom: 2px;
+      }
+
+      .method-desc {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
+      .method-action {
+        flex-shrink: 0;
+        margin-left: var(--spacing-md);
+      }
+
+      /* Command block with copy */
+      .command-block {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-sm) var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-sm);
+      }
+
+      .command-block code {
+        flex: 1;
+        color: var(--color-text-primary);
+        word-break: break-all;
+      }
+
+      .copy-btn {
+        flex-shrink: 0;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-xs);
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .copy-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .copy-btn.copied {
+        background: var(--color-success-bg);
+        border-color: var(--color-success);
+        color: var(--color-success);
+      }
+
+      /* External link button */
+      .link-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-primary);
+        border: none;
+        border-radius: var(--radius-sm);
+        color: white;
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        text-decoration: none;
+        transition: all var(--transition-fast);
+      }
+
+      .link-btn:hover {
+        background: var(--color-primary-hover);
+      }
+
+      /* Guide section */
+      .guide-section {
+        margin-top: var(--spacing-lg);
+        padding-top: var(--spacing-lg);
+        border-top: 1px solid var(--color-border);
+      }
+
+      .guide-section-title {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+        margin-bottom: var(--spacing-sm);
+      }
+
+      .guide-text {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        line-height: 1.5;
+        margin-bottom: var(--spacing-sm);
+      }
+
+      .guide-list {
+        margin: var(--spacing-sm) 0;
+        padding-left: var(--spacing-lg);
+      }
+
+      .guide-list li {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        margin-bottom: var(--spacing-xs);
+        line-height: 1.5;
+      }
+
+      .guide-list li strong {
+        color: var(--color-text-primary);
+      }
+
+      /* External links */
+      .external-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-sm);
+        margin-top: var(--spacing-md);
+      }
+
+      .external-link {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-xs);
+        text-decoration: none;
+        transition: all var(--transition-fast);
+        cursor: pointer;
+      }
+
+      .external-link:hover {
+        border-color: var(--color-primary);
+        color: var(--color-primary);
+      }
+
+      /* Complete step */
+      .complete-content {
+        text-align: center;
+        padding: var(--spacing-lg) 0;
+      }
+
+      .success-icon {
+        width: 64px;
+        height: 64px;
+        color: var(--color-success);
+        margin: 0 auto var(--spacing-md);
+      }
+
+      .complete-title {
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+        margin-bottom: var(--spacing-sm);
+      }
+
+      .complete-description {
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+      }
+
+      /* Dialog footer adjustments for wizard */
+      .dialog-footer.wizard {
+        justify-content: space-between;
+      }
+
+      .footer-left {
+        display: flex;
+        gap: var(--spacing-sm);
+      }
+
+      .footer-right {
+        display: flex;
+        gap: var(--spacing-sm);
+      }
+
+      .btn-text {
+        background: none;
+        border: none;
+        color: var(--color-text-secondary);
+        padding: var(--spacing-sm) var(--spacing-md);
+        cursor: pointer;
+        font-size: var(--font-size-sm);
+      }
+
+      .btn-text:hover {
+        color: var(--color-text-primary);
+      }
     `,
   ];
 
@@ -389,6 +645,10 @@ export class LvGpgDialog extends LitElement {
   @state() private error = '';
   @state() private success = '';
   @state() private globalScope = false;
+  @state() private setupMode = false;
+  @state() private setupStep: SetupStep = 'install-guide';
+  @state() private platform: Platform = 'unknown';
+  @state() private copyFeedback: string | null = null;
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -406,6 +666,7 @@ export class LvGpgDialog extends LitElement {
   private async loadData(): Promise<void> {
     this.loading = true;
     this.error = '';
+    this.platform = getPlatform();
 
     const [configResult, keysResult] = await Promise.all([
       gitService.getGpgConfig(this.repositoryPath),
@@ -423,7 +684,37 @@ export class LvGpgDialog extends LitElement {
       this.keys = keysResult.data;
     }
 
+    // Auto-detect setup state
+    this.detectSetupState();
+
     this.loading = false;
+  }
+
+  private detectSetupState(): void {
+    if (!this.config) {
+      this.setupMode = false;
+      return;
+    }
+
+    // Check if GPG is truly available (must have both available flag AND version)
+    const gpgTrulyAvailable = this.config.gpgAvailable && !!this.config.gpgVersion;
+
+    if (!gpgTrulyAvailable) {
+      // GPG not installed or not properly detected
+      this.setupMode = true;
+      this.setupStep = 'install-guide';
+    } else if (this.keys.length === 0) {
+      // GPG installed but no keys
+      this.setupMode = true;
+      this.setupStep = 'generate-guide';
+    } else if (!this.config.signingKey) {
+      // Keys exist but not configured
+      this.setupMode = true;
+      this.setupStep = 'configure';
+    } else {
+      // Everything is configured
+      this.setupMode = false;
+    }
   }
 
   private async handleToggleCommitSigning(): Promise<void> {
@@ -498,7 +789,7 @@ export class LvGpgDialog extends LitElement {
   }
 
   render() {
-    if (!this.open) return null;
+    if (!this.open) return nothing;
 
     return html`
       <div class="dialog-overlay" @click=${this.handleClose}>
@@ -509,7 +800,7 @@ export class LvGpgDialog extends LitElement {
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
                 <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
               </svg>
-              GPG Signing
+              ${this.getDialogTitle()}
             </span>
             <button class="close-btn" @click=${this.handleClose}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -529,9 +820,111 @@ export class LvGpgDialog extends LitElement {
             ${!this.loading && this.config ? this.renderContent() : ''}
           </div>
 
-          <div class="dialog-footer">
-            <button class="btn btn-secondary" @click=${this.handleClose}>
-              Close
+          ${this.renderFooter()}
+        </div>
+      </div>
+    `;
+  }
+
+  private getDialogTitle(): string {
+    if (!this.setupMode) {
+      return 'GPG Signing';
+    }
+
+    switch (this.setupStep) {
+      case 'install-guide':
+        return 'GPG Setup - Install GPG';
+      case 'generate-guide':
+        return 'GPG Setup - Generate Key';
+      case 'configure':
+        return 'GPG Setup - Select Key';
+      case 'complete':
+        return 'GPG Setup - Complete';
+    }
+  }
+
+  private renderContent() {
+    if (!this.config) return '';
+
+    // Show setup wizard if in setup mode
+    if (this.setupMode) {
+      return this.renderSetupWizard();
+    }
+
+    // Show normal config view
+    return this.renderNormalConfig();
+  }
+
+  private renderSetupWizard() {
+    switch (this.setupStep) {
+      case 'install-guide':
+        return this.renderInstallGuide();
+      case 'generate-guide':
+        return this.renderKeyGenerationGuide();
+      case 'configure':
+        return this.renderConfigureStep();
+      case 'complete':
+        return this.renderSetupComplete();
+    }
+  }
+
+  private renderInstallGuide() {
+    return html`
+      <div class="setup-header">
+        <svg class="setup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+          <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+          <line x1="12" y1="22.08" x2="12" y2="12"></line>
+        </svg>
+        <div class="setup-title">Install GPG</div>
+        <div class="setup-description">
+          GPG (GNU Privacy Guard) is required for signing commits and tags.
+          Choose an installation method for your platform.
+        </div>
+      </div>
+
+      ${this.renderPlatformInstallMethods()}
+    `;
+  }
+
+  private renderPlatformInstallMethods() {
+    switch (this.platform) {
+      case 'macos':
+        return this.renderMacOSInstallMethods();
+      case 'windows':
+        return this.renderWindowsInstallMethods();
+      case 'linux':
+        return this.renderLinuxInstallMethods();
+      default:
+        return this.renderGenericInstallMethods();
+    }
+  }
+
+  private renderMacOSInstallMethods() {
+    return html`
+      <div class="install-methods">
+        <div class="install-method">
+          <div class="method-info">
+            <div class="method-name">Homebrew</div>
+            <div class="method-desc">Recommended for developers</div>
+          </div>
+          <div class="method-action">
+            ${this.renderCommandBlock('brew install gnupg')}
+          </div>
+        </div>
+        <div class="install-method">
+          <div class="method-info">
+            <div class="method-name">GPG Suite</div>
+            <div class="method-desc">Full GUI application with keychain integration</div>
+          </div>
+          <div class="method-action">
+            <button class="link-btn" @click=${() => openExternalUrl('https://gpgtools.org/')}>
+              Download
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
             </button>
           </div>
         </div>
@@ -539,18 +932,222 @@ export class LvGpgDialog extends LitElement {
     `;
   }
 
-  private renderContent() {
-    if (!this.config) return '';
-
-    if (!this.config.gpgAvailable) {
-      return html`
-        <div class="message warning">
-          GPG is not installed or not available in PATH.
-          <br><br>
-          Install GPG to enable commit and tag signing.
+  private renderWindowsInstallMethods() {
+    return html`
+      <div class="install-methods">
+        <div class="install-method">
+          <div class="method-info">
+            <div class="method-name">Gpg4win</div>
+            <div class="method-desc">Official Windows installer with GUI</div>
+          </div>
+          <div class="method-action">
+            <button class="link-btn" @click=${() => openExternalUrl('https://www.gpg4win.org/')}>
+              Download
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+            </button>
+          </div>
         </div>
-      `;
-    }
+        <div class="install-method">
+          <div class="method-info">
+            <div class="method-name">Chocolatey</div>
+            <div class="method-desc">Via package manager</div>
+          </div>
+          <div class="method-action">
+            ${this.renderCommandBlock('choco install gpg4win')}
+          </div>
+        </div>
+        <div class="install-method">
+          <div class="method-info">
+            <div class="method-name">winget</div>
+            <div class="method-desc">Via Windows Package Manager</div>
+          </div>
+          <div class="method-action">
+            ${this.renderCommandBlock('winget install GnuPG.Gpg4win')}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderLinuxInstallMethods() {
+    return html`
+      <div class="install-methods">
+        <div class="install-method">
+          <div class="method-info">
+            <div class="method-name">Debian / Ubuntu</div>
+            <div class="method-desc">apt package manager</div>
+          </div>
+          <div class="method-action">
+            ${this.renderCommandBlock('sudo apt install gnupg')}
+          </div>
+        </div>
+        <div class="install-method">
+          <div class="method-info">
+            <div class="method-name">Fedora / RHEL</div>
+            <div class="method-desc">dnf package manager</div>
+          </div>
+          <div class="method-action">
+            ${this.renderCommandBlock('sudo dnf install gnupg2')}
+          </div>
+        </div>
+        <div class="install-method">
+          <div class="method-info">
+            <div class="method-name">Arch Linux</div>
+            <div class="method-desc">pacman package manager</div>
+          </div>
+          <div class="method-action">
+            ${this.renderCommandBlock('sudo pacman -S gnupg')}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderGenericInstallMethods() {
+    return html`
+      <div class="install-methods">
+        <div class="install-method">
+          <div class="method-info">
+            <div class="method-name">GnuPG Website</div>
+            <div class="method-desc">Download for your platform</div>
+          </div>
+          <div class="method-action">
+            <button class="link-btn" @click=${() => openExternalUrl('https://gnupg.org/download/')}>
+              Download
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderKeyGenerationGuide() {
+    return html`
+      <div class="setup-header">
+        <svg class="setup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
+        </svg>
+        <div class="setup-title">Generate a GPG Key</div>
+        <div class="setup-description">
+          Create a new GPG key pair for signing your Git commits and tags.
+          Run this command in your terminal.
+        </div>
+      </div>
+
+      ${this.renderCommandBlock('gpg --full-generate-key')}
+
+      <div class="guide-section">
+        <div class="guide-section-title">Recommended Settings</div>
+        <ul class="guide-list">
+          <li><strong>Key type:</strong> RSA and RSA (default) or ECC (Ed25519) for modern systems</li>
+          <li><strong>Key size:</strong> 4096 bits for RSA</li>
+          <li><strong>Expiration:</strong> 1-2 years recommended for security</li>
+          <li><strong>Name/Email:</strong> Should match your Git identity</li>
+        </ul>
+      </div>
+
+      <div class="guide-section">
+        <div class="guide-section-title">After Generation</div>
+        <div class="guide-text">
+          List your keys to verify they were created:
+        </div>
+        ${this.renderCommandBlock('gpg --list-secret-keys --keyid-format=long')}
+      </div>
+
+      <div class="guide-section">
+        <div class="guide-section-title">Platform Documentation</div>
+        <div class="guide-text">
+          For detailed instructions on adding your key to your platform:
+        </div>
+        <div class="external-links">
+          <a class="external-link" @click=${() => openExternalUrl('https://docs.github.com/en/authentication/managing-commit-signature-verification')}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+            </svg>
+            GitHub Docs
+          </a>
+          <a class="external-link" @click=${() => openExternalUrl('https://docs.gitlab.com/ee/user/project/repository/signed_commits/gpg.html')}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M22.65 14.39L12 22.13 1.35 14.39a.84.84 0 0 1-.3-.94l1.22-3.78 2.44-7.51A.42.42 0 0 1 4.82 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.49h8.1l2.44-7.51A.42.42 0 0 1 18.6 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.51L23 13.45a.84.84 0 0 1-.35.94z"/>
+            </svg>
+            GitLab Docs
+          </a>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderConfigureStep() {
+    return html`
+      <div class="setup-header">
+        <svg class="setup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <div class="setup-title">Select Your Signing Key</div>
+        <div class="setup-description">
+          Choose which GPG key to use for signing commits and tags.
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Available Keys</div>
+        ${this.keys.length === 0
+          ? html`
+              <div class="empty-text">
+                No GPG keys found. Please generate a key first.
+              </div>
+            `
+          : html`
+              <div class="key-list">
+                ${this.keys.map(
+                  (key) => html`
+                    <div
+                      class="key-item ${this.selectedKey === key.keyId || this.selectedKey === key.keyIdLong ? 'selected' : ''}"
+                      @click=${() => this.handleSelectKey(key.keyIdLong)}
+                    >
+                      <div class="key-radio"></div>
+                      <div class="key-info">
+                        <div class="key-user">${key.userId || key.email}</div>
+                        <div class="key-details">${key.keyType} ${key.keySize} / ${key.keyId}</div>
+                      </div>
+                      <span class="key-badge">${key.trust}</span>
+                    </div>
+                  `
+                )}
+              </div>
+            `}
+      </div>
+    `;
+  }
+
+  private renderSetupComplete() {
+    return html`
+      <div class="complete-content">
+        <svg class="success-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+          <polyline points="22 4 12 14.01 9 11.01"></polyline>
+        </svg>
+        <div class="complete-title">GPG is Ready!</div>
+        <div class="complete-description">
+          Your GPG signing is now configured. You can enable automatic commit
+          signing in the settings below.
+        </div>
+      </div>
+    `;
+  }
+
+  private renderNormalConfig() {
+    if (!this.config) return '';
 
     return html`
       <div class="status-section">
@@ -643,6 +1240,142 @@ export class LvGpgDialog extends LitElement {
             `}
       </div>
     `;
+  }
+
+  private renderCommandBlock(command: string) {
+    const isCopied = this.copyFeedback === command;
+    return html`
+      <div class="command-block">
+        <code>${command}</code>
+        <button
+          class="copy-btn ${isCopied ? 'copied' : ''}"
+          @click=${() => this.copyToClipboard(command)}
+        >
+          ${isCopied ? 'Copied!' : 'Copy'}
+        </button>
+      </div>
+    `;
+  }
+
+  private renderFooter() {
+    if (this.setupMode) {
+      return this.renderSetupFooter();
+    }
+
+    return html`
+      <div class="dialog-footer">
+        <button class="btn btn-secondary" @click=${this.handleClose}>
+          Close
+        </button>
+      </div>
+    `;
+  }
+
+  private renderSetupFooter() {
+    switch (this.setupStep) {
+      case 'install-guide':
+        return html`
+          <div class="dialog-footer wizard">
+            <div class="footer-left">
+              <button class="btn-text" @click=${this.handleSkipSetup}>
+                Skip Setup
+              </button>
+            </div>
+            <div class="footer-right">
+              <button class="btn btn-primary" @click=${this.handleRefreshAndCheck}>
+                I've Installed GPG
+              </button>
+            </div>
+          </div>
+        `;
+      case 'generate-guide':
+        return html`
+          <div class="dialog-footer wizard">
+            <div class="footer-left">
+              <button class="btn btn-secondary" @click=${this.handleSetupBack}>
+                Back
+              </button>
+            </div>
+            <div class="footer-right">
+              <button class="btn btn-primary" @click=${this.handleRefreshAndCheck}>
+                I've Generated a Key
+              </button>
+            </div>
+          </div>
+        `;
+      case 'configure':
+        return html`
+          <div class="dialog-footer wizard">
+            <div class="footer-left">
+              <button class="btn btn-secondary" @click=${this.handleSetupBack}>
+                Back
+              </button>
+            </div>
+            <div class="footer-right">
+              <button
+                class="btn btn-primary"
+                @click=${this.handleCompleteSetup}
+                ?disabled=${!this.selectedKey}
+              >
+                Complete Setup
+              </button>
+            </div>
+          </div>
+        `;
+      case 'complete':
+        return html`
+          <div class="dialog-footer wizard">
+            <div class="footer-left"></div>
+            <div class="footer-right">
+              <button class="btn btn-primary" @click=${this.handleFinishSetup}>
+                Done
+              </button>
+            </div>
+          </div>
+        `;
+    }
+  }
+
+  private async copyToClipboard(text: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      this.copyFeedback = text;
+      setTimeout(() => {
+        this.copyFeedback = null;
+      }, 2000);
+    } catch {
+      console.error('Failed to copy to clipboard');
+    }
+  }
+
+  private handleSkipSetup(): void {
+    this.setupMode = false;
+  }
+
+  private handleSetupBack(): void {
+    switch (this.setupStep) {
+      case 'generate-guide':
+        this.setupStep = 'install-guide';
+        break;
+      case 'configure':
+        this.setupStep = 'generate-guide';
+        break;
+    }
+  }
+
+  private async handleRefreshAndCheck(): Promise<void> {
+    await this.loadData();
+  }
+
+  private handleCompleteSetup(): void {
+    if (this.selectedKey) {
+      this.setupStep = 'complete';
+    }
+  }
+
+  private handleFinishSetup(): void {
+    this.setupMode = false;
+    this.dispatchEvent(new CustomEvent('gpg-changed'));
   }
 }
 

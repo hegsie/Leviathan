@@ -8,6 +8,29 @@ use crate::error::Result;
 use crate::models::diff::{get_image_type, is_image_file};
 use crate::models::{DiffFile, DiffHunk, DiffLine, DiffLineOrigin, FileStatus};
 
+/// Check if a file extension indicates a known text file type.
+/// This is used to override git's binary detection for common text formats
+/// that may be incorrectly flagged as binary (e.g., UTF-16 encoded JSON).
+fn is_known_text_extension(path: &str) -> bool {
+    let path_lower = path.to_lowercase();
+    let text_extensions = [
+        ".json", ".txt", ".md", ".markdown", ".xml", ".yaml", ".yml", ".toml",
+        ".html", ".htm", ".css", ".scss", ".sass", ".less",
+        ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+        ".rs", ".py", ".rb", ".java", ".kt", ".scala", ".go", ".c", ".cpp", ".h", ".hpp",
+        ".cs", ".fs", ".vb", ".swift", ".m", ".mm",
+        ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
+        ".sql", ".graphql", ".gql",
+        ".env", ".ini", ".cfg", ".conf", ".config",
+        ".gitignore", ".gitattributes", ".editorconfig",
+        ".dockerfile", ".containerfile",
+        ".tf", ".tfvars", ".hcl",
+        ".vue", ".svelte", ".astro",
+        ".csv", ".tsv", ".log",
+    ];
+    text_extensions.iter().any(|ext| path_lower.ends_with(ext))
+}
+
 /// Get diff for all changed files
 #[command]
 pub async fn get_diff(
@@ -178,6 +201,9 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
 
             let is_image = is_image_file(&file_path);
             let image_type = get_image_type(&file_path);
+            // Override binary detection for known text file extensions
+            // (git may flag UTF-16 or files with long lines as binary)
+            let is_binary = delta.flags().is_binary() && !is_known_text_extension(&file_path);
 
             files.push(DiffFile {
                 path: file_path.clone(),
@@ -187,7 +213,7 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
                     .map(|p| p.to_string_lossy().to_string()),
                 status,
                 hunks: Vec::new(),
-                is_binary: delta.flags().is_binary(),
+                is_binary,
                 is_image,
                 image_type,
                 additions: 0,
@@ -325,41 +351,86 @@ pub struct CommitStats {
 pub async fn get_commits_stats(path: String, commit_oids: Vec<String>) -> Result<Vec<CommitStats>> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let mut results = Vec::with_capacity(commit_oids.len());
+    let mut skipped_oid_parse = 0;
+    let mut skipped_commit_find = 0;
+    let mut skipped_tree = 0;
+    let mut skipped_diff = 0;
+    let mut skipped_stats = 0;
+    let mut zero_stats = 0;
 
-    for oid_str in commit_oids {
-        let oid = match git2::Oid::from_str(&oid_str) {
+    for oid_str in &commit_oids {
+        let oid = match git2::Oid::from_str(oid_str) {
             Ok(o) => o,
-            Err(_) => continue,
+            Err(_) => {
+                skipped_oid_parse += 1;
+                continue;
+            }
         };
 
         let commit = match repo.find_commit(oid) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => {
+                skipped_commit_find += 1;
+                continue;
+            }
         };
 
         let parent = commit.parent(0).ok();
         let parent_tree = parent.as_ref().and_then(|p| p.tree().ok());
         let commit_tree = match commit.tree() {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => {
+                skipped_tree += 1;
+                continue;
+            }
         };
 
         let diff = match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None) {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(_) => {
+                skipped_diff += 1;
+                continue;
+            }
         };
 
-        let stats = match diff.stats() {
-            Ok(s) => s,
-            Err(_) => continue,
+        let (additions, deletions, files_changed) = match diff.stats() {
+            Ok(s) => (s.insertions(), s.deletions(), s.files_changed()),
+            Err(e) => {
+                // Stats can fail for binary-only diffs or very large diffs
+                // Return 0/0/0 instead of skipping to avoid missing commits
+                tracing::debug!("get_commits_stats: stats failed for {}: {}", oid_str, e);
+                skipped_stats += 1;
+                (0, 0, 0)
+            }
         };
+
+        // Track commits with zero stats (may be merge commits or empty commits)
+        if additions == 0 && deletions == 0 && files_changed == 0 {
+            zero_stats += 1;
+        }
 
         results.push(CommitStats {
-            oid: oid_str,
-            additions: stats.insertions(),
-            deletions: stats.deletions(),
-            files_changed: stats.files_changed(),
+            oid: oid_str.clone(),
+            additions,
+            deletions,
+            files_changed,
         });
+    }
+
+    let total_skipped = skipped_oid_parse + skipped_commit_find + skipped_tree + skipped_diff + skipped_stats;
+    if total_skipped > 0 || zero_stats > 0 {
+        tracing::warn!(
+            "get_commits_stats: processed {}/{} commits for {}. Skipped: oid_parse={}, commit_find={}, tree={}, diff={}, stats={}. Zero stats: {}",
+            results.len(),
+            commit_oids.len(),
+            path,
+            skipped_oid_parse,
+            skipped_commit_find,
+            skipped_tree,
+            skipped_diff,
+            skipped_stats,
+            zero_stats
+        );
     }
 
     Ok(results)

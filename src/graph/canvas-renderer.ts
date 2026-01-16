@@ -265,8 +265,8 @@ export class CanvasRenderer {
   private avatarCache: Map<string, HTMLImageElement | null> = new Map();
   private avatarLoadingSet: Set<string> = new Set();
 
-  // Commit stats for size scaling and display (oid -> {additions, deletions})
-  private commitStats: Map<string, { additions: number; deletions: number }> = new Map();
+  // Commit stats for size scaling and display (oid -> {additions, deletions, filesChanged})
+  private commitStats: Map<string, { additions: number; deletions: number; filesChanged: number }> = new Map();
 
   // Commit signatures (oid -> {signed, valid})
   private commitSignatures: Map<string, { signed: boolean; valid: boolean }> = new Map();
@@ -370,7 +370,7 @@ export class CanvasRenderer {
   /**
    * Set commit stats for size-based node scaling and display
    */
-  setCommitStats(stats: Map<string, { additions: number; deletions: number }>): void {
+  setCommitStats(stats: Map<string, { additions: number; deletions: number; filesChanged: number }>): void {
     this.commitStats = stats;
     this.markDirty();
   }
@@ -476,12 +476,19 @@ export class CanvasRenderer {
   }
 
   /**
-   * Format commit stats as "+N -M" string
+   * Format commit stats as "+N -M" string, or special cases for no changes
    */
   private formatStats(oid: string): string | null {
     const stats = this.commitStats.get(oid);
-    if (!stats || (stats.additions === 0 && stats.deletions === 0)) {
-      return null;
+    if (!stats) {
+      return null; // Stats not yet loaded
+    }
+    if (stats.additions === 0 && stats.deletions === 0) {
+      if (stats.filesChanged > 0) {
+        // Binary files changed - show file count
+        return `${stats.filesChanged} file${stats.filesChanged === 1 ? '' : 's'}`;
+      }
+      return '—'; // No direct changes (e.g., merge commit)
     }
     return `+${stats.additions} -${stats.deletions}`;
   }
@@ -1181,20 +1188,28 @@ export class CanvasRenderer {
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
 
-        // Split into additions and deletions for colored display
-        const stats = this.commitStats.get(node.oid);
-        if (stats) {
-          const addText = `+${stats.additions}`;
-          const delText = `-${stats.deletions}`;
+        if (statsText === '—' || statsText.endsWith('file') || statsText.endsWith('files')) {
+          // No line changes - show in muted color (merge commit or binary files)
+          ctx.fillStyle = theme.textColor;
+          ctx.globalAlpha = 0.5;
+          ctx.fillText(statsText, statsColumnX + statsColumnWidth, y);
+          ctx.globalAlpha = 1.0;
+        } else {
+          // Split into additions and deletions for colored display
+          const stats = this.commitStats.get(node.oid);
+          if (stats) {
+            const addText = `+${stats.additions}`;
+            const delText = `-${stats.deletions}`;
 
-          // Draw deletions first (further right)
-          ctx.fillStyle = '#f85149'; // Red for deletions
-          const delWidth = ctx.measureText(delText).width;
-          ctx.fillText(delText, statsColumnX + statsColumnWidth, y);
+            // Draw deletions first (further right)
+            ctx.fillStyle = '#f85149'; // Red for deletions
+            const delWidth = ctx.measureText(delText).width;
+            ctx.fillText(delText, statsColumnX + statsColumnWidth, y);
 
-          // Draw additions
-          ctx.fillStyle = '#3fb950'; // Green for additions
-          ctx.fillText(addText + ' ', statsColumnX + statsColumnWidth - delWidth - 4, y);
+            // Draw additions
+            ctx.fillStyle = '#3fb950'; // Green for additions
+            ctx.fillText(addText + ' ', statsColumnX + statsColumnWidth - delWidth - 4, y);
+          }
         }
       }
 

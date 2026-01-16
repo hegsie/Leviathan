@@ -204,6 +204,39 @@ export class LvGraphCanvas extends LitElement {
         color: var(--color-text-secondary);
         margin-top: 2px;
       }
+
+      .loading-indicator {
+        position: absolute;
+        bottom: var(--spacing-md);
+        right: calc(var(--spacing-md) + 12px); /* Account for scrollbar */
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        box-shadow: var(--shadow-sm);
+        opacity: 0.9;
+        z-index: 10;
+      }
+
+      .loading-indicator .spinner {
+        width: 12px;
+        height: 12px;
+        border: 2px solid var(--color-border);
+        border-top-color: var(--color-primary);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
     `,
   ];
 
@@ -220,6 +253,7 @@ export class LvGraphCanvas extends LitElement {
   @state() private renderTimeMs = 0;
   @state() private visibleNodes = 0;
   @state() private isLoading = false;
+  @state() private isLoadingStats = false;
   @state() private loadError: string | null = null;
   @state() private tooltipVisible = false;
   @state() private tooltipX = 0;
@@ -235,6 +269,9 @@ export class LvGraphCanvas extends LitElement {
   private realCommits: Map<string, Commit> = new Map();
   private matchedCommitOids: Set<string> = new Set(); // For search highlighting
   private refsByCommit: RefsByCommit = {};
+  private loadVersion = 0; // Incremented on each load to cancel stale requests
+  private statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastLoadedRepoPath: string | null = null; // Track the last repo that completed loading
   private pullRequestsByCommit: Record<string, GraphPullRequest[]> = {};
   private githubRepo: { owner: string; repo: string } | null = null;
   private renderer: CanvasRenderer | null = null;
@@ -380,6 +417,9 @@ export class LvGraphCanvas extends LitElement {
     if (this.animationFrame) {
       cancelAnimationFrame(this.animationFrame);
     }
+    if (this.statsDebounceTimer) {
+      clearTimeout(this.statsDebounceTimer);
+    }
     this.renderer?.destroy();
     this.scrollState?.destroy();
     this.resizeObserver?.disconnect();
@@ -412,6 +452,11 @@ export class LvGraphCanvas extends LitElement {
       return;
     }
 
+    // Increment version to cancel any in-flight requests from previous loads
+    this.loadVersion++;
+    const currentVersion = this.loadVersion;
+    const repoPath = this.repositoryPath;
+
     this.isLoading = true;
     this.loadError = null;
     const startTime = performance.now();
@@ -422,13 +467,16 @@ export class LvGraphCanvas extends LitElement {
       // Always fetch all commits first
       const [commitsResult, refsResult, githubRepoResult] = await Promise.all([
         getCommitHistory({
-          path: this.repositoryPath,
+          path: repoPath,
           limit: this.commitCount,
           allBranches: true,
         }),
-        getRefsByCommit(this.repositoryPath),
-        detectGitHubRepo(this.repositoryPath),
+        getRefsByCommit(repoPath),
+        detectGitHubRepo(repoPath),
       ]);
+
+      // Abort if a newer load has started
+      if (this.loadVersion !== currentVersion) return;
 
       // Check if we have a GitHub repo and fetch PRs
       if (githubRepoResult.success && githubRepoResult.data) {
@@ -461,7 +509,7 @@ export class LvGraphCanvas extends LitElement {
       // If search is active, also fetch matching commits for highlighting
       this.matchedCommitOids.clear();
       if (hasSearch) {
-        const matchResult = await searchCommits(this.repositoryPath, {
+        const matchResult = await searchCommits(repoPath, {
           query: this.searchFilter?.query || undefined,
           author: this.searchFilter?.author || undefined,
           dateFrom: this.searchFilter?.dateFrom
@@ -473,6 +521,9 @@ export class LvGraphCanvas extends LitElement {
           filePath: this.searchFilter?.filePath || undefined,
           limit: this.commitCount,
         });
+
+        // Abort if a newer load has started
+        if (this.loadVersion !== currentVersion) return;
 
         if (matchResult.success && matchResult.data) {
           for (const commit of matchResult.data) {
@@ -621,50 +672,123 @@ export class LvGraphCanvas extends LitElement {
     this.scheduleRender();
 
     // Fetch real commit stats and signatures asynchronously (don't block initial render)
-    this.fetchCommitStats();
+    // Use debouncing for stats to handle rapid repo changes during startup
+    this.scheduleStatsFetch();
     this.fetchCommitSignatures();
+  }
+
+  /**
+   * Schedule stats fetch with debouncing to avoid race conditions during rapid repo changes
+   */
+  private scheduleStatsFetch(): void {
+    const repoPath = this.repositoryPath;
+    log.debug(`scheduleStatsFetch: scheduling for ${repoPath}, version=${this.loadVersion}`);
+
+    // Cancel any pending stats fetch
+    if (this.statsDebounceTimer) {
+      clearTimeout(this.statsDebounceTimer);
+      log.debug(`scheduleStatsFetch: cancelled previous pending fetch`);
+    }
+
+    // Wait a short time before fetching to let rapid changes settle
+    // Use 300ms to handle startup where multiple repos are loaded quickly
+    this.statsDebounceTimer = setTimeout(() => {
+      this.statsDebounceTimer = null;
+      // Check if repo is still the same before fetching
+      if (this.repositoryPath === repoPath) {
+        log.debug(`scheduleStatsFetch: timer fired, fetching for ${repoPath}`);
+        this.fetchCommitStats();
+      } else {
+        log.debug(`scheduleStatsFetch: timer fired but repo changed from ${repoPath} to ${this.repositoryPath}, skipping`);
+      }
+    }, 300);
   }
 
   private async fetchCommitStats(): Promise<void> {
     if (!this.repositoryPath || this.realCommits.size === 0) return;
 
+    // Capture state at start to avoid race conditions when repository changes
+    const repoPath = this.repositoryPath;
     const commitOids = [...this.realCommits.keys()];
+    const version = this.loadVersion;
+    const startTime = Date.now();
+    const MIN_LOADING_DISPLAY_MS = 400; // Minimum time to show loading indicator
 
-    // Fetch in batches to avoid overwhelming the backend
-    const batchSize = 100;
-    const allStats = new Map<string, { additions: number; deletions: number }>();
+    log.debug(`fetchCommitStats: starting for ${commitOids.length} commits, version=${version}`);
+    this.isLoadingStats = true;
 
-    for (let i = 0; i < commitOids.length; i += batchSize) {
-      const batch = commitOids.slice(i, i + batchSize);
-      const result = await getCommitsStats(this.repositoryPath, batch);
+    try {
+      // Fetch in batches to avoid overwhelming the backend
+      const batchSize = 100;
+      const allStats = new Map<string, { additions: number; deletions: number; filesChanged: number }>();
 
-      if (result.success && result.data) {
-        for (const stat of result.data) {
-          allStats.set(stat.oid, { additions: stat.additions, deletions: stat.deletions });
+      for (let i = 0; i < commitOids.length; i += batchSize) {
+        // Abort if we switched to a different repository (not just version change)
+        if (this.repositoryPath !== repoPath) {
+          log.debug(`fetchCommitStats: aborting at batch ${i / batchSize}, repo changed from ${repoPath} to ${this.repositoryPath}`);
+          return;
+        }
+
+        const batch = commitOids.slice(i, i + batchSize);
+        const result = await getCommitsStats(repoPath, batch);
+
+        if (result.success && result.data) {
+          log.debug(`fetchCommitStats: batch ${i / batchSize} returned ${result.data.length}/${batch.length} stats`);
+          for (const stat of result.data) {
+            allStats.set(stat.oid, {
+              additions: stat.additions,
+              deletions: stat.deletions,
+              filesChanged: stat.filesChanged,
+            });
+          }
+        } else {
+          log.warn(`fetchCommitStats: batch ${i / batchSize} failed: ${result.error}`);
         }
       }
-    }
 
-    // Update renderer with real stats
-    if (allStats.size > 0) {
-      this.renderer?.setCommitStats(allStats);
-      this.renderer?.markDirty();
-      this.scheduleRender();
+      // Only update if we're still on the same repository (use path check, not version)
+      // This allows stats to be applied even if a refresh happened during fetching
+      if (this.repositoryPath === repoPath && allStats.size > 0) {
+        log.debug(`fetchCommitStats: complete, got stats for ${allStats.size}/${commitOids.length} commits`);
+        this.renderer?.setCommitStats(allStats);
+        this.renderer?.markDirty();
+        this.scheduleRender();
+      } else if (this.repositoryPath !== repoPath) {
+        log.debug(`fetchCommitStats: discarding stats for ${repoPath}, now on ${this.repositoryPath}`);
+      }
+    } finally {
+      // Only clear loading state if we're still on the same repo
+      if (this.repositoryPath === repoPath) {
+        // Ensure loading indicator is visible for minimum time
+        const elapsed = Date.now() - startTime;
+        if (elapsed < MIN_LOADING_DISPLAY_MS) {
+          await new Promise(resolve => setTimeout(resolve, MIN_LOADING_DISPLAY_MS - elapsed));
+        }
+        this.isLoadingStats = false;
+      }
     }
   }
 
   private async fetchCommitSignatures(): Promise<void> {
     if (!this.repositoryPath || this.realCommits.size === 0) return;
 
+    // Capture state at start to avoid race conditions when repository changes
+    const repoPath = this.repositoryPath;
     const commitOids = [...this.realCommits.keys()];
+    const version = this.loadVersion;
 
     // Fetch in batches to avoid overwhelming the backend
     const batchSize = 50;
     const allSignatures = new Map<string, { signed: boolean; valid: boolean }>();
 
     for (let i = 0; i < commitOids.length; i += batchSize) {
+      // Abort if a newer load has started
+      if (this.loadVersion !== version) {
+        return;
+      }
+
       const batch = commitOids.slice(i, i + batchSize);
-      const result = await getCommitsSignatures(this.repositoryPath, batch);
+      const result = await getCommitsSignatures(repoPath, batch);
 
       if (result.success && result.data) {
         for (const [oid, sig] of result.data) {
@@ -673,8 +797,8 @@ export class LvGraphCanvas extends LitElement {
       }
     }
 
-    // Update renderer with signatures
-    if (allSignatures.size > 0) {
+    // Only update if no newer load has started
+    if (this.loadVersion === version && allSignatures.size > 0) {
       this.renderer?.setCommitSignatures(allSignatures);
       this.renderer?.markDirty();
       this.scheduleRender();
@@ -1438,6 +1562,15 @@ export class LvGraphCanvas extends LitElement {
               ? html`<div class="author-email">${this.tooltipAuthorEmail}</div>`
               : ''}
           </div>
+
+          ${this.isLoadingStats
+            ? html`
+                <div class="loading-indicator">
+                  <div class="spinner"></div>
+                  <span>Loading stats...</span>
+                </div>
+              `
+            : ''}
         </div>
       </div>
     `;

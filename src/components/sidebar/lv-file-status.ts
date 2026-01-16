@@ -547,6 +547,11 @@ export class LvFileStatus extends LitElement {
       if (event.eventType === 'workdir-changed' || event.eventType === 'index-changed') {
         this.debouncedLoadStatus();
       }
+      // Dispatch repository-refresh on refs changes (e.g., commits, branch changes)
+      // This updates the push/pull indicators in the dashboard
+      if (event.eventType === 'refs-changed') {
+        window.dispatchEvent(new CustomEvent('repository-refresh'));
+      }
     });
 
     // Listen for global stage-all, unstage-all, and refresh events
