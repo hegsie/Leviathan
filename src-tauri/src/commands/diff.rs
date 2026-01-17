@@ -159,28 +159,42 @@ pub async fn get_file_diff(
 
     // Fallback: pathspec may have failed due to case sensitivity on Windows
     // Try getting full diff and finding the file with case-insensitive match
-    #[cfg(target_os = "windows")]
-    {
-        let mut fallback_opts = git2::DiffOptions::new();
-        fallback_opts.include_untracked(true);
-        fallback_opts.recurse_untracked_dirs(true);
-        fallback_opts.show_untracked_content(true);
+    let mut fallback_opts = git2::DiffOptions::new();
+    fallback_opts.include_untracked(true);
+    fallback_opts.recurse_untracked_dirs(true);
+    fallback_opts.show_untracked_content(true);
 
-        let fallback_diff = if is_staged {
-            let head = repo.head()?.peel_to_tree()?;
-            repo.diff_tree_to_index(Some(&head), None, Some(&mut fallback_opts))?
-        } else {
-            repo.diff_index_to_workdir(None, Some(&mut fallback_opts))?
-        };
+    let fallback_diff = if is_staged {
+        let head = repo.head()?.peel_to_tree()?;
+        repo.diff_tree_to_index(Some(&head), None, Some(&mut fallback_opts))?
+    } else {
+        repo.diff_index_to_workdir(None, Some(&mut fallback_opts))?
+    };
 
-        let all_files = parse_diff(&fallback_diff)?;
-        if let Some(file) = all_files
-            .into_iter()
-            .find(|f| f.path.eq_ignore_ascii_case(&normalized_file_path))
-        {
-            return Ok(file);
-        }
+    let all_files = parse_diff(&fallback_diff)?;
+
+    // Try exact match first
+    if let Some(file) = all_files.iter().find(|f| f.path == normalized_file_path) {
+        return Ok(file.clone());
     }
+
+    // Try case-insensitive match
+    if let Some(file) = all_files
+        .iter()
+        .find(|f| f.path.eq_ignore_ascii_case(&normalized_file_path))
+    {
+        return Ok(file.clone());
+    }
+
+    // Log available files for debugging
+    let available_paths: Vec<&str> = all_files.iter().map(|f| f.path.as_str()).collect();
+    tracing::warn!(
+        "File '{}' not found in diff. Staged: {}. Available files ({}):\n{}",
+        normalized_file_path,
+        is_staged,
+        available_paths.len(),
+        available_paths.join("\n")
+    );
 
     // File not found in diff - it might be untracked or have no changes
     // Try to read the file and generate a synthetic diff for new/untracked files
