@@ -147,7 +147,7 @@
   --z-toast: 400;
 
   /* Graph Dimensions */
-  --graph-row-height: 28px;
+  --graph-row-height: 36px;
   --graph-node-radius: 6px;
   --graph-lane-width: 16px;
   --graph-line-width: 2px;
@@ -190,15 +190,15 @@
     /* Toggle switch - dark mode uses dark knob on light track */
     --toggle-knob-color: #e4e4e4;
 
-    /* Graph Colors - brighter for dark backgrounds */
-    --color-branch-1: #4fc3f7;
-    --color-branch-2: #81c784;
-    --color-branch-3: #ef5350;
-    --color-branch-4: #ffb74d;
-    --color-branch-5: #ce93d8;
-    --color-branch-6: #4dd0e1;
-    --color-branch-7: #ff8a65;
-    --color-branch-8: #aed581;
+    /* Graph Colors - muted, harmonious palette */
+    --color-branch-1: #6e9ecf;  /* Muted blue */
+    --color-branch-2: #73b875;  /* Muted green */
+    --color-branch-3: #cf7171;  /* Muted coral */
+    --color-branch-4: #d4a55a;  /* Muted gold */
+    --color-branch-5: #a88cc4;  /* Muted purple */
+    --color-branch-6: #5bb5b5;  /* Muted teal */
+    --color-branch-7: #cc8866;  /* Muted peach */
+    --color-branch-8: #8eb86e;  /* Muted sage */
 
     /* Graph node/text colors */
     --graph-text-color: #c8c8c8;
@@ -207,15 +207,15 @@
     --graph-hover-color: #e0e0e0;
     --graph-node-text: #1a1520;
 
-    /* Ref label colors - dark mode */
-    --ref-local-bg: #2e5730;
-    --ref-local-text: #a5d6a7;
-    --ref-remote-bg: #1a3a5c;
-    --ref-remote-text: #90caf9;
-    --ref-tag-bg: #5c4020;
-    --ref-tag-text: #ffe082;
-    --ref-head-bg: #5c3020;
-    --ref-head-text: #ffab91;
+    /* Ref label colors - dark mode (semi-transparent backgrounds) */
+    --ref-local-bg: rgba(115, 184, 117, 0.18);   /* Subtle green */
+    --ref-local-text: #8cc98e;
+    --ref-remote-bg: rgba(110, 158, 207, 0.18);  /* Subtle blue */
+    --ref-remote-text: #8ab4d9;
+    --ref-tag-bg: rgba(212, 165, 90, 0.18);      /* Subtle gold */
+    --ref-tag-text: #d4b46a;
+    --ref-head-bg: rgba(207, 113, 113, 0.18);    /* Subtle coral */
+    --ref-head-text: #cf9191;
   }
 }
 
@@ -255,15 +255,15 @@
   /* Toggle switch */
   --toggle-knob-color: #e4e4e4;
 
-  /* Graph Colors - brighter for dark backgrounds */
-  --color-branch-1: #4fc3f7;
-  --color-branch-2: #81c784;
-  --color-branch-3: #ef5350;
-  --color-branch-4: #ffb74d;
-  --color-branch-5: #ce93d8;
-  --color-branch-6: #4dd0e1;
-  --color-branch-7: #ff8a65;
-  --color-branch-8: #aed581;
+  /* Graph Colors - muted, harmonious palette */
+  --color-branch-1: #6e9ecf;  /* Muted blue */
+  --color-branch-2: #73b875;  /* Muted green */
+  --color-branch-3: #cf7171;  /* Muted coral */
+  --color-branch-4: #d4a55a;  /* Muted gold */
+  --color-branch-5: #a88cc4;  /* Muted purple */
+  --color-branch-6: #5bb5b5;  /* Muted teal */
+  --color-branch-7: #cc8866;  /* Muted peach */
+  --color-branch-8: #8eb86e;  /* Muted sage */
 
   /* Graph node/text colors */
   --graph-text-color: #c8c8c8;
@@ -272,15 +272,15 @@
   --graph-hover-color: #e0e0e0;
   --graph-node-text: #1a1520;
 
-  /* Ref label colors - dark mode */
-  --ref-local-bg: #2e5730;
-  --ref-local-text: #a5d6a7;
-  --ref-remote-bg: #1a3a5c;
-  --ref-remote-text: #90caf9;
-  --ref-tag-bg: #5c4020;
-  --ref-tag-text: #ffe082;
-  --ref-head-bg: #5c3020;
-  --ref-head-text: #ffab91;
+  /* Ref label colors - dark mode (semi-transparent backgrounds) */
+  --ref-local-bg: rgba(115, 184, 117, 0.18);   /* Subtle green */
+  --ref-local-text: #8cc98e;
+  --ref-remote-bg: rgba(110, 158, 207, 0.18);  /* Subtle blue */
+  --ref-remote-text: #8ab4d9;
+  --ref-tag-bg: rgba(212, 165, 90, 0.18);      /* Subtle gold */
+  --ref-tag-text: #d4b46a;
+  --ref-head-bg: rgba(207, 113, 113, 0.18);    /* Subtle coral */
+  --ref-head-text: #cf9191;
 }
 
 /* Base Reset */
