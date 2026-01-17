@@ -127,8 +127,11 @@ pub async fn get_file_diff(
 ) -> Result<DiffFile> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
+    // Normalize path separators for git (always use forward slashes)
+    let normalized_file_path = file_path.replace('\\', "/");
+
     let mut opts = git2::DiffOptions::new();
-    opts.pathspec(&file_path);
+    opts.pathspec(&normalized_file_path);
     // Include untracked files so we can show diff for new files
     opts.include_untracked(true);
     opts.recurse_untracked_dirs(true);
@@ -154,32 +157,41 @@ pub async fn get_file_diff(
 
     // File not found in diff - it might be untracked or have no changes
     // Try to read the file and generate a synthetic diff for new/untracked files
-    let full_path = Path::new(&path).join(&file_path);
+    let full_path = Path::new(&path).join(&normalized_file_path);
     if full_path.exists() {
         // Check if file is untracked
         let statuses = repo.statuses(Some(
             git2::StatusOptions::new()
-                .pathspec(&file_path)
+                .pathspec(&normalized_file_path)
                 .include_untracked(true)
                 .recurse_untracked_dirs(true),
         ))?;
 
         for entry in statuses.iter() {
             if let Some(entry_path) = entry.path() {
-                if entry_path == file_path {
+                let normalized_entry_path = entry_path.replace('\\', "/");
+                // Case-insensitive comparison on Windows
+                #[cfg(target_os = "windows")]
+                let paths_match = normalized_entry_path.eq_ignore_ascii_case(&normalized_file_path);
+                #[cfg(not(target_os = "windows"))]
+                let paths_match = normalized_entry_path == normalized_file_path;
+
+                if paths_match {
                     let status = entry.status();
                     if status.is_wt_new() || status.is_index_new() {
                         // It's a new/untracked file - generate diff from file content
-                        return generate_new_file_diff(&full_path, &file_path);
+                        return generate_new_file_diff(&full_path, &normalized_file_path);
                     }
                 }
             }
         }
     }
 
+    // If we get here, the file might have changes that git considers empty
+    // (e.g., only whitespace/line-ending changes being ignored)
     Err(crate::error::LeviathanError::OperationFailed(format!(
         "File '{}' not found in diff",
-        file_path
+        normalized_file_path
     )))
 }
 
