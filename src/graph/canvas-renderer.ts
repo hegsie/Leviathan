@@ -33,6 +33,10 @@ export interface RenderConfig {
   showAvatars: boolean;
   /** Show icons in ref labels */
   showRefIcons: boolean;
+  /** Width of the refs column in pixels (default 130) */
+  refsColumnWidth: number;
+  /** Width of the stats column in pixels (default 80) */
+  statsColumnWidth: number;
 }
 
 export interface RenderTheme {
@@ -73,7 +77,7 @@ export interface RenderTheme {
 }
 
 const DEFAULT_CONFIG: RenderConfig = {
-  rowHeight: 22,
+  rowHeight: 36,
   laneWidth: 14,
   nodeRadius: 6,
   minNodeRadius: 5,
@@ -83,6 +87,8 @@ const DEFAULT_CONFIG: RenderConfig = {
   showFps: false,
   showAvatars: false,
   showRefIcons: true,
+  refsColumnWidth: 130,
+  statsColumnWidth: 80,
 };
 
 /**
@@ -397,7 +403,7 @@ export class CanvasRenderer {
    */
   private getGravatarUrl(email: string, size: number = 64): string {
     const hash = md5(email.toLowerCase().trim());
-    return `https://www.gravatar.com/avatar/${hash}?s=${size}&d=identicon`;
+    return `https://www.gravatar.com/avatar/${hash}?s=${size}&d=404`;
   }
 
   /**
@@ -617,9 +623,9 @@ export class CanvasRenderer {
     const avatarSize = 22;
     const messageColumnX = avatarColumnX + avatarSize + 12;
 
-    // Right-aligned columns
+    // Right-aligned columns (use config values)
     const timeColumnWidth = 40;
-    const statsColumnWidth = 80;
+    const statsColumnWidth = config.statsColumnWidth;
     const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
     const statsColumnX = timeColumnX - statsColumnWidth - 8;
 
@@ -859,14 +865,45 @@ export class CanvasRenderer {
   }
 
   /**
+   * Get a consistent color for a user based on their name
+   * Generates unique colors using HSL for better distribution
+   * Colors are muted so graph lane colors stand out more
+   */
+  private getUserColor(name: string): string {
+    // Generate hash using djb2 algorithm
+    let hash = 5381;
+    for (let i = 0; i < name.length; i++) {
+      hash = ((hash << 5) + hash) ^ name.charCodeAt(i);
+    }
+    hash = Math.abs(hash);
+
+    // Use golden ratio to spread hues evenly
+    // This ensures consecutive hash values produce visually distinct colors
+    const goldenRatio = 0.618033988749895;
+    const hue = ((hash * goldenRatio) % 1) * 360;
+
+    // Muted colors: lower saturation so graph colors pop
+    const saturation = 35;
+    const lightness = 45;
+
+    return `hsl(${Math.round(hue)}, ${saturation}%, ${lightness}%)`;
+  }
+
+  /**
    * Get initials from author name
    */
   private getInitials(name: string): string {
-    const parts = name.trim().split(/\s+/);
+    // Filter out parts that start with non-letters (like "(External)")
+    const parts = name.trim().split(/\s+/).filter(p => /^[a-zA-Z]/.test(p));
     if (parts.length >= 2) {
-      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+      return (parts[0][0] + parts[1][0]).toUpperCase();
     }
-    return name.substring(0, 2).toUpperCase();
+    if (parts.length === 1 && parts[0].length >= 2) {
+      return parts[0].substring(0, 2).toUpperCase();
+    }
+    // Fallback: first two letters of original name
+    const letters = name.replace(/[^a-zA-Z]/g, '');
+    return letters.substring(0, 2).toUpperCase() || '??';
   }
 
   /**
@@ -877,13 +914,6 @@ export class CanvasRenderer {
     const { ctx, config, theme } = this;
     const { nodes, offsetX, offsetY, refsByCommit, maxLane } = data;
 
-    const labelHeight = 18;
-    const labelPadding = 6;
-    const labelGap = 4;
-    const labelRadius = 4;
-    const iconSize = 12;
-    const iconPadding = 3;
-
     // Get canvas width for responsive layout
     const canvasWidth = this.canvas.width / this.dpr;
     const rightPadding = 16;
@@ -892,11 +922,13 @@ export class CanvasRenderer {
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
     const avatarColumnX = graphEndX + 12;
     const avatarSize = 22;
-    const messageColumnX = avatarColumnX + avatarSize + 12;
+    const refsColumnX = avatarColumnX + avatarSize + 8;
+    const refsColumnWidth = config.refsColumnWidth;
+    const messageColumnX = refsColumnX + refsColumnWidth + 12;
 
-    // Right-aligned columns
+    // Right-aligned columns (use config values)
     const timeColumnWidth = 40;
-    const statsColumnWidth = 80;
+    const statsColumnWidth = config.statsColumnWidth;
     const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
     const statsColumnX = timeColumnX - statsColumnWidth - 8;
 
@@ -909,7 +941,6 @@ export class CanvasRenderer {
     for (const node of nodes) {
       const y = offsetY + node.row * config.rowHeight + this.HEADER_HEIGHT;
       const refs = refsByCommit?.[node.oid] ?? [];
-      const hasRefs = refs.length > 0;
       const laneColor = this.getLaneColor(node.lane);
 
       const isSelected = this.selectedOids.has(node.oid);
@@ -919,6 +950,19 @@ export class CanvasRenderer {
       // Dim non-matching commits during search (but don't dim selected/hovered)
       if (hasHighlighting && !isHighlighted && !isSelected && !isHovered) {
         ctx.globalAlpha = 0.25;
+      }
+
+      // Draw subtle row highlighting for selected/hovered rows
+      if (isSelected || isHovered) {
+        const rowTop = y - config.rowHeight / 2;
+        ctx.fillStyle = isSelected ? 'rgba(255, 255, 255, 0.06)' : 'rgba(255, 255, 255, 0.03)';
+        ctx.fillRect(0, rowTop, canvasWidth, config.rowHeight);
+
+        // Draw left border stripe matching lane color
+        ctx.fillStyle = laneColor;
+        ctx.globalAlpha = isSelected ? 0.8 : 0.5;
+        ctx.fillRect(0, rowTop, 3, config.rowHeight);
+        ctx.globalAlpha = 1.0;
       }
 
       // Render avatar in avatar column
@@ -938,8 +982,10 @@ export class CanvasRenderer {
 
       if (authorEmail) {
         const avatar = this.avatarCache.get(authorEmail);
-        if (avatar) {
-          // Draw circular avatar
+        const avatarLoaded = this.avatarCache.has(authorEmail);
+
+        if (avatar instanceof Image) {
+          // Draw actual Gravatar image
           ctx.save();
           ctx.beginPath();
           ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
@@ -947,29 +993,34 @@ export class CanvasRenderer {
           ctx.drawImage(avatar, avatarCenterX - avatarRadius + 1, y - avatarRadius + 1, avatarSize - 2, avatarSize - 2);
           ctx.restore();
         } else {
-          // Trigger avatar load and show initials
-          this.loadAvatar(authorEmail);
-          // Draw initials circle
+          // No Gravatar: either failed (null) or still loading (undefined)
+          if (!avatarLoaded) {
+            // Not yet attempted, start loading
+            this.loadAvatar(authorEmail);
+          }
+          // Draw colored initials circle
+          const userColor = this.getUserColor(node.commit.author);
           ctx.beginPath();
           ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
-          ctx.fillStyle = laneColor;
+          ctx.fillStyle = userColor;
           ctx.fill();
-          // Draw initials
+          // Draw initials with contrasting text
           const initials = this.getInitials(node.commit.author);
-          ctx.fillStyle = '#ffffff';
+          ctx.fillStyle = this.getContrastingIconColor(userColor);
           ctx.font = `bold ${Math.floor(avatarSize * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(initials, avatarCenterX, y + 1);
         }
       } else {
-        // No email - draw colored circle with initials
+        // No email - draw initials circle
+        const userColor = this.getUserColor(node.commit.author);
         ctx.beginPath();
         ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
-        ctx.fillStyle = laneColor;
+        ctx.fillStyle = userColor;
         ctx.fill();
         const initials = this.getInitials(node.commit.author);
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = this.getContrastingIconColor(userColor);
         ctx.font = `bold ${Math.floor(avatarSize * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -982,28 +1033,9 @@ export class CanvasRenderer {
         this.drawVerifiedBadge(avatarCenterX + avatarRadius - 2, y + avatarRadius - 2, signature.valid);
       }
 
-      // Calculate ref labels width first (to know how much space message gets)
-      let totalRefWidth = 0;
       const prs = data.pullRequestsByCommit?.[node.oid] ?? [];
 
-      if (hasRefs || prs.length > 0) {
-        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
-        for (const ref of refs) {
-          const textWidth = ctx.measureText(ref.shorthand).width;
-          const hasIcon = config.showRefIcons;
-          totalRefWidth += textWidth + labelPadding * 2 + (hasIcon ? iconSize + iconPadding : 0) + labelGap;
-        }
-        for (const pr of prs) {
-          const prLabel = `#${pr.number}`;
-          const prTextWidth = ctx.measureText(prLabel).width;
-          totalRefWidth += prTextWidth + labelPadding * 2 + 10 + iconPadding + labelGap;
-        }
-      }
-
-      // Message gets remaining space after refs
-      const messageMaxWidth = Math.max(100, availableMessageWidth - totalRefWidth - 8);
-
-      // Render commit message
+      // Render commit message (full width now, refs are in separate column)
       const message = node.commit.message;
       ctx.font = '13px -apple-system, BlinkMacSystemFont, sans-serif';
       ctx.fillStyle = laneColor;
@@ -1012,170 +1044,206 @@ export class CanvasRenderer {
 
       // Truncate message to fit available space
       let displayMessage = message;
-      if (ctx.measureText(displayMessage).width > messageMaxWidth) {
-        while (ctx.measureText(displayMessage + '…').width > messageMaxWidth && displayMessage.length > 0) {
+      if (ctx.measureText(displayMessage).width > availableMessageWidth) {
+        while (ctx.measureText(displayMessage + '…').width > availableMessageWidth && displayMessage.length > 0) {
           displayMessage = displayMessage.slice(0, -1);
         }
         displayMessage += '…';
       }
       ctx.fillText(displayMessage, messageColumnX, y);
 
-      // Render refs inline after message
-      const messageWidth = ctx.measureText(displayMessage).width;
-      let currentX = messageColumnX + messageWidth + 12;
-      const maxLabelX = statsColumnX - 12; // Stop before stats column
-      let remainingRefs = 0;
-      let remainingPrs = 0;
-      const hiddenLabels: string[] = []; // Track hidden label names for tooltip
+      // Render refs in refs column - show as many as fit
+      const allRefs = [...refs, ...prs.map(pr => ({ ...pr, isPR: true }))];
+      const smallLabelHeight = 16;
+      const smallLabelPadding = 6;
+      const smallIconSize = 10;
+      const labelGapSize = 4;
+      const hiddenLabels: string[] = [];
 
-      for (let i = 0; i < refs.length; i++) {
-        const ref = refs[i];
-        const label = ref.shorthand;
+      if (allRefs.length > 0) {
+        const labelY = y;
+        let currentX = refsColumnX;
+        let renderedCount = 0;
 
-        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
-        const textWidth = ctx.measureText(label).width;
+        // Calculate how many labels we can fit
+        for (let i = 0; i < allRefs.length; i++) {
+          const item = allRefs[i];
+          const isPR = 'isPR' in item && item.isPR;
 
-        const hasIcon = config.showRefIcons;
-        const pillWidth = textWidth + labelPadding * 2 + (hasIcon ? iconSize + iconPadding : 0);
+          // Calculate this label's width
+          ctx.font = '500 11px -apple-system, BlinkMacSystemFont, sans-serif';
+          const hasIcon = config.showRefIcons;
+          const iconWidth = hasIcon ? smallIconSize + 3 : 0;
 
-        // Check if this label would overflow
-        if (currentX + pillWidth > maxLabelX) {
-          remainingRefs = refs.length - i;
-          remainingPrs = prs.length;
-          // Collect hidden ref names
-          for (let j = i; j < refs.length; j++) {
-            hiddenLabels.push(refs[j].shorthand);
+          let labelText: string;
+          if (isPR) {
+            labelText = `#${(item as GraphPullRequest & { isPR: boolean }).number}`;
+          } else {
+            labelText = (item as RefInfo).shorthand;
           }
-          break;
-        }
 
-        const { bgColor, textColor } = this.getRefColors(ref);
+          const textWidth = ctx.measureText(labelText).width;
+          const pillWidth = textWidth + smallLabelPadding * 2 + iconWidth;
 
-        // Draw pill background
-        ctx.fillStyle = bgColor;
-        this.drawRoundedRect(currentX, y - labelHeight / 2, pillWidth, labelHeight, labelRadius);
+          // Check if we have room for this label plus potential "+N" badge
+          const remainingRefs = allRefs.length - i - 1;
+          const needsBadge = remainingRefs > 0;
+          const badgeSpace = needsBadge ? 30 : 0;
+          const spaceNeeded = pillWidth + (i > 0 ? labelGapSize : 0) + badgeSpace;
 
-        // Store hitbox for tooltip detection
-        this.refLabelHitboxes.push({
-          x: currentX,
-          y: y - labelHeight / 2,
-          width: pillWidth,
-          height: labelHeight,
-          label: ref.shorthand,
-          fullName: ref.name,
-          refType: ref.refType,
-        });
-
-        // Draw HEAD indicator
-        if (ref.isHead) {
-          ctx.strokeStyle = theme.refColors.head;
-          ctx.lineWidth = 2;
-          this.strokeRoundedRect(currentX, y - labelHeight / 2, pillWidth, labelHeight, labelRadius);
-        }
-
-        // Draw icon
-        let textStartX = currentX + labelPadding;
-        if (hasIcon) {
-          // Use a contrasting color for icon - darken or lighten based on background
-          const iconColor = this.getContrastingIconColor(bgColor);
-          ctx.strokeStyle = iconColor;
-          ctx.fillStyle = iconColor;
-          this.drawRefIcon(ref.refType, currentX + labelPadding, y, iconSize);
-          textStartX = currentX + labelPadding + iconSize + iconPadding;
-        }
-
-        // Draw label text
-        ctx.fillStyle = textColor;
-        ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(label, textStartX, y);
-
-        currentX += pillWidth + labelGap;
-      }
-
-      // Render PR badges after refs (only if we haven't hit overflow yet)
-      if (remainingRefs === 0) {
-        for (let i = 0; i < prs.length; i++) {
-          const pr = prs[i];
-          const { bgColor, textColor: prTextColor } = this.getPrColors(pr);
-          const prLabel = `#${pr.number}`;
-
-          ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
-          const prTextWidth = ctx.measureText(prLabel).width;
-
-          // Add PR icon width
-          const prIconSize = 10;
-          const prPillWidth = prTextWidth + labelPadding * 2 + prIconSize + iconPadding;
-
-          // Check if this label would overflow
-          if (currentX + prPillWidth > maxLabelX) {
-            remainingPrs = prs.length - i;
-            // Collect hidden PR labels
-            for (let j = i; j < prs.length; j++) {
-              hiddenLabels.push(`#${prs[j].number}`);
-            }
+          if (currentX + spaceNeeded > refsColumnX + refsColumnWidth && i > 0) {
+            // No room for this label, stop here
             break;
           }
 
-          // Draw PR pill background
-          ctx.fillStyle = bgColor;
-          this.drawRoundedRect(currentX, y - labelHeight / 2, prPillWidth, labelHeight, labelRadius);
+          // Render this label
+          if (i > 0) {
+            currentX += labelGapSize;
+          }
 
-          // Store hitbox for tooltip detection
-          this.refLabelHitboxes.push({
-            x: currentX,
-            y: y - labelHeight / 2,
-            width: prPillWidth,
-            height: labelHeight,
-            label: prLabel,
-            fullName: pr.url ?? `Pull Request ${prLabel}`,
-            refType: 'pullRequest',
-          });
+          // Calculate max width available for this label
+          const remainingWidth = refsColumnX + refsColumnWidth - currentX - badgeSpace;
+          const maxPillWidth = Math.max(40, remainingWidth); // Minimum 40px for any label
 
-          // Draw PR icon (merge/pull request icon)
-          ctx.strokeStyle = prTextColor;
-          ctx.fillStyle = prTextColor;
-          this.drawPrIcon(currentX + labelPadding, y, prIconSize);
+          if (isPR) {
+            // Render PR badge
+            const pr = item as GraphPullRequest & { isPR: boolean };
+            const { bgColor, textColor: prTextColor } = this.getPrColors(pr);
+            const prLabel = `#${pr.number}`;
+            const prIconWidth = smallIconSize + 3;
+            const prPillWidth = Math.min(
+              ctx.measureText(prLabel).width + smallLabelPadding * 2 + prIconWidth,
+              maxPillWidth
+            );
 
-          // Draw PR number
-          ctx.fillStyle = prTextColor;
-          ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
-          ctx.textAlign = 'left';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(prLabel, currentX + labelPadding + prIconSize + iconPadding, y);
+            // Draw pill
+            ctx.fillStyle = bgColor;
+            this.drawRoundedRect(currentX, labelY - smallLabelHeight / 2, prPillWidth, smallLabelHeight, 4);
 
-          currentX += prPillWidth + labelGap;
+            // Draw PR icon
+            ctx.strokeStyle = prTextColor;
+            ctx.fillStyle = prTextColor;
+            this.drawPrIcon(currentX + smallLabelPadding, labelY, smallIconSize);
+
+            // Draw PR number
+            ctx.fillStyle = prTextColor;
+            ctx.font = '500 11px -apple-system, BlinkMacSystemFont, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(prLabel, currentX + smallLabelPadding + prIconWidth, labelY);
+
+            // Store hitbox
+            this.refLabelHitboxes.push({
+              x: currentX,
+              y: labelY - smallLabelHeight / 2,
+              width: prPillWidth,
+              height: smallLabelHeight,
+              label: prLabel,
+              fullName: pr.url ?? `Pull Request ${prLabel}`,
+              refType: 'pullRequest',
+            });
+
+            currentX += prPillWidth;
+          } else {
+            // Render ref badge
+            const ref = item as RefInfo;
+            const { bgColor, textColor } = this.getRefColors(ref);
+
+            // Truncate label if needed
+            let displayLabel = labelText;
+            const maxTextWidth = maxPillWidth - smallLabelPadding * 2 - iconWidth;
+            let actualTextWidth = ctx.measureText(displayLabel).width;
+
+            if (actualTextWidth > maxTextWidth) {
+              while (ctx.measureText(displayLabel + '…').width > maxTextWidth && displayLabel.length > 0) {
+                displayLabel = displayLabel.slice(0, -1);
+              }
+              displayLabel += '…';
+              actualTextWidth = ctx.measureText(displayLabel).width;
+            }
+
+            const actualPillWidth = actualTextWidth + smallLabelPadding * 2 + iconWidth;
+
+            // Draw pill
+            ctx.fillStyle = bgColor;
+            this.drawRoundedRect(currentX, labelY - smallLabelHeight / 2, actualPillWidth, smallLabelHeight, 4);
+
+            // Draw HEAD indicator
+            if (ref.isHead) {
+              ctx.strokeStyle = theme.refColors.headText;
+              ctx.lineWidth = 1.5;
+              this.strokeRoundedRect(currentX, labelY - smallLabelHeight / 2, actualPillWidth, smallLabelHeight, 4);
+            }
+
+            // Draw icon
+            let textStartX = currentX + smallLabelPadding;
+            if (hasIcon) {
+              ctx.strokeStyle = textColor;
+              ctx.fillStyle = textColor;
+              this.drawRefIcon(ref.refType, currentX + smallLabelPadding, labelY, smallIconSize);
+              textStartX = currentX + smallLabelPadding + smallIconSize + 3;
+            }
+
+            // Draw label text
+            ctx.fillStyle = textColor;
+            ctx.font = '500 11px -apple-system, BlinkMacSystemFont, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(displayLabel, textStartX, labelY);
+
+            // Store hitbox
+            this.refLabelHitboxes.push({
+              x: currentX,
+              y: labelY - smallLabelHeight / 2,
+              width: actualPillWidth,
+              height: smallLabelHeight,
+              label: ref.shorthand,
+              fullName: ref.name,
+              refType: ref.refType,
+            });
+
+            currentX += actualPillWidth;
+          }
+
+          renderedCount++;
         }
-      }
 
-      // Show overflow indicator if there are hidden refs/PRs
-      const totalRemaining = remainingRefs + remainingPrs;
-      if (totalRemaining > 0 && currentX < maxLabelX) {
-        const moreText = `+${totalRemaining}`;
-        ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
-        const moreWidth = ctx.measureText(moreText).width + labelPadding * 2;
+        // Show "+N" count badge if there are more refs that didn't fit
+        const remainingCount = allRefs.length - renderedCount;
+        if (remainingCount > 0) {
+          // Collect hidden labels for tooltip
+          for (let j = renderedCount; j < allRefs.length; j++) {
+            const hiddenItem = allRefs[j];
+            if ('isPR' in hiddenItem && hiddenItem.isPR) {
+              hiddenLabels.push(`#${(hiddenItem as GraphPullRequest).number}`);
+            } else {
+              hiddenLabels.push((hiddenItem as RefInfo).shorthand);
+            }
+          }
 
-        // Only show if it fits
-        if (currentX + moreWidth <= maxLabelX) {
+          const moreText = `+${remainingCount}`;
+          ctx.font = 'bold 9px -apple-system, BlinkMacSystemFont, sans-serif';
+          const moreWidth = ctx.measureText(moreText).width + 6;
+          const badgeX = currentX + labelGapSize;
+
           ctx.fillStyle = theme.textColor;
           ctx.globalAlpha = 0.4;
-          this.drawRoundedRect(currentX, y - labelHeight / 2, moreWidth, labelHeight, labelRadius);
+          this.drawRoundedRect(badgeX, y - 8, moreWidth, 16, 4);
           ctx.globalAlpha = 1.0;
 
           ctx.fillStyle = theme.textColor;
-          ctx.globalAlpha = 0.7;
+          ctx.globalAlpha = 0.8;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(moreText, currentX + moreWidth / 2, y);
+          ctx.fillText(moreText, badgeX + moreWidth / 2, y);
           ctx.globalAlpha = 1.0;
 
           // Store hitbox for tooltip
           this.overflowHitboxes.push({
-            x: currentX,
-            y: y - labelHeight / 2,
+            x: badgeX,
+            y: y - 8,
             width: moreWidth,
-            height: labelHeight,
+            height: 16,
             hiddenLabels,
           });
         }
@@ -1350,11 +1418,24 @@ export class CanvasRenderer {
    * Get a contrasting icon color based on the background
    */
   private getContrastingIconColor(bgColor: string): string {
-    // Parse the background color to get luminance
-    const hex = bgColor.replace('#', '');
-    const r = parseInt(hex.substr(0, 2), 16);
-    const g = parseInt(hex.substr(2, 2), 16);
-    const b = parseInt(hex.substr(4, 2), 16);
+    let r = 0, g = 0, b = 0;
+
+    // Parse hex color
+    if (bgColor.startsWith('#')) {
+      const hex = bgColor.replace('#', '');
+      r = parseInt(hex.substr(0, 2), 16);
+      g = parseInt(hex.substr(2, 2), 16);
+      b = parseInt(hex.substr(4, 2), 16);
+    }
+    // Parse rgba/rgb color
+    else if (bgColor.startsWith('rgba') || bgColor.startsWith('rgb')) {
+      const match = bgColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (match) {
+        r = parseInt(match[1], 10);
+        g = parseInt(match[2], 10);
+        b = parseInt(match[3], 10);
+      }
+    }
 
     // Calculate relative luminance
     const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
@@ -1655,6 +1736,49 @@ export class CanvasRenderer {
       cancelAnimationFrame(this.pendingFrame);
       this.pendingFrame = 0;
     }
+  }
+
+  /**
+   * Get column boundary positions for resize handle placement
+   * @param maxLane The maximum lane number from the graph layout
+   * @param offsetX The X offset for the graph
+   * @returns Object with column boundary X positions
+   */
+  getColumnBoundaries(maxLane: number, offsetX: number): {
+    refsEnd: number;
+    statsStart: number;
+  } {
+    const { config } = this;
+
+    // Calculate column positions (must match renderRefLabels logic)
+    const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
+    const avatarColumnX = graphEndX + 12;
+    const avatarSize = 22;
+    const refsColumnX = avatarColumnX + avatarSize + 8;
+    const refsColumnWidth = config.refsColumnWidth;
+
+    // Right-aligned columns
+    const canvasWidth = this.canvas.width / this.dpr;
+    const rightPadding = 16;
+    const timeColumnWidth = 40;
+    const statsColumnWidth = config.statsColumnWidth;
+    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
+    const statsColumnX = timeColumnX - statsColumnWidth - 8;
+
+    return {
+      refsEnd: refsColumnX + refsColumnWidth,
+      statsStart: statsColumnX,
+    };
+  }
+
+  /**
+   * Get current column widths from config
+   */
+  getColumnWidths(): { refsColumnWidth: number; statsColumnWidth: number } {
+    return {
+      refsColumnWidth: this.config.refsColumnWidth,
+      statsColumnWidth: this.config.statsColumnWidth,
+    };
   }
 
   /**

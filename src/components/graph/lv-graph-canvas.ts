@@ -237,6 +237,23 @@ export class LvGraphCanvas extends LitElement {
           transform: rotate(360deg);
         }
       }
+
+      .resize-handle {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 6px;
+        cursor: col-resize;
+        background: transparent;
+        z-index: 10;
+        margin-left: -3px;
+      }
+
+      .resize-handle:hover,
+      .resize-handle.dragging {
+        background: var(--color-primary);
+        opacity: 0.5;
+      }
     `,
   ];
 
@@ -260,6 +277,14 @@ export class LvGraphCanvas extends LitElement {
   @state() private tooltipY = 0;
   @state() private tooltipAuthorName = '';
   @state() private tooltipAuthorEmail = '';
+
+  // Column resize state
+  @state() private refsColumnWidth = 130;
+  @state() private statsColumnWidth = 80;
+  @state() private resizing: 'refs' | 'stats' | null = null;
+  private resizeStartX = 0;
+  private resizeStartWidth = 0;
+  private readonly COLUMN_STORAGE_KEY = 'leviathan-graph-columns';
 
   @query('.canvas-container') private containerEl!: HTMLDivElement;
   @query('canvas') private canvasEl!: HTMLCanvasElement;
@@ -294,6 +319,7 @@ export class LvGraphCanvas extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
+    this.loadColumnWidths();
   }
 
   async firstUpdated(): Promise<void> {
@@ -360,6 +386,8 @@ export class LvGraphCanvas extends LitElement {
         lineWidth: 2,
         showLabels: true,
         showFps: false, // We show our own FPS
+        refsColumnWidth: this.refsColumnWidth,
+        statsColumnWidth: this.statsColumnWidth,
       },
       getThemeFromCSS()
     );
@@ -420,6 +448,9 @@ export class LvGraphCanvas extends LitElement {
     if (this.statsDebounceTimer) {
       clearTimeout(this.statsDebounceTimer);
     }
+    // Clean up resize listeners if still attached
+    document.removeEventListener('mousemove', this.handleResizeMove);
+    document.removeEventListener('mouseup', this.handleResizeEnd);
     this.renderer?.destroy();
     this.scrollState?.destroy();
     this.resizeObserver?.disconnect();
@@ -1517,6 +1548,81 @@ export class LvGraphCanvas extends LitElement {
     });
   }
 
+  // Column resize methods
+  private loadColumnWidths(): void {
+    try {
+      const saved = localStorage.getItem(this.COLUMN_STORAGE_KEY);
+      if (saved) {
+        const { refs, stats } = JSON.parse(saved);
+        this.refsColumnWidth = refs ?? 130;
+        this.statsColumnWidth = stats ?? 80;
+      }
+    } catch {
+      // Ignore parse errors, use defaults
+    }
+  }
+
+  private saveColumnWidths(): void {
+    try {
+      localStorage.setItem(this.COLUMN_STORAGE_KEY, JSON.stringify({
+        refs: this.refsColumnWidth,
+        stats: this.statsColumnWidth,
+      }));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  private updateRendererColumnWidths(): void {
+    this.renderer?.setConfig({
+      refsColumnWidth: this.refsColumnWidth,
+      statsColumnWidth: this.statsColumnWidth,
+    });
+  }
+
+  private handleResizeStart(e: MouseEvent, column: 'refs' | 'stats'): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.resizing = column;
+    this.resizeStartX = e.clientX;
+    this.resizeStartWidth = column === 'refs'
+      ? this.refsColumnWidth
+      : this.statsColumnWidth;
+
+    document.addEventListener('mousemove', this.handleResizeMove);
+    document.addEventListener('mouseup', this.handleResizeEnd);
+  }
+
+  private handleResizeMove = (e: MouseEvent): void => {
+    if (!this.resizing) return;
+
+    const delta = e.clientX - this.resizeStartX;
+
+    if (this.resizing === 'refs') {
+      // Refs column: wider when dragging right
+      this.refsColumnWidth = Math.max(80, Math.min(250, this.resizeStartWidth + delta));
+    } else {
+      // Stats column: wider when dragging left (inverted)
+      this.statsColumnWidth = Math.max(50, Math.min(150, this.resizeStartWidth - delta));
+    }
+
+    this.updateRendererColumnWidths();
+    this.renderer?.markDirty();
+    this.scheduleRender();
+  };
+
+  private handleResizeEnd = (): void => {
+    this.resizing = null;
+    document.removeEventListener('mousemove', this.handleResizeMove);
+    document.removeEventListener('mouseup', this.handleResizeEnd);
+    this.saveColumnWidths();
+  };
+
+  private getResizeHandlePositions(): { refsEnd: number; statsStart: number } | null {
+    if (!this.renderer || !this.layout) return null;
+    return this.renderer.getColumnBoundaries(this.layout.maxLane, this.PADDING);
+  }
+
   private renderGraph(): void {
     if (!this.renderer || !this.virtualScroll || !this.layout) return;
 
@@ -1536,6 +1642,8 @@ export class LvGraphCanvas extends LitElement {
   }
 
   render() {
+    const handlePositions = this.getResizeHandlePositions();
+
     return html`
       <div class="container">
         <div class="canvas-container">
@@ -1543,6 +1651,21 @@ export class LvGraphCanvas extends LitElement {
             <div class="scroll-content"></div>
           </div>
           <canvas tabindex="0"></canvas>
+
+          ${handlePositions
+            ? html`
+                <div
+                  class="resize-handle ${this.resizing === 'refs' ? 'dragging' : ''}"
+                  style="left: ${handlePositions.refsEnd}px"
+                  @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'refs')}
+                ></div>
+                <div
+                  class="resize-handle ${this.resizing === 'stats' ? 'dragging' : ''}"
+                  style="left: ${handlePositions.statsStart}px"
+                  @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'stats')}
+                ></div>
+              `
+            : ''}
 
           ${this.loadError
             ? html`
