@@ -151,8 +151,35 @@ pub async fn get_file_diff(
     let files = parse_diff(&diff)?;
 
     // If we found the file, return it
+    // pathspec should have filtered to just our file, but it may be empty
+    // if case-sensitivity caused a mismatch
     if let Some(file) = files.into_iter().next() {
         return Ok(file);
+    }
+
+    // Fallback: pathspec may have failed due to case sensitivity on Windows
+    // Try getting full diff and finding the file with case-insensitive match
+    #[cfg(target_os = "windows")]
+    {
+        let mut fallback_opts = git2::DiffOptions::new();
+        fallback_opts.include_untracked(true);
+        fallback_opts.recurse_untracked_dirs(true);
+        fallback_opts.show_untracked_content(true);
+
+        let fallback_diff = if is_staged {
+            let head = repo.head()?.peel_to_tree()?;
+            repo.diff_tree_to_index(Some(&head), None, Some(&mut fallback_opts))?
+        } else {
+            repo.diff_index_to_workdir(None, Some(&mut fallback_opts))?
+        };
+
+        let all_files = parse_diff(&fallback_diff)?;
+        if let Some(file) = all_files
+            .into_iter()
+            .find(|f| f.path.eq_ignore_ascii_case(&normalized_file_path))
+        {
+            return Ok(file);
+        }
     }
 
     // File not found in diff - it might be untracked or have no changes
