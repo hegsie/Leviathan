@@ -230,9 +230,25 @@ pub async fn get_file_diff(
 
     // If we get here, the file might have changes that git considers empty
     // (e.g., only whitespace/line-ending changes being ignored)
+    // Include debug info in error message for troubleshooting
+    let sample_paths: String = available_paths
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if available_paths.len() > 10 {
+        format!("... and {} more", available_paths.len() - 10)
+    } else {
+        String::new()
+    };
     Err(crate::error::LeviathanError::OperationFailed(format!(
-        "File '{}' not found in diff",
-        normalized_file_path
+        "File '{}' not found in diff. Staged: {}. Found {} files: [{}{}]",
+        normalized_file_path,
+        is_staged,
+        available_paths.len(),
+        sample_paths,
+        suffix
     )))
 }
 
