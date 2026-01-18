@@ -36,15 +36,10 @@ if (typeof import.meta === 'object' && !import.meta.env) {
 // Mock Tauri API
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 const mockInvoke: MockInvoke = () => Promise.resolve(null);
-// Variables for tracking invocations - prefixed with _ as they're for debugging
-let _lastInvokedCommand: string | null = null;
-let _lastInvokedArgs: unknown = null;
 
 // Set up mock before tests run
 (globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } }).__TAURI_INTERNALS__ = {
   invoke: (command: string, args?: unknown) => {
-    _lastInvokedCommand = command;
-    _lastInvokedArgs = args;
     return mockInvoke(command, args);
   },
 };
@@ -66,8 +61,6 @@ describe('oauth.service - State Management', () => {
   beforeEach(() => {
     // Reset state
     cancelOAuth();
-    _lastInvokedCommand = null;
-    _lastInvokedArgs = null;
   });
 
   it('should initially have no pending OAuth', () => {

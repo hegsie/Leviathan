@@ -11,7 +11,6 @@ import { repositoryStore, type RecentRepository } from '../../stores/repository.
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { UnifiedProfile, IntegrationAccount, IntegrationType, IntegrationConfig, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
 import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
-import { getAccountsByType, getAccountById } from '../../stores/unified-profile.store.ts';
 import { showToast } from '../../services/notification.service.ts';
 
 type ViewMode = 'list' | 'edit' | 'create' | 'add-account' | 'edit-account' | 'assign-repos';

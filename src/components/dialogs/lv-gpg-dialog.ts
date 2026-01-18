@@ -9,7 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { GpgConfig, GpgKey } from '../../services/git.service.ts';
 import { getPlatform, type Platform } from '../../utils/platform.ts';
-import { handleExternalLink, openExternalUrl } from '../../utils/external-link.ts';
+import { openExternalUrl } from '../../utils/external-link.ts';
 
 type SetupStep = 'install-guide' | 'generate-guide' | 'configure' | 'complete';
 

@@ -208,14 +208,11 @@ pub async fn get_file_diff(
     };
 
     let opposite_files = parse_diff(&opposite_diff)?;
-    if let Some(file) = opposite_files
-        .iter()
-        .find(|f| {
-            f.path == normalized_file_path
-                || f.path.eq_ignore_ascii_case(&normalized_file_path)
-                || f.path.ends_with(filename)
-        })
-    {
+    if let Some(file) = opposite_files.iter().find(|f| {
+        f.path == normalized_file_path
+            || f.path.eq_ignore_ascii_case(&normalized_file_path)
+            || f.path.ends_with(filename)
+    }) {
         return Ok(file.clone());
     }
 
