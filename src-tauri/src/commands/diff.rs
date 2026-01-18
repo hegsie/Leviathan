@@ -186,6 +186,39 @@ pub async fn get_file_diff(
         return Ok(file.clone());
     }
 
+    // Try matching by filename only (handles path prefix mismatches)
+    let filename = normalized_file_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized_file_path);
+    if let Some(file) = all_files
+        .iter()
+        .find(|f| f.path.ends_with(filename) || f.path.eq_ignore_ascii_case(filename))
+    {
+        return Ok(file.clone());
+    }
+
+    // Try the opposite staging state as fallback
+    // (sometimes a file shows in status but diff is in the other state)
+    let opposite_diff = if is_staged {
+        repo.diff_index_to_workdir(None, Some(&mut fallback_opts))?
+    } else {
+        let head = repo.head()?.peel_to_tree()?;
+        repo.diff_tree_to_index(Some(&head), None, Some(&mut fallback_opts))?
+    };
+
+    let opposite_files = parse_diff(&opposite_diff)?;
+    if let Some(file) = opposite_files
+        .iter()
+        .find(|f| {
+            f.path == normalized_file_path
+                || f.path.eq_ignore_ascii_case(&normalized_file_path)
+                || f.path.ends_with(filename)
+        })
+    {
+        return Ok(file.clone());
+    }
+
     // Log available files for debugging
     let available_paths: Vec<&str> = all_files.iter().map(|f| f.path.as_str()).collect();
     tracing::warn!(

@@ -230,13 +230,15 @@ class KeyboardService {
     }
 
     // Check if event originated from a component with its own keyboard handling
-    // (e.g., file-status panel) - let those handle navigation keys themselves
+    // (e.g., file-status panel, graph canvas) - let those handle navigation keys themselves
     const isInLocalKeyboardHandler = path.some((el) => {
       if (el instanceof HTMLElement) {
         const tagName = el.tagName.toLowerCase();
         return (
           tagName === 'lv-file-status' ||
           tagName === 'lv-diff-view' ||
+          tagName === 'lv-graph-canvas' ||
+          tagName === 'lv-branches-panel' ||
           el.hasAttribute('data-keyboard-nav')
         );
       }

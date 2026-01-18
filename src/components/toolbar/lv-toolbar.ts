@@ -367,6 +367,13 @@ export class LvToolbar extends LitElement {
     }));
   }
 
+  private handleOpenShortcuts(): void {
+    this.dispatchEvent(new CustomEvent('open-shortcuts', {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   private handleOpenCommandPalette(): void {
     this.dispatchEvent(new CustomEvent('open-command-palette', {
       bubbles: true,
@@ -524,6 +531,23 @@ export class LvToolbar extends LitElement {
             <line x1="9" y1="9" x2="15" y2="9"></line>
             <line x1="9" y1="15" x2="15" y2="15"></line>
             <line x1="9" y1="12" x2="13" y2="12"></line>
+          </svg>
+        </button>
+        <button
+          class="menu-btn"
+          title="Keyboard Shortcuts (?)"
+          @click=${this.handleOpenShortcuts}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="4" width="20" height="16" rx="2" ry="2"></rect>
+            <path d="M6 8h.01"></path>
+            <path d="M10 8h.01"></path>
+            <path d="M14 8h.01"></path>
+            <path d="M18 8h.01"></path>
+            <path d="M8 12h.01"></path>
+            <path d="M12 12h.01"></path>
+            <path d="M16 12h.01"></path>
+            <path d="M7 16h10"></path>
           </svg>
         </button>
         <button

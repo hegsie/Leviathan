@@ -1336,6 +1336,7 @@ export class AppShell extends LitElement {
     return html`
       <lv-toolbar
         @open-settings=${() => { this.showSettings = true; }}
+        @open-shortcuts=${() => { this.showShortcuts = true; }}
         @open-command-palette=${() => { this.showCommandPalette = true; }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
         @repository-refresh=${() => this.handleRefresh()}
