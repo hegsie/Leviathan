@@ -229,7 +229,27 @@ class KeyboardService {
       if (!e.ctrlKey && !e.metaKey) return;
     }
 
-    // Try vim navigation first
+    // Check if event originated from a component with its own keyboard handling
+    // (e.g., file-status panel) - let those handle navigation keys themselves
+    const isInLocalKeyboardHandler = path.some((el) => {
+      if (el instanceof HTMLElement) {
+        const tagName = el.tagName.toLowerCase();
+        return (
+          tagName === 'lv-file-status' ||
+          tagName === 'lv-diff-view' ||
+          el.hasAttribute('data-keyboard-nav')
+        );
+      }
+      return false;
+    });
+
+    // For navigation keys (arrows, home, end, vim j/k), let local handlers take precedence
+    const isNavigationKey = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'Enter', ' ', 'j', 'k', 's', 'u'].includes(e.key);
+    if (isInLocalKeyboardHandler && isNavigationKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      return; // Let the local component handle it
+    }
+
+    // Try vim navigation first (only when not in a local keyboard handler)
     if (this.handleVimKey(e)) {
       return;
     }
