@@ -721,7 +721,7 @@ export class AppShell extends LitElement {
     const result = await import('./services/git.service.ts').then((m) =>
       m.cherryPick({
         path: this.activeRepository!.repository.path,
-        commit_oid: commit.oid,
+        commitOid: commit.oid,
       })
     );
 
@@ -746,7 +746,7 @@ export class AppShell extends LitElement {
     const result = await import('./services/git.service.ts').then((m) =>
       m.revert({
         path: this.activeRepository!.repository.path,
-        commit_oid: commit.oid,
+        commitOid: commit.oid,
       })
     );
 

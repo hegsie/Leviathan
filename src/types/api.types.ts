@@ -160,7 +160,7 @@ export interface AbortRebaseCommand {
  */
 export interface CherryPickCommand {
   path: string;
-  commit_oid: string;
+  commitOid: string;
 }
 
 export interface ContinueCherryPickCommand {
@@ -176,7 +176,7 @@ export interface AbortCherryPickCommand {
  */
 export interface RevertCommand {
   path: string;
-  commit_oid: string;
+  commitOid: string;
 }
 
 export interface ContinueRevertCommand {
