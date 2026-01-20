@@ -1,12 +1,12 @@
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
-import { sharedStyles } from '../../styles/shared-styles.ts';
-import * as gitService from '../../services/git.service.ts';
-import * as watcherService from '../../services/watcher.service.ts';
-import { showConfirm } from '../../services/dialog.service.ts';
-import { open as shellOpen } from '@tauri-apps/plugin-shell';
-import { join } from '@tauri-apps/api/path';
-import type { StatusEntry, FileStatus } from '../../types/git.types.ts';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
+import { sharedStyles } from "../../styles/shared-styles.ts";
+import * as gitService from "../../services/git.service.ts";
+import * as watcherService from "../../services/watcher.service.ts";
+import { showConfirm } from "../../services/dialog.service.ts";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
+import { join } from "@tauri-apps/api/path";
+import type { StatusEntry, FileStatus } from "../../types/git.types.ts";
 
 interface FileContextMenuState {
   visible: boolean;
@@ -20,7 +20,7 @@ interface FileContextMenuState {
  * File status component
  * Displays staged and unstaged changes with staging functionality
  */
-@customElement('lv-file-status')
+@customElement("lv-file-status")
 export class LvFileStatus extends LitElement {
   static styles = [
     sharedStyles,
@@ -451,7 +451,7 @@ export class LvFileStatus extends LitElement {
     `,
   ];
 
-  @property({ type: String }) repositoryPath: string = '';
+  @property({ type: String }) repositoryPath: string = "";
 
   @state() private stagedFiles: StatusEntry[] = [];
   @state() private unstagedFiles: StatusEntry[] = [];
@@ -462,9 +462,15 @@ export class LvFileStatus extends LitElement {
   @state() private selectedFiles: Set<string> = new Set();
   @state() private lastSelectedFile: string | null = null;
   @state() private focusedIndex: number = -1;
-  @state() private viewMode: 'flat' | 'tree' = 'flat';
+  @state() private viewMode: "flat" | "tree" = "flat";
   @state() private expandedFolders: Set<string> = new Set();
-  @state() private contextMenu: FileContextMenuState = { visible: false, x: 0, y: 0, file: null, isStaged: false };
+  @state() private contextMenu: FileContextMenuState = {
+    visible: false,
+    x: 0,
+    y: 0,
+    file: null,
+    isStaged: false,
+  };
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
@@ -473,11 +479,16 @@ export class LvFileStatus extends LitElement {
   };
 
   /** Tree node structure for tree view */
-  private buildFileTree(files: StatusEntry[]): Map<string, { file?: StatusEntry; children: Map<string, unknown> }> {
-    const root = new Map<string, { file?: StatusEntry; children: Map<string, unknown> }>();
+  private buildFileTree(
+    files: StatusEntry[],
+  ): Map<string, { file?: StatusEntry; children: Map<string, unknown> }> {
+    const root = new Map<
+      string,
+      { file?: StatusEntry; children: Map<string, unknown> }
+    >();
 
     for (const file of files) {
-      const parts = file.path.split('/');
+      const parts = file.path.split("/");
       let current = root;
 
       for (let i = 0; i < parts.length; i++) {
@@ -492,7 +503,10 @@ export class LvFileStatus extends LitElement {
         if (isFile) {
           node.file = file;
         }
-        current = node.children as Map<string, { file?: StatusEntry; children: Map<string, unknown> }>;
+        current = node.children as Map<
+          string,
+          { file?: StatusEntry; children: Map<string, unknown> }
+        >;
       }
     }
 
@@ -510,14 +524,14 @@ export class LvFileStatus extends LitElement {
   }
 
   private toggleViewMode(): void {
-    this.viewMode = this.viewMode === 'flat' ? 'tree' : 'flat';
+    this.viewMode = this.viewMode === "flat" ? "tree" : "flat";
     // Expand all folders by default when switching to tree view
-    if (this.viewMode === 'tree') {
+    if (this.viewMode === "tree") {
       const allFolders = new Set<string>();
       const collectFolders = (files: StatusEntry[]) => {
         for (const file of files) {
-          const parts = file.path.split('/');
-          let path = '';
+          const parts = file.path.split("/");
+          let path = "";
           for (let i = 0; i < parts.length - 1; i++) {
             path = path ? `${path}/${parts[i]}` : parts[i];
             allFolders.add(path);
@@ -539,18 +553,21 @@ export class LvFileStatus extends LitElement {
     super.connectedCallback();
 
     // Add document click listener for closing context menu
-    document.addEventListener('click', this.handleDocumentClick);
+    document.addEventListener("click", this.handleDocumentClick);
 
     // Subscribe to file change events with debouncing
     this.unsubscribeWatcher = watcherService.onFileChange((event) => {
       // Refresh status on workdir or index changes
-      if (event.eventType === 'workdir-changed' || event.eventType === 'index-changed') {
+      if (
+        event.eventType === "workdir-changed" ||
+        event.eventType === "index-changed"
+      ) {
         this.debouncedLoadStatus();
       }
       // Dispatch repository-refresh on refs changes (e.g., commits, branch changes)
       // This updates the push/pull indicators in the dashboard
-      if (event.eventType === 'refs-changed') {
-        window.dispatchEvent(new CustomEvent('repository-refresh'));
+      if (event.eventType === "refs-changed") {
+        window.dispatchEvent(new CustomEvent("repository-refresh"));
       }
     });
 
@@ -558,13 +575,13 @@ export class LvFileStatus extends LitElement {
     this.boundHandleStageAllEvent = () => this.handleStageAll();
     this.boundHandleUnstageAllEvent = () => this.handleUnstageAll();
     this.boundHandleRefreshEvent = () => this.refresh();
-    window.addEventListener('stage-all', this.boundHandleStageAllEvent);
-    window.addEventListener('unstage-all', this.boundHandleUnstageAllEvent);
-    window.addEventListener('status-refresh', this.boundHandleRefreshEvent);
+    window.addEventListener("stage-all", this.boundHandleStageAllEvent);
+    window.addEventListener("unstage-all", this.boundHandleUnstageAllEvent);
+    window.addEventListener("status-refresh", this.boundHandleRefreshEvent);
 
     // Listen for keyboard events
-    this.addEventListener('keydown', this.handleKeyDown);
-    this.setAttribute('tabindex', '0');
+    this.addEventListener("keydown", this.handleKeyDown);
+    this.setAttribute("tabindex", "0");
 
     await this.loadStatus();
   }
@@ -574,29 +591,32 @@ export class LvFileStatus extends LitElement {
     if (allFiles.length === 0) return;
 
     switch (e.key) {
-      case 'ArrowDown':
-      case 'j':
+      case "ArrowDown":
+      case "j":
         e.preventDefault();
-        this.focusedIndex = Math.min(this.focusedIndex + 1, allFiles.length - 1);
+        this.focusedIndex = Math.min(
+          this.focusedIndex + 1,
+          allFiles.length - 1,
+        );
         if (this.focusedIndex < 0) this.focusedIndex = 0;
         this.scrollFocusedIntoView();
         break;
 
-      case 'ArrowUp':
-      case 'k':
+      case "ArrowUp":
+      case "k":
         e.preventDefault();
         this.focusedIndex = Math.max(this.focusedIndex - 1, 0);
         this.scrollFocusedIntoView();
         break;
 
-      case 'Enter':
+      case "Enter":
         e.preventDefault();
         if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
           this.handleFileClick(allFiles[this.focusedIndex]);
         }
         break;
 
-      case ' ':
+      case " ":
         // Toggle selection on focused file
         e.preventDefault();
         if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
@@ -612,12 +632,15 @@ export class LvFileStatus extends LitElement {
         }
         break;
 
-      case 's':
+      case "s":
         // Stage selected files or focused file
         e.preventDefault();
         if (this.selectedFiles.size > 0) {
           this.handleStageSelected();
-        } else if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
+        } else if (
+          this.focusedIndex >= 0 &&
+          this.focusedIndex < allFiles.length
+        ) {
           const file = allFiles[this.focusedIndex];
           if (!this.stagedFiles.some((f) => f.path === file.path)) {
             this.handleStageFile(file, e);
@@ -625,12 +648,15 @@ export class LvFileStatus extends LitElement {
         }
         break;
 
-      case 'u':
+      case "u":
         // Unstage selected files or focused file
         e.preventDefault();
         if (this.selectedFiles.size > 0) {
           this.handleUnstageSelected();
-        } else if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
+        } else if (
+          this.focusedIndex >= 0 &&
+          this.focusedIndex < allFiles.length
+        ) {
           const file = allFiles[this.focusedIndex];
           if (this.stagedFiles.some((f) => f.path === file.path)) {
             this.handleUnstageFile(file, e);
@@ -638,13 +664,13 @@ export class LvFileStatus extends LitElement {
         }
         break;
 
-      case 'Home':
+      case "Home":
         e.preventDefault();
         this.focusedIndex = 0;
         this.scrollFocusedIntoView();
         break;
 
-      case 'End':
+      case "End":
         e.preventDefault();
         this.focusedIndex = allFiles.length - 1;
         this.scrollFocusedIntoView();
@@ -665,8 +691,10 @@ export class LvFileStatus extends LitElement {
 
   private scrollFocusedIntoView(): void {
     requestAnimationFrame(() => {
-      const item = this.shadowRoot?.querySelector(`[data-index="${this.focusedIndex}"]`);
-      item?.scrollIntoView({ block: 'nearest' });
+      const item = this.shadowRoot?.querySelector(
+        `[data-index="${this.focusedIndex}"]`,
+      );
+      item?.scrollIntoView({ block: "nearest" });
     });
   }
 
@@ -678,7 +706,7 @@ export class LvFileStatus extends LitElement {
     super.disconnectedCallback();
 
     // Remove document click listener
-    document.removeEventListener('click', this.handleDocumentClick);
+    document.removeEventListener("click", this.handleDocumentClick);
 
     // Clear debounce timeout
     if (this.statusRefreshTimeout) {
@@ -694,17 +722,23 @@ export class LvFileStatus extends LitElement {
 
     // Remove global event listeners
     if (this.boundHandleStageAllEvent) {
-      window.removeEventListener('stage-all', this.boundHandleStageAllEvent);
+      window.removeEventListener("stage-all", this.boundHandleStageAllEvent);
     }
     if (this.boundHandleUnstageAllEvent) {
-      window.removeEventListener('unstage-all', this.boundHandleUnstageAllEvent);
+      window.removeEventListener(
+        "unstage-all",
+        this.boundHandleUnstageAllEvent,
+      );
     }
     if (this.boundHandleRefreshEvent) {
-      window.removeEventListener('status-refresh', this.boundHandleRefreshEvent);
+      window.removeEventListener(
+        "status-refresh",
+        this.boundHandleRefreshEvent,
+      );
     }
 
     // Remove keyboard listener
-    this.removeEventListener('keydown', this.handleKeyDown);
+    this.removeEventListener("keydown", this.handleKeyDown);
   }
 
   /**
@@ -722,14 +756,14 @@ export class LvFileStatus extends LitElement {
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
-    if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+    if (changedProperties.has("repositoryPath") && this.repositoryPath) {
       // Reset for new repository so we show loading on first load
       this.hasInitiallyLoaded = false;
       // Start watching the new repository
       try {
         await watcherService.startWatching(this.repositoryPath);
       } catch (err) {
-        console.warn('Failed to start file watcher:', err);
+        console.warn("Failed to start file watcher:", err);
       }
       await this.loadStatus();
     }
@@ -748,7 +782,7 @@ export class LvFileStatus extends LitElement {
       const result = await gitService.getStatus(this.repositoryPath);
 
       if (!result.success) {
-        this.error = result.error?.message ?? 'Failed to load status';
+        this.error = result.error?.message ?? "Failed to load status";
         return;
       }
 
@@ -757,8 +791,14 @@ export class LvFileStatus extends LitElement {
       const newUnstagedFiles = entries.filter((e) => !e.isStaged);
 
       // Only update if there are actual changes (delta update)
-      const stagedChanged = !this.areStatusEntriesEqual(this.stagedFiles, newStagedFiles);
-      const unstagedChanged = !this.areStatusEntriesEqual(this.unstagedFiles, newUnstagedFiles);
+      const stagedChanged = !this.areStatusEntriesEqual(
+        this.stagedFiles,
+        newStagedFiles,
+      );
+      const unstagedChanged = !this.areStatusEntriesEqual(
+        this.unstagedFiles,
+        newUnstagedFiles,
+      );
 
       if (stagedChanged) {
         this.stagedFiles = newStagedFiles;
@@ -769,17 +809,19 @@ export class LvFileStatus extends LitElement {
 
       // Emit status changed event only if something changed
       if (stagedChanged || unstagedChanged) {
-        this.dispatchEvent(new CustomEvent('status-changed', {
-          detail: {
-            stagedCount: this.stagedFiles.length,
-            totalCount: this.stagedFiles.length + this.unstagedFiles.length,
-          },
-          bubbles: true,
-          composed: true,
-        }));
+        this.dispatchEvent(
+          new CustomEvent("status-changed", {
+            detail: {
+              stagedCount: this.stagedFiles.length,
+              totalCount: this.stagedFiles.length + this.unstagedFiles.length,
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
       }
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Unknown error';
+      this.error = err instanceof Error ? err.message : "Unknown error";
     } finally {
       this.loading = false;
       this.hasInitiallyLoaded = true;
@@ -801,10 +843,12 @@ export class LvFileStatus extends LitElement {
     if (a.length !== b.length) return false;
 
     for (let i = 0; i < a.length; i++) {
-      if (a[i].path !== b[i].path ||
-          a[i].status !== b[i].status ||
-          a[i].isStaged !== b[i].isStaged ||
-          a[i].isConflicted !== b[i].isConflicted) {
+      if (
+        a[i].path !== b[i].path ||
+        a[i].status !== b[i].status ||
+        a[i].isStaged !== b[i].isStaged ||
+        a[i].isConflicted !== b[i].isConflicted
+      ) {
         return false;
       }
     }
@@ -813,22 +857,24 @@ export class LvFileStatus extends LitElement {
 
   private getStatusLabel(status: FileStatus): string {
     const labels: Record<FileStatus, string> = {
-      new: 'A',
-      modified: 'M',
-      deleted: 'D',
-      renamed: 'R',
-      copied: 'C',
-      ignored: 'I',
-      untracked: '?',
-      typechange: 'T',
-      conflicted: '!',
+      new: "A",
+      modified: "M",
+      deleted: "D",
+      renamed: "R",
+      copied: "C",
+      ignored: "I",
+      untracked: "?",
+      typechange: "T",
+      conflicted: "!",
     };
-    return labels[status] || '?';
+    return labels[status] || "?";
   }
 
   private async handleStageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
-    const result = await gitService.stageFiles(this.repositoryPath, { paths: [file.path] });
+    const result = await gitService.stageFiles(this.repositoryPath, {
+      paths: [file.path],
+    });
     if (result.success) {
       await this.loadStatus();
     }
@@ -836,7 +882,9 @@ export class LvFileStatus extends LitElement {
 
   private async handleUnstageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
-    const result = await gitService.unstageFiles(this.repositoryPath, { paths: [file.path] });
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths: [file.path],
+    });
     if (result.success) {
       await this.loadStatus();
     }
@@ -846,14 +894,16 @@ export class LvFileStatus extends LitElement {
     e.stopPropagation();
 
     const confirmed = await showConfirm(
-      'Discard Changes',
+      "Discard Changes",
       `Are you sure you want to discard changes to "${file.path}"? This action cannot be undone.`,
-      'warning'
+      "warning",
     );
 
     if (!confirmed) return;
 
-    const result = await gitService.discardChanges(this.repositoryPath, [file.path]);
+    const result = await gitService.discardChanges(this.repositoryPath, [
+      file.path,
+    ]);
     if (result.success) {
       await this.loadStatus();
     }
@@ -873,7 +923,9 @@ export class LvFileStatus extends LitElement {
     const paths = this.stagedFiles.map((f) => f.path);
     if (paths.length === 0) return;
 
-    const result = await gitService.unstageFiles(this.repositoryPath, { paths });
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths,
+    });
     if (result.success) {
       await this.loadStatus();
     }
@@ -900,7 +952,9 @@ export class LvFileStatus extends LitElement {
       this.selectedFiles = newSelected;
     } else if (e?.shiftKey && this.lastSelectedFile) {
       // Range select
-      const lastIndex = allFiles.findIndex((f) => f.path === this.lastSelectedFile);
+      const lastIndex = allFiles.findIndex(
+        (f) => f.path === this.lastSelectedFile,
+      );
       if (lastIndex !== -1 && clickedIndex !== -1) {
         const start = Math.min(lastIndex, clickedIndex);
         const end = Math.max(lastIndex, clickedIndex);
@@ -919,11 +973,13 @@ export class LvFileStatus extends LitElement {
     this.focusedIndex = clickedIndex;
 
     // Dispatch event with selected files
-    this.dispatchEvent(new CustomEvent('file-selected', {
-      detail: { file, selectedFiles: Array.from(this.selectedFiles) },
-      bubbles: true,
-      composed: true,
-    }));
+    this.dispatchEvent(
+      new CustomEvent("file-selected", {
+        detail: { file, selectedFiles: Array.from(this.selectedFiles) },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   // Batch operation handlers
@@ -949,7 +1005,9 @@ export class LvFileStatus extends LitElement {
       .map((f) => f.path);
     if (paths.length === 0) return;
 
-    const result = await gitService.unstageFiles(this.repositoryPath, { paths });
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths,
+    });
     if (result.success) {
       const newSelected = new Set(this.selectedFiles);
       paths.forEach((p) => newSelected.delete(p));
@@ -965,9 +1023,9 @@ export class LvFileStatus extends LitElement {
     if (paths.length === 0) return;
 
     const confirmed = await showConfirm(
-      'Discard Changes',
-      `Discard changes to ${paths.length} file${paths.length > 1 ? 's' : ''}? This cannot be undone.`,
-      'warning'
+      "Discard Changes",
+      `Discard changes to ${paths.length} file${paths.length > 1 ? "s" : ""}? This cannot be undone.`,
+      "warning",
     );
     if (!confirmed) return;
 
@@ -981,17 +1039,29 @@ export class LvFileStatus extends LitElement {
   }
 
   // Context menu handlers
-  private handleContextMenu(e: MouseEvent, file: StatusEntry, isStaged: boolean): void {
+  private handleContextMenu(
+    e: MouseEvent,
+    file: StatusEntry,
+    isStaged: boolean,
+  ): void {
     e.preventDefault();
     e.stopPropagation();
-    this.contextMenu = { visible: true, x: e.clientX, y: e.clientY, file, isStaged };
+    this.contextMenu = {
+      visible: true,
+      x: e.clientX,
+      y: e.clientY,
+      file,
+      isStaged,
+    };
   }
 
   private async handleContextStage(): Promise<void> {
     const file = this.contextMenu.file;
     if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    const result = await gitService.stageFiles(this.repositoryPath, { paths: [file.path] });
+    const result = await gitService.stageFiles(this.repositoryPath, {
+      paths: [file.path],
+    });
     if (result.success) await this.loadStatus();
   }
 
@@ -999,7 +1069,9 @@ export class LvFileStatus extends LitElement {
     const file = this.contextMenu.file;
     if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    const result = await gitService.unstageFiles(this.repositoryPath, { paths: [file.path] });
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths: [file.path],
+    });
     if (result.success) await this.loadStatus();
   }
 
@@ -1007,7 +1079,13 @@ export class LvFileStatus extends LitElement {
     const file = this.contextMenu.file;
     if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.dispatchEvent(new CustomEvent('file-selected', { detail: { file }, bubbles: true, composed: true }));
+    this.dispatchEvent(
+      new CustomEvent("file-selected", {
+        detail: { file },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   private async handleContextOpenInEditor(): Promise<void> {
@@ -1017,7 +1095,9 @@ export class LvFileStatus extends LitElement {
     try {
       const fullPath = await join(this.repositoryPath, file.path);
       await shellOpen(fullPath);
-    } catch (err) { console.error('Failed to open file:', err); }
+    } catch (err) {
+      console.error("Failed to open file:", err);
+    }
   }
 
   private async handleContextRevealInFinder(): Promise<void> {
@@ -1026,32 +1106,44 @@ export class LvFileStatus extends LitElement {
     this.contextMenu = { ...this.contextMenu, visible: false };
     try {
       const fullPath = await join(this.repositoryPath, file.path);
-      const dirPath = fullPath.substring(0, fullPath.lastIndexOf('/'));
+      const dirPath = fullPath.substring(0, fullPath.lastIndexOf("/"));
       await shellOpen(dirPath);
-    } catch (err) { console.error('Failed to reveal:', err); }
+    } catch (err) {
+      console.error("Failed to reveal:", err);
+    }
   }
 
   private async handleContextCopyPath(): Promise<void> {
     const file = this.contextMenu.file;
     if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    try { await navigator.clipboard.writeText(file.path); } catch (err) { console.error('Failed to copy:', err); }
+    try {
+      await navigator.clipboard.writeText(file.path);
+    } catch (err) {
+      console.error("Failed to copy:", err);
+    }
   }
 
   private async handleContextDiscard(): Promise<void> {
     const file = this.contextMenu.file;
     if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    const confirmed = await showConfirm('Discard Changes', `Discard changes to "${file.path}"? This cannot be undone.`, 'warning');
+    const confirmed = await showConfirm(
+      "Discard Changes",
+      `Discard changes to "${file.path}"? This cannot be undone.`,
+      "warning",
+    );
     if (!confirmed) return;
-    const result = await gitService.discardChanges(this.repositoryPath, [file.path]);
+    const result = await gitService.discardChanges(this.repositoryPath, [
+      file.path,
+    ]);
     if (result.success) await this.loadStatus();
   }
 
   private getFileNameAndDir(path: string): { name: string; dir: string } {
-    const lastSlash = path.lastIndexOf('/');
+    const lastSlash = path.lastIndexOf("/");
     if (lastSlash === -1) {
-      return { name: path, dir: '' };
+      return { name: path, dir: "" };
     }
     return {
       name: path.slice(lastSlash + 1),
@@ -1066,50 +1158,78 @@ export class LvFileStatus extends LitElement {
 
     return html`
       <li
-        class="file-item ${isSelected ? 'selected' : ''} ${isFocused ? 'focused' : ''}"
+        class="file-item ${isSelected ? "selected" : ""} ${isFocused
+          ? "focused"
+          : ""}"
         @click=${(e: MouseEvent) => this.handleFileClick(file, e)}
-        @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, file, staged)}
+        @contextmenu=${(e: MouseEvent) =>
+          this.handleContextMenu(e, file, staged)}
         title="${file.path}"
         data-index="${index}"
       >
-        <span class="file-status ${file.status}">${this.getStatusLabel(file.status)}</span>
+        <span class="file-status ${file.status}"
+          >${this.getStatusLabel(file.status)}</span
+        >
         <span class="file-name-container">
           <span class="file-name">${name}</span>
           ${dir ? html`<span class="file-dir">${dir}</span>` : nothing}
         </span>
         <div class="file-actions">
-          ${staged ? html`
-            <button
-              class="file-action"
-              title="Unstage"
-              @click=${(e: Event) => this.handleUnstageFile(file, e)}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="5" y1="12" x2="19" y2="12"></line>
-              </svg>
-            </button>
-          ` : html`
-            <button
-              class="file-action"
-              title="Stage"
-              @click=${(e: Event) => this.handleStageFile(file, e)}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="12" y1="5" x2="12" y2="19"></line>
-                <line x1="5" y1="12" x2="19" y2="12"></line>
-              </svg>
-            </button>
-            <button
-              class="file-action"
-              title="Discard changes"
-              @click=${(e: Event) => this.handleDiscardFile(file, e)}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-              </svg>
-            </button>
-          `}
+          ${staged
+            ? html`
+                <button
+                  class="file-action"
+                  title="Unstage"
+                  @click=${(e: Event) => this.handleUnstageFile(file, e)}
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg>
+                </button>
+              `
+            : html`
+                <button
+                  class="file-action"
+                  title="Stage"
+                  @click=${(e: Event) => this.handleStageFile(file, e)}
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg>
+                </button>
+                <button
+                  class="file-action"
+                  title="Discard changes"
+                  @click=${(e: Event) => this.handleDiscardFile(file, e)}
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                </button>
+              `}
         </div>
       </li>
     `;
@@ -1121,7 +1241,7 @@ export class LvFileStatus extends LitElement {
     path: string,
     depth: number,
     staged: boolean,
-    indexOffset: number
+    indexOffset: number,
   ): unknown {
     // If this node has a file, render it as a file item
     if (node.file) {
@@ -1132,48 +1252,76 @@ export class LvFileStatus extends LitElement {
 
       return html`
         <li
-          class="file-item tree-file-item ${isSelected ? 'selected' : ''} ${isFocused ? 'focused' : ''}"
+          class="file-item tree-file-item ${isSelected
+            ? "selected"
+            : ""} ${isFocused ? "focused" : ""}"
           style="--tree-depth: ${depth}"
           @click=${(e: MouseEvent) => this.handleFileClick(file, e)}
-          @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, file, staged)}
+          @contextmenu=${(e: MouseEvent) =>
+            this.handleContextMenu(e, file, staged)}
           title="${file.path}"
           data-index="${index}"
         >
-          <span class="file-status ${file.status}">${this.getStatusLabel(file.status)}</span>
+          <span class="file-status ${file.status}"
+            >${this.getStatusLabel(file.status)}</span
+          >
           <span class="file-name"><span>${name}</span></span>
           <div class="file-actions">
-            ${staged ? html`
-              <button
-                class="file-action"
-                title="Unstage"
-                @click=${(e: Event) => this.handleUnstageFile(file, e)}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="5" y1="12" x2="19" y2="12"></line>
-                </svg>
-              </button>
-            ` : html`
-              <button
-                class="file-action"
-                title="Stage"
-                @click=${(e: Event) => this.handleStageFile(file, e)}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="12" y1="5" x2="12" y2="19"></line>
-                  <line x1="5" y1="12" x2="19" y2="12"></line>
-                </svg>
-              </button>
-              <button
-                class="file-action"
-                title="Discard changes"
-                @click=${(e: Event) => this.handleDiscardFile(file, e)}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="18" y1="6" x2="6" y2="18"></line>
-                  <line x1="6" y1="6" x2="18" y2="18"></line>
-                </svg>
-              </button>
-            `}
+            ${staged
+              ? html`
+                  <button
+                    class="file-action"
+                    title="Unstage"
+                    @click=${(e: Event) => this.handleUnstageFile(file, e)}
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    >
+                      <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                  </button>
+                `
+              : html`
+                  <button
+                    class="file-action"
+                    title="Stage"
+                    @click=${(e: Event) => this.handleStageFile(file, e)}
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    >
+                      <line x1="12" y1="5" x2="12" y2="19"></line>
+                      <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                  </button>
+                  <button
+                    class="file-action"
+                    title="Discard changes"
+                    @click=${(e: Event) => this.handleDiscardFile(file, e)}
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    >
+                      <line x1="18" y1="6" x2="6" y2="18"></line>
+                      <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                  </button>
+                `}
           </div>
         </li>
       `;
@@ -1185,44 +1333,77 @@ export class LvFileStatus extends LitElement {
     let currentIndex = indexOffset;
 
     return html`
-      <li class="folder-item" style="--tree-depth: ${depth}" @click=${() => this.toggleFolder(path)}>
-        <svg class="chevron ${isExpanded ? 'expanded' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <li
+        class="folder-item"
+        style="--tree-depth: ${depth}"
+        @click=${() => this.toggleFolder(path)}
+      >
+        <svg
+          class="chevron ${isExpanded ? "expanded" : ""}"
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
           <polyline points="9 18 15 12 9 6"></polyline>
         </svg>
         <svg class="folder-icon" viewBox="0 0 24 24" fill="currentColor">
           ${isExpanded
-            ? html`<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>`
-            : html`<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z"></path>`
-          }
+            ? html`<path
+                d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+              ></path>`
+            : html`<path
+                d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z"
+              ></path>`}
         </svg>
         <span class="folder-name">${name}</span>
       </li>
-      ${isExpanded ? html`
-        <ul class="folder-children">
-          ${children.map(([childName, childNode]) => {
-            const childPath = path ? `${path}/${childName}` : childName;
-            const result = this.renderTreeNode(
-              childName,
-              childNode as { file?: StatusEntry; children: Map<string, unknown> },
-              childPath,
-              depth + 1,
-              staged,
-              currentIndex
-            );
-            // Count files in this subtree for index calculation
-            const countFiles = (n: { file?: StatusEntry; children: Map<string, unknown> }): number => {
-              if (n.file) return 1;
-              let count = 0;
-              for (const child of n.children.values()) {
-                count += countFiles(child as { file?: StatusEntry; children: Map<string, unknown> });
-              }
-              return count;
-            };
-            currentIndex += countFiles(childNode as { file?: StatusEntry; children: Map<string, unknown> });
-            return result;
-          })}
-        </ul>
-      ` : nothing}
+      ${isExpanded
+        ? html`
+            <ul class="folder-children">
+              ${children.map(([childName, childNode]) => {
+                const childPath = path ? `${path}/${childName}` : childName;
+                const result = this.renderTreeNode(
+                  childName,
+                  childNode as {
+                    file?: StatusEntry;
+                    children: Map<string, unknown>;
+                  },
+                  childPath,
+                  depth + 1,
+                  staged,
+                  currentIndex,
+                );
+                // Count files in this subtree for index calculation
+                const countFiles = (n: {
+                  file?: StatusEntry;
+                  children: Map<string, unknown>;
+                }): number => {
+                  if (n.file) return 1;
+                  let count = 0;
+                  for (const child of n.children.values()) {
+                    count += countFiles(
+                      child as {
+                        file?: StatusEntry;
+                        children: Map<string, unknown>;
+                      },
+                    );
+                  }
+                  return count;
+                };
+                currentIndex += countFiles(
+                  childNode as {
+                    file?: StatusEntry;
+                    children: Map<string, unknown>;
+                  },
+                );
+                return result;
+              })}
+            </ul>
+          `
+        : nothing}
     `;
   }
 
@@ -1232,44 +1413,73 @@ export class LvFileStatus extends LitElement {
 
     return html`
       <div class="selection-actions">
-        <span class="selection-count">${selectedInSection.length} selected</span>
-        ${staged ? html`
-          <button
-            class="selection-action-btn"
-            @click=${() => this.handleUnstageSelected()}
-            title="Unstage selected files"
-          >Unstage</button>
-        ` : html`
-          <button
-            class="selection-action-btn"
-            @click=${() => this.handleStageSelected()}
-            title="Stage selected files"
-          >Stage</button>
-          <button
-            class="selection-action-btn danger"
-            @click=${() => this.handleDiscardSelected()}
-            title="Discard selected files"
-          >Discard</button>
-        `}
+        <span class="selection-count"
+          >${selectedInSection.length} selected</span
+        >
+        ${staged
+          ? html`
+              <button
+                class="selection-action-btn"
+                @click=${() => this.handleUnstageSelected()}
+                title="Unstage selected files"
+              >
+                Unstage
+              </button>
+            `
+          : html`
+              <button
+                class="selection-action-btn"
+                @click=${() => this.handleStageSelected()}
+                title="Stage selected files"
+              >
+                Stage
+              </button>
+              <button
+                class="selection-action-btn danger"
+                @click=${() => this.handleDiscardSelected()}
+                title="Discard selected files"
+              >
+                Discard
+              </button>
+            `}
       </div>
     `;
   }
 
-  private renderFileList(files: StatusEntry[], staged: boolean, indexOffset: number) {
-    if (this.viewMode === 'tree') {
+  private renderFileList(
+    files: StatusEntry[],
+    staged: boolean,
+    indexOffset: number,
+  ) {
+    if (this.viewMode === "tree") {
       const tree = this.buildFileTree(files);
       let currentIndex = indexOffset;
 
       return html`
         <ul class="file-list">
           ${Array.from(tree.entries()).map(([name, node]) => {
-            const result = this.renderTreeNode(name, node, name, 0, staged, currentIndex);
+            const result = this.renderTreeNode(
+              name,
+              node,
+              name,
+              0,
+              staged,
+              currentIndex,
+            );
             // Count files for index calculation
-            const countFiles = (n: { file?: StatusEntry; children: Map<string, unknown> }): number => {
+            const countFiles = (n: {
+              file?: StatusEntry;
+              children: Map<string, unknown>;
+            }): number => {
               if (n.file) return 1;
               let count = 0;
               for (const child of n.children.values()) {
-                count += countFiles(child as { file?: StatusEntry; children: Map<string, unknown> });
+                count += countFiles(
+                  child as {
+                    file?: StatusEntry;
+                    children: Map<string, unknown>;
+                  },
+                );
               }
               return count;
             };
@@ -1294,54 +1504,118 @@ export class LvFileStatus extends LitElement {
 
     return html`
       <div class="context-menu" style="left: ${x}px; top: ${y}px">
-        ${isStaged ? html`
-          <button class="context-menu-item" @click=${this.handleContextUnstage}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-            Unstage
-          </button>
-        ` : html`
-          <button class="context-menu-item" @click=${this.handleContextStage}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-            Stage
-          </button>
-        `}
+        ${isStaged
+          ? html`
+              <button
+                class="context-menu-item"
+                @click=${this.handleContextUnstage}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                Unstage
+              </button>
+            `
+          : html`
+              <button
+                class="context-menu-item"
+                @click=${this.handleContextStage}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                Stage
+              </button>
+            `}
         <button class="context-menu-item" @click=${this.handleContextViewDiff}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
             <path d="M12 3v18M3 12h18"></path>
           </svg>
           View diff
         </button>
-        <button class="context-menu-item" @click=${this.handleContextOpenInEditor}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+        <button
+          class="context-menu-item"
+          @click=${this.handleContextOpenInEditor}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path
+              d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"
+            ></path>
             <polyline points="15 3 21 3 21 9"></polyline>
             <line x1="10" y1="14" x2="21" y2="3"></line>
           </svg>
           Open in editor
         </button>
-        <button class="context-menu-item" @click=${this.handleContextRevealInFinder}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+        <button
+          class="context-menu-item"
+          @click=${this.handleContextRevealInFinder}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path
+              d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+            ></path>
           </svg>
-          Reveal in Finder
+          ${navigator.userAgent.includes("Win")
+            ? "Reveal in Explorer"
+            : navigator.userAgent.includes("Linux")
+              ? "Reveal in File Manager"
+              : "Reveal in Finder"}
         </button>
         <button class="context-menu-item" @click=${this.handleContextCopyPath}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            <path
+              d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+            ></path>
           </svg>
           Copy file path
         </button>
         <div class="context-menu-divider"></div>
-        <button class="context-menu-item danger" @click=${this.handleContextDiscard}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button
+          class="context-menu-item danger"
+          @click=${this.handleContextDiscard}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
             <polyline points="3 6 5 6 21 6"></polyline>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            <path
+              d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
+            ></path>
           </svg>
           Discard changes
         </button>
@@ -1361,7 +1635,12 @@ export class LvFileStatus extends LitElement {
     if (this.stagedFiles.length === 0 && this.unstagedFiles.length === 0) {
       return html`
         <div class="clean-state">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+          >
             <path d="M22 11.08V12a10 10 0 11-5.93-9.14"></path>
             <polyline points="22 4 12 14.01 9 11.01"></polyline>
           </svg>
@@ -1375,39 +1654,74 @@ export class LvFileStatus extends LitElement {
       <!-- Toolbar -->
       <div class="toolbar">
         <button
-          class="view-toggle ${this.viewMode === 'tree' ? 'active' : ''}"
-          title="${this.viewMode === 'tree' ? 'Switch to flat view' : 'Switch to tree view'}"
+          class="view-toggle ${this.viewMode === "tree" ? "active" : ""}"
+          title="${this.viewMode === "tree"
+            ? "Switch to flat view"
+            : "Switch to tree view"}"
           @click=${() => this.toggleViewMode()}
         >
-          ${this.viewMode === 'tree'
-            ? html`<svg viewBox="0 0 24 24" fill="currentColor"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`
-            : html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>`
-          }
-          <span>${this.viewMode === 'tree' ? 'Tree' : 'Flat'}</span>
+          ${this.viewMode === "tree"
+            ? html`<svg viewBox="0 0 24 24" fill="currentColor">
+                <path
+                  d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+                ></path>
+              </svg>`
+            : html`<svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <line x1="3" y1="6" x2="21" y2="6"></line>
+                <line x1="3" y1="12" x2="21" y2="12"></line>
+                <line x1="3" y1="18" x2="21" y2="18"></line>
+              </svg>`}
+          <span>${this.viewMode === "tree" ? "Tree" : "Flat"}</span>
         </button>
       </div>
 
       <!-- Staged changes -->
       <div class="section">
-        <div class="section-header" @click=${() => this.stagedExpanded = !this.stagedExpanded}>
-          <svg class="chevron ${this.stagedExpanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <div
+          class="section-header"
+          @click=${() => (this.stagedExpanded = !this.stagedExpanded)}
+        >
+          <svg
+            class="chevron ${this.stagedExpanded ? "expanded" : ""}"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
             <polyline points="9 18 15 12 9 6"></polyline>
           </svg>
           <span class="section-title">Staged</span>
           <span class="section-count">${this.stagedFiles.length}</span>
-          ${this.stagedFiles.length > 0 ? html`
-            <div class="section-actions" @click=${(e: Event) => e.stopPropagation()}>
-              <button
-                class="section-action"
-                title="Unstage all"
-                @click=${this.handleUnstageAll}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="5" y1="12" x2="19" y2="12"></line>
-                </svg>
-              </button>
-            </div>
-          ` : nothing}
+          ${this.stagedFiles.length > 0
+            ? html`
+                <div
+                  class="section-actions"
+                  @click=${(e: Event) => e.stopPropagation()}
+                >
+                  <button
+                    class="section-action"
+                    title="Unstage all"
+                    @click=${this.handleUnstageAll}
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    >
+                      <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                  </button>
+                </div>
+              `
+            : nothing}
         </div>
         ${this.stagedExpanded ? this.renderSelectionActions(true) : nothing}
         ${this.stagedFiles.length > 0 && this.stagedExpanded
@@ -1417,30 +1731,55 @@ export class LvFileStatus extends LitElement {
 
       <!-- Unstaged changes -->
       <div class="section">
-        <div class="section-header" @click=${() => this.unstagedExpanded = !this.unstagedExpanded}>
-          <svg class="chevron ${this.unstagedExpanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <div
+          class="section-header"
+          @click=${() => (this.unstagedExpanded = !this.unstagedExpanded)}
+        >
+          <svg
+            class="chevron ${this.unstagedExpanded ? "expanded" : ""}"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
             <polyline points="9 18 15 12 9 6"></polyline>
           </svg>
           <span class="section-title">Changes</span>
           <span class="section-count">${this.unstagedFiles.length}</span>
-          ${this.unstagedFiles.length > 0 ? html`
-            <div class="section-actions" @click=${(e: Event) => e.stopPropagation()}>
-              <button
-                class="section-action"
-                title="Stage all"
-                @click=${this.handleStageAll}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="12" y1="5" x2="12" y2="19"></line>
-                  <line x1="5" y1="12" x2="19" y2="12"></line>
-                </svg>
-              </button>
-            </div>
-          ` : nothing}
+          ${this.unstagedFiles.length > 0
+            ? html`
+                <div
+                  class="section-actions"
+                  @click=${(e: Event) => e.stopPropagation()}
+                >
+                  <button
+                    class="section-action"
+                    title="Stage all"
+                    @click=${this.handleStageAll}
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    >
+                      <line x1="12" y1="5" x2="12" y2="19"></line>
+                      <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                  </button>
+                </div>
+              `
+            : nothing}
         </div>
         ${this.unstagedExpanded ? this.renderSelectionActions(false) : nothing}
         ${this.unstagedFiles.length > 0 && this.unstagedExpanded
-          ? this.renderFileList(this.unstagedFiles, false, this.stagedExpanded ? this.stagedFiles.length : 0)
+          ? this.renderFileList(
+              this.unstagedFiles,
+              false,
+              this.stagedExpanded ? this.stagedFiles.length : 0,
+            )
           : nothing}
       </div>
 
@@ -1451,6 +1790,6 @@ export class LvFileStatus extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'lv-file-status': LvFileStatus;
+    "lv-file-status": LvFileStatus;
   }
 }
