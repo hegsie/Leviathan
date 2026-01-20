@@ -55,12 +55,37 @@ pub async fn cherry_pick(path: String, commit_oid: String) -> Result<Commit> {
 
     // Check for conflicts
     if index.has_conflicts() {
-        // Write the conflicted index and set up cherry-pick state
-        index.write()?;
+        // For conflicts, we need to apply the in-memory index to the repo's real index
+        // and working directory
+        let mut repo_index = repo.index()?;
+
+        // Clear the repo index and add entries from the in-memory index
+        for entry in index.iter() {
+            repo_index.add(&entry)?;
+        }
+
+        // Add conflict entries
+        for conflict in index.conflicts()? {
+            let conflict = conflict?;
+            if let Some(ancestor) = conflict.ancestor {
+                repo_index.add(&ancestor)?;
+            }
+            if let Some(our) = conflict.our {
+                repo_index.add(&our)?;
+            }
+            if let Some(their) = conflict.their {
+                repo_index.add(&their)?;
+            }
+        }
+
+        repo_index.write()?;
+
+        // Checkout with conflict markers
         repo.checkout_index(
-            Some(&mut index),
+            Some(&mut repo_index),
             Some(
                 git2::build::CheckoutBuilder::default()
+                    .force()
                     .allow_conflicts(true)
                     .conflict_style_merge(true),
             ),
@@ -197,12 +222,36 @@ pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
 
     // Check for conflicts
     if index.has_conflicts() {
-        // Write the conflicted index
-        index.write()?;
+        // For conflicts, we need to apply the in-memory index to the repo's real index
+        let mut repo_index = repo.index()?;
+
+        // Add entries from the in-memory index
+        for entry in index.iter() {
+            repo_index.add(&entry)?;
+        }
+
+        // Add conflict entries
+        for conflict in index.conflicts()? {
+            let conflict = conflict?;
+            if let Some(ancestor) = conflict.ancestor {
+                repo_index.add(&ancestor)?;
+            }
+            if let Some(our) = conflict.our {
+                repo_index.add(&our)?;
+            }
+            if let Some(their) = conflict.their {
+                repo_index.add(&their)?;
+            }
+        }
+
+        repo_index.write()?;
+
+        // Checkout with conflict markers
         repo.checkout_index(
-            Some(&mut index),
+            Some(&mut repo_index),
             Some(
                 git2::build::CheckoutBuilder::default()
+                    .force()
                     .allow_conflicts(true)
                     .conflict_style_merge(true),
             ),
