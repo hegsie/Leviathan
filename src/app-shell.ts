@@ -35,10 +35,14 @@ import './components/dialogs/lv-bitbucket-dialog.ts';
 import './components/dialogs/lv-azure-devops-dialog.ts';
 import './components/dialogs/lv-profile-manager-dialog.ts';
 import './components/dialogs/lv-migration-dialog.ts';
+import './components/dialogs/lv-create-tag-dialog.ts';
+import './components/dialogs/lv-create-branch-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import './components/common/lv-toast-container.ts';
 import './components/dashboard/lv-context-dashboard.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
+import type { LvCreateTagDialog } from './components/dialogs/lv-create-tag-dialog.ts';
+import type { LvCreateBranchDialog } from './components/dialogs/lv-create-branch-dialog.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
@@ -410,6 +414,8 @@ export class AppShell extends LitElement {
   private resizeStartValue = 0;
 
   @query('lv-graph-canvas') private graphCanvas?: LvGraphCanvas;
+  @query('lv-create-tag-dialog') private createTagDialog?: LvCreateTagDialog;
+  @query('lv-create-branch-dialog') private createBranchDialog?: LvCreateBranchDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -786,6 +792,22 @@ export class AppShell extends LitElement {
     }
   }
 
+  private handleCreateTagFromContext(): void {
+    const commit = this.contextMenu.commit;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    if (commit) {
+      this.createTagDialog?.open(commit.oid);
+    }
+  }
+
+  private handleCreateBranchFromContext(): void {
+    const commit = this.contextMenu.commit;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    if (commit) {
+      this.createBranchDialog?.open(commit.oid);
+    }
+  }
+
   private handleConflictResolved(): void {
     this.showConflictDialog = false;
     this.graphCanvas?.refresh?.();
@@ -1054,6 +1076,13 @@ export class AppShell extends LitElement {
         category: 'action',
         icon: 'stash',
         action: () => this.handleCreateStash(),
+      },
+      {
+        id: 'create-tag',
+        label: 'Create tag',
+        category: 'action',
+        icon: 'tag',
+        action: this.requiresRepository(() => this.createTagDialog?.open()),
       },
       {
         id: 'settings',
@@ -1362,6 +1391,7 @@ export class AppShell extends LitElement {
                   @tag-selected=${this.handleTagSelected}
                   @branch-selected=${this.handleBranchSelected}
                   @repository-changed=${() => this.handleRefresh()}
+                  @create-tag=${() => this.createTagDialog?.open()}
                 >
                   <lv-left-panel></lv-left-panel>
                 </aside>
@@ -1520,6 +1550,22 @@ export class AppShell extends LitElement {
                   <path d="M8 4v4l3 2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
                 </svg>
                 Revert
+              </button>
+              <button class="context-menu-item" @click=${this.handleCreateTagFromContext}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"></path>
+                  <line x1="7" y1="7" x2="7.01" y2="7"></line>
+                </svg>
+                Create tag
+              </button>
+              <button class="context-menu-item" @click=${this.handleCreateBranchFromContext}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="6" y1="3" x2="6" y2="15"></line>
+                  <circle cx="18" cy="6" r="3"></circle>
+                  <circle cx="6" cy="18" r="3"></circle>
+                  <path d="M18 9a9 9 0 0 1-9 9"></path>
+                </svg>
+                Create branch
               </button>
               <div class="context-menu-divider"></div>
               <div class="context-menu-submenu">
@@ -1697,6 +1743,17 @@ export class AppShell extends LitElement {
         @close=${() => { this.showMigrationDialog = false; }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
       ></lv-migration-dialog>
+
+      ${this.activeRepository ? html`
+        <lv-create-tag-dialog
+          .repositoryPath=${this.activeRepository.repository.path}
+          @tag-created=${() => this.handleRefresh()}
+        ></lv-create-tag-dialog>
+        <lv-create-branch-dialog
+          .repositoryPath=${this.activeRepository.repository.path}
+          @branch-created=${() => this.handleRefresh()}
+        ></lv-create-branch-dialog>
+      ` : ''}
 
       <lv-toast-container></lv-toast-container>
     `;

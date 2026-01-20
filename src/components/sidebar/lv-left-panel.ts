@@ -70,6 +70,32 @@ export class LvLeftPanel extends LitElement {
         font-weight: var(--font-weight-normal);
       }
 
+      .section-action {
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-sm);
+        color: var(--color-text-muted);
+        cursor: pointer;
+        flex-shrink: 0;
+        opacity: 0;
+        transition: all var(--transition-fast);
+      }
+
+      .section-header:hover .section-action {
+        opacity: 1;
+      }
+
+      .section-action:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
       .section.collapsed .section-content {
         display: none;
       }
@@ -181,14 +207,24 @@ export class LvLeftPanel extends LitElement {
         ></lv-stash-list>
       `}
 
-      <!-- Tags Section - only show when there are tags -->
-      ${this.tagCount > 0 ? html`
-        <section class="section refs-section ${tagsExpanded ? '' : 'collapsed'}">
-          <header class="section-header" @click=${() => this.toggleSection('tags')}>
-            ${this.renderChevron(tagsExpanded)}
-            <span class="title">Tags</span>
-            <span class="count">${this.tagCount}</span>
-          </header>
+      <!-- Tags Section - always show header for discoverability -->
+      <section class="section refs-section ${tagsExpanded ? '' : 'collapsed'}">
+        <header class="section-header" @click=${() => this.toggleSection('tags')}>
+          ${this.renderChevron(tagsExpanded)}
+          <span class="title">Tags</span>
+          ${this.tagCount > 0 ? html`<span class="count">${this.tagCount}</span>` : ''}
+          <button
+            class="section-action"
+            title="Create tag"
+            @click=${this.handleCreateTag}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+          </button>
+        </header>
+        ${this.tagCount > 0 ? html`
           <div class="section-content">
             <lv-tag-list
               .repositoryPath=${this.repositoryPath}
@@ -196,16 +232,15 @@ export class LvLeftPanel extends LitElement {
               @tag-count-changed=${this.handleTagCountChanged}
             ></lv-tag-list>
           </div>
-        </section>
-      ` : html`
-        <!-- Hidden tag-list to track count -->
-        <lv-tag-list
-          style="display: none;"
-          .repositoryPath=${this.repositoryPath}
-          @tags-changed=${this.handleTagsChanged}
-          @tag-count-changed=${this.handleTagCountChanged}
-        ></lv-tag-list>
-      `}
+        ` : html`
+          <lv-tag-list
+            style="display: none;"
+            .repositoryPath=${this.repositoryPath}
+            @tags-changed=${this.handleTagsChanged}
+            @tag-count-changed=${this.handleTagCountChanged}
+          ></lv-tag-list>
+        `}
+      </section>
     `;
   }
 
@@ -234,6 +269,15 @@ export class LvLeftPanel extends LitElement {
 
   private handleTagCountChanged(e: CustomEvent<{ count: number }>): void {
     this.tagCount = e.detail.count;
+  }
+
+  private handleCreateTag(e: Event): void {
+    e.stopPropagation();
+    // Dispatch event for app-shell to handle (since the dialog in lv-tag-list may be hidden)
+    this.dispatchEvent(new CustomEvent('create-tag', {
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   private renderChevron(expanded: boolean) {
