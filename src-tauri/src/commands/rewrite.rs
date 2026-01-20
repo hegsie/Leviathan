@@ -56,11 +56,24 @@ pub async fn cherry_pick(path: String, commit_oid: String) -> Result<Commit> {
     let mut opts = git2::CherrypickOptions::new();
     opts.checkout_builder(checkout_builder);
 
+    // For merge commits, specify mainline parent (1 = the branch that was merged into)
+    if commit.parent_count() > 1 {
+        opts.mainline(1);
+    }
+
     repo.cherrypick(&commit, Some(&mut opts))?;
 
     // Check if there are conflicts
     let mut index = repo.index()?;
-    if index.has_conflicts() {
+    let has_conflicts = index.has_conflicts();
+    tracing::debug!(
+        "Cherry-pick completed. has_conflicts: {}, repo_state: {:?}",
+        has_conflicts,
+        repo.state()
+    );
+
+    if has_conflicts {
+        tracing::debug!("Returning CherryPickConflict error");
         return Err(LeviathanError::CherryPickConflict);
     }
 
@@ -190,6 +203,11 @@ pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
 
     let mut opts = git2::RevertOptions::new();
     opts.checkout_builder(checkout_builder);
+
+    // For merge commits, specify mainline parent (1 = the branch that was merged into)
+    if commit.parent_count() > 1 {
+        opts.mainline(1);
+    }
 
     repo.revert(&commit, Some(&mut opts))?;
 

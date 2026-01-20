@@ -59,6 +59,8 @@ const PRELOAD_LANGUAGES: BundledLanguage[] = [
   'markdown',
   'sql',
   'bash',
+  'csharp',
+  'java',
 ];
 
 /**
@@ -127,6 +129,12 @@ const EXT_TO_LANG: Record<string, BundledLanguage> = {
   '.rs': 'rust',
   '.go': 'go',
   '.zig': 'zig',
+
+  // .NET languages
+  '.cs': 'csharp',
+  '.vb': 'vb',
+  '.razor': 'razor',
+  '.cshtml': 'razor',
 
   // JVM languages
   '.java': 'java',

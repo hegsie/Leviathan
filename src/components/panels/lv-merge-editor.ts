@@ -263,62 +263,54 @@ export class LvMergeEditor extends LitElement {
         outline: none;
       }
 
-      /* Syntax-highlighted editable view */
+      /* Editable code view with line gutter */
       .editable-code-container {
-        position: relative;
+        display: flex;
         width: 100%;
         height: 100%;
-        overflow: auto;
+        overflow: hidden;
       }
 
-      .editable-code-backdrop {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        min-height: 100%;
+      .line-gutter {
+        flex-shrink: 0;
+        width: 50px;
+        background: var(--color-bg-tertiary);
+        border-right: 1px solid var(--color-border);
+        overflow: hidden;
+        user-select: none;
+      }
+
+      .gutter-line {
+        height: 1.5em;
+        padding: 0 var(--spacing-sm);
+        text-align: right;
         font-family: var(--font-mono);
         font-size: var(--font-size-sm);
         line-height: 1.5;
-        white-space: pre-wrap;
-        word-break: break-all;
-        pointer-events: none;
-        padding: 0;
-        margin: 0;
-        background: var(--color-bg-primary);
+        color: var(--color-text-muted);
       }
 
-      .editable-code-backdrop .code-view {
-        width: 100%;
-      }
-
-      .editable-code-textarea {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
+      .editable-textarea {
+        flex: 1;
         font-family: var(--font-mono);
         font-size: var(--font-size-sm);
         line-height: 1.5;
-        white-space: pre-wrap;
-        word-break: break-all;
-        padding: 0;
+        padding: 0 var(--spacing-sm);
         margin: 0;
         border: none;
-        background: transparent;
-        color: transparent;
-        caret-color: var(--color-text-primary);
+        background: var(--color-bg-primary);
+        color: var(--color-text-primary);
         resize: none;
-        overflow: hidden;
-        z-index: 1;
+        overflow: auto;
+        white-space: pre;
+        tab-size: 4;
       }
 
-      .editable-code-textarea:focus {
+      .editable-textarea:focus {
         outline: none;
       }
 
-      .editable-code-textarea::selection {
+      .editable-textarea::selection {
         background: rgba(var(--color-primary-rgb, 59, 130, 246), 0.3);
       }
 
@@ -409,8 +401,9 @@ export class LvMergeEditor extends LitElement {
     }
 
     try {
-      // Load all three versions in parallel
-      const [ancestorResult, oursResult, theirsResult] = await Promise.all([
+      // Load all three versions and the working directory file in parallel
+      // The working directory file contains git's proper 3-way merge with conflict markers
+      const [ancestorResult, oursResult, theirsResult, workdirResult] = await Promise.all([
         this.conflictFile.ancestor?.oid
           ? gitService.getBlobContent(this.repositoryPath, this.conflictFile.ancestor.oid)
           : Promise.resolve({ success: true, data: '' }),
@@ -420,14 +413,19 @@ export class LvMergeEditor extends LitElement {
         this.conflictFile.theirs?.oid
           ? gitService.getBlobContent(this.repositoryPath, this.conflictFile.theirs.oid)
           : Promise.resolve({ success: true, data: '' }),
+        // Read the working directory file - git has already done a proper diff3 merge
+        gitService.readFileContent(this.repositoryPath, this.conflictFile.path),
       ]);
 
       this.baseContent = ancestorResult.success ? (ancestorResult.data || '') : '';
       this.oursContent = oursResult.success ? (oursResult.data || '') : '';
       this.theirsContent = theirsResult.success ? (theirsResult.data || '') : '';
 
-      // Start with a 3-way merge attempt
-      this.outputContent = this.performAutoMerge();
+      // Use git's merged output from the working directory (has proper conflict markers)
+      // Fall back to naive merge only if we can't read the working directory file
+      this.outputContent = workdirResult.success && workdirResult.data
+        ? workdirResult.data
+        : this.performAutoMerge();
     } catch (err) {
       console.error('Failed to load conflict contents:', err);
     } finally {
@@ -573,35 +571,24 @@ export class LvMergeEditor extends LitElement {
   }
 
   /**
-   * Render an editable code view with syntax highlighting
-   * Uses a transparent textarea over a highlighted backdrop
+   * Render an editable code view with line numbers
+   * Uses a synchronized gutter approach for reliable display
    */
   private renderEditableCodeView(content: string): ReturnType<typeof html> {
-    const lines = content.split('\n');
-
-    // Check for conflict markers to highlight those lines
-    const conflictPatterns = ['<<<<<<<', '=======', '>>>>>>>'];
+    const lineCount = content.split('\n').length;
 
     return html`
       <div class="editable-code-container">
-        <div class="editable-code-backdrop">
-          <div class="code-view">
-            ${lines.map((line, index) => {
-              const isConflictMarker = conflictPatterns.some(p => line.startsWith(p));
-              return html`
-                <div class="code-line ${isConflictMarker ? 'line-conflict-marker' : ''}">
-                  <span class="line-number">${index + 1}</span>
-                  <span class="line-content">${this.renderHighlightedContent(line) || ' '}</span>
-                </div>
-              `;
-            })}
-          </div>
+        <div class="line-gutter" id="output-gutter">
+          ${Array.from({ length: lineCount }, (_, i) => html`
+            <div class="gutter-line">${i + 1}</div>
+          `)}
         </div>
         <textarea
-          class="editable-code-textarea"
+          class="editable-textarea"
           .value=${content}
           @input=${this.handleOutputChange}
-          @scroll=${this.handleEditableScroll}
+          @scroll=${this.handleTextareaScroll}
           spellcheck="false"
         ></textarea>
       </div>
@@ -609,18 +596,13 @@ export class LvMergeEditor extends LitElement {
   }
 
   /**
-   * Sync scroll position between textarea and backdrop
+   * Sync scroll position between textarea and line gutter
    */
-  private handleEditableScroll(e: Event): void {
+  private handleTextareaScroll(e: Event): void {
     const textarea = e.target as HTMLTextAreaElement;
-    const container = textarea.closest('.editable-code-container');
-    if (container) {
-      const backdrop = container.querySelector('.editable-code-backdrop') as HTMLElement;
-      if (backdrop) {
-        backdrop.style.transform = `translateY(-${textarea.scrollTop}px)`;
-      }
-      // Sync horizontal scroll too
-      container.scrollLeft = textarea.scrollLeft;
+    const gutter = this.shadowRoot?.getElementById('output-gutter');
+    if (gutter) {
+      gutter.scrollTop = textarea.scrollTop;
     }
   }
 

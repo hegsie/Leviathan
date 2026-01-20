@@ -260,6 +260,44 @@ export class LvConflictResolutionDialog extends LitElement {
         opacity: 0.5;
         cursor: not-allowed;
       }
+
+      .confirm-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+      }
+
+      .confirm-dialog {
+        background: var(--color-bg-primary);
+        border-radius: var(--radius-lg);
+        padding: var(--spacing-lg);
+        max-width: 400px;
+        box-shadow: var(--shadow-xl);
+      }
+
+      .confirm-title {
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-semibold);
+        margin-bottom: var(--spacing-sm);
+      }
+
+      .confirm-message {
+        color: var(--color-text-secondary);
+        margin-bottom: var(--spacing-lg);
+      }
+
+      .confirm-actions {
+        display: flex;
+        gap: var(--spacing-sm);
+        justify-content: flex-end;
+      }
     `,
   ];
 
@@ -271,6 +309,8 @@ export class LvConflictResolutionDialog extends LitElement {
   @state() private resolvedFiles: Set<string> = new Set();
   @state() private selectedIndex = 0;
   @state() private loading = false;
+  @state() private aborting = false;
+  @state() private showAbortConfirm = false;
 
   @query('lv-merge-editor') private mergeEditor?: LvMergeEditor;
 
@@ -282,6 +322,19 @@ export class LvConflictResolutionDialog extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this.handleKeyDown);
+  }
+
+  protected updated(changedProperties: Map<string, unknown>): void {
+    super.updated(changedProperties);
+
+    // When open changes to true, load conflicts
+    if (changedProperties.has('open') && this.open) {
+      this.resolvedFiles = new Set();
+      this.selectedIndex = 0;
+      this.aborting = false;
+      this.showAbortConfirm = false;
+      this.loadConflicts();
+    }
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
@@ -310,6 +363,8 @@ export class LvConflictResolutionDialog extends LitElement {
     this.open = false;
     this.conflicts = [];
     this.resolvedFiles = new Set();
+    this.aborting = false;
+    this.showAbortConfirm = false;
   }
 
   private async loadConflicts(): Promise<void> {
@@ -360,13 +415,20 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   }
 
-  private async handleAbort(): Promise<void> {
-    if (!this.repositoryPath) return;
+  private handleAbort(): void {
+    if (this.aborting) return;
+    this.showAbortConfirm = true;
+  }
 
-    const confirmAbort = confirm(
-      `Are you sure you want to abort the ${this.operationType}? All resolved changes will be lost.`
-    );
-    if (!confirmAbort) return;
+  private handleAbortCancel(): void {
+    this.showAbortConfirm = false;
+  }
+
+  private async handleAbortConfirm(): Promise<void> {
+    if (!this.repositoryPath || this.aborting) return;
+
+    this.aborting = true;
+    this.showAbortConfirm = false;
 
     try {
       let result;
@@ -395,9 +457,11 @@ export class LvConflictResolutionDialog extends LitElement {
         this.close();
       } else {
         console.error('Failed to abort:', result.error);
+        this.aborting = false; // Allow retry
       }
     } catch (err) {
       console.error('Failed to abort:', err);
+      this.aborting = false; // Allow retry
     }
   }
 
@@ -589,17 +653,36 @@ export class LvConflictResolutionDialog extends LitElement {
           </div>
           <div class="footer-actions">
             <button class="btn btn-danger" @click=${this.handleAbort}>
-              Abort ${this.operationType === 'merge' ? 'Merge' : 'Rebase'}
+              Abort ${this.getOperationTitle()}
             </button>
             <button
               class="btn btn-primary"
               @click=${this.handleContinue}
               ?disabled=${this.resolvedCount < this.totalCount}
             >
-              ${this.operationType === 'merge' ? 'Complete Merge' : 'Continue Rebase'}
+              ${this.operationType === 'merge' ? 'Complete Merge' : `Continue ${this.getOperationTitle()}`}
             </button>
           </div>
         </div>
+
+        ${this.showAbortConfirm
+          ? html`
+              <div class="confirm-overlay">
+                <div class="confirm-dialog">
+                  <div class="confirm-title">Abort ${this.getOperationTitle()}?</div>
+                  <div class="confirm-message">
+                    All resolved changes will be lost. This cannot be undone.
+                  </div>
+                  <div class="confirm-actions">
+                    <button class="btn" @click=${this.handleAbortCancel}>Cancel</button>
+                    <button class="btn btn-danger" @click=${this.handleAbortConfirm}>
+                      Abort
+                    </button>
+                  </div>
+                </div>
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }

@@ -274,6 +274,12 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let index = repo.index()?;
 
+    tracing::debug!(
+        "get_conflicts: repo_state={:?}, has_conflicts={}",
+        repo.state(),
+        index.has_conflicts()
+    );
+
     let mut conflicts = Vec::new();
 
     for conflict in index.conflicts()? {
@@ -303,6 +309,7 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
         });
     }
 
+    tracing::debug!("get_conflicts: returning {} conflicts", conflicts.len());
     Ok(conflicts)
 }
 
