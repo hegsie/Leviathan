@@ -47,61 +47,26 @@ pub async fn cherry_pick(path: String, commit_oid: String) -> Result<Commit> {
         ));
     }
 
-    // Get the current HEAD
-    let head = repo.head()?.peel_to_commit()?;
+    // Use repo.cherrypick() which properly updates working directory and index
+    let mut checkout_builder = git2::build::CheckoutBuilder::new();
+    checkout_builder
+        .allow_conflicts(true)
+        .conflict_style_merge(true);
 
-    // Perform the cherry-pick by merging the commit's changes
-    let mut index = repo.cherrypick_commit(&commit, &head, 0, None)?;
+    let mut opts = git2::CherrypickOptions::new();
+    opts.checkout_builder(checkout_builder);
 
-    // Check for conflicts
+    repo.cherrypick(&commit, Some(&mut opts))?;
+
+    // Check if there are conflicts
+    let mut index = repo.index()?;
     if index.has_conflicts() {
-        // For conflicts, we need to apply the in-memory index to the repo's real index
-        // and working directory
-        let mut repo_index = repo.index()?;
-
-        // Clear the repo index and add entries from the in-memory index
-        for entry in index.iter() {
-            repo_index.add(&entry)?;
-        }
-
-        // Add conflict entries
-        for conflict in index.conflicts()? {
-            let conflict = conflict?;
-            if let Some(ancestor) = conflict.ancestor {
-                repo_index.add(&ancestor)?;
-            }
-            if let Some(our) = conflict.our {
-                repo_index.add(&our)?;
-            }
-            if let Some(their) = conflict.their {
-                repo_index.add(&their)?;
-            }
-        }
-
-        repo_index.write()?;
-
-        // Checkout with conflict markers
-        repo.checkout_index(
-            Some(&mut repo_index),
-            Some(
-                git2::build::CheckoutBuilder::default()
-                    .force()
-                    .allow_conflicts(true)
-                    .conflict_style_merge(true),
-            ),
-        )?;
-
-        // Set repository state to cherry-pick in progress
-        // Note: git2 doesn't have a direct way to set CHERRY_PICK_HEAD,
-        // so we write it manually
-        let cherry_pick_head_path = Path::new(&path).join(".git/CHERRY_PICK_HEAD");
-        std::fs::write(&cherry_pick_head_path, format!("{}\n", commit_oid))?;
-
         return Err(LeviathanError::CherryPickConflict);
     }
 
-    // No conflicts - create the cherry-pick commit
-    let tree_oid = index.write_tree_to(&repo)?;
+    // No conflicts - the working directory and index are updated, now create the commit
+    let head = repo.head()?.peel_to_commit()?;
+    let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
 
@@ -113,6 +78,9 @@ pub async fn cherry_pick(path: String, commit_oid: String) -> Result<Commit> {
         &tree,
         &[&head],
     )?;
+
+    // Clean up cherry-pick state
+    repo.cleanup_state()?;
 
     let new_commit = repo.find_commit(new_oid)?;
     Ok(Commit::from_git2(&new_commit))
@@ -214,58 +182,26 @@ pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
         ));
     }
 
-    // Get the current HEAD
-    let head = repo.head()?.peel_to_commit()?;
+    // Use repo.revert() which properly updates working directory and index
+    let mut checkout_builder = git2::build::CheckoutBuilder::new();
+    checkout_builder
+        .allow_conflicts(true)
+        .conflict_style_merge(true);
 
-    // Revert is like a reverse cherry-pick: apply parent's state over commit's state
-    let mut index = repo.revert_commit(&commit, &head, 0, None)?;
+    let mut opts = git2::RevertOptions::new();
+    opts.checkout_builder(checkout_builder);
 
-    // Check for conflicts
+    repo.revert(&commit, Some(&mut opts))?;
+
+    // Check if there are conflicts
+    let mut index = repo.index()?;
     if index.has_conflicts() {
-        // For conflicts, we need to apply the in-memory index to the repo's real index
-        let mut repo_index = repo.index()?;
-
-        // Add entries from the in-memory index
-        for entry in index.iter() {
-            repo_index.add(&entry)?;
-        }
-
-        // Add conflict entries
-        for conflict in index.conflicts()? {
-            let conflict = conflict?;
-            if let Some(ancestor) = conflict.ancestor {
-                repo_index.add(&ancestor)?;
-            }
-            if let Some(our) = conflict.our {
-                repo_index.add(&our)?;
-            }
-            if let Some(their) = conflict.their {
-                repo_index.add(&their)?;
-            }
-        }
-
-        repo_index.write()?;
-
-        // Checkout with conflict markers
-        repo.checkout_index(
-            Some(&mut repo_index),
-            Some(
-                git2::build::CheckoutBuilder::default()
-                    .force()
-                    .allow_conflicts(true)
-                    .conflict_style_merge(true),
-            ),
-        )?;
-
-        // Set up revert state
-        let revert_head_path = Path::new(&path).join(".git/REVERT_HEAD");
-        std::fs::write(&revert_head_path, format!("{}\n", commit_oid))?;
-
         return Err(LeviathanError::RevertConflict);
     }
 
-    // No conflicts - create the revert commit
-    let tree_oid = index.write_tree_to(&repo)?;
+    // No conflicts - the working directory and index are updated, now create the commit
+    let head = repo.head()?.peel_to_commit()?;
+    let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
 
@@ -283,6 +219,9 @@ pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
         &tree,
         &[&head],
     )?;
+
+    // Clean up revert state
+    repo.cleanup_state()?;
 
     let new_commit = repo.find_commit(new_oid)?;
     Ok(Commit::from_git2(&new_commit))
