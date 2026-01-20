@@ -139,6 +139,7 @@ pub async fn fetch(
     path: String,
     remote: Option<String>,
     prune: Option<bool>,
+    token: Option<String>,
 ) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
@@ -147,7 +148,7 @@ pub async fn fetch(
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let mut fetch_opts = credentials_service::get_fetch_options();
+    let mut fetch_opts = credentials_service::get_fetch_options(token);
 
     if prune.unwrap_or(false) {
         fetch_opts.prune(git2::FetchPrune::On);
@@ -185,13 +186,14 @@ pub async fn pull(
     remote: Option<String>,
     branch: Option<String>,
     rebase: Option<bool>,
+    token: Option<String>,
 ) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let remote_name = remote.as_deref().unwrap_or("origin");
 
     // First fetch (without emitting separate event)
-    fetch_internal(&path, remote_name, false)?;
+    fetch_internal(&path, remote_name, false, token)?;
 
     // Get the branch to merge
     let branch_name = if let Some(ref b) = branch {
@@ -282,14 +284,14 @@ pub async fn pull(
 }
 
 /// Internal fetch without event emission (used by pull)
-fn fetch_internal(path: &str, remote_name: &str, prune: bool) -> Result<()> {
+fn fetch_internal(path: &str, remote_name: &str, prune: bool, token: Option<String>) -> Result<()> {
     let repo = git2::Repository::open(Path::new(path))?;
 
     let mut git_remote = repo
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let mut fetch_opts = credentials_service::get_fetch_options();
+    let mut fetch_opts = credentials_service::get_fetch_options(token);
 
     if prune {
         fetch_opts.prune(git2::FetchPrune::On);
@@ -317,6 +319,7 @@ pub async fn push(
     branch: Option<String>,
     force: Option<bool>,
     set_upstream: Option<bool>,
+    token: Option<String>,
 ) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
@@ -332,7 +335,7 @@ pub async fn push(
         head.shorthand().unwrap_or("main").to_string()
     };
 
-    let mut push_opts = credentials_service::get_push_options();
+    let mut push_opts = credentials_service::get_push_options(token);
 
     let refspec = if force.unwrap_or(false) {
         format!("+refs/heads/{}:refs/heads/{}", branch_name, branch_name)

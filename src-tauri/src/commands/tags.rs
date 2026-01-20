@@ -115,6 +115,7 @@ pub async fn push_tag(
     name: String,
     remote: Option<String>,
     force: Option<bool>,
+    token: Option<String>,
 ) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
@@ -123,7 +124,7 @@ pub async fn push_tag(
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let mut push_opts = credentials_service::get_push_options();
+    let mut push_opts = credentials_service::get_push_options(token);
 
     let refspec = if force.unwrap_or(false) {
         format!("+refs/tags/{}:refs/tags/{}", name, name)

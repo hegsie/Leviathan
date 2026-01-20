@@ -269,15 +269,30 @@ pub async fn get_lfs_files(path: String) -> Result<Vec<LfsFile>> {
 
 /// Pull (download) LFS files
 #[command]
-pub async fn lfs_pull(path: String) -> Result<String> {
+pub async fn lfs_pull(path: String, token: Option<String>) -> Result<String> {
     let repo_path = Path::new(&path);
+
+    // Similar to submodules, LFS commands shell out to `git lfs`.
+    // Passing the token directly is tricky without setting up a temporary credential helper.
+    if token.is_some() {
+        tracing::warn!("Token provided for lfs_pull but explicit token injection is not yet fully supported for LFS commands.");
+    }
+
     run_lfs_command(repo_path, &["pull"])
 }
 
 /// Fetch LFS files from remote
 #[command]
-pub async fn lfs_fetch(path: String, refs: Option<Vec<String>>) -> Result<String> {
+pub async fn lfs_fetch(
+    path: String,
+    refs: Option<Vec<String>>,
+    token: Option<String>,
+) -> Result<String> {
     let repo_path = Path::new(&path);
+
+    if token.is_some() {
+        tracing::warn!("Token provided for lfs_fetch but explicit token injection is not yet fully supported for LFS commands.");
+    }
 
     let mut args = vec!["fetch"];
 

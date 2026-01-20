@@ -62,11 +62,13 @@ pub async fn clone_repository(
     path: String,
     bare: Option<bool>,
     branch: Option<String>,
+    token: Option<String>,
 ) -> Result<Repository> {
     let dest_path = std::path::PathBuf::from(&path);
     let url_clone = url.clone();
     let bare = bare.unwrap_or(false);
     let app_for_progress = app.clone();
+    let token_clone = token.clone();
 
     // Run the blocking clone operation in a separate thread
     let result = tokio::task::spawn_blocking(move || {
@@ -84,7 +86,8 @@ pub async fn clone_repository(
         let mut fetch_opts = git2::FetchOptions::new();
 
         // Use CredentialsHelper to get callbacks with authentication support
-        let mut callbacks = crate::services::CredentialsHelper::new().get_callbacks();
+        let mut callbacks =
+            crate::services::CredentialsHelper::new_with_token(token_clone).get_callbacks();
 
         // Track last emitted percent to avoid spamming events
         let last_percent = Arc::new(AtomicUsize::new(0));

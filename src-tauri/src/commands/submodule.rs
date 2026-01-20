@@ -213,7 +213,24 @@ pub async fn update_submodules(
     init: Option<bool>,
     recursive: Option<bool>,
     remote: Option<bool>,
+    token: Option<String>,
 ) -> Result<()> {
+    // Note: Standard git submodule update command doesn't easily accept a token argument
+    // since it shells out to git commands internally for each submodule.
+    // However, if we are authenticated via git-credential-manager or similar, it should work.
+    // For our specific token injection, it's more complex with submodules as they might reside on different hosts.
+    //
+    // Ideally, we would configure the credential helper for the duration of this command
+    // or pass the token via environment variable if we were using a custom helper.
+    //
+    // For now, we'll proceed without explicit token injection for submodules,
+    // relying on the credential manager/helper being set up correctly,
+    // BUT we will log a warning if a token was provided but can't be used easily here.
+
+    if token.is_some() {
+        tracing::warn!("Token provided for update_submodules but explicit token injection is not yet fully supported for submodules. Operation may fail if credentials are not in keychain.");
+    }
+
     let repo_path = Path::new(&path);
 
     let mut args = vec!["submodule", "update"];

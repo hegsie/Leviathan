@@ -3,9 +3,9 @@
  * Provides high-level Git operations via Tauri commands
  */
 
-import { invokeCommand, listenToEvent } from './tauri-api.ts';
-import { showToast } from './notification.service.ts';
-import type { UnlistenFn } from '@tauri-apps/api/event';
+import { invokeCommand, listenToEvent } from "./tauri-api.ts";
+import { showToast } from "./notification.service.ts";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Repository,
   Commit,
@@ -23,7 +23,7 @@ import type {
   BlameResult,
   ReflogEntry,
   ImageVersions,
-} from '../types/git.types.ts';
+} from "../types/git.types.ts";
 import type {
   OpenRepositoryCommand,
   CloneRepositoryCommand,
@@ -59,76 +59,100 @@ import type {
   PushTagCommand,
   GetDiffCommand,
   CommandResult,
-} from '../types/api.types.ts';
+} from "../types/api.types.ts";
 
 /**
  * Repository operations
  */
 export async function openRepository(
-  args: OpenRepositoryCommand
+  args: OpenRepositoryCommand,
 ): Promise<CommandResult<Repository>> {
-  return invokeCommand<Repository>('open_repository', args);
+  return invokeCommand<Repository>("open_repository", args);
 }
 
 export async function cloneRepository(
-  args: CloneRepositoryCommand
+  args: CloneRepositoryCommand,
 ): Promise<CommandResult<Repository>> {
-  return invokeCommand<Repository>('clone_repository', args);
+  // If no token is provided, try to find one based on the URL
+  if (args && !args.token) {
+    // We don't have a repo path yet (it's being cloned), so we can't detect by folder.
+    // But we can check the URL domain.
+    if (
+      args.url.includes("github.com") ||
+      args.url.includes("azure.com") ||
+      args.url.includes("visualstudio.com")
+    ) {
+      // Try GitHub first
+      if (args.url.includes("github.com")) {
+        const tokenResult = await getGitHubToken();
+        if (tokenResult.success && tokenResult.data) {
+          args.token = tokenResult.data;
+        }
+      }
+      // Try Azure DevOps (simplified check, would ideally need a specialized helper for URL parsing without repo context)
+      // For now, we'll just support GitHub auto-token on clone, as ADO usually needs organization context which we can infer from URL but it's safer to implement specifically if needed.
+      // But let's at least try the ADO token if we can get it globally (if we had a global getAdoToken).
+      // Since getAdoToken isn't exported globally/generically in this file (it's inside getRepoToken logic), we will stick to GitHub for now.
+    }
+  }
+  return invokeCommand<Repository>("clone_repository", args);
 }
 
 export async function initRepository(
-  args: InitRepositoryCommand
+  args: InitRepositoryCommand,
 ): Promise<CommandResult<Repository>> {
-  return invokeCommand<Repository>('init_repository', args);
+  return invokeCommand<Repository>("init_repository", args);
 }
 
 /**
  * Branch operations
  */
-export async function getBranches(path: string): Promise<CommandResult<Branch[]>> {
-  return invokeCommand<Branch[]>('get_branches', { path });
+export async function getBranches(
+  path: string,
+): Promise<CommandResult<Branch[]>> {
+  return invokeCommand<Branch[]>("get_branches", { path });
 }
 
 export async function createBranch(
   path: string,
-  args: CreateBranchCommand
+  args: CreateBranchCommand,
 ): Promise<CommandResult<Branch>> {
-  return invokeCommand<Branch>('create_branch', { path, ...args });
+  return invokeCommand<Branch>("create_branch", { path, ...args });
 }
 
 export async function deleteBranch(
   path: string,
   name: string,
-  force?: boolean
+  force?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_branch', { path, name, force });
+  return invokeCommand<void>("delete_branch", { path, name, force });
 }
 
 export async function renameBranch(
   path: string,
-  args: RenameBranchCommand
+  args: RenameBranchCommand,
 ): Promise<CommandResult<Branch>> {
-  return invokeCommand<Branch>('rename_branch', { path, ...args });
+  return invokeCommand<Branch>("rename_branch", { path, ...args });
 }
 
 export async function checkout(
   path: string,
-  args: CheckoutCommand
+  args: CheckoutCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('checkout', { path, ...args });
+  return invokeCommand<void>("checkout", { path, ...args });
 }
 
 /**
  * Commit operations
  */
 export async function getCommitHistory(
-  args: GetCommitHistoryCommand
+  args: GetCommitHistoryCommand,
 ): Promise<CommandResult<Commit[]>> {
-  return invokeCommand<Commit[]>('get_commit_history', args);
+  return invokeCommand<Commit[]>("get_commit_history", args);
 }
 
 export async function getCommit(oid: string): Promise<CommandResult<Commit>> {
-  return invokeCommand<Commit>('get_commit', { oid });
+  return invokeCommand<Commit>("get_commit", { oid });
 }
 
 /**
@@ -143,9 +167,9 @@ export async function searchCommits(
     dateTo?: number;
     filePath?: string;
     limit?: number;
-  }
+  },
 ): Promise<CommandResult<Commit[]>> {
-  return invokeCommand<Commit[]>('search_commits', {
+  return invokeCommand<Commit[]>("search_commits", {
     path: repoPath,
     query: options.query,
     author: options.author,
@@ -158,37 +182,39 @@ export async function searchCommits(
 
 export async function createCommit(
   path: string,
-  args: CreateCommitCommand
+  args: CreateCommitCommand,
 ): Promise<CommandResult<Commit>> {
-  return invokeCommand<Commit>('create_commit', { path, ...args });
+  return invokeCommand<Commit>("create_commit", { path, ...args });
 }
 
 /**
  * Staging operations
  */
-export async function getStatus(path: string): Promise<CommandResult<StatusEntry[]>> {
-  return invokeCommand<StatusEntry[]>('get_status', { path });
+export async function getStatus(
+  path: string,
+): Promise<CommandResult<StatusEntry[]>> {
+  return invokeCommand<StatusEntry[]>("get_status", { path });
 }
 
 export async function stageFiles(
   repoPath: string,
-  args: StageFilesCommand
+  args: StageFilesCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('stage_files', { path: repoPath, ...args });
+  return invokeCommand<void>("stage_files", { path: repoPath, ...args });
 }
 
 export async function unstageFiles(
   repoPath: string,
-  args: UnstageFilesCommand
+  args: UnstageFilesCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('unstage_files', { path: repoPath, ...args });
+  return invokeCommand<void>("unstage_files", { path: repoPath, ...args });
 }
 
 export async function discardChanges(
   repoPath: string,
-  paths: string[]
+  paths: string[],
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('discard_changes', { path: repoPath, paths });
+  return invokeCommand<void>("discard_changes", { path: repoPath, paths });
 }
 
 /**
@@ -198,9 +224,9 @@ export async function discardChanges(
  */
 export async function stageHunk(
   repoPath: string,
-  patch: string
+  patch: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('stage_hunk', { repoPath, patch });
+  return invokeCommand<void>("stage_hunk", { repoPath, patch });
 }
 
 /**
@@ -210,9 +236,9 @@ export async function stageHunk(
  */
 export async function unstageHunk(
   repoPath: string,
-  patch: string
+  patch: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('unstage_hunk', { repoPath, patch });
+  return invokeCommand<void>("unstage_hunk", { repoPath, patch });
 }
 
 /**
@@ -226,9 +252,14 @@ export async function writeFileContent(
   repoPath: string,
   filePath: string,
   content: string,
-  stageAfter?: boolean
+  stageAfter?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('write_file_content', { repoPath, filePath, content, stageAfter });
+  return invokeCommand<void>("write_file_content", {
+    repoPath,
+    filePath,
+    content,
+    stageAfter,
+  });
 }
 
 /**
@@ -240,296 +271,422 @@ export async function writeFileContent(
 export async function readFileContent(
   repoPath: string,
   filePath: string,
-  fromIndex?: boolean
+  fromIndex?: boolean,
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>('read_file_content', { repoPath, filePath, fromIndex });
+  return invokeCommand<string>("read_file_content", {
+    repoPath,
+    filePath,
+    fromIndex,
+  });
 }
 
 /**
  * Remote operations
  */
-export async function getRemotes(path: string): Promise<CommandResult<Remote[]>> {
-  return invokeCommand<Remote[]>('get_remotes', { path });
+export async function getRemotes(
+  path: string,
+): Promise<CommandResult<Remote[]>> {
+  return invokeCommand<Remote[]>("get_remotes", { path });
 }
 
 export async function addRemote(
   repoPath: string,
   name: string,
-  url: string
+  url: string,
 ): Promise<CommandResult<Remote>> {
-  return invokeCommand<Remote>('add_remote', { path: repoPath, name, url });
+  return invokeCommand<Remote>("add_remote", { path: repoPath, name, url });
 }
 
 export async function removeRemote(
   repoPath: string,
-  name: string
+  name: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('remove_remote', { path: repoPath, name });
+  return invokeCommand<void>("remove_remote", { path: repoPath, name });
 }
 
 export async function renameRemote(
   repoPath: string,
   oldName: string,
-  newName: string
+  newName: string,
 ): Promise<CommandResult<Remote>> {
-  return invokeCommand<Remote>('rename_remote', { path: repoPath, oldName, newName });
+  return invokeCommand<Remote>("rename_remote", {
+    path: repoPath,
+    oldName,
+    newName,
+  });
 }
 
 export async function setRemoteUrl(
   repoPath: string,
   name: string,
   url: string,
-  push?: boolean
+  push?: boolean,
 ): Promise<CommandResult<Remote>> {
-  return invokeCommand<Remote>('set_remote_url', { path: repoPath, name, url, push });
+  return invokeCommand<Remote>("set_remote_url", {
+    path: repoPath,
+    name,
+    url,
+    push,
+  });
 }
 
-export async function fetch(args?: FetchCommand & { silent?: boolean }): Promise<CommandResult<void>> {
-  const result = await invokeCommand<void>('fetch', args);
+export async function fetch(
+  args?: FetchCommand & { silent?: boolean },
+): Promise<CommandResult<void>> {
+  // If no token is provided, try to find one for the repository
+  if (args && !args.token) {
+    const token = await getRepoToken(args.path, args.remote);
+    if (token) {
+      args.token = token;
+    }
+  }
+
+  const result = await invokeCommand<void>("fetch", args);
   if (!args?.silent) {
     if (result.success) {
-      showToast('Fetch completed successfully', 'success');
+      showToast("Fetch completed successfully", "success");
     } else {
-      showToast(`Fetch failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      showToast(
+        `Fetch failed: ${result.error?.message ?? "Unknown error"}`,
+        "error",
+      );
     }
   }
   return result;
 }
 
-export async function pull(args?: PullCommand & { silent?: boolean }): Promise<CommandResult<void>> {
-  const result = await invokeCommand<void>('pull', args);
+export async function pull(
+  args?: PullCommand & { silent?: boolean },
+): Promise<CommandResult<void>> {
+  // If no token is provided, try to find one for the repository
+  if (args && !args.token) {
+    const token = await getRepoToken(args.path, args.remote);
+    if (token) {
+      args.token = token;
+    }
+  }
+
+  const result = await invokeCommand<void>("pull", args);
   if (!args?.silent) {
     if (result.success) {
-      showToast('Pull completed successfully', 'success');
+      showToast("Pull completed successfully", "success");
     } else {
-      showToast(`Pull failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      showToast(
+        `Pull failed: ${result.error?.message ?? "Unknown error"}`,
+        "error",
+      );
     }
   }
   return result;
 }
 
-export async function push(args?: PushCommand & { silent?: boolean }): Promise<CommandResult<void>> {
-  const result = await invokeCommand<void>('push', args);
+export async function push(
+  args?: PushCommand & { silent?: boolean },
+): Promise<CommandResult<void>> {
+  // If no token is provided, try to find one for the repository
+  if (args && !args.token) {
+    const token = await getRepoToken(args.path, args.remote);
+    if (token) {
+      args.token = token;
+    }
+  }
+
+  const result = await invokeCommand<void>("push", args);
   if (!args?.silent) {
     if (result.success) {
-      showToast('Push completed successfully', 'success');
+      showToast("Push completed successfully", "success");
     } else {
-      showToast(`Push failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      showToast(
+        `Push failed: ${result.error?.message ?? "Unknown error"}`,
+        "error",
+      );
     }
   }
   return result;
+}
+
+/**
+ * Helper to get authentication token for a repository
+ * Checks if it's a GitHub or Azure DevOps repo and retrieves corresponding token
+ */
+async function getRepoToken(
+  repoPath: string,
+  remoteName?: string,
+): Promise<string | undefined> {
+  try {
+    // Check if it's a GitHub repo
+    const ghRepoResult = await detectGitHubRepo(repoPath);
+    if (
+      ghRepoResult.success &&
+      ghRepoResult.data &&
+      (!remoteName || ghRepoResult.data.remoteName === remoteName)
+    ) {
+      const tokenResult = await getGitHubToken();
+      if (tokenResult.success && tokenResult.data) {
+        return tokenResult.data;
+      }
+    }
+
+    // Check if it's an Azure DevOps repo
+    const adoRepoResult = await detectAdoRepo(repoPath);
+    if (
+      adoRepoResult.success &&
+      adoRepoResult.data &&
+      (!remoteName || adoRepoResult.data.remoteName === remoteName)
+    ) {
+      const tokenResult = await getAdoToken();
+      if (tokenResult.success && tokenResult.data) {
+        return tokenResult.data;
+      }
+    }
+
+    // Check if it's a GitLab repo
+    const gitlabRepoResult = await detectGitLabRepo(repoPath);
+    if (
+      gitlabRepoResult.success &&
+      gitlabRepoResult.data &&
+      (!remoteName || gitlabRepoResult.data.remoteName === remoteName)
+    ) {
+      const tokenResult = await getGitLabToken();
+      if (tokenResult.success && tokenResult.data) {
+        return tokenResult.data;
+      }
+    }
+  } catch (err) {
+    console.error("Failed to auto-detect repository token:", err);
+  }
+  return undefined;
 }
 
 /**
  * Merge operations
  */
 export async function merge(args: MergeCommand): Promise<CommandResult<void>> {
-  return invokeCommand<void>('merge', args);
+  return invokeCommand<void>("merge", args);
 }
 
 export async function abortMerge(
-  args: AbortMergeCommand
+  args: AbortMergeCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('abort_merge', args);
+  return invokeCommand<void>("abort_merge", args);
 }
 
 /**
  * Rebase operations
  */
 export async function rebase(
-  args: RebaseCommand
+  args: RebaseCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('rebase', args);
+  return invokeCommand<void>("rebase", args);
 }
 
 export async function continueRebase(
-  args: ContinueRebaseCommand
+  args: ContinueRebaseCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('continue_rebase', args);
+  return invokeCommand<void>("continue_rebase", args);
 }
 
 export async function abortRebase(
-  args: AbortRebaseCommand
+  args: AbortRebaseCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('abort_rebase', args);
+  return invokeCommand<void>("abort_rebase", args);
 }
 
 export async function getRebaseCommits(
   path: string,
-  onto: string
+  onto: string,
 ): Promise<CommandResult<RebaseCommit[]>> {
-  return invokeCommand<RebaseCommit[]>('get_rebase_commits', { path, onto });
+  return invokeCommand<RebaseCommit[]>("get_rebase_commits", { path, onto });
 }
 
 export async function executeInteractiveRebase(
   path: string,
   onto: string,
-  todo: string
+  todo: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('execute_interactive_rebase', { path, onto, todo });
+  return invokeCommand<void>("execute_interactive_rebase", {
+    path,
+    onto,
+    todo,
+  });
 }
 
 /**
  * Conflict resolution operations
  */
 export async function getConflicts(
-  path: string
+  path: string,
 ): Promise<CommandResult<ConflictFile[]>> {
-  return invokeCommand<ConflictFile[]>('get_conflicts', { path });
+  return invokeCommand<ConflictFile[]>("get_conflicts", { path });
 }
 
 export async function getBlobContent(
   path: string,
-  oid: string
+  oid: string,
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>('get_blob_content', { path, oid });
+  return invokeCommand<string>("get_blob_content", { path, oid });
 }
 
 export async function resolveConflict(
   path: string,
   filePath: string,
-  content: string
+  content: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('resolve_conflict', { path, file_path: filePath, content });
+  return invokeCommand<void>("resolve_conflict", {
+    path,
+    file_path: filePath,
+    content,
+  });
 }
 
 /**
  * Cherry-pick operations
  */
 export async function cherryPick(
-  args: CherryPickCommand
+  args: CherryPickCommand,
 ): Promise<CommandResult<Commit>> {
-  return invokeCommand<Commit>('cherry_pick', args);
+  return invokeCommand<Commit>("cherry_pick", args);
 }
 
 export async function continueCherryPick(
-  args: ContinueCherryPickCommand
+  args: ContinueCherryPickCommand,
 ): Promise<CommandResult<Commit>> {
-  return invokeCommand<Commit>('continue_cherry_pick', args);
+  return invokeCommand<Commit>("continue_cherry_pick", args);
 }
 
 export async function abortCherryPick(
-  args: AbortCherryPickCommand
+  args: AbortCherryPickCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('abort_cherry_pick', args);
+  return invokeCommand<void>("abort_cherry_pick", args);
 }
 
 /**
  * Revert operations
  */
 export async function revert(
-  args: RevertCommand
+  args: RevertCommand,
 ): Promise<CommandResult<Commit>> {
-  return invokeCommand<Commit>('revert', args);
+  return invokeCommand<Commit>("revert", args);
 }
 
 export async function continueRevert(
-  args: ContinueRevertCommand
+  args: ContinueRevertCommand,
 ): Promise<CommandResult<Commit>> {
-  return invokeCommand<Commit>('continue_revert', args);
+  return invokeCommand<Commit>("continue_revert", args);
 }
 
 export async function abortRevert(
-  args: AbortRevertCommand
+  args: AbortRevertCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('abort_revert', args);
+  return invokeCommand<void>("abort_revert", args);
 }
 
 /**
  * Reset operations
  */
-export async function reset(
-  args: ResetCommand
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>('reset', args);
+export async function reset(args: ResetCommand): Promise<CommandResult<void>> {
+  return invokeCommand<void>("reset", args);
 }
 
 /**
  * Stash operations
  */
-export async function getStashes(path: string): Promise<CommandResult<Stash[]>> {
-  return invokeCommand<Stash[]>('get_stashes', { path });
+export async function getStashes(
+  path: string,
+): Promise<CommandResult<Stash[]>> {
+  return invokeCommand<Stash[]>("get_stashes", { path });
 }
 
 export async function createStash(
-  args: CreateStashCommand
+  args: CreateStashCommand,
 ): Promise<CommandResult<Stash>> {
-  return invokeCommand<Stash>('create_stash', args);
+  return invokeCommand<Stash>("create_stash", args);
 }
 
 export async function applyStash(
-  args: ApplyStashCommand
+  args: ApplyStashCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('apply_stash', args);
+  return invokeCommand<void>("apply_stash", args);
 }
 
 export async function dropStash(
-  args: DropStashCommand
+  args: DropStashCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('drop_stash', args);
+  return invokeCommand<void>("drop_stash", args);
 }
 
 export async function popStash(
-  args: PopStashCommand
+  args: PopStashCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('pop_stash', args);
+  return invokeCommand<void>("pop_stash", args);
 }
 
 /**
  * Tag operations
  */
 export async function getTags(path: string): Promise<CommandResult<Tag[]>> {
-  return invokeCommand<Tag[]>('get_tags', { path });
+  return invokeCommand<Tag[]>("get_tags", { path });
 }
 
 export async function createTag(
-  args: CreateTagCommand
+  args: CreateTagCommand,
 ): Promise<CommandResult<Tag>> {
-  return invokeCommand<Tag>('create_tag', args);
+  return invokeCommand<Tag>("create_tag", args);
 }
 
 export async function deleteTag(
-  args: DeleteTagCommand
+  args: DeleteTagCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_tag', args);
+  return invokeCommand<void>("delete_tag", args);
 }
 
 export async function pushTag(
-  args: PushTagCommand
+  args: PushTagCommand,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('push_tag', args);
+  return invokeCommand<void>("push_tag", args);
 }
 
 /**
  * Diff operations
  */
 export async function getDiff(
-  args?: GetDiffCommand
+  args?: GetDiffCommand,
 ): Promise<CommandResult<DiffFile[]>> {
-  return invokeCommand<DiffFile[]>('get_diff', args);
+  return invokeCommand<DiffFile[]>("get_diff", args);
 }
 
 export async function getFileDiff(
   repoPath: string,
   filePath: string,
-  staged?: boolean
+  staged?: boolean,
 ): Promise<CommandResult<DiffFile>> {
-  return invokeCommand<DiffFile>('get_file_diff', { path: repoPath, filePath, staged });
+  return invokeCommand<DiffFile>("get_file_diff", {
+    path: repoPath,
+    filePath,
+    staged,
+  });
 }
 
 export async function getCommitFiles(
   repoPath: string,
-  commitOid: string
+  commitOid: string,
 ): Promise<CommandResult<CommitFileEntry[]>> {
-  return invokeCommand<CommitFileEntry[]>('get_commit_files', { path: repoPath, commitOid });
+  return invokeCommand<CommitFileEntry[]>("get_commit_files", {
+    path: repoPath,
+    commitOid,
+  });
 }
 
 export async function getCommitFileDiff(
   repoPath: string,
   commitOid: string,
-  filePath: string
+  filePath: string,
 ): Promise<CommandResult<DiffFile>> {
-  return invokeCommand<DiffFile>('get_commit_file_diff', { path: repoPath, commitOid, filePath });
+  return invokeCommand<DiffFile>("get_commit_file_diff", {
+    path: repoPath,
+    commitOid,
+    filePath,
+  });
 }
 
 /**
@@ -538,9 +695,12 @@ export async function getCommitFileDiff(
  */
 export async function getCommitsStats(
   repoPath: string,
-  commitOids: string[]
+  commitOids: string[],
 ): Promise<CommandResult<CommitStats[]>> {
-  return invokeCommand<CommitStats[]>('get_commits_stats', { path: repoPath, commitOids });
+  return invokeCommand<CommitStats[]>("get_commits_stats", {
+    path: repoPath,
+    commitOids,
+  });
 }
 
 /**
@@ -549,9 +709,13 @@ export async function getCommitsStats(
 export async function getFileBlame(
   repoPath: string,
   filePath: string,
-  commitOid?: string
+  commitOid?: string,
 ): Promise<CommandResult<BlameResult>> {
-  return invokeCommand<BlameResult>('get_file_blame', { path: repoPath, filePath, commitOid });
+  return invokeCommand<BlameResult>("get_file_blame", {
+    path: repoPath,
+    filePath,
+    commitOid,
+  });
 }
 
 /**
@@ -561,9 +725,9 @@ export async function getImageVersions(
   repoPath: string,
   filePath: string,
   staged?: boolean,
-  commitOid?: string
+  commitOid?: string,
 ): Promise<CommandResult<ImageVersions>> {
-  return invokeCommand<ImageVersions>('get_image_versions', {
+  return invokeCommand<ImageVersions>("get_image_versions", {
     path: repoPath,
     filePath,
     staged,
@@ -578,9 +742,9 @@ export async function getFileHistory(
   repoPath: string,
   filePath: string,
   limit?: number,
-  followRenames?: boolean
+  followRenames?: boolean,
 ): Promise<CommandResult<Commit[]>> {
-  return invokeCommand<Commit[]>('get_file_history', {
+  return invokeCommand<Commit[]>("get_file_history", {
     path: repoPath,
     filePath,
     limit,
@@ -592,9 +756,9 @@ export async function getFileHistory(
  * Refs operations
  */
 export async function getRefsByCommit(
-  path: string
+  path: string,
 ): Promise<CommandResult<RefsByCommit>> {
-  return invokeCommand<RefsByCommit>('get_refs_by_commit', { path });
+  return invokeCommand<RefsByCommit>("get_refs_by_commit", { path });
 }
 
 /**
@@ -602,17 +766,17 @@ export async function getRefsByCommit(
  */
 export async function getReflog(
   repoPath: string,
-  limit?: number
+  limit?: number,
 ): Promise<CommandResult<ReflogEntry[]>> {
-  return invokeCommand<ReflogEntry[]>('get_reflog', { path: repoPath, limit });
+  return invokeCommand<ReflogEntry[]>("get_reflog", { path: repoPath, limit });
 }
 
 export async function resetToReflog(
   repoPath: string,
   reflogIndex: number,
-  mode: 'soft' | 'mixed' | 'hard' = 'mixed'
+  mode: "soft" | "mixed" | "hard" = "mixed",
 ): Promise<CommandResult<ReflogEntry>> {
-  return invokeCommand<ReflogEntry>('reset_to_reflog', {
+  return invokeCommand<ReflogEntry>("reset_to_reflog", {
     path: repoPath,
     reflogIndex,
     mode,
@@ -632,9 +796,9 @@ export interface CleanEntry {
 export async function getCleanableFiles(
   repoPath: string,
   includeIgnored?: boolean,
-  includeDirectories?: boolean
+  includeDirectories?: boolean,
 ): Promise<CommandResult<CleanEntry[]>> {
-  return invokeCommand<CleanEntry[]>('get_cleanable_files', {
+  return invokeCommand<CleanEntry[]>("get_cleanable_files", {
     path: repoPath,
     includeIgnored,
     includeDirectories,
@@ -643,9 +807,9 @@ export async function getCleanableFiles(
 
 export async function cleanFiles(
   repoPath: string,
-  paths: string[]
+  paths: string[],
 ): Promise<CommandResult<number>> {
-  return invokeCommand<number>('clean_files', {
+  return invokeCommand<number>("clean_files", {
     path: repoPath,
     paths,
   });
@@ -654,9 +818,9 @@ export async function cleanFiles(
 export async function cleanAll(
   repoPath: string,
   includeIgnored?: boolean,
-  includeDirectories?: boolean
+  includeDirectories?: boolean,
 ): Promise<CommandResult<number>> {
-  return invokeCommand<number>('clean_all', {
+  return invokeCommand<number>("clean_all", {
     path: repoPath,
     includeIgnored,
     includeDirectories,
@@ -697,17 +861,17 @@ export interface BisectStepResult {
 }
 
 export async function getBisectStatus(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<BisectStatus>> {
-  return invokeCommand<BisectStatus>('get_bisect_status', { path: repoPath });
+  return invokeCommand<BisectStatus>("get_bisect_status", { path: repoPath });
 }
 
 export async function bisectStart(
   repoPath: string,
   badCommit?: string,
-  goodCommit?: string
+  goodCommit?: string,
 ): Promise<CommandResult<BisectStepResult>> {
-  return invokeCommand<BisectStepResult>('bisect_start', {
+  return invokeCommand<BisectStepResult>("bisect_start", {
     path: repoPath,
     badCommit,
     goodCommit,
@@ -716,9 +880,9 @@ export async function bisectStart(
 
 export async function bisectBad(
   repoPath: string,
-  commit?: string
+  commit?: string,
 ): Promise<CommandResult<BisectStepResult>> {
-  return invokeCommand<BisectStepResult>('bisect_bad', {
+  return invokeCommand<BisectStepResult>("bisect_bad", {
     path: repoPath,
     commit,
   });
@@ -726,9 +890,9 @@ export async function bisectBad(
 
 export async function bisectGood(
   repoPath: string,
-  commit?: string
+  commit?: string,
 ): Promise<CommandResult<BisectStepResult>> {
-  return invokeCommand<BisectStepResult>('bisect_good', {
+  return invokeCommand<BisectStepResult>("bisect_good", {
     path: repoPath,
     commit,
   });
@@ -736,24 +900,29 @@ export async function bisectGood(
 
 export async function bisectSkip(
   repoPath: string,
-  commit?: string
+  commit?: string,
 ): Promise<CommandResult<BisectStepResult>> {
-  return invokeCommand<BisectStepResult>('bisect_skip', {
+  return invokeCommand<BisectStepResult>("bisect_skip", {
     path: repoPath,
     commit,
   });
 }
 
 export async function bisectReset(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<BisectStepResult>> {
-  return invokeCommand<BisectStepResult>('bisect_reset', { path: repoPath });
+  return invokeCommand<BisectStepResult>("bisect_reset", { path: repoPath });
 }
 
 /**
  * Submodule operations
  */
-export type SubmoduleStatus = 'current' | 'modified' | 'uninitialized' | 'missing' | 'dirty';
+export type SubmoduleStatus =
+  | "current"
+  | "modified"
+  | "uninitialized"
+  | "missing"
+  | "dirty";
 
 export interface Submodule {
   name: string;
@@ -766,18 +935,18 @@ export interface Submodule {
 }
 
 export async function getSubmodules(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<Submodule[]>> {
-  return invokeCommand<Submodule[]>('get_submodules', { path: repoPath });
+  return invokeCommand<Submodule[]>("get_submodules", { path: repoPath });
 }
 
 export async function addSubmodule(
   repoPath: string,
   url: string,
   submodulePath: string,
-  branch?: string
+  branch?: string,
 ): Promise<CommandResult<Submodule>> {
-  return invokeCommand<Submodule>('add_submodule', {
+  return invokeCommand<Submodule>("add_submodule", {
     path: repoPath,
     url,
     submodulePath,
@@ -787,9 +956,9 @@ export async function addSubmodule(
 
 export async function initSubmodules(
   repoPath: string,
-  submodulePaths?: string[]
+  submodulePaths?: string[],
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('init_submodules', {
+  return invokeCommand<void>("init_submodules", {
     path: repoPath,
     submodulePaths,
   });
@@ -802,22 +971,30 @@ export async function updateSubmodules(
     init?: boolean;
     recursive?: boolean;
     remote?: boolean;
-  }
+    token?: string;
+  },
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('update_submodules', {
+  // Try to find a token if not provided
+  let token = options?.token;
+  if (!token) {
+    token = await getRepoToken(repoPath);
+  }
+
+  return invokeCommand<void>("update_submodules", {
     path: repoPath,
     submodulePaths: options?.submodulePaths,
     init: options?.init,
     recursive: options?.recursive,
     remote: options?.remote,
+    token,
   });
 }
 
 export async function syncSubmodules(
   repoPath: string,
-  submodulePaths?: string[]
+  submodulePaths?: string[],
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('sync_submodules', {
+  return invokeCommand<void>("sync_submodules", {
     path: repoPath,
     submodulePaths,
   });
@@ -826,9 +1003,9 @@ export async function syncSubmodules(
 export async function deinitSubmodule(
   repoPath: string,
   submodulePath: string,
-  force?: boolean
+  force?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('deinit_submodule', {
+  return invokeCommand<void>("deinit_submodule", {
     path: repoPath,
     submodulePath,
     force,
@@ -837,9 +1014,9 @@ export async function deinitSubmodule(
 
 export async function removeSubmodule(
   repoPath: string,
-  submodulePath: string
+  submodulePath: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('remove_submodule', {
+  return invokeCommand<void>("remove_submodule", {
     path: repoPath,
     submodulePath,
   });
@@ -860,9 +1037,9 @@ export interface Worktree {
 }
 
 export async function getWorktrees(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<Worktree[]>> {
-  return invokeCommand<Worktree[]>('get_worktrees', { path: repoPath });
+  return invokeCommand<Worktree[]>("get_worktrees", { path: repoPath });
 }
 
 export async function addWorktree(
@@ -874,9 +1051,9 @@ export async function addWorktree(
     commit?: string;
     force?: boolean;
     detach?: boolean;
-  }
+  },
 ): Promise<CommandResult<Worktree>> {
-  return invokeCommand<Worktree>('add_worktree', {
+  return invokeCommand<Worktree>("add_worktree", {
     path: repoPath,
     worktreePath,
     branch: options?.branch,
@@ -890,9 +1067,9 @@ export async function addWorktree(
 export async function removeWorktree(
   repoPath: string,
   worktreePath: string,
-  force?: boolean
+  force?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('remove_worktree', {
+  return invokeCommand<void>("remove_worktree", {
     path: repoPath,
     worktreePath,
     force,
@@ -901,9 +1078,9 @@ export async function removeWorktree(
 
 export async function pruneWorktrees(
   repoPath: string,
-  dryRun?: boolean
+  dryRun?: boolean,
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>('prune_worktrees', {
+  return invokeCommand<string>("prune_worktrees", {
     path: repoPath,
     dryRun,
   });
@@ -912,9 +1089,9 @@ export async function pruneWorktrees(
 export async function lockWorktree(
   repoPath: string,
   worktreePath: string,
-  reason?: string
+  reason?: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('lock_worktree', {
+  return invokeCommand<void>("lock_worktree", {
     path: repoPath,
     worktreePath,
     reason,
@@ -923,9 +1100,9 @@ export async function lockWorktree(
 
 export async function unlockWorktree(
   repoPath: string,
-  worktreePath: string
+  worktreePath: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('unlock_worktree', {
+  return invokeCommand<void>("unlock_worktree", {
     path: repoPath,
     worktreePath,
   });
@@ -955,55 +1132,55 @@ export interface LfsStatus {
 }
 
 export async function getLfsStatus(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<LfsStatus>> {
-  return invokeCommand<LfsStatus>('get_lfs_status', { path: repoPath });
+  return invokeCommand<LfsStatus>("get_lfs_status", { path: repoPath });
 }
 
-export async function initLfs(
-  repoPath: string
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>('init_lfs', { path: repoPath });
+export async function initLfs(repoPath: string): Promise<CommandResult<void>> {
+  return invokeCommand<void>("init_lfs", { path: repoPath });
 }
 
 export async function lfsTrack(
   repoPath: string,
-  pattern: string
+  pattern: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('lfs_track', { path: repoPath, pattern });
+  return invokeCommand<void>("lfs_track", { path: repoPath, pattern });
 }
 
 export async function lfsUntrack(
   repoPath: string,
-  pattern: string
+  pattern: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('lfs_untrack', { path: repoPath, pattern });
+  return invokeCommand<void>("lfs_untrack", { path: repoPath, pattern });
 }
 
 export async function getLfsFiles(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<LfsFile[]>> {
-  return invokeCommand<LfsFile[]>('get_lfs_files', { path: repoPath });
+  return invokeCommand<LfsFile[]>("get_lfs_files", { path: repoPath });
 }
 
 export async function lfsPull(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>('lfs_pull', { path: repoPath });
+  const token = await getRepoToken(repoPath);
+  return invokeCommand<string>("lfs_pull", { path: repoPath, token });
 }
 
 export async function lfsFetch(
   repoPath: string,
-  refs?: string[]
+  refs?: string[],
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>('lfs_fetch', { path: repoPath, refs });
+  const token = await getRepoToken(repoPath);
+  return invokeCommand<string>("lfs_fetch", { path: repoPath, refs, token });
 }
 
 export async function lfsPrune(
   repoPath: string,
-  dryRun?: boolean
+  dryRun?: boolean,
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>('lfs_prune', { path: repoPath, dryRun });
+  return invokeCommand<string>("lfs_prune", { path: repoPath, dryRun });
 }
 
 /**
@@ -1041,23 +1218,23 @@ export interface CommitSignature {
 }
 
 export async function getGpgConfig(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<GpgConfig>> {
-  return invokeCommand<GpgConfig>('get_gpg_config', { path: repoPath });
+  return invokeCommand<GpgConfig>("get_gpg_config", { path: repoPath });
 }
 
 export async function getGpgKeys(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<GpgKey[]>> {
-  return invokeCommand<GpgKey[]>('get_gpg_keys', { path: repoPath });
+  return invokeCommand<GpgKey[]>("get_gpg_keys", { path: repoPath });
 }
 
 export async function setSigningKey(
   repoPath: string,
   keyId: string | null,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('set_signing_key', {
+  return invokeCommand<void>("set_signing_key", {
     path: repoPath,
     keyId,
     global,
@@ -1067,9 +1244,9 @@ export async function setSigningKey(
 export async function setCommitSigning(
   repoPath: string,
   enabled: boolean,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('set_commit_signing', {
+  return invokeCommand<void>("set_commit_signing", {
     path: repoPath,
     enabled,
     global,
@@ -1079,9 +1256,9 @@ export async function setCommitSigning(
 export async function setTagSigning(
   repoPath: string,
   enabled: boolean,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('set_tag_signing', {
+  return invokeCommand<void>("set_tag_signing", {
     path: repoPath,
     enabled,
     global,
@@ -1090,9 +1267,9 @@ export async function setTagSigning(
 
 export async function getCommitSignature(
   repoPath: string,
-  commitOid: string
+  commitOid: string,
 ): Promise<CommandResult<CommitSignature>> {
-  return invokeCommand<CommitSignature>('get_commit_signature', {
+  return invokeCommand<CommitSignature>("get_commit_signature", {
     path: repoPath,
     commitOid,
   });
@@ -1100,12 +1277,15 @@ export async function getCommitSignature(
 
 export async function getCommitsSignatures(
   repoPath: string,
-  commitOids: string[]
+  commitOids: string[],
 ): Promise<CommandResult<Array<[string, CommitSignature]>>> {
-  return invokeCommand<Array<[string, CommitSignature]>>('get_commits_signatures', {
-    path: repoPath,
-    commitOids,
-  });
+  return invokeCommand<Array<[string, CommitSignature]>>(
+    "get_commits_signatures",
+    {
+      path: repoPath,
+      commitOids,
+    },
+  );
 }
 
 // ============================================================================
@@ -1137,20 +1317,20 @@ export interface SshTestResult {
 }
 
 export async function getSshConfig(): Promise<CommandResult<SshConfig>> {
-  return invokeCommand<SshConfig>('get_ssh_config', {});
+  return invokeCommand<SshConfig>("get_ssh_config", {});
 }
 
 export async function getSshKeys(): Promise<CommandResult<SshKey[]>> {
-  return invokeCommand<SshKey[]>('get_ssh_keys', {});
+  return invokeCommand<SshKey[]>("get_ssh_keys", {});
 }
 
 export async function generateSshKey(
   keyType: string,
   email: string,
   filename?: string,
-  passphrase?: string
+  passphrase?: string,
 ): Promise<CommandResult<SshKey>> {
-  return invokeCommand<SshKey>('generate_ssh_key', {
+  return invokeCommand<SshKey>("generate_ssh_key", {
     keyType,
     email,
     filename,
@@ -1159,31 +1339,31 @@ export async function generateSshKey(
 }
 
 export async function testSshConnection(
-  host: string
+  host: string,
 ): Promise<CommandResult<SshTestResult>> {
-  return invokeCommand<SshTestResult>('test_ssh_connection', { host });
+  return invokeCommand<SshTestResult>("test_ssh_connection", { host });
 }
 
 export async function addKeyToAgent(
-  keyPath: string
+  keyPath: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('add_key_to_agent', { keyPath });
+  return invokeCommand<void>("add_key_to_agent", { keyPath });
 }
 
 export async function listAgentKeys(): Promise<CommandResult<string[]>> {
-  return invokeCommand<string[]>('list_agent_keys', {});
+  return invokeCommand<string[]>("list_agent_keys", {});
 }
 
 export async function getPublicKeyContent(
-  keyName: string
+  keyName: string,
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>('get_public_key_content', { keyName });
+  return invokeCommand<string>("get_public_key_content", { keyName });
 }
 
 export async function deleteSshKey(
-  keyName: string
+  keyName: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_ssh_key', { keyName });
+  return invokeCommand<void>("delete_ssh_key", { keyName });
 }
 
 // ============================================================================
@@ -1212,77 +1392,86 @@ export interface UserIdentity {
 export async function getConfigValue(
   path: string | null,
   key: string,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<string | null>> {
-  return invokeCommand<string | null>('get_config_value', { path, key, global });
+  return invokeCommand<string | null>("get_config_value", {
+    path,
+    key,
+    global,
+  });
 }
 
 export async function setConfigValue(
   path: string | null,
   key: string,
   value: string,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('set_config_value', { path, key, value, global });
+  return invokeCommand<void>("set_config_value", { path, key, value, global });
 }
 
 export async function unsetConfigValue(
   path: string | null,
   key: string,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('unset_config_value', { path, key, global });
+  return invokeCommand<void>("unset_config_value", { path, key, global });
 }
 
 export async function getConfigList(
   path: string | null,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<ConfigEntry[]>> {
-  return invokeCommand<ConfigEntry[]>('get_config_list', { path, global });
+  return invokeCommand<ConfigEntry[]>("get_config_list", { path, global });
 }
 
 export async function getUserIdentity(
-  path: string
+  path: string,
 ): Promise<CommandResult<UserIdentity>> {
-  return invokeCommand<UserIdentity>('get_user_identity', { path });
+  return invokeCommand<UserIdentity>("get_user_identity", { path });
 }
 
 export async function setUserIdentity(
   path: string | null,
   name: string | null,
   email: string | null,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('set_user_identity', { path, name, email, global });
+  return invokeCommand<void>("set_user_identity", {
+    path,
+    name,
+    email,
+    global,
+  });
 }
 
 export async function getAliases(
-  path?: string
+  path?: string,
 ): Promise<CommandResult<GitAlias[]>> {
-  return invokeCommand<GitAlias[]>('get_aliases', { path });
+  return invokeCommand<GitAlias[]>("get_aliases", { path });
 }
 
 export async function setAlias(
   path: string | null,
   name: string,
   command: string,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('set_alias', { path, name, command, global });
+  return invokeCommand<void>("set_alias", { path, name, command, global });
 }
 
 export async function deleteAlias(
   path: string | null,
   name: string,
-  global?: boolean
+  global?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_alias', { path, name, global });
+  return invokeCommand<void>("delete_alias", { path, name, global });
 }
 
 export async function getCommonSettings(
-  path: string
+  path: string,
 ): Promise<CommandResult<ConfigEntry[]>> {
-  return invokeCommand<ConfigEntry[]>('get_common_settings', { path });
+  return invokeCommand<ConfigEntry[]>("get_common_settings", { path });
 }
 
 // ============================================================================
@@ -1311,45 +1500,59 @@ export interface AvailableHelper {
 }
 
 export async function getCredentialHelpers(
-  path: string
+  path: string,
 ): Promise<CommandResult<CredentialHelper[]>> {
-  return invokeCommand<CredentialHelper[]>('get_credential_helpers', { path });
+  return invokeCommand<CredentialHelper[]>("get_credential_helpers", { path });
 }
 
 export async function setCredentialHelper(
   path: string | null,
   helper: string,
   global?: boolean,
-  urlPattern?: string
+  urlPattern?: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('set_credential_helper', { path, helper, global, urlPattern });
+  return invokeCommand<void>("set_credential_helper", {
+    path,
+    helper,
+    global,
+    urlPattern,
+  });
 }
 
 export async function unsetCredentialHelper(
   path: string | null,
   global?: boolean,
-  urlPattern?: string
+  urlPattern?: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('unset_credential_helper', { path, global, urlPattern });
+  return invokeCommand<void>("unset_credential_helper", {
+    path,
+    global,
+    urlPattern,
+  });
 }
 
-export async function getAvailableHelpers(): Promise<CommandResult<AvailableHelper[]>> {
-  return invokeCommand<AvailableHelper[]>('get_available_helpers', {});
+export async function getAvailableHelpers(): Promise<
+  CommandResult<AvailableHelper[]>
+> {
+  return invokeCommand<AvailableHelper[]>("get_available_helpers", {});
 }
 
 export async function testCredentials(
   path: string,
-  remoteUrl: string
+  remoteUrl: string,
 ): Promise<CommandResult<CredentialTestResult>> {
-  return invokeCommand<CredentialTestResult>('test_credentials', { path, remoteUrl });
+  return invokeCommand<CredentialTestResult>("test_credentials", {
+    path,
+    remoteUrl,
+  });
 }
 
 export async function eraseCredentials(
   path: string,
   host: string,
-  protocol: string
+  protocol: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('erase_credentials', { path, host, protocol });
+  return invokeCommand<void>("erase_credentials", { path, host, protocol });
 }
 
 /**
@@ -1358,18 +1561,22 @@ export async function eraseCredentials(
 export async function storeGitCredentials(
   url: string,
   username: string,
-  password: string
+  password: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('store_git_credentials', { url, username, password });
+  return invokeCommand<void>("store_git_credentials", {
+    url,
+    username,
+    password,
+  });
 }
 
 /**
  * Delete git credentials from the system keyring
  */
 export async function deleteGitCredentials(
-  url: string
+  url: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_git_credentials', { url });
+  return invokeCommand<void>("delete_git_credentials", { url });
 }
 
 // ============================================================================
@@ -1494,41 +1701,56 @@ export interface CreatePullRequestInput {
 }
 
 // Authentication (using Stronghold secure storage)
-export async function storeGitHubToken(token: string): Promise<CommandResult<void>> {
+export async function storeGitHubToken(
+  token: string,
+): Promise<CommandResult<void>> {
   try {
-    const { GitHubCredentials } = await import('./credential.service.ts');
+    const { GitHubCredentials } = await import("./credential.service.ts");
     await GitHubCredentials.setToken(token);
     return { success: true, data: undefined };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
 export async function getGitHubToken(): Promise<CommandResult<string | null>> {
   try {
-    const { GitHubCredentials } = await import('./credential.service.ts');
+    const { GitHubCredentials } = await import("./credential.service.ts");
     const token = await GitHubCredentials.getToken();
     return { success: true, data: token };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
 export async function deleteGitHubToken(): Promise<CommandResult<void>> {
   try {
-    const { GitHubCredentials } = await import('./credential.service.ts');
+    const { GitHubCredentials } = await import("./credential.service.ts");
     await GitHubCredentials.deleteToken();
     return { success: true, data: undefined };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
-export async function checkGitHubConnection(): Promise<CommandResult<GitHubConnectionStatus>> {
+export async function checkGitHubConnection(): Promise<
+  CommandResult<GitHubConnectionStatus>
+> {
   // Get token from Stronghold and pass to backend
   const tokenResult = await getGitHubToken();
   const token = tokenResult.success ? tokenResult.data : null;
-  return invokeCommand<GitHubConnectionStatus>('check_github_connection', { token });
+  return invokeCommand<GitHubConnectionStatus>("check_github_connection", {
+    token,
+  });
 }
 
 /**
@@ -1536,14 +1758,20 @@ export async function checkGitHubConnection(): Promise<CommandResult<GitHubConne
  * Used for multi-account support where token is retrieved from account-specific storage
  */
 export async function checkGitHubConnectionWithToken(
-  token: string | null
+  token: string | null,
 ): Promise<CommandResult<GitHubConnectionStatus>> {
-  return invokeCommand<GitHubConnectionStatus>('check_github_connection', { token });
+  return invokeCommand<GitHubConnectionStatus>("check_github_connection", {
+    token,
+  });
 }
 
 // Repository Detection
-export async function detectGitHubRepo(path: string): Promise<CommandResult<DetectedGitHubRepo | null>> {
-  return invokeCommand<DetectedGitHubRepo | null>('detect_github_repo', { path });
+export async function detectGitHubRepo(
+  path: string,
+): Promise<CommandResult<DetectedGitHubRepo | null>> {
+  return invokeCommand<DetectedGitHubRepo | null>("detect_github_repo", {
+    path,
+  });
 }
 
 // Pull Requests
@@ -1552,36 +1780,57 @@ export async function listPullRequests(
   repo: string,
   state?: string,
   perPage?: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<PullRequestSummary[]>> {
-  return invokeCommand<PullRequestSummary[]>('list_pull_requests', { owner, repo, state, perPage, token });
+  return invokeCommand<PullRequestSummary[]>("list_pull_requests", {
+    owner,
+    repo,
+    state,
+    perPage,
+    token,
+  });
 }
 
 export async function getPullRequest(
   owner: string,
   repo: string,
   number: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<PullRequestDetails>> {
-  return invokeCommand<PullRequestDetails>('get_pull_request', { owner, repo, number, token });
+  return invokeCommand<PullRequestDetails>("get_pull_request", {
+    owner,
+    repo,
+    number,
+    token,
+  });
 }
 
 export async function createPullRequest(
   owner: string,
   repo: string,
   input: CreatePullRequestInput,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<PullRequestSummary>> {
-  return invokeCommand<PullRequestSummary>('create_pull_request', { owner, repo, input, token });
+  return invokeCommand<PullRequestSummary>("create_pull_request", {
+    owner,
+    repo,
+    input,
+    token,
+  });
 }
 
 export async function getPullRequestReviews(
   owner: string,
   repo: string,
   number: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<PullRequestReview[]>> {
-  return invokeCommand<PullRequestReview[]>('get_pull_request_reviews', { owner, repo, number, token });
+  return invokeCommand<PullRequestReview[]>("get_pull_request_reviews", {
+    owner,
+    repo,
+    number,
+    token,
+  });
 }
 
 // GitHub Actions
@@ -1590,27 +1839,43 @@ export async function getWorkflowRuns(
   repo: string,
   branch?: string,
   perPage?: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<WorkflowRun[]>> {
-  return invokeCommand<WorkflowRun[]>('get_workflow_runs', { owner, repo, branch, perPage, token });
+  return invokeCommand<WorkflowRun[]>("get_workflow_runs", {
+    owner,
+    repo,
+    branch,
+    perPage,
+    token,
+  });
 }
 
 export async function getCheckRuns(
   owner: string,
   repo: string,
   commitSha: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<CheckRun[]>> {
-  return invokeCommand<CheckRun[]>('get_check_runs', { owner, repo, commitSha, token });
+  return invokeCommand<CheckRun[]>("get_check_runs", {
+    owner,
+    repo,
+    commitSha,
+    token,
+  });
 }
 
 export async function getCommitStatus(
   owner: string,
   repo: string,
   commitSha: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>('get_commit_status', { owner, repo, commitSha, token });
+  return invokeCommand<string>("get_commit_status", {
+    owner,
+    repo,
+    commitSha,
+    token,
+  });
 }
 
 // GitHub Issues
@@ -1652,27 +1917,44 @@ export async function listIssues(
   state?: string,
   labels?: string,
   perPage?: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<IssueSummary[]>> {
-  return invokeCommand<IssueSummary[]>('list_issues', { owner, repo, state, labels, perPage, token });
+  return invokeCommand<IssueSummary[]>("list_issues", {
+    owner,
+    repo,
+    state,
+    labels,
+    perPage,
+    token,
+  });
 }
 
 export async function getIssue(
   owner: string,
   repo: string,
   number: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<IssueSummary>> {
-  return invokeCommand<IssueSummary>('get_issue', { owner, repo, number, token });
+  return invokeCommand<IssueSummary>("get_issue", {
+    owner,
+    repo,
+    number,
+    token,
+  });
 }
 
 export async function createIssue(
   owner: string,
   repo: string,
   input: CreateIssueInput,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<IssueSummary>> {
-  return invokeCommand<IssueSummary>('create_issue', { owner, repo, input, token });
+  return invokeCommand<IssueSummary>("create_issue", {
+    owner,
+    repo,
+    input,
+    token,
+  });
 }
 
 export async function updateIssueState(
@@ -1680,9 +1962,15 @@ export async function updateIssueState(
   repo: string,
   number: number,
   state: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<IssueSummary>> {
-  return invokeCommand<IssueSummary>('update_issue_state', { owner, repo, number, state, token });
+  return invokeCommand<IssueSummary>("update_issue_state", {
+    owner,
+    repo,
+    number,
+    state,
+    token,
+  });
 }
 
 export async function getIssueComments(
@@ -1690,9 +1978,15 @@ export async function getIssueComments(
   repo: string,
   number: number,
   perPage?: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<IssueComment[]>> {
-  return invokeCommand<IssueComment[]>('get_issue_comments', { owner, repo, number, perPage, token });
+  return invokeCommand<IssueComment[]>("get_issue_comments", {
+    owner,
+    repo,
+    number,
+    perPage,
+    token,
+  });
 }
 
 export async function addIssueComment(
@@ -1700,18 +1994,29 @@ export async function addIssueComment(
   repo: string,
   number: number,
   body: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<IssueComment>> {
-  return invokeCommand<IssueComment>('add_issue_comment', { owner, repo, number, body, token });
+  return invokeCommand<IssueComment>("add_issue_comment", {
+    owner,
+    repo,
+    number,
+    body,
+    token,
+  });
 }
 
 export async function getRepoLabels(
   owner: string,
   repo: string,
   perPage?: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<Label[]>> {
-  return invokeCommand<Label[]>('get_repo_labels', { owner, repo, perPage, token });
+  return invokeCommand<Label[]>("get_repo_labels", {
+    owner,
+    repo,
+    perPage,
+    token,
+  });
 }
 
 // Issue Reference Utilities
@@ -1731,11 +2036,21 @@ export function parseIssueReferences(text: string): IssueReference[] {
   const seen = new Set<number>();
 
   // Keywords that GitHub recognizes for auto-closing issues
-  const keywords = ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved'];
-  const keywordPattern = keywords.join('|');
+  const keywords = [
+    "close",
+    "closes",
+    "closed",
+    "fix",
+    "fixes",
+    "fixed",
+    "resolve",
+    "resolves",
+    "resolved",
+  ];
+  const keywordPattern = keywords.join("|");
 
   // Match keyword + issue reference (e.g., "fixes #123" or "fix #123")
-  const keywordRegex = new RegExp(`\\b(${keywordPattern})\\s+#(\\d+)\\b`, 'gi');
+  const keywordRegex = new RegExp(`\\b(${keywordPattern})\\s+#(\\d+)\\b`, "gi");
   let match;
 
   while ((match = keywordRegex.exec(text)) !== null) {
@@ -1772,7 +2087,17 @@ export function parseIssueReferences(text: string): IssueReference[] {
  */
 export function isClosingKeyword(keyword: string | null): boolean {
   if (!keyword) return false;
-  const closingKeywords = ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved'];
+  const closingKeywords = [
+    "close",
+    "closes",
+    "closed",
+    "fix",
+    "fixes",
+    "fixed",
+    "resolve",
+    "resolves",
+    "resolved",
+  ];
   return closingKeywords.includes(keyword.toLowerCase());
 }
 
@@ -1806,44 +2131,68 @@ export async function listReleases(
   owner: string,
   repo: string,
   perPage?: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<ReleaseSummary[]>> {
-  return invokeCommand<ReleaseSummary[]>('list_releases', { owner, repo, perPage, token });
+  return invokeCommand<ReleaseSummary[]>("list_releases", {
+    owner,
+    repo,
+    perPage,
+    token,
+  });
 }
 
 export async function getReleaseByTag(
   owner: string,
   repo: string,
   tag: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<ReleaseSummary>> {
-  return invokeCommand<ReleaseSummary>('get_release_by_tag', { owner, repo, tag, token });
+  return invokeCommand<ReleaseSummary>("get_release_by_tag", {
+    owner,
+    repo,
+    tag,
+    token,
+  });
 }
 
 export async function getLatestRelease(
   owner: string,
   repo: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<ReleaseSummary>> {
-  return invokeCommand<ReleaseSummary>('get_latest_release', { owner, repo, token });
+  return invokeCommand<ReleaseSummary>("get_latest_release", {
+    owner,
+    repo,
+    token,
+  });
 }
 
 export async function createRelease(
   owner: string,
   repo: string,
   input: CreateReleaseInput,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<ReleaseSummary>> {
-  return invokeCommand<ReleaseSummary>('create_release', { owner, repo, input, token });
+  return invokeCommand<ReleaseSummary>("create_release", {
+    owner,
+    repo,
+    input,
+    token,
+  });
 }
 
 export async function deleteRelease(
   owner: string,
   repo: string,
   releaseId: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_release', { owner, repo, releaseId, token });
+  return invokeCommand<void>("delete_release", {
+    owner,
+    repo,
+    releaseId,
+    token,
+  });
 }
 
 // =======================
@@ -1915,45 +2264,59 @@ export interface AdoPipelineRun {
 
 // Azure DevOps Token Management (using Stronghold secure storage)
 
-export async function storeAdoToken(token: string): Promise<CommandResult<void>> {
+export async function storeAdoToken(
+  token: string,
+): Promise<CommandResult<void>> {
   try {
-    const { AzureDevOpsCredentials } = await import('./credential.service.ts');
+    const { AzureDevOpsCredentials } = await import("./credential.service.ts");
     await AzureDevOpsCredentials.setToken(token);
     return { success: true, data: undefined };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
 export async function getAdoToken(): Promise<CommandResult<string | null>> {
   try {
-    const { AzureDevOpsCredentials } = await import('./credential.service.ts');
+    const { AzureDevOpsCredentials } = await import("./credential.service.ts");
     const token = await AzureDevOpsCredentials.getToken();
     return { success: true, data: token };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
 export async function deleteAdoToken(): Promise<CommandResult<void>> {
   try {
-    const { AzureDevOpsCredentials } = await import('./credential.service.ts');
+    const { AzureDevOpsCredentials } = await import("./credential.service.ts");
     await AzureDevOpsCredentials.deleteToken();
     return { success: true, data: undefined };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
 // Azure DevOps Connection
 
 export async function checkAdoConnection(
-  organization: string
+  organization: string,
 ): Promise<CommandResult<AdoConnectionStatus>> {
   // Get token from Stronghold and pass to backend
   const tokenResult = await getAdoToken();
   const token = tokenResult.success ? tokenResult.data : null;
-  return invokeCommand<AdoConnectionStatus>('check_ado_connection', { organization, token });
+  return invokeCommand<AdoConnectionStatus>("check_ado_connection", {
+    organization,
+    token,
+  });
 }
 
 /**
@@ -1962,15 +2325,18 @@ export async function checkAdoConnection(
  */
 export async function checkAdoConnectionWithToken(
   organization: string,
-  token: string | null
+  token: string | null,
 ): Promise<CommandResult<AdoConnectionStatus>> {
-  return invokeCommand<AdoConnectionStatus>('check_ado_connection', { organization, token });
+  return invokeCommand<AdoConnectionStatus>("check_ado_connection", {
+    organization,
+    token,
+  });
 }
 
 export async function detectAdoRepo(
-  path: string
+  path: string,
 ): Promise<CommandResult<DetectedAdoRepo | null>> {
-  return invokeCommand<DetectedAdoRepo | null>('detect_ado_repo', { path });
+  return invokeCommand<DetectedAdoRepo | null>("detect_ado_repo", { path });
 }
 
 // Azure DevOps Pull Requests
@@ -1980,9 +2346,9 @@ export async function listAdoPullRequests(
   project: string,
   repository: string,
   status?: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<AdoPullRequest[]>> {
-  return invokeCommand<AdoPullRequest[]>('list_ado_pull_requests', {
+  return invokeCommand<AdoPullRequest[]>("list_ado_pull_requests", {
     organization,
     project,
     repository,
@@ -1996,9 +2362,9 @@ export async function getAdoPullRequest(
   project: string,
   repository: string,
   pullRequestId: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<AdoPullRequest>> {
-  return invokeCommand<AdoPullRequest>('get_ado_pull_request', {
+  return invokeCommand<AdoPullRequest>("get_ado_pull_request", {
     organization,
     project,
     repository,
@@ -2012,9 +2378,9 @@ export async function createAdoPullRequest(
   project: string,
   repository: string,
   input: CreateAdoPullRequestInput,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<AdoPullRequest>> {
-  return invokeCommand<AdoPullRequest>('create_ado_pull_request', {
+  return invokeCommand<AdoPullRequest>("create_ado_pull_request", {
     organization,
     project,
     repository,
@@ -2029,18 +2395,28 @@ export async function getAdoWorkItems(
   organization: string,
   project: string,
   ids: number[],
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<AdoWorkItem[]>> {
-  return invokeCommand<AdoWorkItem[]>('get_ado_work_items', { organization, project, ids, token });
+  return invokeCommand<AdoWorkItem[]>("get_ado_work_items", {
+    organization,
+    project,
+    ids,
+    token,
+  });
 }
 
 export async function queryAdoWorkItems(
   organization: string,
   project: string,
   state?: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<AdoWorkItem[]>> {
-  return invokeCommand<AdoWorkItem[]>('query_ado_work_items', { organization, project, state, token });
+  return invokeCommand<AdoWorkItem[]>("query_ado_work_items", {
+    organization,
+    project,
+    state,
+    token,
+  });
 }
 
 // Azure DevOps Pipelines
@@ -2049,9 +2425,14 @@ export async function listAdoPipelineRuns(
   organization: string,
   project: string,
   top?: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<AdoPipelineRun[]>> {
-  return invokeCommand<AdoPipelineRun[]>('list_ado_pipeline_runs', { organization, project, top, token });
+  return invokeCommand<AdoPipelineRun[]>("list_ado_pipeline_runs", {
+    organization,
+    project,
+    top,
+    token,
+  });
 }
 
 // =======================
@@ -2131,45 +2512,59 @@ export interface GitLabPipeline {
 }
 
 // GitLab Token Management (using Stronghold secure storage)
-export async function storeGitLabToken(token: string): Promise<CommandResult<void>> {
+export async function storeGitLabToken(
+  token: string,
+): Promise<CommandResult<void>> {
   try {
-    const { GitLabCredentials } = await import('./credential.service.ts');
+    const { GitLabCredentials } = await import("./credential.service.ts");
     await GitLabCredentials.setToken(token);
     return { success: true, data: undefined };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
 export async function getGitLabToken(): Promise<CommandResult<string | null>> {
   try {
-    const { GitLabCredentials } = await import('./credential.service.ts');
+    const { GitLabCredentials } = await import("./credential.service.ts");
     const token = await GitLabCredentials.getToken();
     return { success: true, data: token };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
 export async function deleteGitLabToken(): Promise<CommandResult<void>> {
   try {
-    const { GitLabCredentials } = await import('./credential.service.ts');
+    const { GitLabCredentials } = await import("./credential.service.ts");
     await GitLabCredentials.deleteToken();
     return { success: true, data: undefined };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
 // GitLab Connection
 
 export async function checkGitLabConnection(
-  instanceUrl: string
+  instanceUrl: string,
 ): Promise<CommandResult<GitLabConnectionStatus>> {
   // Get token from Stronghold and pass to backend
   const tokenResult = await getGitLabToken();
   const token = tokenResult.success ? tokenResult.data : null;
-  return invokeCommand<GitLabConnectionStatus>('check_gitlab_connection', { instanceUrl, token });
+  return invokeCommand<GitLabConnectionStatus>("check_gitlab_connection", {
+    instanceUrl,
+    token,
+  });
 }
 
 /**
@@ -2178,15 +2573,20 @@ export async function checkGitLabConnection(
  */
 export async function checkGitLabConnectionWithToken(
   instanceUrl: string,
-  token: string | null
+  token: string | null,
 ): Promise<CommandResult<GitLabConnectionStatus>> {
-  return invokeCommand<GitLabConnectionStatus>('check_gitlab_connection', { instanceUrl, token });
+  return invokeCommand<GitLabConnectionStatus>("check_gitlab_connection", {
+    instanceUrl,
+    token,
+  });
 }
 
 export async function detectGitLabRepo(
-  path: string
+  path: string,
 ): Promise<CommandResult<DetectedGitLabRepo | null>> {
-  return invokeCommand<DetectedGitLabRepo | null>('detect_gitlab_repo', { path });
+  return invokeCommand<DetectedGitLabRepo | null>("detect_gitlab_repo", {
+    path,
+  });
 }
 
 // GitLab Merge Requests
@@ -2195,9 +2595,9 @@ export async function listGitLabMergeRequests(
   instanceUrl: string,
   projectPath: string,
   state?: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<GitLabMergeRequest[]>> {
-  return invokeCommand<GitLabMergeRequest[]>('list_gitlab_merge_requests', {
+  return invokeCommand<GitLabMergeRequest[]>("list_gitlab_merge_requests", {
     instanceUrl,
     projectPath,
     state,
@@ -2209,9 +2609,9 @@ export async function getGitLabMergeRequest(
   instanceUrl: string,
   projectPath: string,
   mrIid: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<GitLabMergeRequest>> {
-  return invokeCommand<GitLabMergeRequest>('get_gitlab_merge_request', {
+  return invokeCommand<GitLabMergeRequest>("get_gitlab_merge_request", {
     instanceUrl,
     projectPath,
     mrIid,
@@ -2223,9 +2623,9 @@ export async function createGitLabMergeRequest(
   instanceUrl: string,
   projectPath: string,
   input: CreateMergeRequestInput,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<GitLabMergeRequest>> {
-  return invokeCommand<GitLabMergeRequest>('create_gitlab_merge_request', {
+  return invokeCommand<GitLabMergeRequest>("create_gitlab_merge_request", {
     instanceUrl,
     projectPath,
     input,
@@ -2240,9 +2640,9 @@ export async function listGitLabIssues(
   projectPath: string,
   state?: string,
   labels?: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<GitLabIssue[]>> {
-  return invokeCommand<GitLabIssue[]>('list_gitlab_issues', {
+  return invokeCommand<GitLabIssue[]>("list_gitlab_issues", {
     instanceUrl,
     projectPath,
     state,
@@ -2255,9 +2655,9 @@ export async function createGitLabIssue(
   instanceUrl: string,
   projectPath: string,
   input: CreateGitLabIssueInput,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<GitLabIssue>> {
-  return invokeCommand<GitLabIssue>('create_gitlab_issue', {
+  return invokeCommand<GitLabIssue>("create_gitlab_issue", {
     instanceUrl,
     projectPath,
     input,
@@ -2271,9 +2671,9 @@ export async function listGitLabPipelines(
   instanceUrl: string,
   projectPath: string,
   status?: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<GitLabPipeline[]>> {
-  return invokeCommand<GitLabPipeline[]>('list_gitlab_pipelines', {
+  return invokeCommand<GitLabPipeline[]>("list_gitlab_pipelines", {
     instanceUrl,
     projectPath,
     status,
@@ -2284,9 +2684,13 @@ export async function listGitLabPipelines(
 export async function getGitLabLabels(
   instanceUrl: string,
   projectPath: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<string[]>> {
-  return invokeCommand<string[]>('get_gitlab_labels', { instanceUrl, projectPath, token });
+  return invokeCommand<string[]>("get_gitlab_labels", {
+    instanceUrl,
+    projectPath,
+    token,
+  });
 }
 
 // =======================
@@ -2359,43 +2763,58 @@ export interface BitbucketPipeline {
 
 export async function storeBitbucketCredentials(
   username: string,
-  appPassword: string
+  appPassword: string,
 ): Promise<CommandResult<void>> {
   try {
-    const { BitbucketCredentials } = await import('./credential.service.ts');
+    const { BitbucketCredentials } = await import("./credential.service.ts");
     await BitbucketCredentials.setCredentials(username, appPassword);
     return { success: true, data: undefined };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
-export async function getBitbucketCredentials(): Promise<CommandResult<[string, string] | null>> {
+export async function getBitbucketCredentials(): Promise<
+  CommandResult<[string, string] | null>
+> {
   try {
-    const { BitbucketCredentials } = await import('./credential.service.ts');
+    const { BitbucketCredentials } = await import("./credential.service.ts");
     const creds = await BitbucketCredentials.getCredentials();
     if (creds) {
       return { success: true, data: [creds.username, creds.password] };
     }
     return { success: true, data: null };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
-export async function deleteBitbucketCredentials(): Promise<CommandResult<void>> {
+export async function deleteBitbucketCredentials(): Promise<
+  CommandResult<void>
+> {
   try {
-    const { BitbucketCredentials } = await import('./credential.service.ts');
+    const { BitbucketCredentials } = await import("./credential.service.ts");
     await BitbucketCredentials.deleteCredentials();
     return { success: true, data: undefined };
   } catch (error) {
-    return { success: false, error: { code: 'CREDENTIAL_ERROR', message: String(error) } };
+    return {
+      success: false,
+      error: { code: "CREDENTIAL_ERROR", message: String(error) },
+    };
   }
 }
 
 // Bitbucket Connection
 
-export async function checkBitbucketConnection(): Promise<CommandResult<BitbucketConnectionStatus>> {
+export async function checkBitbucketConnection(): Promise<
+  CommandResult<BitbucketConnectionStatus>
+> {
   // Get credentials from Stronghold and pass to backend
   const credsResult = await getBitbucketCredentials();
   let username: string | null = null;
@@ -2403,16 +2822,22 @@ export async function checkBitbucketConnection(): Promise<CommandResult<Bitbucke
   if (credsResult.success && credsResult.data) {
     [username, appPassword] = credsResult.data;
   }
-  return invokeCommand<BitbucketConnectionStatus>('check_bitbucket_connection', { username, appPassword });
+  return invokeCommand<BitbucketConnectionStatus>(
+    "check_bitbucket_connection",
+    { username, appPassword },
+  );
 }
 
 /**
  * Check Bitbucket connection with a specific OAuth token
  */
 export async function checkBitbucketConnectionWithToken(
-  token: string
+  token: string,
 ): Promise<CommandResult<BitbucketConnectionStatus>> {
-  return invokeCommand<BitbucketConnectionStatus>('check_bitbucket_connection_with_token', { token });
+  return invokeCommand<BitbucketConnectionStatus>(
+    "check_bitbucket_connection_with_token",
+    { token },
+  );
 }
 
 /**
@@ -2421,9 +2846,9 @@ export async function checkBitbucketConnectionWithToken(
 export async function storeBitbucketOAuthToken(
   accessToken: string,
   refreshToken?: string,
-  expiresIn?: number
+  expiresIn?: number,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('store_bitbucket_oauth_token', {
+  return invokeCommand<void>("store_bitbucket_oauth_token", {
     accessToken,
     refreshToken,
     expiresIn,
@@ -2431,9 +2856,11 @@ export async function storeBitbucketOAuthToken(
 }
 
 export async function detectBitbucketRepo(
-  path: string
+  path: string,
 ): Promise<CommandResult<DetectedBitbucketRepo | null>> {
-  return invokeCommand<DetectedBitbucketRepo | null>('detect_bitbucket_repo', { path });
+  return invokeCommand<DetectedBitbucketRepo | null>("detect_bitbucket_repo", {
+    path,
+  });
 }
 
 // Bitbucket Pull Requests
@@ -2442,9 +2869,9 @@ export async function listBitbucketPullRequests(
   workspace: string,
   repoSlug: string,
   state?: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<BitbucketPullRequest[]>> {
-  return invokeCommand<BitbucketPullRequest[]>('list_bitbucket_pull_requests', {
+  return invokeCommand<BitbucketPullRequest[]>("list_bitbucket_pull_requests", {
     workspace,
     repoSlug,
     state,
@@ -2456,9 +2883,9 @@ export async function getBitbucketPullRequest(
   workspace: string,
   repoSlug: string,
   prId: number,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<BitbucketPullRequest>> {
-  return invokeCommand<BitbucketPullRequest>('get_bitbucket_pull_request', {
+  return invokeCommand<BitbucketPullRequest>("get_bitbucket_pull_request", {
     workspace,
     repoSlug,
     prId,
@@ -2470,9 +2897,9 @@ export async function createBitbucketPullRequest(
   workspace: string,
   repoSlug: string,
   input: CreateBitbucketPullRequestInput,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<BitbucketPullRequest>> {
-  return invokeCommand<BitbucketPullRequest>('create_bitbucket_pull_request', {
+  return invokeCommand<BitbucketPullRequest>("create_bitbucket_pull_request", {
     workspace,
     repoSlug,
     input,
@@ -2486,9 +2913,9 @@ export async function listBitbucketIssues(
   workspace: string,
   repoSlug: string,
   state?: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<BitbucketIssue[]>> {
-  return invokeCommand<BitbucketIssue[]>('list_bitbucket_issues', {
+  return invokeCommand<BitbucketIssue[]>("list_bitbucket_issues", {
     workspace,
     repoSlug,
     state,
@@ -2501,9 +2928,9 @@ export async function listBitbucketIssues(
 export async function listBitbucketPipelines(
   workspace: string,
   repoSlug: string,
-  token?: string | null
+  token?: string | null,
 ): Promise<CommandResult<BitbucketPipeline[]>> {
-  return invokeCommand<BitbucketPipeline[]>('list_bitbucket_pipelines', {
+  return invokeCommand<BitbucketPipeline[]>("list_bitbucket_pipelines", {
     workspace,
     repoSlug,
     token,
@@ -2532,39 +2959,45 @@ export interface ConventionalType {
  * Get commit template from git config or .gitmessage file
  */
 export async function getCommitTemplate(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<string | null>> {
-  return invokeCommand<string | null>('get_commit_template', { path: repoPath });
+  return invokeCommand<string | null>("get_commit_template", {
+    path: repoPath,
+  });
 }
 
 /**
  * List all saved commit templates
  */
-export async function listTemplates(): Promise<CommandResult<CommitTemplate[]>> {
-  return invokeCommand<CommitTemplate[]>('list_templates', {});
+export async function listTemplates(): Promise<
+  CommandResult<CommitTemplate[]>
+> {
+  return invokeCommand<CommitTemplate[]>("list_templates", {});
 }
 
 /**
  * Save a commit template
  */
 export async function saveTemplate(
-  template: CommitTemplate
+  template: CommitTemplate,
 ): Promise<CommandResult<CommitTemplate>> {
-  return invokeCommand<CommitTemplate>('save_template', { template });
+  return invokeCommand<CommitTemplate>("save_template", { template });
 }
 
 /**
  * Delete a commit template
  */
 export async function deleteTemplate(id: string): Promise<CommandResult<void>> {
-  return invokeCommand<void>('delete_template', { id });
+  return invokeCommand<void>("delete_template", { id });
 }
 
 /**
  * Get conventional commit types
  */
-export async function getConventionalTypes(): Promise<CommandResult<ConventionalType[]>> {
-  return invokeCommand<ConventionalType[]>('get_conventional_types', {});
+export async function getConventionalTypes(): Promise<
+  CommandResult<ConventionalType[]>
+> {
+  return invokeCommand<ConventionalType[]>("get_conventional_types", {});
 }
 
 // ============================================================================
@@ -2583,9 +3016,9 @@ export interface RemoteStatus {
  */
 export async function startAutoFetch(
   repoPath: string,
-  intervalMinutes: number
+  intervalMinutes: number,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('start_auto_fetch', {
+  return invokeCommand<void>("start_auto_fetch", {
     path: repoPath,
     intervalMinutes,
   });
@@ -2594,22 +3027,28 @@ export async function startAutoFetch(
 /**
  * Stop auto-fetching for a repository
  */
-export async function stopAutoFetch(repoPath: string): Promise<CommandResult<void>> {
-  return invokeCommand<void>('stop_auto_fetch', { path: repoPath });
+export async function stopAutoFetch(
+  repoPath: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("stop_auto_fetch", { path: repoPath });
 }
 
 /**
  * Check if auto-fetch is running for a repository
  */
-export async function isAutoFetchRunning(repoPath: string): Promise<CommandResult<boolean>> {
-  return invokeCommand<boolean>('is_auto_fetch_running', { path: repoPath });
+export async function isAutoFetchRunning(
+  repoPath: string,
+): Promise<CommandResult<boolean>> {
+  return invokeCommand<boolean>("is_auto_fetch_running", { path: repoPath });
 }
 
 /**
  * Get remote status (ahead/behind counts)
  */
-export async function getRemoteStatus(repoPath: string): Promise<CommandResult<RemoteStatus>> {
-  return invokeCommand<RemoteStatus>('get_remote_status', { path: repoPath });
+export async function getRemoteStatus(
+  repoPath: string,
+): Promise<CommandResult<RemoteStatus>> {
+  return invokeCommand<RemoteStatus>("get_remote_status", { path: repoPath });
 }
 
 // ============================================================================
@@ -2640,14 +3079,14 @@ export async function setupRemoteOperationListeners(): Promise<void> {
   }
 
   remoteOperationUnlisten = await listenToEvent<RemoteOperationResult>(
-    'remote-operation-completed',
+    "remote-operation-completed",
     (result) => {
       // For auto-fetch background operations, show a success toast
       // Note: The inline toasts in fetch/pull/push handle user-initiated operations
-      if (result.operation === 'fetch' && result.success) {
-        showToast(result.message, 'success');
+      if (result.operation === "fetch" && result.success) {
+        showToast(result.message, "success");
       }
-    }
+    },
   );
 }
 
@@ -2665,9 +3104,9 @@ export function cleanupRemoteOperationListeners(): void {
 // Git Profiles
 // ============================================================================
 
-import type { GitProfile, ProfilesConfig } from '../types/workflow.types.ts';
-import { workflowStore } from '../stores/workflow.store.ts';
-import * as unifiedProfileService from './unified-profile.service.ts';
+import type { GitProfile, ProfilesConfig } from "../types/workflow.types.ts";
+import { workflowStore } from "../stores/workflow.store.ts";
+import * as unifiedProfileService from "./unified-profile.service.ts";
 
 /**
  * Current identity for a repository
@@ -2682,21 +3121,25 @@ export interface CurrentIdentityInfo {
  * Get all saved profiles
  */
 export async function getProfiles(): Promise<CommandResult<GitProfile[]>> {
-  return invokeCommand<GitProfile[]>('get_profiles', {});
+  return invokeCommand<GitProfile[]>("get_profiles", {});
 }
 
 /**
  * Get profiles config including repository assignments
  */
-export async function getProfilesConfig(): Promise<CommandResult<ProfilesConfig>> {
-  return invokeCommand<ProfilesConfig>('get_profiles_config', {});
+export async function getProfilesConfig(): Promise<
+  CommandResult<ProfilesConfig>
+> {
+  return invokeCommand<ProfilesConfig>("get_profiles_config", {});
 }
 
 /**
  * Save a profile (create or update)
  */
-export async function saveProfile(profile: GitProfile): Promise<CommandResult<GitProfile>> {
-  const result = await invokeCommand<GitProfile>('save_profile', { profile });
+export async function saveProfile(
+  profile: GitProfile,
+): Promise<CommandResult<GitProfile>> {
+  const result = await invokeCommand<GitProfile>("save_profile", { profile });
   if (result.success && result.data) {
     // Update store
     const store = workflowStore.getState();
@@ -2713,8 +3156,10 @@ export async function saveProfile(profile: GitProfile): Promise<CommandResult<Gi
 /**
  * Delete a profile
  */
-export async function deleteProfile(profileId: string): Promise<CommandResult<void>> {
-  const result = await invokeCommand<void>('delete_profile', { profileId });
+export async function deleteProfile(
+  profileId: string,
+): Promise<CommandResult<void>> {
+  const result = await invokeCommand<void>("delete_profile", { profileId });
   if (result.success) {
     workflowStore.getState().removeProfile(profileId);
   }
@@ -2726,15 +3171,20 @@ export async function deleteProfile(profileId: string): Promise<CommandResult<vo
  */
 export async function applyProfile(
   repoPath: string,
-  profileId: string
+  profileId: string,
 ): Promise<CommandResult<void>> {
-  const result = await invokeCommand<void>('apply_profile', { path: repoPath, profileId });
+  const result = await invokeCommand<void>("apply_profile", {
+    path: repoPath,
+    profileId,
+  });
   if (result.success) {
-    const profile = workflowStore.getState().profiles.find((p) => p.id === profileId);
+    const profile = workflowStore
+      .getState()
+      .profiles.find((p) => p.id === profileId);
     if (profile) {
       workflowStore.getState().setActiveProfile(profile);
     }
-    showToast('Profile applied successfully', 'success');
+    showToast("Profile applied successfully", "success");
   }
   return result;
 }
@@ -2743,18 +3193,22 @@ export async function applyProfile(
  * Detect which profile should be used for a repository based on URL patterns
  */
 export async function detectProfileForRepository(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<GitProfile | null>> {
-  return invokeCommand<GitProfile | null>('detect_profile_for_repository', { path: repoPath });
+  return invokeCommand<GitProfile | null>("detect_profile_for_repository", {
+    path: repoPath,
+  });
 }
 
 /**
  * Get the assigned profile for a repository
  */
 export async function getAssignedProfile(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<GitProfile | null>> {
-  return invokeCommand<GitProfile | null>('get_assigned_profile', { path: repoPath });
+  return invokeCommand<GitProfile | null>("get_assigned_profile", {
+    path: repoPath,
+  });
 }
 
 /**
@@ -2762,27 +3216,34 @@ export async function getAssignedProfile(
  */
 export async function assignProfileToRepository(
   repoPath: string,
-  profileId: string
+  profileId: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('assign_profile_to_repository', { path: repoPath, profileId });
+  return invokeCommand<void>("assign_profile_to_repository", {
+    path: repoPath,
+    profileId,
+  });
 }
 
 /**
  * Remove profile assignment from a repository
  */
 export async function unassignProfileFromRepository(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>('unassign_profile_from_repository', { path: repoPath });
+  return invokeCommand<void>("unassign_profile_from_repository", {
+    path: repoPath,
+  });
 }
 
 /**
  * Get the current git identity for a repository
  */
 export async function getCurrentIdentity(
-  repoPath: string
+  repoPath: string,
 ): Promise<CommandResult<CurrentIdentityInfo>> {
-  return invokeCommand<CurrentIdentityInfo>('get_current_identity', { path: repoPath });
+  return invokeCommand<CurrentIdentityInfo>("get_current_identity", {
+    path: repoPath,
+  });
 }
 
 /**
@@ -2797,7 +3258,7 @@ export async function loadProfiles(): Promise<void> {
     if (result.success && result.data) {
       store.setProfiles(result.data);
     } else {
-      store.setProfileError(result.error?.message ?? 'Failed to load profiles');
+      store.setProfileError(result.error?.message ?? "Failed to load profiles");
     }
   } finally {
     store.setLoadingProfiles(false);
@@ -2807,7 +3268,9 @@ export async function loadProfiles(): Promise<void> {
 /**
  * Load and detect profile for a repository
  */
-export async function loadProfileForRepository(repoPath: string): Promise<void> {
+export async function loadProfileForRepository(
+  repoPath: string,
+): Promise<void> {
   const store = workflowStore.getState();
   store.setCurrentRepositoryPath(repoPath);
 
@@ -2824,7 +3287,12 @@ export async function loadProfileForRepository(repoPath: string): Promise<void> 
 /**
  * Repository hosting provider types
  */
-export type RepositoryProvider = 'github' | 'ado' | 'gitlab' | 'bitbucket' | null;
+export type RepositoryProvider =
+  | "github"
+  | "ado"
+  | "gitlab"
+  | "bitbucket"
+  | null;
 
 /**
  * Integration suggestion result
@@ -2839,61 +3307,71 @@ export interface IntegrationSuggestion {
 /**
  * Detect repository hosting provider and check if integration is configured
  */
-export async function detectRepositoryIntegration(repoPath: string): Promise<IntegrationSuggestion | null> {
+export async function detectRepositoryIntegration(
+  repoPath: string,
+): Promise<IntegrationSuggestion | null> {
   // Import the store to check for configured accounts
-  const { unifiedProfileStore } = await import('../stores/unified-profile.store.ts');
+  const { unifiedProfileStore } =
+    await import("../stores/unified-profile.store.ts");
   const accounts = unifiedProfileStore.getState().accounts;
 
   // Helper to check if an account of a given type exists
-  const hasAccountOfType = (type: 'github' | 'gitlab' | 'azure-devops' | 'bitbucket'): boolean => {
-    return accounts.some(account => account.integrationType === type);
+  const hasAccountOfType = (
+    type: "github" | "gitlab" | "azure-devops" | "bitbucket",
+  ): boolean => {
+    return accounts.some((account) => account.integrationType === type);
   };
 
   // Try to detect each provider in parallel
-  const [githubResult, adoResult, gitlabResult, bitbucketResult] = await Promise.all([
-    detectGitHubRepo(repoPath),
-    detectAdoRepo(repoPath),
-    detectGitLabRepo(repoPath),
-    detectBitbucketRepo(repoPath),
-  ]);
+  const [githubResult, adoResult, gitlabResult, bitbucketResult] =
+    await Promise.all([
+      detectGitHubRepo(repoPath),
+      detectAdoRepo(repoPath),
+      detectGitLabRepo(repoPath),
+      detectBitbucketRepo(repoPath),
+    ]);
 
   // Check GitHub
   if (githubResult.success && githubResult.data) {
     return {
-      provider: 'github',
-      providerName: 'GitHub',
-      isConfigured: hasAccountOfType('github'),
-      features: ['Pull request overlays', 'Create PRs from branches', 'Link issues'],
+      provider: "github",
+      providerName: "GitHub",
+      isConfigured: hasAccountOfType("github"),
+      features: [
+        "Pull request overlays",
+        "Create PRs from branches",
+        "Link issues",
+      ],
     };
   }
 
   // Check Azure DevOps
   if (adoResult.success && adoResult.data) {
     return {
-      provider: 'ado',
-      providerName: 'Azure DevOps',
-      isConfigured: hasAccountOfType('azure-devops'),
-      features: ['Pull request overlays', 'Work item linking'],
+      provider: "ado",
+      providerName: "Azure DevOps",
+      isConfigured: hasAccountOfType("azure-devops"),
+      features: ["Pull request overlays", "Work item linking"],
     };
   }
 
   // Check GitLab
   if (gitlabResult.success && gitlabResult.data) {
     return {
-      provider: 'gitlab',
-      providerName: 'GitLab',
-      isConfigured: hasAccountOfType('gitlab'),
-      features: ['Merge request overlays', 'Issue linking'],
+      provider: "gitlab",
+      providerName: "GitLab",
+      isConfigured: hasAccountOfType("gitlab"),
+      features: ["Merge request overlays", "Issue linking"],
     };
   }
 
   // Check Bitbucket
   if (bitbucketResult.success && bitbucketResult.data) {
     return {
-      provider: 'bitbucket',
-      providerName: 'Bitbucket',
-      isConfigured: hasAccountOfType('bitbucket'),
-      features: ['Pull request overlays'],
+      provider: "bitbucket",
+      providerName: "Bitbucket",
+      isConfigured: hasAccountOfType("bitbucket"),
+      features: ["Pull request overlays"],
     };
   }
 

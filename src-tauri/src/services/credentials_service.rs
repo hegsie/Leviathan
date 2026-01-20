@@ -4,8 +4,8 @@
 //! via the `security` CLI tool (avoids permission prompts that the keyring crate triggers).
 
 use git2::{Cred, CredentialType, RemoteCallbacks};
+use keyring::Entry;
 use std::collections::HashMap;
-use std::process::Command;
 use std::sync::Mutex;
 
 /// Service name for keychain storage
@@ -32,53 +32,30 @@ fn cache_credentials(host: &str, username: &str, password: &str) {
     }
 }
 
-/// Get a password from macOS Keychain using security CLI
-fn keychain_get(service: &str, account: &str) -> Option<String> {
-    let output = Command::new("security")
-        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !password.is_empty() {
-            return Some(password);
-        }
-    }
-    None
+/// Get a password from the keyring
+fn keyring_get(service: &str, account: &str) -> Option<String> {
+    let entry = Entry::new(service, account).ok()?;
+    entry.get_password().ok()
 }
 
-/// Store a password in macOS Keychain using security CLI
-fn keychain_set(service: &str, account: &str, password: &str) -> bool {
-    // First try to delete any existing entry (ignore errors)
-    let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", service, "-a", account])
-        .output();
+/// Store a password in the keyring
+fn keyring_set(service: &str, account: &str, password: &str) -> bool {
+    let entry = match Entry::new(service, account) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
 
-    // Add the new entry
-    let output = Command::new("security")
-        .args([
-            "add-generic-password",
-            "-s",
-            service,
-            "-a",
-            account,
-            "-w",
-            password,
-            "-U", // Update if exists
-        ])
-        .output();
-
-    output.map(|o| o.status.success()).unwrap_or(false)
+    entry.set_password(password).is_ok()
 }
 
-/// Delete a password from macOS Keychain using security CLI
-fn keychain_delete(service: &str, account: &str) -> bool {
-    let output = Command::new("security")
-        .args(["delete-generic-password", "-s", service, "-a", account])
-        .output();
+/// Delete a password from the keyring
+fn keyring_delete(service: &str, account: &str) -> bool {
+    let entry = match Entry::new(service, account) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
 
-    output.map(|o| o.status.success()).unwrap_or(false)
+    entry.delete_credential().is_ok()
 }
 
 /// Credentials helper that provides git2 remote callbacks with authentication support
@@ -87,6 +64,8 @@ pub struct CredentialsHelper {
     try_ssh_agent: bool,
     /// Whether to try SSH key from default locations
     try_ssh_key: bool,
+    /// Specific token to use for authentication (bypasses keychain)
+    token: Option<String>,
 }
 
 impl Default for CredentialsHelper {
@@ -94,6 +73,7 @@ impl Default for CredentialsHelper {
         Self {
             try_ssh_agent: true,
             try_ssh_key: true,
+            token: None,
         }
     }
 }
@@ -104,13 +84,23 @@ impl CredentialsHelper {
         Self::default()
     }
 
+    /// Create new credentials helper with a specific token
+    pub fn new_with_token(token: Option<String>) -> Self {
+        Self {
+            token,
+            ..Self::default()
+        }
+    }
+
     /// Get remote callbacks configured with credential support
     pub fn get_callbacks(&self) -> RemoteCallbacks<'static> {
         let try_ssh_agent = self.try_ssh_agent;
         let try_ssh_key = self.try_ssh_key;
+        let token = self.token.clone();
         let mut tried_ssh_agent = false;
         let mut tried_ssh_key = false;
         let mut tried_keyring = false;
+        let mut tried_token = false;
 
         let mut callbacks = RemoteCallbacks::new();
 
@@ -121,6 +111,16 @@ impl CredentialsHelper {
                 username_from_url,
                 allowed_types
             );
+
+            // Try provided token first for HTTPS
+            if let Some(ref token_value) = token {
+                if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) && !tried_token {
+                    tried_token = true;
+                    tracing::debug!("Using provided token for authentication");
+                    let username = username_from_url.unwrap_or("git");
+                    return Cred::userpass_plaintext(username, token_value);
+                }
+            }
 
             // Try SSH agent first for SSH URLs
             if allowed_types.contains(CredentialType::SSH_KEY) && try_ssh_agent && !tried_ssh_agent
@@ -197,18 +197,18 @@ fn get_stored_credentials(url: &str) -> Option<(String, String)> {
         return Some(creds);
     }
 
-    // Try keychain via security CLI
+    // Try keyring
     let username_key = format!("{}_username", host);
     let password_key = format!("{}_password", host);
 
-    let username = keychain_get(SERVICE_NAME, &username_key)?;
-    let password = keychain_get(SERVICE_NAME, &password_key)?;
+    let username = keyring_get(SERVICE_NAME, &username_key)?;
+    let password = keyring_get(SERVICE_NAME, &password_key)?;
 
     // Cache for faster future lookups
     cache_credentials(&host, &username, &password);
 
     tracing::debug!(
-        "Found credentials in keychain for host: {} (username len: {}, password len: {})",
+        "Found credentials in keyring for host: {} (username len: {}, password len: {})",
         host,
         username.len(),
         password.len()
@@ -229,18 +229,18 @@ pub fn store_credentials(url: &str, username: &str, password: &str) -> Result<()
     // Store in memory cache
     cache_credentials(&host, username, password);
 
-    // Store in keychain via security CLI
+    // Store in keyring
     let username_key = format!("{}_username", host);
     let password_key = format!("{}_password", host);
 
-    let username_ok = keychain_set(SERVICE_NAME, &username_key, username);
-    let password_ok = keychain_set(SERVICE_NAME, &password_key, password);
+    let username_ok = keyring_set(SERVICE_NAME, &username_key, username);
+    let password_ok = keyring_set(SERVICE_NAME, &password_key, password);
 
     if username_ok && password_ok {
-        tracing::info!("Stored credentials in keychain for host: {}", host);
+        tracing::info!("Stored credentials in keyring for host: {}", host);
     } else {
         tracing::warn!(
-            "Failed to store credentials in keychain for host: {} (cached in memory only)",
+            "Failed to store credentials in keyring for host: {} (cached in memory only)",
             host
         );
     }
@@ -259,11 +259,11 @@ pub fn delete_credentials(url: &str) -> Result<(), String> {
         }
     }
 
-    // Remove from keychain via security CLI
+    // Remove from keyring
     let username_key = format!("{}_username", host);
     let password_key = format!("{}_password", host);
-    keychain_delete(SERVICE_NAME, &username_key);
-    keychain_delete(SERVICE_NAME, &password_key);
+    keyring_delete(SERVICE_NAME, &username_key);
+    keyring_delete(SERVICE_NAME, &password_key);
 
     tracing::debug!("Deleted credentials for host: {}", host);
     Ok(())
@@ -289,22 +289,22 @@ fn extract_host(url: &str) -> Option<String> {
 }
 
 /// Get fetch options with credential and progress callbacks
-pub fn get_fetch_options<'a>() -> git2::FetchOptions<'a> {
+pub fn get_fetch_options<'a>(token: Option<String>) -> git2::FetchOptions<'a> {
     let mut fetch_opts = git2::FetchOptions::new();
-    fetch_opts.remote_callbacks(get_callbacks_with_progress());
+    fetch_opts.remote_callbacks(get_callbacks_with_progress(token));
     fetch_opts
 }
 
 /// Get push options with credential and progress callbacks
-pub fn get_push_options<'a>() -> git2::PushOptions<'a> {
+pub fn get_push_options<'a>(token: Option<String>) -> git2::PushOptions<'a> {
     let mut push_opts = git2::PushOptions::new();
-    push_opts.remote_callbacks(get_callbacks_with_progress());
+    push_opts.remote_callbacks(get_callbacks_with_progress(token));
     push_opts
 }
 
 /// Get remote callbacks with both credential and progress support
-fn get_callbacks_with_progress<'a>() -> RemoteCallbacks<'a> {
-    let mut callbacks = CredentialsHelper::new().get_callbacks();
+fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a> {
+    let mut callbacks = CredentialsHelper::new_with_token(token).get_callbacks();
 
     // Add transfer progress callback
     callbacks.transfer_progress(|stats| {

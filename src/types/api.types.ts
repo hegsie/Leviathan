@@ -2,7 +2,6 @@
  * API and IPC type definitions
  */
 
-
 /**
  * Tauri command response wrapper
  */
@@ -30,6 +29,7 @@ export interface CloneRepositoryCommand {
   path: string;
   bare?: boolean;
   branch?: string;
+  token?: string;
 }
 
 export interface InitRepositoryCommand {
@@ -104,6 +104,7 @@ export interface FetchCommand {
   path: string;
   remote?: string;
   prune?: boolean;
+  token?: string;
 }
 
 export interface PullCommand {
@@ -111,6 +112,7 @@ export interface PullCommand {
   remote?: string;
   branch?: string;
   rebase?: boolean;
+  token?: string;
 }
 
 export interface PushCommand {
@@ -119,6 +121,7 @@ export interface PushCommand {
   branch?: string;
   force?: boolean;
   setUpstream?: boolean;
+  token?: string;
 }
 
 /**
@@ -190,7 +193,7 @@ export interface AbortRevertCommand {
 export interface ResetCommand {
   path: string;
   target_ref: string;
-  mode: 'soft' | 'mixed' | 'hard';
+  mode: "soft" | "mixed" | "hard";
 }
 
 /**
@@ -255,7 +258,7 @@ export interface GetDiffCommand {
  */
 export interface RepositoryChangedEvent {
   path: string;
-  changeType: 'status' | 'index' | 'refs' | 'config';
+  changeType: "status" | "index" | "refs" | "config";
 }
 
 export interface OperationProgressEvent {
@@ -275,7 +278,7 @@ export interface OperationCompleteEvent {
  * Settings
  */
 export interface AppSettings {
-  theme: 'light' | 'dark' | 'system';
+  theme: "light" | "dark" | "system";
   fontSize: number;
   fontFamily: string;
   tabSize: number;

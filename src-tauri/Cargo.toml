@@ -30,7 +30,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
-keyring = { version = "3", features = ["apple-native"] }
+keyring = "3"
 notify = "8"
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "query", "form", "http2"] }
 dirs = "6"
