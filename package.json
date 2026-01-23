@@ -33,7 +33,7 @@
     "@vaadin/router": "^1.7.5",
     "lit": "^3.3.2",
     "shiki": "^3.21.0",
-    "zustand": "^5.0.9"
+    "zustand": "^5.0.10"
   },
   "devDependencies": {
     "@open-wc/testing": "^4.0.0",
