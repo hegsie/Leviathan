@@ -1131,6 +1131,34 @@ export class LvGraphCanvas extends LitElement {
     e.preventDefault();
     e.stopPropagation();
 
+    // Check for ref label right-click first
+    if (this.renderer) {
+      const rect = this.canvasEl.getBoundingClientRect();
+      const canvasX = e.clientX - rect.left;
+      const canvasY = e.clientY - rect.top;
+
+      const refLabelHit = this.renderer.getRefLabelAtPoint(canvasX, canvasY);
+      if (refLabelHit && refLabelHit.refType !== 'pullRequest') {
+        // Dispatch ref context menu event for branches and tags
+        this.dispatchEvent(
+          new CustomEvent('ref-context-menu', {
+            detail: {
+              refName: refLabelHit.label,
+              fullName: refLabelHit.fullName,
+              refType: refLabelHit.refType,
+              position: {
+                x: e.clientX,
+                y: e.clientY,
+              },
+            },
+            bubbles: true,
+            composed: true,
+          })
+        );
+        return;
+      }
+    }
+
     const result = this.hitTest(e);
 
     if (result.type === 'node' && result.node) {

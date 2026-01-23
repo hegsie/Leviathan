@@ -7,9 +7,17 @@ use crate::error::{LeviathanError, Result};
 use crate::models::Commit;
 
 /// Cherry-pick a commit onto the current branch
+///
+/// Options:
+/// - `no_commit`: If true, stages changes without committing (like `git cherry-pick -n`)
 #[command]
-pub async fn cherry_pick(path: String, commit_oid: String) -> Result<Commit> {
+pub async fn cherry_pick(
+    path: String,
+    commit_oid: String,
+    no_commit: Option<bool>,
+) -> Result<Commit> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    let no_commit = no_commit.unwrap_or(false);
 
     // Check for existing operations in progress
     if repo.state() != git2::RepositoryState::Clean {
@@ -67,14 +75,23 @@ pub async fn cherry_pick(path: String, commit_oid: String) -> Result<Commit> {
     let mut index = repo.index()?;
     let has_conflicts = index.has_conflicts();
     tracing::debug!(
-        "Cherry-pick completed. has_conflicts: {}, repo_state: {:?}",
+        "Cherry-pick completed. has_conflicts: {}, repo_state: {:?}, no_commit: {}",
         has_conflicts,
-        repo.state()
+        repo.state(),
+        no_commit
     );
 
     if has_conflicts {
         tracing::debug!("Returning CherryPickConflict error");
         return Err(LeviathanError::CherryPickConflict);
+    }
+
+    // If no_commit is true, just stage the changes without committing
+    if no_commit {
+        // Clean up cherry-pick state but keep the staged changes
+        repo.cleanup_state()?;
+        // Return the original commit info since we didn't create a new one
+        return Ok(Commit::from_git2(&commit));
     }
 
     // No conflicts - the working directory and index are updated, now create the commit

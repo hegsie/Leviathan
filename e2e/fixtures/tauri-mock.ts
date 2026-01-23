@@ -199,6 +199,7 @@ function createMockHandler(mocks: typeof defaultMockData) {
         return mocks.branches.find((b) => b.isHead) || null;
 
       case 'checkout_branch':
+      case 'checkout':
       case 'create_branch':
       case 'delete_branch':
       case 'rename_branch':
@@ -259,6 +260,19 @@ function createMockHandler(mocks: typeof defaultMockData) {
 
       case 'create_tag':
       case 'delete_tag':
+      case 'push_tag':
+        return null;
+
+      // Rewrite commands (cherry-pick, revert, reset, merge, rebase)
+      case 'cherry_pick':
+      case 'revert':
+      case 'reset':
+      case 'merge':
+      case 'rebase':
+      case 'abort_cherry_pick':
+      case 'abort_merge':
+      case 'abort_rebase':
+      case 'abort_revert':
         return null;
 
       // Remote commands
@@ -427,6 +441,7 @@ export async function setupTauriMocks(
               deletions: 1,
             };
           case 'checkout_branch':
+          case 'checkout':
           case 'create_branch':
           case 'delete_branch':
           case 'rename_branch':
@@ -441,9 +456,19 @@ export async function setupTauriMocks(
           case 'drop_stash':
           case 'create_tag':
           case 'delete_tag':
+          case 'push_tag':
           case 'fetch':
           case 'pull':
           case 'push':
+          case 'cherry_pick':
+          case 'revert':
+          case 'reset':
+          case 'merge':
+          case 'rebase':
+          case 'abort_cherry_pick':
+          case 'abort_merge':
+          case 'abort_rebase':
+          case 'abort_revert':
             return null;
           default:
             console.warn(`[Tauri Mock] Unmocked command: ${command}`, args);

@@ -24,3 +24,4 @@ export { LvConfigDialog } from './lv-config-dialog.ts';
 export { LvCredentialsDialog } from './lv-credentials-dialog.ts';
 export { LvGitHubDialog } from './lv-github-dialog.ts';
 export { LvProfileManagerDialog } from './lv-profile-manager-dialog.ts';
+export { LvCherryPickDialog } from './lv-cherry-pick-dialog.ts';

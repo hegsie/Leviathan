@@ -123,9 +123,10 @@ export class CreateBranchDialogPage extends BaseDialog {
 
   constructor(page: Page) {
     super(page, 'lv-create-branch-dialog');
-    // Input has id="branch-name-input" and placeholder="feature/my-new-feature"
-    this.nameInput = this.dialog.locator('#branch-name-input, input[placeholder*="feature"]');
-    this.createButton = this.dialog.locator('button', { hasText: 'Create' });
+    // Use role-based selector for the Branch Name input
+    this.nameInput = page.getByRole('textbox', { name: 'Branch Name' });
+    // Use exact match for Create Branch button to avoid matching "Create tag" button
+    this.createButton = page.locator('lv-create-branch-dialog').getByRole('button', { name: 'Create Branch' });
     this.checkoutCheckbox = this.dialog.locator('input[type="checkbox"]');
   }
 

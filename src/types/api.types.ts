@@ -161,6 +161,8 @@ export interface AbortRebaseCommand {
 export interface CherryPickCommand {
   path: string;
   commitOid: string;
+  /** If true, stages changes without committing (like `git cherry-pick -n`) */
+  noCommit?: boolean;
 }
 
 export interface ContinueCherryPickCommand {
