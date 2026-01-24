@@ -31,10 +31,17 @@ impl TestRepo {
         Self { dir, path }
     }
 
-    /// Create a repository with an initial commit
+    /// Create a repository with an initial commit on the "main" branch
     pub fn with_initial_commit() -> Self {
         let test_repo = Self::new();
         test_repo.create_commit("Initial commit", &[("README.md", "# Test Repo")]);
+
+        // Rename the default branch to "main" for consistency
+        let repo = test_repo.repo();
+        if let Ok(mut head) = repo.find_branch("master", git2::BranchType::Local) {
+            let _ = head.rename("main", false);
+        }
+
         test_repo
     }
 
