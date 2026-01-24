@@ -266,6 +266,7 @@ export class VirtualScrollManager {
     const edges: LayoutEdge[] = [];
     const seen = new Set<LayoutEdge>();
 
+
     // Check all edge row ranges that might intersect our viewport
     for (const [key, rangeEdges] of this.edgesByRowRange) {
       const [minRowStr, maxRowStr] = key.split('-');

@@ -58,7 +58,15 @@ impl Commit {
             author: Signature::from(commit.author()),
             committer: Signature::from(commit.committer()),
             parent_ids: commit.parent_ids().map(|id| id.to_string()).collect(),
-            timestamp: commit.time().seconds(),
+            // Use the maximum of author/committer timestamps for sorting.
+            // For cherry-picks/reverts, one timestamp may be from the original commit
+            // while the other is from when the operation was performed. Using the max
+            // ensures the commit sorts correctly relative to its parent.
+            timestamp: commit
+                .author()
+                .when()
+                .seconds()
+                .max(commit.committer().when().seconds()),
         }
     }
 }
