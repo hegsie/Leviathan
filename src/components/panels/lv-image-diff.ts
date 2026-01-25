@@ -614,58 +614,78 @@ export class LvImageDiff extends LitElement {
     let unchanged = 0;
     const threshold = this.differenceThreshold;
 
-    for (let i = 0; i < oldData.data.length; i += 4) {
-      const oldR = oldData.data[i];
-      const oldG = oldData.data[i + 1];
-      const oldB = oldData.data[i + 2];
-      const oldA = oldData.data[i + 3];
+    const totalLength = oldData.data.length;
+    const pixelsPerChunk = 10000; // number of pixels per chunk (adjust if needed)
+    const step = 4; // RGBA per pixel
 
-      const newR = newData.data[i];
-      const newG = newData.data[i + 1];
-      const newB = newData.data[i + 2];
-      const newA = newData.data[i + 3];
+    await new Promise<void>((resolve) => {
+      let index = 0;
 
-      const oldIsTransparent = oldA < 10;
-      const newIsTransparent = newA < 10;
+      const processChunk = () => {
+        const maxIndex = Math.min(index + pixelsPerChunk * step, totalLength);
 
-      // Calculate color difference
-      const diff =
-        Math.abs(oldR - newR) +
-        Math.abs(oldG - newG) +
-        Math.abs(oldB - newB) +
-        Math.abs(oldA - newA);
+        for (; index < maxIndex; index += step) {
+          const oldR = oldData.data[index];
+          const oldG = oldData.data[index + 1];
+          const oldB = oldData.data[index + 2];
+          const oldA = oldData.data[index + 3];
 
-      if (oldIsTransparent && !newIsTransparent) {
-        // Added pixel (green)
-        diffData.data[i] = 0;
-        diffData.data[i + 1] = 255;
-        diffData.data[i + 2] = 0;
-        diffData.data[i + 3] = 180;
-        added++;
-      } else if (!oldIsTransparent && newIsTransparent) {
-        // Removed pixel (red)
-        diffData.data[i] = 255;
-        diffData.data[i + 1] = 0;
-        diffData.data[i + 2] = 0;
-        diffData.data[i + 3] = 180;
-        removed++;
-      } else if (diff > threshold) {
-        // Changed pixel (magenta)
-        diffData.data[i] = 255;
-        diffData.data[i + 1] = 0;
-        diffData.data[i + 2] = 255;
-        diffData.data[i + 3] = 180;
-        changed++;
-      } else {
-        // Unchanged pixel (show dimmed original)
-        diffData.data[i] = newR;
-        diffData.data[i + 1] = newG;
-        diffData.data[i + 2] = newB;
-        diffData.data[i + 3] = Math.floor(newA * 0.3);
-        unchanged++;
-      }
-    }
+          const newR = newData.data[index];
+          const newG = newData.data[index + 1];
+          const newB = newData.data[index + 2];
+          const newA = newData.data[index + 3];
 
+          const oldIsTransparent = oldA < 10;
+          const newIsTransparent = newA < 10;
+
+          // Calculate color difference
+          const diff =
+            Math.abs(oldR - newR) +
+            Math.abs(oldG - newG) +
+            Math.abs(oldB - newB) +
+            Math.abs(oldA - newA);
+
+          if (oldIsTransparent && !newIsTransparent) {
+            // Added pixel (green)
+            diffData.data[index] = 0;
+            diffData.data[index + 1] = 255;
+            diffData.data[index + 2] = 0;
+            diffData.data[index + 3] = 180;
+            added++;
+          } else if (!oldIsTransparent && newIsTransparent) {
+            // Removed pixel (red)
+            diffData.data[index] = 255;
+            diffData.data[index + 1] = 0;
+            diffData.data[index + 2] = 0;
+            diffData.data[index + 3] = 180;
+            removed++;
+          } else if (diff > threshold) {
+            // Changed pixel (magenta)
+            diffData.data[index] = 255;
+            diffData.data[index + 1] = 0;
+            diffData.data[index + 2] = 255;
+            diffData.data[index + 3] = 180;
+            changed++;
+          } else {
+            // Unchanged pixel (show dimmed original)
+            diffData.data[index] = newR;
+            diffData.data[index + 1] = newG;
+            diffData.data[index + 2] = newB;
+            diffData.data[index + 3] = Math.floor(newA * 0.3);
+            unchanged++;
+          }
+        }
+
+        if (index < totalLength) {
+          // Schedule next chunk to avoid blocking the main thread
+          requestAnimationFrame(processChunk);
+        } else {
+          resolve();
+        }
+      };
+
+      requestAnimationFrame(processChunk);
+    });
     diffCtx.putImageData(diffData, 0, 0);
     this.differenceDataUrl = diffCanvas.toDataURL('image/png');
     this.differenceStats = { added, removed, changed, unchanged };
