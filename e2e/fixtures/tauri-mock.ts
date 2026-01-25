@@ -327,8 +327,11 @@ function createMockHandler(mocks: typeof defaultMockData) {
         const filePath = (args?.path as string) || 'image.png';
         const imageType = filePath.split('.').pop()?.toLowerCase() || 'png';
         return {
+          path: filePath,
           oldData: oldImageBase64,
           newData: newImageBase64,
+          oldSize: [2, 2] as [number, number],
+          newSize: [2, 2] as [number, number],
           imageType,
         };
       }
@@ -476,8 +479,11 @@ export async function setupTauriMocks(
             const filePath = (args as { path?: string })?.path || 'image.png';
             const imageType = filePath.split('.').pop()?.toLowerCase() || 'png';
             return {
+              path: filePath,
               oldData: oldImageBase64,
               newData: newImageBase64,
+              oldSize: [2, 2] as [number, number],
+              newSize: [2, 2] as [number, number],
               imageType,
             };
           }
