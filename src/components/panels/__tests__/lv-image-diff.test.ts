@@ -12,10 +12,13 @@ const mockInvoke = (command: string): Promise<unknown> => {
   switch (command) {
     case 'get_image_versions':
       return Promise.resolve({
+        path: 'test-image.png',
         oldData:
           'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
         newData:
           'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        oldSize: [1, 1] as [number, number],
+        newSize: [1, 1] as [number, number],
         imageType: 'png',
       });
     default:
@@ -54,8 +57,11 @@ describe('Image Diff Component Data Structures', () => {
   describe('ImageVersions', () => {
     it('should have oldData and newData for modified images', () => {
       const imageVersions = {
+        path: 'test-image.png',
         oldData: 'base64olddata',
         newData: 'base64newdata',
+        oldSize: [100, 100] as [number, number],
+        newSize: [100, 100] as [number, number],
         imageType: 'png',
       };
 
@@ -66,8 +72,11 @@ describe('Image Diff Component Data Structures', () => {
 
     it('should handle new images (no oldData)', () => {
       const imageVersions = {
+        path: 'new-image.png',
         oldData: null,
         newData: 'base64newdata',
+        oldSize: null,
+        newSize: [100, 100] as [number, number],
         imageType: 'png',
       };
 
@@ -77,8 +86,11 @@ describe('Image Diff Component Data Structures', () => {
 
     it('should handle deleted images (no newData)', () => {
       const imageVersions = {
+        path: 'deleted-image.png',
         oldData: 'base64olddata',
         newData: null,
+        oldSize: [100, 100] as [number, number],
+        newSize: null,
         imageType: 'png',
       };
 
