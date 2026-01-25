@@ -972,7 +972,12 @@ export class LvInteractiveRebaseDialog extends LitElement {
           ${this.canApplyAutosquash ? html`
             <div class="autosquash-banner">
               <span>Found commits with <code>fixup!</code> or <code>squash!</code> prefixes</span>
-              <button @click=${this.applyAutosquash}>Apply Autosquash</button>
+              <button
+                @click=${this.applyAutosquash}
+                aria-label="Automatically reorder and mark fixup! and squash! commits"
+              >
+                Apply Autosquash
+              </button>
             </div>
           ` : nothing}
 
