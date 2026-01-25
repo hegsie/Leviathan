@@ -474,10 +474,27 @@ export class LvInteractiveRebaseDialog extends LitElement {
   @state() private draggedIndex: number | null = null;
   @state() private dropTargetIndex: number | null = null;
   @state() private showPreview = true;
-  @state() private hasAutosquashCommits = false;
-  @state() private autosquashApplied = false;
 
   @query('lv-modal') private modal!: LvModal;
+
+  /**
+   * Check if there are any commits with fixup!/squash! prefixes
+   */
+  private get hasAutosquashCommits(): boolean {
+    return this.commits.some(
+      c => c.summary.startsWith('fixup! ') || c.summary.startsWith('squash! ')
+    );
+  }
+
+  /**
+   * Check if autosquash can be applied (fixup!/squash! commits still have action='pick')
+   */
+  private get canApplyAutosquash(): boolean {
+    return this.commits.some(
+      c => (c.summary.startsWith('fixup! ') || c.summary.startsWith('squash! ')) &&
+           c.action === 'pick'
+    );
+  }
 
   public async open(onto: string): Promise<void> {
     this.reset();
@@ -498,8 +515,6 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.error = '';
     this.draggedIndex = null;
     this.dropTargetIndex = null;
-    this.hasAutosquashCommits = false;
-    this.autosquashApplied = false;
   }
 
   private async loadCommits(): Promise<void> {
@@ -517,7 +532,6 @@ export class LvInteractiveRebaseDialog extends LitElement {
           action: 'pick' as RebaseAction,
           originalIndex: index,
         }));
-        this.detectAutosquashCommits();
       } else {
         this.error = result.error?.message ?? 'Failed to load commits';
       }
@@ -526,15 +540,6 @@ export class LvInteractiveRebaseDialog extends LitElement {
     } finally {
       this.loading = false;
     }
-  }
-
-  /**
-   * Detect commits with fixup! or squash! prefixes
-   */
-  private detectAutosquashCommits(): void {
-    this.hasAutosquashCommits = this.commits.some(
-      c => c.summary.startsWith('fixup! ') || c.summary.startsWith('squash! ')
-    );
   }
 
   /**
@@ -581,7 +586,6 @@ export class LvInteractiveRebaseDialog extends LitElement {
     }
 
     this.commits = newCommits;
-    this.autosquashApplied = true;
   }
 
   /**
@@ -933,7 +937,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
             </div>
           </div>
 
-          ${this.hasAutosquashCommits && !this.autosquashApplied ? html`
+          ${this.canApplyAutosquash ? html`
             <div class="autosquash-banner">
               <span>Found commits with <code>fixup!</code> or <code>squash!</code> prefixes</span>
               <button @click=${this.applyAutosquash}>Apply Autosquash</button>
