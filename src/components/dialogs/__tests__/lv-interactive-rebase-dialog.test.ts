@@ -161,9 +161,12 @@ function applyAutosquash(commits: EditableRebaseCommit[]): EditableRebaseCommit[
     const isFixup = asCommit.summary.startsWith('fixup! ');
     const targetSummary = asCommit.summary.slice(isFixup ? 7 : 8);
 
-    const targetIndex = newCommits.findIndex(c =>
-      c.summary === targetSummary || c.summary.startsWith(targetSummary)
-    );
+    // Two-pass approach: exact match first, then prefix match (matches git's autosquash behavior)
+    let targetIndex = newCommits.findIndex(c => c.summary === targetSummary);
+    if (targetIndex === -1) {
+      // No exact match, try prefix match
+      targetIndex = newCommits.findIndex(c => c.summary.startsWith(targetSummary));
+    }
 
     if (targetIndex !== -1) {
       asCommit.action = isFixup ? 'fixup' : 'squash';
@@ -468,6 +471,64 @@ describe('Interactive Rebase Dialog', () => {
       expect(result[1].shortId).to.equal('def1234');
       // Action stays as pick since no target found
       expect(result[1].action).to.equal('pick');
+    });
+
+    it('should prefer exact match over prefix match', () => {
+      // "Add feature" should match exactly, not "Add feature X" via prefix
+      const commits = [
+        createEditableCommit('abc1234', 'Add feature X', 'pick', 0),
+        createEditableCommit('def1234', 'Add feature', 'pick', 1),
+        createEditableCommit('ghi1234', 'fixup! Add feature', 'pick', 2),
+      ];
+
+      const result = applyAutosquash(commits);
+
+      expect(result).to.have.length(3);
+      // fixup should be placed after "Add feature" (exact match), not "Add feature X"
+      expect(result[0].shortId).to.equal('abc1234');
+      expect(result[0].summary).to.equal('Add feature X');
+      expect(result[1].shortId).to.equal('def1234');
+      expect(result[1].summary).to.equal('Add feature');
+      expect(result[2].shortId).to.equal('ghi1234');
+      expect(result[2].action).to.equal('fixup');
+    });
+
+    it('should fall back to prefix match when no exact match exists', () => {
+      // "fixup! Add" should match "Add feature" via prefix when no exact "Add" exists
+      const commits = [
+        createEditableCommit('abc1234', 'Add feature', 'pick', 0),
+        createEditableCommit('def1234', 'Other commit', 'pick', 1),
+        createEditableCommit('ghi1234', 'fixup! Add', 'pick', 2),
+      ];
+
+      const result = applyAutosquash(commits);
+
+      expect(result).to.have.length(3);
+      // fixup should be placed after "Add feature" via prefix match
+      expect(result[0].shortId).to.equal('abc1234');
+      expect(result[1].shortId).to.equal('ghi1234');
+      expect(result[1].action).to.equal('fixup');
+      expect(result[2].shortId).to.equal('def1234');
+    });
+
+    it('should handle exact match even when prefix match appears first in list', () => {
+      // "Add feature" appears after "Add feature - part 1" but should still be matched exactly
+      const commits = [
+        createEditableCommit('aaa1234', 'Add feature - part 1', 'pick', 0),
+        createEditableCommit('bbb1234', 'Add feature - part 2', 'pick', 1),
+        createEditableCommit('ccc1234', 'Add feature', 'pick', 2),
+        createEditableCommit('ddd1234', 'squash! Add feature', 'pick', 3),
+      ];
+
+      const result = applyAutosquash(commits);
+
+      expect(result).to.have.length(4);
+      // squash should follow the exact "Add feature" match, not the first prefix match
+      expect(result[0].shortId).to.equal('aaa1234');
+      expect(result[1].shortId).to.equal('bbb1234');
+      expect(result[2].shortId).to.equal('ccc1234');
+      expect(result[3].shortId).to.equal('ddd1234');
+      expect(result[3].action).to.equal('squash');
     });
   });
 

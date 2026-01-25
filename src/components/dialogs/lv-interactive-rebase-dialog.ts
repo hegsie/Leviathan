@@ -581,9 +581,12 @@ export class LvInteractiveRebaseDialog extends LitElement {
       const targetSummary = asCommit.summary.slice(isFixup ? 7 : 8); // Remove prefix
 
       // Find the target commit by matching summary
-      const targetIndex = newCommits.findIndex(c =>
-        c.summary === targetSummary || c.summary.startsWith(targetSummary)
-      );
+      // Two-pass approach: exact match first, then prefix match (matches git's autosquash behavior)
+      let targetIndex = newCommits.findIndex(c => c.summary === targetSummary);
+      if (targetIndex === -1) {
+        // No exact match, try prefix match
+        targetIndex = newCommits.findIndex(c => c.summary.startsWith(targetSummary));
+      }
 
       if (targetIndex !== -1) {
         // Set the action based on prefix
