@@ -638,12 +638,12 @@ describe('Interactive Rebase Dialog', () => {
         if (c.action === 'reword' && c.newMessage && c.newMessage !== c.summary) {
           // Use pick + exec to amend with new message
           todoLines.push(`pick ${c.shortId} ${c.summary}`);
+          // Use $'...' ANSI-C quoting for proper newline handling
           const escapedMessage = c.newMessage
             .replace(/\\/g, '\\\\')
-            .replace(/"/g, '\\"')
-            .replace(/\$/g, '\\$')
-            .replace(/`/g, '\\`');
-          todoLines.push(`exec git commit --amend -m "${escapedMessage}"`);
+            .replace(/'/g, "\\'")
+            .replace(/\n/g, '\\n');
+          todoLines.push(`exec git commit --amend -m $'${escapedMessage}'`);
         } else if (c.action === 'reword') {
           // Reword without message change - keep as pick
           todoLines.push(`pick ${c.shortId} ${c.summary}`);
@@ -680,7 +680,7 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 Old message\n' +
-        'exec git commit --amend -m "New message"'
+        "exec git commit --amend -m $'New message'"
       );
     });
 
@@ -704,16 +704,17 @@ describe('Interactive Rebase Dialog', () => {
       expect(todo).to.equal('pick abc1234 Some message');
     });
 
-    it('should escape special characters in reword message', () => {
+    it('should escape single quotes in reword message', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 0, 'New "quoted" message'),
+        createEditableCommit('abc1234', 'Old', 'reword', 0, "It's working"),
       ];
 
       const todo = generateTodo(commits);
 
+      // $'...' syntax requires escaping single quotes
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        'exec git commit --amend -m "New \\"quoted\\" message"'
+        "exec git commit --amend -m $'It\\'s working'"
       );
     });
 
@@ -726,11 +727,12 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        'exec git commit --amend -m "Path\\\\to\\\\file"'
+        "exec git commit --amend -m $'Path\\\\to\\\\file'"
       );
     });
 
-    it('should escape dollar signs in reword message', () => {
+    it('should not escape dollar signs in reword message', () => {
+      // $'...' syntax doesn't do variable expansion, so $ doesn't need escaping
       const commits = [
         createEditableCommit('abc1234', 'Old', 'reword', 0, 'Cost $100'),
       ];
@@ -739,11 +741,12 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        'exec git commit --amend -m "Cost \\$100"'
+        "exec git commit --amend -m $'Cost $100'"
       );
     });
 
-    it('should escape backticks in reword message', () => {
+    it('should not escape backticks in reword message', () => {
+      // $'...' syntax doesn't do command substitution, so backticks don't need escaping
       const commits = [
         createEditableCommit('abc1234', 'Old', 'reword', 0, 'Use `code` here'),
       ];
@@ -752,7 +755,7 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        'exec git commit --amend -m "Use \\`code\\` here"'
+        "exec git commit --amend -m $'Use `code` here'"
       );
     });
 
@@ -767,24 +770,24 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 First\n' +
-        'exec git commit --amend -m "First reworded"\n' +
+        "exec git commit --amend -m $'First reworded'\n" +
         'pick def1234 Second\n' +
         'pick ghi1234 Third\n' +
-        'exec git commit --amend -m "Third reworded"'
+        "exec git commit --amend -m $'Third reworded'"
       );
     });
 
-    it('should handle multiline reword messages', () => {
+    it('should escape newlines in reword messages', () => {
       const commits = [
         createEditableCommit('abc1234', 'Old', 'reword', 0, 'Line 1\nLine 2\nLine 3'),
       ];
 
       const todo = generateTodo(commits);
 
-      // Multiline messages work with -m flag (git handles the newlines)
+      // $'...' syntax interprets \n as actual newlines when executed
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        'exec git commit --amend -m "Line 1\nLine 2\nLine 3"'
+        "exec git commit --amend -m $'Line 1\\nLine 2\\nLine 3'"
       );
     });
   });
