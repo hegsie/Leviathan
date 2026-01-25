@@ -548,6 +548,15 @@ export class AppShell extends LitElement {
     this.graphCanvas?.refresh?.();
   };
 
+  // Handle open-conflict-dialog events from child components (e.g., interactive rebase)
+  private handleOpenConflictDialogEvent = (e: Event): void => {
+    const customEvent = e as CustomEvent<{ operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' }>;
+    if (customEvent.detail?.operationType) {
+      this.conflictOperationType = customEvent.detail.operationType;
+    }
+    this.showConflictDialog = true;
+  };
+
   connectedCallback(): void {
     super.connectedCallback();
     this.unsubscribe = repositoryStore.subscribe((state) => {
@@ -596,6 +605,7 @@ export class AppShell extends LitElement {
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('contextmenu', this.handleContextMenu);
     window.addEventListener('repository-refresh', this.handleWindowRefresh);
+    this.addEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
 
     // Load vim mode from keyboard service
     this.vimMode = keyboardService.isVimMode();
@@ -661,6 +671,7 @@ export class AppShell extends LitElement {
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('contextmenu', this.handleContextMenu);
     window.removeEventListener('repository-refresh', this.handleWindowRefresh);
+    this.removeEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
     gitService.cleanupRemoteOperationListeners();
     // Stop periodic token validation
     unifiedProfileService.stopPeriodicTokenValidation();
