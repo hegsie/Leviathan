@@ -22,7 +22,6 @@ interface PreviewCommit {
   shortId: string;
   summary: string;
   isSquashed: boolean;
-  isDropped: boolean;
   squashedFrom?: string[];
   /** Error message if this commit configuration is invalid */
   error?: string;
@@ -277,10 +276,6 @@ export class LvInteractiveRebaseDialog extends LitElement {
       .preview-commit.squashed {
         background: var(--color-warning-bg, rgba(234, 179, 8, 0.1));
         border-left: 3px solid var(--color-warning);
-      }
-
-      .preview-commit.dropped {
-        display: none;
       }
 
       .preview-hash {
@@ -641,7 +636,6 @@ export class LvInteractiveRebaseDialog extends LitElement {
           shortId: commit.shortId,
           summary: commit.summary,
           isSquashed: false,
-          isDropped: false,
           error: `Cannot ${commit.action}: no previous commit to combine with`,
         });
         i++;
@@ -670,7 +664,6 @@ export class LvInteractiveRebaseDialog extends LitElement {
         shortId: commit.shortId,
         summary,
         isSquashed: squashedFrom.length > 0,
-        isDropped: false,
         squashedFrom: squashedFrom.length > 0 ? squashedFrom : undefined,
       });
 

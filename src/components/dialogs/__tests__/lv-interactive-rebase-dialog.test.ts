@@ -38,7 +38,6 @@ interface PreviewCommit {
   shortId: string;
   summary: string;
   isSquashed: boolean;
-  isDropped: boolean;
   squashedFrom?: string[];
   error?: string;
 }
@@ -85,7 +84,6 @@ function generatePreview(commits: EditableRebaseCommit[]): PreviewCommit[] {
         shortId: commit.shortId,
         summary: commit.summary,
         isSquashed: false,
-        isDropped: false,
         error: `Cannot ${commit.action}: no previous commit to combine with`,
       });
       i++;
@@ -113,7 +111,6 @@ function generatePreview(commits: EditableRebaseCommit[]): PreviewCommit[] {
       shortId: commit.shortId,
       summary,
       isSquashed: squashedFrom.length > 0,
-      isDropped: false,
       squashedFrom: squashedFrom.length > 0 ? squashedFrom : undefined,
     });
 
