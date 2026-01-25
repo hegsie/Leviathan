@@ -60,10 +60,26 @@ function createEditableCommit(
   };
 }
 
+/*
+ * ============================================================================
+ * WARNING: DUPLICATED LOGIC - KEEP IN SYNC WITH COMPONENT
+ * ============================================================================
+ * The following functions (generatePreview, applyAutosquash, getStats,
+ * generateTodo) duplicate logic from lv-interactive-rebase-dialog.ts.
+ * This allows unit testing without mocking internal component methods.
+ *
+ * If you modify the corresponding logic in the component, you MUST update
+ * these test functions to match. Failure to keep them in sync will cause
+ * tests to pass while the actual component behavior differs.
+ *
+ * Consider extracting these into a shared utility module if the maintenance
+ * burden becomes too high.
+ * ============================================================================
+ */
+
 /**
  * Generate preview of what commits will look like after rebase
- * This mirrors the logic in lv-interactive-rebase-dialog.ts
- * Handles edge cases like orphaned squash/fixup commits
+ * @see lv-interactive-rebase-dialog.ts generatePreview()
  */
 function generatePreview(commits: EditableRebaseCommit[]): PreviewCommit[] {
   const preview: PreviewCommit[] = [];
@@ -140,6 +156,7 @@ function detectAutosquashCommits(commits: EditableRebaseCommit[]): boolean {
 
 /**
  * Apply autosquash: reorder and mark fixup!/squash! commits
+ * @see lv-interactive-rebase-dialog.ts applyAutosquash()
  */
 function applyAutosquash(commits: EditableRebaseCommit[]): EditableRebaseCommit[] {
   const newCommits: EditableRebaseCommit[] = [];
@@ -183,6 +200,7 @@ function applyAutosquash(commits: EditableRebaseCommit[]): EditableRebaseCommit[
 
 /**
  * Get statistics about the rebase operation
+ * @see lv-interactive-rebase-dialog.ts getStats()
  */
 function getStats(commits: EditableRebaseCommit[]): { kept: number; squashed: number; dropped: number; reworded: number } {
   let kept = 0;
@@ -664,8 +682,9 @@ describe('Interactive Rebase Dialog', () => {
 
   describe('Todo File Generation', () => {
     /**
-     * Generate todo file content matching the component logic
+     * Generate todo file content for interactive rebase
      * For reword with changed message, uses pick + exec git commit --amend
+     * @see lv-interactive-rebase-dialog.ts handleExecute()
      */
     function generateTodo(commits: EditableRebaseCommit[]): string {
       const todoLines: string[] = [];
