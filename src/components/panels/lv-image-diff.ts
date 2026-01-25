@@ -577,179 +577,197 @@ export class LvImageDiff extends LitElement {
 
     this.computingDifference = true;
 
-    const oldSrc = this.getImageSrc(
-      this.imageData.oldData ?? null,
-      this.imageData.imageType ?? null
-    );
-    const newSrc = this.getImageSrc(
-      this.imageData.newData ?? null,
-      this.imageData.imageType ?? null
-    );
+    // Track canvases for cleanup in finally block
+    let oldCanvas: HTMLCanvasElement | null = null;
+    let newCanvas: HTMLCanvasElement | null = null;
+    let diffCanvas: HTMLCanvasElement | null = null;
 
-    if (!oldSrc && !newSrc) {
-      this.differenceDataUrl = null;
-      this.computingDifference = false;
-      return;
-    }
+    try {
+      const oldSrc = this.getImageSrc(
+        this.imageData.oldData ?? null,
+        this.imageData.imageType ?? null
+      );
+      const newSrc = this.getImageSrc(
+        this.imageData.newData ?? null,
+        this.imageData.imageType ?? null
+      );
 
-    // Load images
-    const loadImage = (src: string): Promise<HTMLImageElement | null> => {
-      if (!src) return Promise.resolve(null);
-      return new Promise((resolve) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = () => resolve(null);
-        img.src = src;
-      });
-    };
+      if (!oldSrc && !newSrc) {
+        this.differenceDataUrl = null;
+        return;
+      }
 
-    const [oldImg, newImg] = await Promise.all([
-      loadImage(oldSrc),
-      loadImage(newSrc),
-    ]);
-
-    // Determine canvas size (use the larger dimensions)
-    const width = Math.max(oldImg?.width ?? 0, newImg?.width ?? 0);
-    const height = Math.max(oldImg?.height ?? 0, newImg?.height ?? 0);
-
-    if (width === 0 || height === 0) {
-      this.differenceDataUrl = null;
-      this.computingDifference = false;
-      return;
-    }
-
-    // Create canvases
-    const oldCanvas = document.createElement('canvas');
-    const newCanvas = document.createElement('canvas');
-    const diffCanvas = document.createElement('canvas');
-
-    oldCanvas.width = newCanvas.width = diffCanvas.width = width;
-    oldCanvas.height = newCanvas.height = diffCanvas.height = height;
-
-    const oldCtx = oldCanvas.getContext('2d');
-    const newCtx = newCanvas.getContext('2d');
-    const diffCtx = diffCanvas.getContext('2d');
-
-    if (!oldCtx || !newCtx || !diffCtx) {
-      this.error = 'Failed to create canvas context for difference computation';
-      this.computingDifference = false;
-      return;
-    }
-
-    // Draw images
-    if (oldImg) {
-      oldCtx.drawImage(oldImg, 0, 0);
-    }
-    if (newImg) {
-      newCtx.drawImage(newImg, 0, 0);
-    }
-
-    // Get image data
-    const oldData = oldCtx.getImageData(0, 0, width, height);
-    const newData = newCtx.getImageData(0, 0, width, height);
-    const diffData = diffCtx.createImageData(width, height);
-
-    // Compute difference
-    let added = 0;
-    let removed = 0;
-    let changed = 0;
-    let unchanged = 0;
-    const threshold = this.differenceThreshold;
-
-    const totalLength = oldData.data.length;
-    const pixelsPerChunk = 10000; // number of pixels per chunk (adjust if needed)
-    const step = 4; // RGBA per pixel
-
-    await new Promise<void>((resolve) => {
-      let index = 0;
-
-      const processChunk = () => {
-        const maxIndex = Math.min(index + pixelsPerChunk * step, totalLength);
-
-        for (; index < maxIndex; index += step) {
-          const oldR = oldData.data[index];
-          const oldG = oldData.data[index + 1];
-          const oldB = oldData.data[index + 2];
-          const oldA = oldData.data[index + 3];
-
-          const newR = newData.data[index];
-          const newG = newData.data[index + 1];
-          const newB = newData.data[index + 2];
-          const newA = newData.data[index + 3];
-
-          const oldIsTransparent = oldA < 10;
-          const newIsTransparent = newA < 10;
-
-          if (oldIsTransparent && newIsTransparent) {
-            // Both transparent - always unchanged (RGB values don't matter)
-            diffData.data[index] = 0;
-            diffData.data[index + 1] = 0;
-            diffData.data[index + 2] = 0;
-            diffData.data[index + 3] = 0;
-            unchanged++;
-          } else if (oldIsTransparent && !newIsTransparent) {
-            // Added pixel (green)
-            diffData.data[index] = 0;
-            diffData.data[index + 1] = 255;
-            diffData.data[index + 2] = 0;
-            diffData.data[index + 3] = 180;
-            added++;
-          } else if (!oldIsTransparent && newIsTransparent) {
-            // Removed pixel (red)
-            diffData.data[index] = 255;
-            diffData.data[index + 1] = 0;
-            diffData.data[index + 2] = 0;
-            diffData.data[index + 3] = 180;
-            removed++;
-          } else {
-            // Both opaque - calculate color difference
-            const diff =
-              Math.abs(oldR - newR) +
-              Math.abs(oldG - newG) +
-              Math.abs(oldB - newB) +
-              Math.abs(oldA - newA);
-
-            if (diff > threshold) {
-              // Changed pixel (magenta)
-              diffData.data[index] = 255;
-              diffData.data[index + 1] = 0;
-              diffData.data[index + 2] = 255;
-              diffData.data[index + 3] = 180;
-              changed++;
-            } else {
-              // Unchanged pixel (show dimmed original)
-              diffData.data[index] = newR;
-              diffData.data[index + 1] = newG;
-              diffData.data[index + 2] = newB;
-              diffData.data[index + 3] = Math.floor(newA * 0.3);
-              unchanged++;
-            }
-          }
-        }
-
-        if (index < totalLength) {
-          // Schedule next chunk to avoid blocking the main thread
-          requestAnimationFrame(processChunk);
-        } else {
-          resolve();
-        }
+      // Load images
+      const loadImage = (src: string): Promise<HTMLImageElement | null> => {
+        if (!src) return Promise.resolve(null);
+        return new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = () => resolve(null);
+          img.src = src;
+        });
       };
 
-      requestAnimationFrame(processChunk);
-    });
-    diffCtx.putImageData(diffData, 0, 0);
-    this.differenceDataUrl = diffCanvas.toDataURL('image/png');
-    this.differenceStats = { added, removed, changed, unchanged };
-    this.computingDifference = false;
+      const [oldImg, newImg] = await Promise.all([
+        loadImage(oldSrc),
+        loadImage(newSrc),
+      ]);
 
-    // Explicitly clear canvas resources to help the browser release memory,
-    // especially important for large images and repeated diff computations.
-    oldCanvas.width = 0;
-    oldCanvas.height = 0;
-    newCanvas.width = 0;
-    newCanvas.height = 0;
-    diffCanvas.width = 0;
-    diffCanvas.height = 0;
+      // Determine canvas size (use the larger dimensions)
+      const width = Math.max(oldImg?.width ?? 0, newImg?.width ?? 0);
+      const height = Math.max(oldImg?.height ?? 0, newImg?.height ?? 0);
+
+      if (width === 0 || height === 0) {
+        this.differenceDataUrl = null;
+        return;
+      }
+
+      // Create canvases (assign to outer-scoped variables for cleanup in finally)
+      oldCanvas = document.createElement('canvas');
+      newCanvas = document.createElement('canvas');
+      diffCanvas = document.createElement('canvas');
+
+      oldCanvas.width = newCanvas.width = diffCanvas.width = width;
+      oldCanvas.height = newCanvas.height = diffCanvas.height = height;
+
+      const oldCtx = oldCanvas.getContext('2d');
+      const newCtx = newCanvas.getContext('2d');
+      const diffCtx = diffCanvas.getContext('2d');
+
+      if (!oldCtx || !newCtx || !diffCtx) {
+        this.error = 'Failed to create canvas context for difference computation';
+        return;
+      }
+
+      // Draw images
+      if (oldImg) {
+        oldCtx.drawImage(oldImg, 0, 0);
+      }
+      if (newImg) {
+        newCtx.drawImage(newImg, 0, 0);
+      }
+
+      // Get image data
+      const oldData = oldCtx.getImageData(0, 0, width, height);
+      const newData = newCtx.getImageData(0, 0, width, height);
+      const diffData = diffCtx.createImageData(width, height);
+
+      // Compute difference
+      let added = 0;
+      let removed = 0;
+      let changed = 0;
+      let unchanged = 0;
+      const threshold = this.differenceThreshold;
+
+      const totalLength = oldData.data.length;
+      const pixelsPerChunk = 10000; // number of pixels per chunk (adjust if needed)
+      const step = 4; // RGBA per pixel
+
+      await new Promise<void>((resolve) => {
+        let index = 0;
+
+        const processChunk = () => {
+          const maxIndex = Math.min(index + pixelsPerChunk * step, totalLength);
+
+          for (; index < maxIndex; index += step) {
+            const oldR = oldData.data[index];
+            const oldG = oldData.data[index + 1];
+            const oldB = oldData.data[index + 2];
+            const oldA = oldData.data[index + 3];
+
+            const newR = newData.data[index];
+            const newG = newData.data[index + 1];
+            const newB = newData.data[index + 2];
+            const newA = newData.data[index + 3];
+
+            const oldIsTransparent = oldA < 10;
+            const newIsTransparent = newA < 10;
+
+            if (oldIsTransparent && newIsTransparent) {
+              // Both transparent - always unchanged (RGB values don't matter)
+              diffData.data[index] = 0;
+              diffData.data[index + 1] = 0;
+              diffData.data[index + 2] = 0;
+              diffData.data[index + 3] = 0;
+              unchanged++;
+            } else if (oldIsTransparent && !newIsTransparent) {
+              // Added pixel (green)
+              diffData.data[index] = 0;
+              diffData.data[index + 1] = 255;
+              diffData.data[index + 2] = 0;
+              diffData.data[index + 3] = 180;
+              added++;
+            } else if (!oldIsTransparent && newIsTransparent) {
+              // Removed pixel (red)
+              diffData.data[index] = 255;
+              diffData.data[index + 1] = 0;
+              diffData.data[index + 2] = 0;
+              diffData.data[index + 3] = 180;
+              removed++;
+            } else {
+              // Both opaque - calculate color difference
+              const diff =
+                Math.abs(oldR - newR) +
+                Math.abs(oldG - newG) +
+                Math.abs(oldB - newB) +
+                Math.abs(oldA - newA);
+
+              if (diff > threshold) {
+                // Changed pixel (magenta)
+                diffData.data[index] = 255;
+                diffData.data[index + 1] = 0;
+                diffData.data[index + 2] = 255;
+                diffData.data[index + 3] = 180;
+                changed++;
+              } else {
+                // Unchanged pixel (show dimmed original)
+                diffData.data[index] = newR;
+                diffData.data[index + 1] = newG;
+                diffData.data[index + 2] = newB;
+                diffData.data[index + 3] = Math.floor(newA * 0.3);
+                unchanged++;
+              }
+            }
+          }
+
+          if (index < totalLength) {
+            // Schedule next chunk to avoid blocking the main thread
+            requestAnimationFrame(processChunk);
+          } else {
+            resolve();
+          }
+        };
+
+        requestAnimationFrame(processChunk);
+      });
+
+      diffCtx.putImageData(diffData, 0, 0);
+      this.differenceDataUrl = diffCanvas.toDataURL('image/png');
+      this.differenceStats = { added, removed, changed, unchanged };
+    } catch (err) {
+      // Log error and set error state so user knows computation failed
+      console.error('Error computing image difference:', err);
+      this.error = 'Failed to compute image difference';
+      this.differenceDataUrl = null;
+    } finally {
+      // Always reset the computing flag to allow future computations
+      this.computingDifference = false;
+
+      // Explicitly clear canvas resources to help the browser release memory,
+      // especially important for large images and repeated diff computations.
+      if (oldCanvas) {
+        oldCanvas.width = 0;
+        oldCanvas.height = 0;
+      }
+      if (newCanvas) {
+        newCanvas.width = 0;
+        newCanvas.height = 0;
+      }
+      if (diffCanvas) {
+        diffCanvas.width = 0;
+        diffCanvas.height = 0;
+      }
+    }
   }
 
   private renderSideBySide() {

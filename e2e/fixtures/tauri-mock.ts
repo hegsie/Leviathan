@@ -286,12 +286,17 @@ function createMockHandler(mocks: typeof defaultMockData) {
 
       // Diff commands
       case 'get_diff':
-      case 'get_file_diff':
+      case 'get_file_diff': {
+        const filePath = (args?.path as string) || 'src/main.ts';
+        // Check if this is an image file
+        const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp'];
+        const isImage = imageExtensions.some(ext => filePath.toLowerCase().endsWith(ext));
+        const imageType = isImage ? filePath.split('.').pop()?.toLowerCase() || 'png' : null;
         return {
-          path: args?.path || 'src/main.ts',
+          path: filePath,
           oldPath: null,
           status: 'modified',
-          hunks: [
+          hunks: isImage ? [] : [
             {
               header: '@@ -1,5 +1,6 @@',
               oldStart: 1,
@@ -305,12 +310,28 @@ function createMockHandler(mocks: typeof defaultMockData) {
               ],
             },
           ],
-          isBinary: false,
-          isImage: false,
-          imageType: null,
-          additions: 1,
-          deletions: 1,
+          isBinary: isImage,
+          isImage,
+          imageType,
+          additions: isImage ? 0 : 1,
+          deletions: isImage ? 0 : 1,
         };
+      }
+
+      case 'get_image_versions': {
+        // Return mock image data - small 2x2 red/green PNG images encoded in base64
+        // Old image: 2x2 red pixels
+        const oldImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVQI12P4z8DwHwAFAAH/plkKSgAAAABJRU5ErkJggg==';
+        // New image: 2x2 green pixels
+        const newImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVQI12Ng+M/AAAADhAH/hc2rNAAAAABJRU5ErkJggg==';
+        const filePath = (args?.path as string) || 'image.png';
+        const imageType = filePath.split('.').pop()?.toLowerCase() || 'png';
+        return {
+          oldData: oldImageBase64,
+          newData: newImageBase64,
+          imageType,
+        };
+      }
 
       // Profile commands
       case 'get_profiles':
@@ -428,18 +449,38 @@ export async function setupTauriMocks(
           case 'get_settings':
             return data.settings;
           case 'get_diff':
-          case 'get_file_diff':
+          case 'get_file_diff': {
+            const filePath = (args as { path?: string })?.path || 'src/main.ts';
+            // Check if this is an image file
+            const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp'];
+            const isImage = imageExtensions.some(ext => filePath.toLowerCase().endsWith(ext));
+            const imageType = isImage ? filePath.split('.').pop()?.toLowerCase() || 'png' : null;
             return {
-              path: (args as { path?: string })?.path || 'src/main.ts',
+              path: filePath,
               oldPath: null,
               status: 'modified',
               hunks: [],
-              isBinary: false,
-              isImage: false,
-              imageType: null,
-              additions: 1,
-              deletions: 1,
+              isBinary: isImage,
+              isImage,
+              imageType,
+              additions: isImage ? 0 : 1,
+              deletions: isImage ? 0 : 1,
             };
+          }
+          case 'get_image_versions': {
+            // Return mock image data - small 2x2 red/green PNG images encoded in base64
+            // Old image: 2x2 red pixels
+            const oldImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVQI12P4z8DwHwAFAAH/plkKSgAAAABJRU5ErkJggg==';
+            // New image: 2x2 green pixels
+            const newImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVQI12Ng+M/AAAADhAH/hc2rNAAAAABJRU5ErkJggg==';
+            const filePath = (args as { path?: string })?.path || 'image.png';
+            const imageType = filePath.split('.').pop()?.toLowerCase() || 'png';
+            return {
+              oldData: oldImageBase64,
+              newData: newImageBase64,
+              imageType,
+            };
+          }
           case 'checkout_branch':
           case 'checkout':
           case 'create_branch':

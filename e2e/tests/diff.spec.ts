@@ -239,3 +239,148 @@ test.describe('Image Diff Deleted Files', () => {
     await expect(file).toBeVisible();
   });
 });
+
+test.describe('Image Diff Difference Mode', () => {
+  let app: AppPage;
+  let rightPanel: RightPanelPage;
+  let graph: GraphPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    rightPanel = new RightPanelPage(page);
+    graph = new GraphPanelPage(page);
+    // Setup with a modified image file
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'assets/test-image.png', status: 'modified', isStaged: false, isConflicted: false },
+      ])
+    );
+  });
+
+  test('clicking Difference button should switch to difference mode', async ({ page }) => {
+    // Click on the image file to open diff
+    const file = rightPanel.getUnstagedFile('assets/test-image.png');
+    await file.click();
+
+    // Wait for diff overlay to appear
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    // Find and click the Difference button
+    const differenceButton = page.locator('lv-image-diff').getByRole('button', { name: 'Difference' });
+    await expect(differenceButton).toBeVisible();
+    await differenceButton.click();
+
+    // Verify the difference mode is active (button should have 'active' class)
+    await expect(differenceButton).toHaveClass(/active/);
+  });
+
+  test('difference mode should display sensitivity slider', async ({ page }) => {
+    // Click on the image file to open diff
+    const file = rightPanel.getUnstagedFile('assets/test-image.png');
+    await file.click();
+
+    // Wait for diff overlay to appear
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    // Click the Difference button
+    const differenceButton = page.locator('lv-image-diff').getByRole('button', { name: 'Difference' });
+    await differenceButton.click();
+
+    // Verify sensitivity slider is visible
+    const sensitivitySlider = page.locator('lv-image-diff').getByRole('slider', { name: /sensitivity/i });
+    await expect(sensitivitySlider).toBeVisible({ timeout: 5000 });
+  });
+
+  test('difference mode should display legend with color swatches', async ({ page }) => {
+    // Click on the image file to open diff
+    const file = rightPanel.getUnstagedFile('assets/test-image.png');
+    await file.click();
+
+    // Wait for diff overlay to appear
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    // Click the Difference button
+    const differenceButton = page.locator('lv-image-diff').getByRole('button', { name: 'Difference' });
+    await differenceButton.click();
+
+    // Wait for difference computation to complete
+    await page.waitForTimeout(500);
+
+    // Verify legend items are displayed
+    const imageDiff = page.locator('lv-image-diff');
+    await expect(imageDiff.locator('.legend-item').filter({ hasText: 'Added' })).toBeVisible({ timeout: 5000 });
+    await expect(imageDiff.locator('.legend-item').filter({ hasText: 'Removed' })).toBeVisible();
+    await expect(imageDiff.locator('.legend-item').filter({ hasText: 'Changed' })).toBeVisible();
+  });
+
+  test('difference mode should show statistics with percentages', async ({ page }) => {
+    // Click on the image file to open diff
+    const file = rightPanel.getUnstagedFile('assets/test-image.png');
+    await file.click();
+
+    // Wait for diff overlay to appear
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    // Click the Difference button
+    const differenceButton = page.locator('lv-image-diff').getByRole('button', { name: 'Difference' });
+    await differenceButton.click();
+
+    // Wait for difference computation
+    await page.waitForTimeout(500);
+
+    // Verify percentages are shown in legend (format: "Added (X.X%)")
+    const imageDiff = page.locator('lv-image-diff');
+    const addedLegend = imageDiff.locator('.legend-item').filter({ hasText: 'Added' });
+    await expect(addedLegend).toContainText(/%/);
+  });
+
+  test('sensitivity slider should be adjustable', async ({ page }) => {
+    // Click on the image file to open diff
+    const file = rightPanel.getUnstagedFile('assets/test-image.png');
+    await file.click();
+
+    // Wait for diff overlay to appear
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    // Click the Difference button
+    const differenceButton = page.locator('lv-image-diff').getByRole('button', { name: 'Difference' });
+    await differenceButton.click();
+
+    // Get the sensitivity slider
+    const sensitivitySlider = page.locator('lv-image-diff').getByRole('slider', { name: /sensitivity/i });
+    await expect(sensitivitySlider).toBeVisible({ timeout: 5000 });
+
+    // Adjust the slider value
+    await sensitivitySlider.fill('50');
+
+    // Verify the threshold value display updates
+    const thresholdValue = page.locator('lv-image-diff .threshold-value');
+    await expect(thresholdValue).toHaveText('50');
+  });
+
+  test('should switch between image diff modes', async ({ page }) => {
+    // Click on the image file to open diff
+    const file = rightPanel.getUnstagedFile('assets/test-image.png');
+    await file.click();
+
+    // Wait for diff overlay to appear
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    const imageDiff = page.locator('lv-image-diff');
+
+    // Verify all mode buttons are present
+    await expect(imageDiff.getByRole('button', { name: 'Side by Side' })).toBeVisible();
+    await expect(imageDiff.getByRole('button', { name: 'Onion Skin' })).toBeVisible();
+    await expect(imageDiff.getByRole('button', { name: 'Swipe' })).toBeVisible();
+    await expect(imageDiff.getByRole('button', { name: 'Difference' })).toBeVisible();
+
+    // Switch to Difference mode
+    await imageDiff.getByRole('button', { name: 'Difference' }).click();
+    await expect(imageDiff.getByRole('button', { name: 'Difference' })).toHaveClass(/active/);
+
+    // Switch back to Side by Side
+    await imageDiff.getByRole('button', { name: 'Side by Side' }).click();
+    await expect(imageDiff.getByRole('button', { name: 'Side by Side' })).toHaveClass(/active/);
+  });
+});
