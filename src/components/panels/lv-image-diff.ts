@@ -475,6 +475,10 @@ export class LvImageDiff extends LitElement {
     this.loading = true;
     this.error = null;
 
+    // Clear cached difference data to force recomputation with new images
+    this.differenceDataUrl = null;
+    this.differenceStats = { added: 0, removed: 0, changed: 0, unchanged: 0 };
+
     const result = await gitService.getImageVersions(
       this.repoPath,
       this.filePath,
