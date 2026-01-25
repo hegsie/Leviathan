@@ -26,6 +26,8 @@ interface PreviewCommit {
   isSquashed: boolean;
   isDropped: boolean;
   squashedFrom?: string[];
+  /** Error message if this commit configuration is invalid */
+  error?: string;
 }
 
 @customElement('lv-interactive-rebase-dialog')
@@ -303,6 +305,24 @@ export class LvInteractiveRebaseDialog extends LitElement {
         border-radius: var(--radius-sm);
       }
 
+      .preview-commit.error {
+        background: var(--color-error-bg, rgba(239, 68, 68, 0.1));
+        border-left: 3px solid var(--color-error);
+      }
+
+      .preview-commit.error .preview-message {
+        color: var(--color-error);
+      }
+
+      .error-badge {
+        font-size: var(--font-size-xs);
+        color: white;
+        background: var(--color-error);
+        padding: 1px 6px;
+        border-radius: var(--radius-sm);
+        font-weight: var(--font-weight-semibold);
+      }
+
       .preview-empty {
         padding: var(--spacing-md);
         text-align: center;
@@ -566,10 +586,12 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
   /**
    * Generate preview of what commits will look like after rebase
+   * Handles edge cases like orphaned squash/fixup commits
    */
   private generatePreview(): PreviewCommit[] {
     const preview: PreviewCommit[] = [];
     let i = 0;
+    let hasBaseCommit = false; // Track if we've seen a pick/reword/edit
 
     while (i < this.commits.length) {
       const commit = this.commits[i];
@@ -579,6 +601,23 @@ export class LvInteractiveRebaseDialog extends LitElement {
         i++;
         continue;
       }
+
+      // Check if this is an orphaned squash/fixup (no base commit before it)
+      if ((commit.action === 'squash' || commit.action === 'fixup') && !hasBaseCommit) {
+        // This squash/fixup has no commit to squash into - mark as error
+        preview.push({
+          shortId: commit.shortId,
+          summary: commit.summary,
+          isSquashed: false,
+          isDropped: false,
+          error: `Cannot ${commit.action}: no previous commit to combine with`,
+        });
+        i++;
+        continue;
+      }
+
+      // This is a base commit (pick/reword/edit)
+      hasBaseCommit = true;
 
       // Check if following commits are squash/fixup
       const squashedFrom: string[] = [];
@@ -605,6 +644,14 @@ export class LvInteractiveRebaseDialog extends LitElement {
     }
 
     return preview;
+  }
+
+  /**
+   * Check if the current configuration has validation errors
+   */
+  private hasValidationErrors(): boolean {
+    const preview = this.generatePreview();
+    return preview.some(p => p.error !== undefined);
   }
 
   /**
@@ -772,7 +819,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
   }
 
   private get canExecute(): boolean {
-    return this.commits.length > 0 && !this.executing;
+    return this.commits.length > 0 && !this.executing && !this.hasValidationErrors();
   }
 
   private renderCommitRow(commit: EditableRebaseCommit, index: number) {
@@ -841,11 +888,16 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
     return html`
       ${preview.map(commit => html`
-        <div class="preview-commit ${commit.isSquashed ? 'squashed' : ''}">
+        <div class="preview-commit ${commit.isSquashed ? 'squashed' : ''} ${commit.error ? 'error' : ''}">
           <span class="preview-hash">${commit.shortId}</span>
-          <span class="preview-message" title="${commit.summary}">${commit.summary}</span>
+          <span class="preview-message" title="${commit.error || commit.summary}">
+            ${commit.error ? commit.error : commit.summary}
+          </span>
           ${commit.squashedFrom ? html`
             <span class="squash-badge">+${commit.squashedFrom.length} squashed</span>
+          ` : nothing}
+          ${commit.error ? html`
+            <span class="error-badge">Error</span>
           ` : nothing}
         </div>
       `)}

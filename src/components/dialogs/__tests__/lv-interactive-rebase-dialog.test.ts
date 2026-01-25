@@ -41,6 +41,7 @@ interface PreviewCommit {
   isSquashed: boolean;
   isDropped: boolean;
   squashedFrom?: string[];
+  error?: string;
 }
 
 /**
@@ -66,10 +67,12 @@ function createEditableCommit(
 /**
  * Generate preview of what commits will look like after rebase
  * This mirrors the logic in lv-interactive-rebase-dialog.ts
+ * Handles edge cases like orphaned squash/fixup commits
  */
 function generatePreview(commits: EditableRebaseCommit[]): PreviewCommit[] {
   const preview: PreviewCommit[] = [];
   let i = 0;
+  let hasBaseCommit = false;
 
   while (i < commits.length) {
     const commit = commits[i];
@@ -78,6 +81,22 @@ function generatePreview(commits: EditableRebaseCommit[]): PreviewCommit[] {
       i++;
       continue;
     }
+
+    // Check if this is an orphaned squash/fixup (no base commit before it)
+    if ((commit.action === 'squash' || commit.action === 'fixup') && !hasBaseCommit) {
+      preview.push({
+        shortId: commit.shortId,
+        summary: commit.summary,
+        isSquashed: false,
+        isDropped: false,
+        error: `Cannot ${commit.action}: no previous commit to combine with`,
+      });
+      i++;
+      continue;
+    }
+
+    // This is a base commit (pick/reword/edit)
+    hasBaseCommit = true;
 
     const squashedFrom: string[] = [];
     let j = i + 1;
@@ -103,6 +122,15 @@ function generatePreview(commits: EditableRebaseCommit[]): PreviewCommit[] {
   }
 
   return preview;
+
+}
+
+/**
+ * Check if the configuration has validation errors
+ */
+function hasValidationErrors(commits: EditableRebaseCommit[]): boolean {
+  const preview = generatePreview(commits);
+  return preview.some(p => p.error !== undefined);
 }
 
 /**
@@ -269,6 +297,82 @@ describe('Interactive Rebase Dialog', () => {
       const preview = generatePreview(commits);
 
       expect(preview).to.have.length(0);
+    });
+
+    it('should mark squash at index 0 as error', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Feature A', 'squash', 0),
+        createEditableCommit('def1234', 'Feature B', 'pick', 1),
+      ];
+
+      const preview = generatePreview(commits);
+
+      expect(preview).to.have.length(2);
+      expect(preview[0].error).to.equal('Cannot squash: no previous commit to combine with');
+      expect(preview[1].error).to.be.undefined;
+    });
+
+    it('should mark fixup at index 0 as error', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Feature A', 'fixup', 0),
+        createEditableCommit('def1234', 'Feature B', 'pick', 1),
+      ];
+
+      const preview = generatePreview(commits);
+
+      expect(preview).to.have.length(2);
+      expect(preview[0].error).to.equal('Cannot fixup: no previous commit to combine with');
+      expect(preview[1].error).to.be.undefined;
+    });
+
+    it('should mark squash/fixup after all dropped commits as error', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Feature A', 'drop', 0),
+        createEditableCommit('def1234', 'Feature B', 'drop', 1),
+        createEditableCommit('ghi1234', 'Feature C', 'squash', 2),
+        createEditableCommit('jkl1234', 'Feature D', 'pick', 3),
+      ];
+
+      const preview = generatePreview(commits);
+
+      expect(preview).to.have.length(2);
+      expect(preview[0].shortId).to.equal('ghi1234');
+      expect(preview[0].error).to.equal('Cannot squash: no previous commit to combine with');
+      expect(preview[1].shortId).to.equal('jkl1234');
+      expect(preview[1].error).to.be.undefined;
+    });
+
+    it('should mark multiple consecutive orphaned squash/fixup as errors', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Feature A', 'squash', 0),
+        createEditableCommit('def1234', 'Feature B', 'fixup', 1),
+        createEditableCommit('ghi1234', 'Feature C', 'pick', 2),
+      ];
+
+      const preview = generatePreview(commits);
+
+      expect(preview).to.have.length(3);
+      expect(preview[0].error).to.equal('Cannot squash: no previous commit to combine with');
+      expect(preview[1].error).to.equal('Cannot fixup: no previous commit to combine with');
+      expect(preview[2].error).to.be.undefined;
+    });
+
+    it('should validate hasValidationErrors returns true for orphaned squash', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Feature A', 'squash', 0),
+        createEditableCommit('def1234', 'Feature B', 'pick', 1),
+      ];
+
+      expect(hasValidationErrors(commits)).to.be.true;
+    });
+
+    it('should validate hasValidationErrors returns false for valid config', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
+        createEditableCommit('def1234', 'Feature B', 'squash', 1),
+      ];
+
+      expect(hasValidationErrors(commits)).to.be.false;
     });
   });
 
