@@ -1,5 +1,12 @@
 import { expect } from '@open-wc/testing';
 
+/**
+ * Alpha value threshold below which a pixel is considered transparent.
+ * This must match TRANSPARENCY_ALPHA_THRESHOLD in lv-image-diff.ts.
+ * We define it locally to avoid importing the component before mocks are set up.
+ */
+const TRANSPARENCY_ALPHA_THRESHOLD = 10;
+
 // Mock Tauri API before importing any modules that use it
 const mockInvoke = (command: string): Promise<unknown> => {
   switch (command) {
@@ -225,8 +232,8 @@ describe('Image Diff Component Data Structures', () => {
         const oldA = 5; // Transparent
         const newA = 255; // Opaque
 
-        const oldIsTransparent = oldA < 10;
-        const newIsTransparent = newA < 10;
+        const oldIsTransparent = oldA < TRANSPARENCY_ALPHA_THRESHOLD;
+        const newIsTransparent = newA < TRANSPARENCY_ALPHA_THRESHOLD;
 
         expect(oldIsTransparent && !newIsTransparent).to.be.true;
       });
@@ -235,8 +242,8 @@ describe('Image Diff Component Data Structures', () => {
         const oldA = 255; // Opaque
         const newA = 5; // Transparent
 
-        const oldIsTransparent = oldA < 10;
-        const newIsTransparent = newA < 10;
+        const oldIsTransparent = oldA < TRANSPARENCY_ALPHA_THRESHOLD;
+        const newIsTransparent = newA < TRANSPARENCY_ALPHA_THRESHOLD;
 
         expect(!oldIsTransparent && newIsTransparent).to.be.true;
       });
@@ -346,8 +353,8 @@ describe('Image Diff Component Data Structures', () => {
         const newB = newImageData.data[i + 2];
         const newA = newImageData.data[i + 3];
 
-        const oldIsTransparent = oldA < 10;
-        const newIsTransparent = newA < 10;
+        const oldIsTransparent = oldA < TRANSPARENCY_ALPHA_THRESHOLD;
+        const newIsTransparent = newA < TRANSPARENCY_ALPHA_THRESHOLD;
 
         if (oldIsTransparent && newIsTransparent) {
           // Both transparent - always unchanged (RGB values don't matter)

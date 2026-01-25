@@ -13,6 +13,13 @@ type ImageDiffMode = 'side-by-side' | 'onion-skin' | 'swipe' | 'difference';
 /** Debounce delay for threshold slider in milliseconds */
 const THRESHOLD_DEBOUNCE_MS = 150;
 
+/**
+ * Alpha value threshold below which a pixel is considered transparent.
+ * Pixels with alpha < this value are treated as fully transparent in difference calculations.
+ * Using a small threshold (rather than 0) accounts for anti-aliasing and compression artifacts.
+ */
+export const TRANSPARENCY_ALPHA_THRESHOLD = 10;
+
 @customElement('lv-image-diff')
 export class LvImageDiff extends LitElement {
   static styles = [
@@ -680,8 +687,8 @@ export class LvImageDiff extends LitElement {
             const newB = newData.data[index + 2];
             const newA = newData.data[index + 3];
 
-            const oldIsTransparent = oldA < 10;
-            const newIsTransparent = newA < 10;
+            const oldIsTransparent = oldA < TRANSPARENCY_ALPHA_THRESHOLD;
+            const newIsTransparent = newA < TRANSPARENCY_ALPHA_THRESHOLD;
 
             if (oldIsTransparent && newIsTransparent) {
               // Both transparent - always unchanged (RGB values don't matter)
