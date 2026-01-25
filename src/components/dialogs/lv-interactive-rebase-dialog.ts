@@ -793,10 +793,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
       const todoLines: string[] = [];
 
       for (const c of this.commits) {
+        // Sanitize summary for todo file format (line-based, no newlines allowed)
+        const sanitizedSummary = c.summary.replace(/[\r\n]+/g, ' ').trim();
+
         if (c.action === 'reword' && c.newMessage && c.newMessage !== c.summary) {
           // Use pick + exec to amend with new message
           // This is more reliable than reword which opens an editor
-          todoLines.push(`pick ${c.shortId} ${c.summary}`);
+          todoLines.push(`pick ${c.shortId} ${sanitizedSummary}`);
           // Use printf for POSIX shell compatibility (works with dash, sh, bash, zsh)
           // Single quotes around printf arg prevent shell expansion
           // '\'' escapes a single quote within single-quoted string
@@ -807,9 +810,9 @@ export class LvInteractiveRebaseDialog extends LitElement {
           todoLines.push(`exec git commit --amend -m "$(printf '%b' '${escapedMessage}')"`);
         } else if (c.action === 'reword') {
           // Reword without message change - keep as pick (no point in reword)
-          todoLines.push(`pick ${c.shortId} ${c.summary}`);
+          todoLines.push(`pick ${c.shortId} ${sanitizedSummary}`);
         } else {
-          todoLines.push(`${c.action} ${c.shortId} ${c.summary}`);
+          todoLines.push(`${c.action} ${c.shortId} ${sanitizedSummary}`);
         }
       }
 
