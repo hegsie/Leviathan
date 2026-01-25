@@ -683,6 +683,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
   /**
    * Get statistics about the rebase operation
+   *
+   * Note: `kept` counts commits that will remain in history (pick, edit, reword).
+   * `reworded` is a subset of `kept` - commits that are kept but with modified messages.
+   * The sum of kept + squashed + dropped equals total commits, but reworded overlaps with kept.
    */
   private getStats(): { kept: number; squashed: number; dropped: number; reworded: number } {
     let kept = 0;
@@ -697,7 +701,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
           kept++;
           break;
         case 'reword':
-          reworded++;
+          reworded++; // Also counted in kept (reworded is a subset of kept)
           kept++;
           break;
         case 'squash':
