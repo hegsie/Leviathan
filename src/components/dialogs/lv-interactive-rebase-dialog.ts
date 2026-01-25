@@ -383,6 +383,15 @@ export class LvInteractiveRebaseDialog extends LitElement {
         font-size: var(--font-size-sm);
       }
 
+      .warning-message {
+        padding: var(--spacing-sm) var(--spacing-md);
+        background: var(--color-warning-bg, rgba(234, 179, 8, 0.1));
+        border: 1px solid var(--color-warning);
+        border-radius: var(--radius-md);
+        color: var(--color-warning);
+        font-size: var(--font-size-sm);
+      }
+
       .help-section {
         display: flex;
         gap: var(--spacing-lg);
@@ -476,6 +485,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
   @state() private loading = false;
   @state() private executing = false;
   @state() private error = '';
+  @state() private warning = '';
   @state() private draggedIndex: number | null = null;
   @state() private dropTargetIndex: number | null = null;
   @state() private showPreview = true;
@@ -518,6 +528,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.loading = false;
     this.executing = false;
     this.error = '';
+    this.warning = '';
     this.draggedIndex = null;
     this.dropTargetIndex = null;
   }
@@ -553,6 +564,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
   private applyAutosquash(): void {
     const newCommits: EditableRebaseCommit[] = [];
     const autosquashCommits: EditableRebaseCommit[] = [];
+    const unmatchedCommits: string[] = [];
 
     // Separate regular and autosquash commits (create copies to avoid mutation)
     for (const commit of this.commits) {
@@ -585,12 +597,23 @@ export class LvInteractiveRebaseDialog extends LitElement {
         }
         newCommits.splice(insertIndex, 0, asCommit);
       } else {
-        // No target found, keep as pick at end
+        // No target found, keep as pick at end and track for warning
+        unmatchedCommits.push(asCommit.shortId);
         newCommits.push(asCommit);
       }
     }
 
     this.commits = newCommits;
+
+    // Show warning if some commits couldn't find their targets
+    if (unmatchedCommits.length > 0) {
+      const commitList = unmatchedCommits.join(', ');
+      this.warning = unmatchedCommits.length === 1
+        ? `Commit ${commitList} couldn't find its target and was kept as pick.`
+        : `Commits ${commitList} couldn't find their targets and were kept as picks.`;
+    } else {
+      this.warning = '';
+    }
   }
 
   /**
@@ -1013,6 +1036,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
               <div>Drag rows to reorder commits</div>
             </div>
           </div>
+
+          ${this.warning
+            ? html`<div class="warning-message">${this.warning}</div>`
+            : nothing}
 
           ${this.error
             ? html`<div class="error-message">${this.error}</div>`
