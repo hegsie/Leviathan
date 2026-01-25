@@ -16,8 +16,6 @@ interface EditableRebaseCommit extends RebaseCommit {
   action: RebaseAction;
   /** New message for reword action */
   newMessage?: string;
-  /** Original index before reordering (for preview) */
-  originalIndex: number;
 }
 
 interface PreviewCommit {
@@ -544,10 +542,9 @@ export class LvInteractiveRebaseDialog extends LitElement {
       const result = await gitService.getRebaseCommits(this.repositoryPath, this.onto);
 
       if (result.success) {
-        this.commits = (result.data || []).map((c, index) => ({
+        this.commits = (result.data || []).map(c => ({
           ...c,
           action: 'pick' as RebaseAction,
-          originalIndex: index,
         }));
       } else {
         this.error = result.error?.message ?? 'Failed to load commits';

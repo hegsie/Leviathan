@@ -32,7 +32,6 @@ interface EditableRebaseCommit {
   summary: string;
   action: RebaseAction;
   newMessage?: string;
-  originalIndex: number;
 }
 
 interface PreviewCommit {
@@ -51,7 +50,6 @@ function createEditableCommit(
   shortId: string,
   summary: string,
   action: RebaseAction = 'pick',
-  originalIndex: number = 0,
   newMessage?: string
 ): EditableRebaseCommit {
   return {
@@ -59,7 +57,6 @@ function createEditableCommit(
     shortId,
     summary,
     action,
-    originalIndex,
     newMessage,
   };
 }
@@ -221,9 +218,9 @@ describe('Interactive Rebase Dialog', () => {
   describe('Preview Generation', () => {
     it('should show all commits when all are pick', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Feature B', 'pick', 1),
-        createEditableCommit('ghi1234', 'Feature C', 'pick', 2),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Feature B', 'pick'),
+        createEditableCommit('ghi1234', 'Feature C', 'pick'),
       ];
 
       const preview = generatePreview(commits);
@@ -237,9 +234,9 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should hide dropped commits in preview', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Feature B', 'drop', 1),
-        createEditableCommit('ghi1234', 'Feature C', 'pick', 2),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Feature B', 'drop'),
+        createEditableCommit('ghi1234', 'Feature C', 'pick'),
       ];
 
       const preview = generatePreview(commits);
@@ -251,9 +248,9 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should mark squashed commits correctly', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Fix for A', 'squash', 1),
-        createEditableCommit('ghi1234', 'Feature B', 'pick', 2),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Fix for A', 'squash'),
+        createEditableCommit('ghi1234', 'Feature B', 'pick'),
       ];
 
       const preview = generatePreview(commits);
@@ -266,10 +263,10 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should handle multiple squashed commits', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Fix 1', 'fixup', 1),
-        createEditableCommit('ghi1234', 'Fix 2', 'squash', 2),
-        createEditableCommit('jkl1234', 'Feature B', 'pick', 3),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Fix 1', 'fixup'),
+        createEditableCommit('ghi1234', 'Fix 2', 'squash'),
+        createEditableCommit('jkl1234', 'Feature B', 'pick'),
       ];
 
       const preview = generatePreview(commits);
@@ -281,8 +278,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should use new message for reworded commits', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Old message', 'reword', 0, 'New message'),
-        createEditableCommit('def1234', 'Feature B', 'pick', 1),
+        createEditableCommit('abc1234', 'Old message', 'reword', 'New message'),
+        createEditableCommit('def1234', 'Feature B', 'pick'),
       ];
 
       const preview = generatePreview(commits);
@@ -293,8 +290,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should handle all commits dropped', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'drop', 0),
-        createEditableCommit('def1234', 'Feature B', 'drop', 1),
+        createEditableCommit('abc1234', 'Feature A', 'drop'),
+        createEditableCommit('def1234', 'Feature B', 'drop'),
       ];
 
       const preview = generatePreview(commits);
@@ -304,8 +301,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should mark squash at index 0 as error', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'squash', 0),
-        createEditableCommit('def1234', 'Feature B', 'pick', 1),
+        createEditableCommit('abc1234', 'Feature A', 'squash'),
+        createEditableCommit('def1234', 'Feature B', 'pick'),
       ];
 
       const preview = generatePreview(commits);
@@ -317,8 +314,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should mark fixup at index 0 as error', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'fixup', 0),
-        createEditableCommit('def1234', 'Feature B', 'pick', 1),
+        createEditableCommit('abc1234', 'Feature A', 'fixup'),
+        createEditableCommit('def1234', 'Feature B', 'pick'),
       ];
 
       const preview = generatePreview(commits);
@@ -330,10 +327,10 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should mark squash/fixup after all dropped commits as error', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'drop', 0),
-        createEditableCommit('def1234', 'Feature B', 'drop', 1),
-        createEditableCommit('ghi1234', 'Feature C', 'squash', 2),
-        createEditableCommit('jkl1234', 'Feature D', 'pick', 3),
+        createEditableCommit('abc1234', 'Feature A', 'drop'),
+        createEditableCommit('def1234', 'Feature B', 'drop'),
+        createEditableCommit('ghi1234', 'Feature C', 'squash'),
+        createEditableCommit('jkl1234', 'Feature D', 'pick'),
       ];
 
       const preview = generatePreview(commits);
@@ -347,9 +344,9 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should mark multiple consecutive orphaned squash/fixup as errors', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'squash', 0),
-        createEditableCommit('def1234', 'Feature B', 'fixup', 1),
-        createEditableCommit('ghi1234', 'Feature C', 'pick', 2),
+        createEditableCommit('abc1234', 'Feature A', 'squash'),
+        createEditableCommit('def1234', 'Feature B', 'fixup'),
+        createEditableCommit('ghi1234', 'Feature C', 'pick'),
       ];
 
       const preview = generatePreview(commits);
@@ -362,8 +359,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should validate hasValidationErrors returns true for orphaned squash', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'squash', 0),
-        createEditableCommit('def1234', 'Feature B', 'pick', 1),
+        createEditableCommit('abc1234', 'Feature A', 'squash'),
+        createEditableCommit('def1234', 'Feature B', 'pick'),
       ];
 
       expect(hasValidationErrors(commits)).to.be.true;
@@ -371,8 +368,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should validate hasValidationErrors returns false for valid config', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Feature B', 'squash', 1),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Feature B', 'squash'),
       ];
 
       expect(hasValidationErrors(commits)).to.be.false;
@@ -382,8 +379,8 @@ describe('Interactive Rebase Dialog', () => {
   describe('Autosquash Detection', () => {
     it('should detect fixup! commits', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'fixup! Feature A', 'pick', 1),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'fixup! Feature A', 'pick'),
       ];
 
       expect(detectAutosquashCommits(commits)).to.be.true;
@@ -391,8 +388,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should detect squash! commits', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'squash! Feature A', 'pick', 1),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'squash! Feature A', 'pick'),
       ];
 
       expect(detectAutosquashCommits(commits)).to.be.true;
@@ -400,8 +397,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should return false when no autosquash commits', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Feature B', 'pick', 1),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Feature B', 'pick'),
       ];
 
       expect(detectAutosquashCommits(commits)).to.be.false;
@@ -411,9 +408,9 @@ describe('Interactive Rebase Dialog', () => {
   describe('Autosquash Application', () => {
     it('should reorder fixup! commits after their target', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Feature B', 'pick', 1),
-        createEditableCommit('ghi1234', 'fixup! Feature A', 'pick', 2),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Feature B', 'pick'),
+        createEditableCommit('ghi1234', 'fixup! Feature A', 'pick'),
       ];
 
       const result = applyAutosquash(commits);
@@ -427,9 +424,9 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should reorder squash! commits after their target', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Feature B', 'pick', 1),
-        createEditableCommit('ghi1234', 'squash! Feature A', 'pick', 2),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Feature B', 'pick'),
+        createEditableCommit('ghi1234', 'squash! Feature A', 'pick'),
       ];
 
       const result = applyAutosquash(commits);
@@ -443,9 +440,9 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should handle multiple autosquash commits for same target', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'fixup! Feature A', 'pick', 1),
-        createEditableCommit('ghi1234', 'squash! Feature A', 'pick', 2),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'fixup! Feature A', 'pick'),
+        createEditableCommit('ghi1234', 'squash! Feature A', 'pick'),
       ];
 
       const result = applyAutosquash(commits);
@@ -460,8 +457,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should keep autosquash commits at end if no target found', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'fixup! Unknown Feature', 'pick', 1),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'fixup! Unknown Feature', 'pick'),
       ];
 
       const result = applyAutosquash(commits);
@@ -476,9 +473,9 @@ describe('Interactive Rebase Dialog', () => {
     it('should prefer exact match over prefix match', () => {
       // "Add feature" should match exactly, not "Add feature X" via prefix
       const commits = [
-        createEditableCommit('abc1234', 'Add feature X', 'pick', 0),
-        createEditableCommit('def1234', 'Add feature', 'pick', 1),
-        createEditableCommit('ghi1234', 'fixup! Add feature', 'pick', 2),
+        createEditableCommit('abc1234', 'Add feature X', 'pick'),
+        createEditableCommit('def1234', 'Add feature', 'pick'),
+        createEditableCommit('ghi1234', 'fixup! Add feature', 'pick'),
       ];
 
       const result = applyAutosquash(commits);
@@ -496,9 +493,9 @@ describe('Interactive Rebase Dialog', () => {
     it('should fall back to prefix match when no exact match exists', () => {
       // "fixup! Add" should match "Add feature" via prefix when no exact "Add" exists
       const commits = [
-        createEditableCommit('abc1234', 'Add feature', 'pick', 0),
-        createEditableCommit('def1234', 'Other commit', 'pick', 1),
-        createEditableCommit('ghi1234', 'fixup! Add', 'pick', 2),
+        createEditableCommit('abc1234', 'Add feature', 'pick'),
+        createEditableCommit('def1234', 'Other commit', 'pick'),
+        createEditableCommit('ghi1234', 'fixup! Add', 'pick'),
       ];
 
       const result = applyAutosquash(commits);
@@ -514,10 +511,10 @@ describe('Interactive Rebase Dialog', () => {
     it('should handle exact match even when prefix match appears first in list', () => {
       // "Add feature" appears after "Add feature - part 1" but should still be matched exactly
       const commits = [
-        createEditableCommit('aaa1234', 'Add feature - part 1', 'pick', 0),
-        createEditableCommit('bbb1234', 'Add feature - part 2', 'pick', 1),
-        createEditableCommit('ccc1234', 'Add feature', 'pick', 2),
-        createEditableCommit('ddd1234', 'squash! Add feature', 'pick', 3),
+        createEditableCommit('aaa1234', 'Add feature - part 1', 'pick'),
+        createEditableCommit('bbb1234', 'Add feature - part 2', 'pick'),
+        createEditableCommit('ccc1234', 'Add feature', 'pick'),
+        createEditableCommit('ddd1234', 'squash! Add feature', 'pick'),
       ];
 
       const result = applyAutosquash(commits);
@@ -535,8 +532,8 @@ describe('Interactive Rebase Dialog', () => {
   describe('Statistics Calculation', () => {
     it('should count pick commits as kept', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Feature B', 'pick', 1),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Feature B', 'pick'),
       ];
 
       const stats = getStats(commits);
@@ -549,7 +546,7 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should count edit commits as kept', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'edit', 0),
+        createEditableCommit('abc1234', 'Feature A', 'edit'),
       ];
 
       const stats = getStats(commits);
@@ -559,7 +556,7 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should count reword commits as both kept and reworded', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'reword', 0),
+        createEditableCommit('abc1234', 'Feature A', 'reword'),
       ];
 
       const stats = getStats(commits);
@@ -570,9 +567,9 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should count squash and fixup as squashed', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Fix 1', 'squash', 1),
-        createEditableCommit('ghi1234', 'Fix 2', 'fixup', 2),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Fix 1', 'squash'),
+        createEditableCommit('ghi1234', 'Fix 2', 'fixup'),
       ];
 
       const stats = getStats(commits);
@@ -583,8 +580,8 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should count dropped commits', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Remove me', 'drop', 1),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Remove me', 'drop'),
       ];
 
       const stats = getStats(commits);
@@ -595,12 +592,12 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should handle complex scenarios', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Feature B', 'reword', 1),
-        createEditableCommit('ghi1234', 'Fix', 'squash', 2),
-        createEditableCommit('jkl1234', 'Remove', 'drop', 3),
-        createEditableCommit('mno1234', 'Edit this', 'edit', 4),
-        createEditableCommit('pqr1234', 'Fixup', 'fixup', 5),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Feature B', 'reword'),
+        createEditableCommit('ghi1234', 'Fix', 'squash'),
+        createEditableCommit('jkl1234', 'Remove', 'drop'),
+        createEditableCommit('mno1234', 'Edit this', 'edit'),
+        createEditableCommit('pqr1234', 'Fixup', 'fixup'),
       ];
 
       const stats = getStats(commits);
@@ -657,9 +654,9 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should generate correct todo format for basic actions', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick', 0),
-        createEditableCommit('def1234', 'Feature B', 'squash', 1),
-        createEditableCommit('ghi1234', 'Feature C', 'drop', 2),
+        createEditableCommit('abc1234', 'Feature A', 'pick'),
+        createEditableCommit('def1234', 'Feature B', 'squash'),
+        createEditableCommit('ghi1234', 'Feature C', 'drop'),
       ];
 
       const todo = generateTodo(commits);
@@ -673,7 +670,7 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should use pick + exec for reword with changed message', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Old message', 'reword', 0, 'New message'),
+        createEditableCommit('abc1234', 'Old message', 'reword', 'New message'),
       ];
 
       const todo = generateTodo(commits);
@@ -686,7 +683,7 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should use pick for reword without message change', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Same message', 'reword', 0, 'Same message'),
+        createEditableCommit('abc1234', 'Same message', 'reword', 'Same message'),
       ];
 
       const todo = generateTodo(commits);
@@ -696,7 +693,7 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should use pick for reword without newMessage set', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Some message', 'reword', 0),
+        createEditableCommit('abc1234', 'Some message', 'reword'),
       ];
 
       const todo = generateTodo(commits);
@@ -706,7 +703,7 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should escape single quotes in reword message', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 0, "It's working"),
+        createEditableCommit('abc1234', 'Old', 'reword', "It's working"),
       ];
 
       const todo = generateTodo(commits);
@@ -720,7 +717,7 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should escape backslashes in reword message', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 0, 'Path\\to\\file'),
+        createEditableCommit('abc1234', 'Old', 'reword', 'Path\\to\\file'),
       ];
 
       const todo = generateTodo(commits);
@@ -734,7 +731,7 @@ describe('Interactive Rebase Dialog', () => {
     it('should not escape dollar signs in reword message', () => {
       // $'...' syntax doesn't do variable expansion, so $ doesn't need escaping
       const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 0, 'Cost $100'),
+        createEditableCommit('abc1234', 'Old', 'reword', 'Cost $100'),
       ];
 
       const todo = generateTodo(commits);
@@ -748,7 +745,7 @@ describe('Interactive Rebase Dialog', () => {
     it('should not escape backticks in reword message', () => {
       // $'...' syntax doesn't do command substitution, so backticks don't need escaping
       const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 0, 'Use `code` here'),
+        createEditableCommit('abc1234', 'Old', 'reword', 'Use `code` here'),
       ];
 
       const todo = generateTodo(commits);
@@ -761,9 +758,9 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should handle multiple reword commits', () => {
       const commits = [
-        createEditableCommit('abc1234', 'First', 'reword', 0, 'First reworded'),
-        createEditableCommit('def1234', 'Second', 'pick', 1),
-        createEditableCommit('ghi1234', 'Third', 'reword', 2, 'Third reworded'),
+        createEditableCommit('abc1234', 'First', 'reword', 'First reworded'),
+        createEditableCommit('def1234', 'Second', 'pick'),
+        createEditableCommit('ghi1234', 'Third', 'reword', 'Third reworded'),
       ];
 
       const todo = generateTodo(commits);
@@ -779,7 +776,7 @@ describe('Interactive Rebase Dialog', () => {
 
     it('should escape newlines in reword messages', () => {
       const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 0, 'Line 1\nLine 2\nLine 3'),
+        createEditableCommit('abc1234', 'Old', 'reword', 'Line 1\nLine 2\nLine 3'),
       ];
 
       const todo = generateTodo(commits);
