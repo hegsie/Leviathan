@@ -197,6 +197,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_gc_aggressive() {
+        let repo = TestRepo::with_initial_commit();
+        let result = run_gc(repo.path_str(), Some(true), None, None).await;
+        assert!(result.is_ok());
+        let gc_result = result.unwrap();
+        assert!(gc_result.success);
+    }
+
+    #[tokio::test]
     async fn test_run_gc_nonexistent_path() {
         let result = run_gc("/nonexistent/path".to_string(), None, None, None).await;
         assert!(result.is_err());
