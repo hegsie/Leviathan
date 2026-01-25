@@ -31,6 +31,9 @@ const mockInvoke = (command: string): Promise<unknown> => {
   invoke: mockInvoke,
 };
 
+// Import after mocking
+// Component is imported dynamically in tests to avoid build issues
+
 describe('Image Diff Component Data Structures', () => {
   describe('ImageDiffMode', () => {
     it('should support side-by-side mode', () => {
