@@ -1,10 +1,10 @@
 //! Repository maintenance command handlers
 
 use std::path::Path;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::create_command;
 
 /// Result of a garbage collection operation
 #[derive(Clone, serde::Serialize)]
@@ -35,7 +35,7 @@ pub async fn run_gc(
     git2::Repository::open(repo_path)?;
 
     // Build the git gc command
-    let mut cmd = Command::new("git");
+    let mut cmd = create_command("git");
     cmd.current_dir(repo_path);
     cmd.arg("gc");
 
@@ -92,7 +92,7 @@ pub async fn run_fsck(path: String, full: Option<bool>) -> Result<GcResult> {
     git2::Repository::open(repo_path)?;
 
     // Build the git fsck command
-    let mut cmd = Command::new("git");
+    let mut cmd = create_command("git");
     cmd.current_dir(repo_path);
     cmd.arg("fsck");
 
@@ -143,7 +143,7 @@ pub async fn run_prune(path: String, dry_run: Option<bool>) -> Result<GcResult> 
     git2::Repository::open(repo_path)?;
 
     // Build the git prune command
-    let mut cmd = Command::new("git");
+    let mut cmd = create_command("git");
     cmd.current_dir(repo_path);
     cmd.arg("prune");
 
