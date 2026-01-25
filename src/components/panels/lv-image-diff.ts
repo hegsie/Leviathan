@@ -689,6 +689,15 @@ export class LvImageDiff extends LitElement {
     diffCtx.putImageData(diffData, 0, 0);
     this.differenceDataUrl = diffCanvas.toDataURL('image/png');
     this.differenceStats = { added, removed, changed, unchanged };
+
+    // Explicitly clear canvas resources to help the browser release memory,
+    // especially important for large images and repeated diff computations.
+    oldCanvas.width = 0;
+    oldCanvas.height = 0;
+    newCanvas.width = 0;
+    newCanvas.height = 0;
+    diffCanvas.width = 0;
+    diffCanvas.height = 0;
   }
 
   private renderSideBySide() {
