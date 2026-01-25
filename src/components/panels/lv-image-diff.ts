@@ -471,7 +471,7 @@ export class LvImageDiff extends LitElement {
     await this.loadImageVersions();
   }
 
-  disconnectedCallback() {
+  disconnectedCallback(): void {
     super.disconnectedCallback();
     if (this.thresholdDebounceTimeout) {
       clearTimeout(this.thresholdDebounceTimeout);
