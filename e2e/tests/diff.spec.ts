@@ -304,11 +304,11 @@ test.describe('Image Diff Difference Mode', () => {
     const differenceButton = page.locator('lv-image-diff').getByRole('button', { name: 'Difference' });
     await differenceButton.click();
 
-    // Wait for difference computation to complete
-    await page.waitForTimeout(500);
+    // Wait for difference computation to complete by checking loading state disappears
+    const imageDiff = page.locator('lv-image-diff');
+    await expect(imageDiff.locator('.loading')).toBeHidden({ timeout: 10000 });
 
     // Verify legend items are displayed
-    const imageDiff = page.locator('lv-image-diff');
     await expect(imageDiff.locator('.legend-item').filter({ hasText: 'Added' })).toBeVisible({ timeout: 5000 });
     await expect(imageDiff.locator('.legend-item').filter({ hasText: 'Removed' })).toBeVisible();
     await expect(imageDiff.locator('.legend-item').filter({ hasText: 'Changed' })).toBeVisible();
@@ -326,11 +326,11 @@ test.describe('Image Diff Difference Mode', () => {
     const differenceButton = page.locator('lv-image-diff').getByRole('button', { name: 'Difference' });
     await differenceButton.click();
 
-    // Wait for difference computation
-    await page.waitForTimeout(500);
+    // Wait for difference computation to complete by checking loading state disappears
+    const imageDiff = page.locator('lv-image-diff');
+    await expect(imageDiff.locator('.loading')).toBeHidden({ timeout: 10000 });
 
     // Verify percentages are shown in legend (format: "Added (X.X%)")
-    const imageDiff = page.locator('lv-image-diff');
     const addedLegend = imageDiff.locator('.legend-item').filter({ hasText: 'Added' });
     await expect(addedLegend).toContainText(/%/);
   });
