@@ -488,6 +488,18 @@ export class LvImageDiff extends LitElement {
     ) {
       await this.loadImageVersions();
     }
+
+    // Trigger difference computation when entering difference mode or when imageData loads
+    // while already in difference mode. This keeps the render method pure (no side effects).
+    if (
+      this.mode === 'difference' &&
+      !this.differenceDataUrl &&
+      !this.computingDifference &&
+      this.imageData &&
+      (this.imageData.oldData || this.imageData.newData)
+    ) {
+      this.computeDifference();
+    }
   }
 
   private async loadImageVersions() {
@@ -915,13 +927,8 @@ export class LvImageDiff extends LitElement {
 
   private renderDifference() {
     if (!this.differenceDataUrl) {
-      // Show loading if computation is in progress
-      if (this.computingDifference) {
-        return html`<div class="loading">Computing difference...</div>`;
-      }
-      // Try to compute if we have image data and not already computing
-      if (this.imageData && (this.imageData.oldData || this.imageData.newData)) {
-        this.computeDifference();
+      // Show loading if computation is in progress or will be triggered by updated()
+      if (this.computingDifference || (this.imageData && (this.imageData.oldData || this.imageData.newData))) {
         return html`<div class="loading">Computing difference...</div>`;
       }
       return html`<div class="no-image">No images to compare</div>`;
