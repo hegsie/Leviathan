@@ -544,12 +544,12 @@ export class LvInteractiveRebaseDialog extends LitElement {
     const newCommits: EditableRebaseCommit[] = [];
     const autosquashCommits: EditableRebaseCommit[] = [];
 
-    // Separate regular and autosquash commits
+    // Separate regular and autosquash commits (create copies to avoid mutation)
     for (const commit of this.commits) {
       if (commit.summary.startsWith('fixup! ') || commit.summary.startsWith('squash! ')) {
-        autosquashCommits.push(commit);
+        autosquashCommits.push({ ...commit });
       } else {
-        newCommits.push(commit);
+        newCommits.push({ ...commit });
       }
     }
 
