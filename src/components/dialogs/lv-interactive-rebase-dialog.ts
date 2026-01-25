@@ -905,6 +905,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
               class="reword-input"
               rows="2"
               placeholder="Enter new commit message..."
+              aria-label="New commit message for ${commit.shortId}"
               .value=${commit.newMessage ?? commit.summary}
               @input=${(e: Event) => this.handleRewordChange(index, e)}
               ?disabled=${this.executing}
