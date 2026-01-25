@@ -325,4 +325,154 @@ describe('Image Diff Component Data Structures', () => {
       expect(status).to.equal('deleted');
     });
   });
+
+  describe('Difference computation integration', () => {
+    // Helper function that mirrors the computeDifference algorithm
+    function computeDifferenceFromImageData(
+      oldImageData: ImageData,
+      newImageData: ImageData,
+      threshold: number
+    ): { stats: { added: number; removed: number; changed: number; unchanged: number } } {
+      let added = 0;
+      let removed = 0;
+      let changed = 0;
+      let unchanged = 0;
+
+      for (let i = 0; i < oldImageData.data.length; i += 4) {
+        const oldR = oldImageData.data[i];
+        const oldG = oldImageData.data[i + 1];
+        const oldB = oldImageData.data[i + 2];
+        const oldA = oldImageData.data[i + 3];
+
+        const newR = newImageData.data[i];
+        const newG = newImageData.data[i + 1];
+        const newB = newImageData.data[i + 2];
+        const newA = newImageData.data[i + 3];
+
+        const oldIsTransparent = oldA < 10;
+        const newIsTransparent = newA < 10;
+
+        const diff =
+          Math.abs(oldR - newR) +
+          Math.abs(oldG - newG) +
+          Math.abs(oldB - newB) +
+          Math.abs(oldA - newA);
+
+        if (oldIsTransparent && !newIsTransparent) {
+          added++;
+        } else if (!oldIsTransparent && newIsTransparent) {
+          removed++;
+        } else if (diff > threshold) {
+          changed++;
+        } else {
+          unchanged++;
+        }
+      }
+
+      return { stats: { added, removed, changed, unchanged } };
+    }
+
+    it('should compute difference stats from real canvas data', () => {
+      // Create 2x2 pixel test images
+      const width = 2;
+      const height = 2;
+
+      // Create ImageData objects (4 pixels, 4 bytes each = 16 bytes)
+      const oldData = new ImageData(width, height);
+      const newData = new ImageData(width, height);
+
+      // Pixel 0 (0,0): Unchanged - both red
+      oldData.data.set([255, 0, 0, 255], 0);
+      newData.data.set([255, 0, 0, 255], 0);
+
+      // Pixel 1 (1,0): Changed - red to blue
+      oldData.data.set([255, 0, 0, 255], 4);
+      newData.data.set([0, 0, 255, 255], 4);
+
+      // Pixel 2 (0,1): Added - transparent to green
+      oldData.data.set([0, 0, 0, 0], 8);
+      newData.data.set([0, 255, 0, 255], 8);
+
+      // Pixel 3 (1,1): Removed - white to transparent
+      oldData.data.set([255, 255, 255, 255], 12);
+      newData.data.set([0, 0, 0, 0], 12);
+
+      const result = computeDifferenceFromImageData(oldData, newData, 10);
+
+      expect(result.stats.unchanged).to.equal(1);
+      expect(result.stats.changed).to.equal(1);
+      expect(result.stats.added).to.equal(1);
+      expect(result.stats.removed).to.equal(1);
+    });
+
+    it('should respect threshold when computing differences', () => {
+      const width = 2;
+      const height = 1;
+
+      const oldData = new ImageData(width, height);
+      const newData = new ImageData(width, height);
+
+      // Pixel 0: Small change (within threshold of 20)
+      oldData.data.set([100, 100, 100, 255], 0);
+      newData.data.set([105, 105, 105, 255], 0); // diff = 15
+
+      // Pixel 1: Large change (exceeds threshold of 20)
+      oldData.data.set([100, 100, 100, 255], 4);
+      newData.data.set([150, 150, 150, 255], 4); // diff = 150
+
+      // With threshold 20, pixel 0 should be unchanged, pixel 1 should be changed
+      const result = computeDifferenceFromImageData(oldData, newData, 20);
+
+      expect(result.stats.unchanged).to.equal(1);
+      expect(result.stats.changed).to.equal(1);
+      expect(result.stats.added).to.equal(0);
+      expect(result.stats.removed).to.equal(0);
+    });
+
+    it('should handle identical images', () => {
+      const width = 3;
+      const height = 3;
+
+      const oldData = new ImageData(width, height);
+      const newData = new ImageData(width, height);
+
+      // Fill both with the same color
+      for (let i = 0; i < 9; i++) {
+        oldData.data.set([128, 64, 32, 255], i * 4);
+        newData.data.set([128, 64, 32, 255], i * 4);
+      }
+
+      const result = computeDifferenceFromImageData(oldData, newData, 10);
+
+      expect(result.stats.unchanged).to.equal(9);
+      expect(result.stats.changed).to.equal(0);
+      expect(result.stats.added).to.equal(0);
+      expect(result.stats.removed).to.equal(0);
+    });
+
+    it('should handle completely different images', () => {
+      const width = 2;
+      const height = 2;
+
+      const oldData = new ImageData(width, height);
+      const newData = new ImageData(width, height);
+
+      // Old: all black opaque
+      for (let i = 0; i < 4; i++) {
+        oldData.data.set([0, 0, 0, 255], i * 4);
+      }
+
+      // New: all white opaque
+      for (let i = 0; i < 4; i++) {
+        newData.data.set([255, 255, 255, 255], i * 4);
+      }
+
+      const result = computeDifferenceFromImageData(oldData, newData, 10);
+
+      expect(result.stats.unchanged).to.equal(0);
+      expect(result.stats.changed).to.equal(4);
+      expect(result.stats.added).to.equal(0);
+      expect(result.stats.removed).to.equal(0);
+    });
+  });
 });
