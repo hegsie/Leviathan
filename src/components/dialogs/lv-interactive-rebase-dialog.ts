@@ -823,10 +823,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
       } else {
         if (result.error?.code === 'REBASE_CONFLICT') {
           // Dispatch event to trigger conflict resolution dialog
-          this.dispatchEvent(new CustomEvent('rebase-conflict', {
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
-            detail: { repositoryPath: this.repositoryPath },
+            detail: { operationType: 'rebase' },
           }));
           this.error = 'Rebase encountered conflicts. Please resolve them to continue.';
         } else {
