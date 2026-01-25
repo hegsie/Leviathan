@@ -462,21 +462,164 @@ describe('Interactive Rebase Dialog', () => {
   });
 
   describe('Todo File Generation', () => {
-    it('should generate correct todo format', () => {
+    /**
+     * Generate todo file content matching the component logic
+     * For reword with changed message, uses pick + exec git commit --amend
+     */
+    function generateTodo(commits: EditableRebaseCommit[]): string {
+      const todoLines: string[] = [];
+
+      for (const c of commits) {
+        if (c.action === 'reword' && c.newMessage && c.newMessage !== c.summary) {
+          // Use pick + exec to amend with new message
+          todoLines.push(`pick ${c.shortId} ${c.summary}`);
+          const escapedMessage = c.newMessage
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\$/g, '\\$')
+            .replace(/`/g, '\\`');
+          todoLines.push(`exec git commit --amend -m "${escapedMessage}"`);
+        } else if (c.action === 'reword') {
+          // Reword without message change - keep as pick
+          todoLines.push(`pick ${c.shortId} ${c.summary}`);
+        } else {
+          todoLines.push(`${c.action} ${c.shortId} ${c.summary}`);
+        }
+      }
+
+      return todoLines.join('\n');
+    }
+
+    it('should generate correct todo format for basic actions', () => {
       const commits = [
         createEditableCommit('abc1234', 'Feature A', 'pick', 0),
         createEditableCommit('def1234', 'Feature B', 'squash', 1),
         createEditableCommit('ghi1234', 'Feature C', 'drop', 2),
       ];
 
-      const todo = commits
-        .map(c => `${c.action} ${c.shortId} ${c.summary}`)
-        .join('\n');
+      const todo = generateTodo(commits);
 
       expect(todo).to.equal(
         'pick abc1234 Feature A\n' +
         'squash def1234 Feature B\n' +
         'drop ghi1234 Feature C'
+      );
+    });
+
+    it('should use pick + exec for reword with changed message', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old message', 'reword', 0, 'New message'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      expect(todo).to.equal(
+        'pick abc1234 Old message\n' +
+        'exec git commit --amend -m "New message"'
+      );
+    });
+
+    it('should use pick for reword without message change', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Same message', 'reword', 0, 'Same message'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      expect(todo).to.equal('pick abc1234 Same message');
+    });
+
+    it('should use pick for reword without newMessage set', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Some message', 'reword', 0),
+      ];
+
+      const todo = generateTodo(commits);
+
+      expect(todo).to.equal('pick abc1234 Some message');
+    });
+
+    it('should escape special characters in reword message', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', 0, 'New "quoted" message'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      expect(todo).to.equal(
+        'pick abc1234 Old\n' +
+        'exec git commit --amend -m "New \\"quoted\\" message"'
+      );
+    });
+
+    it('should escape backslashes in reword message', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', 0, 'Path\\to\\file'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      expect(todo).to.equal(
+        'pick abc1234 Old\n' +
+        'exec git commit --amend -m "Path\\\\to\\\\file"'
+      );
+    });
+
+    it('should escape dollar signs in reword message', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', 0, 'Cost $100'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      expect(todo).to.equal(
+        'pick abc1234 Old\n' +
+        'exec git commit --amend -m "Cost \\$100"'
+      );
+    });
+
+    it('should escape backticks in reword message', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', 0, 'Use `code` here'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      expect(todo).to.equal(
+        'pick abc1234 Old\n' +
+        'exec git commit --amend -m "Use \\`code\\` here"'
+      );
+    });
+
+    it('should handle multiple reword commits', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'First', 'reword', 0, 'First reworded'),
+        createEditableCommit('def1234', 'Second', 'pick', 1),
+        createEditableCommit('ghi1234', 'Third', 'reword', 2, 'Third reworded'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      expect(todo).to.equal(
+        'pick abc1234 First\n' +
+        'exec git commit --amend -m "First reworded"\n' +
+        'pick def1234 Second\n' +
+        'pick ghi1234 Third\n' +
+        'exec git commit --amend -m "Third reworded"'
+      );
+    });
+
+    it('should handle multiline reword messages', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', 0, 'Line 1\nLine 2\nLine 3'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      // Multiline messages work with -m flag (git handles the newlines)
+      expect(todo).to.equal(
+        'pick abc1234 Old\n' +
+        'exec git commit --amend -m "Line 1\nLine 2\nLine 3"'
       );
     });
   });

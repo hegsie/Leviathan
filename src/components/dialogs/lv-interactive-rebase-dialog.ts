@@ -707,15 +707,25 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
     try {
       // Generate the todo file content
-      // For reword commits, we include the new message as a comment
-      // The actual message change requires GIT_SEQUENCE_EDITOR to handle it
+      // For reword commits with changed messages, use pick + exec git commit --amend
+      // This avoids git opening an editor which won't work in Tauri context
       const todoLines: string[] = [];
 
       for (const c of this.commits) {
         if (c.action === 'reword' && c.newMessage && c.newMessage !== c.summary) {
-          // Use 'reword' action - git will prompt for message
-          // We'll need to handle this via a custom editor script
-          todoLines.push(`reword ${c.shortId} ${c.summary}`);
+          // Use pick + exec to amend with new message
+          // This is more reliable than reword which opens an editor
+          todoLines.push(`pick ${c.shortId} ${c.summary}`);
+          // Escape the message for shell: escape backslashes, then double quotes
+          const escapedMessage = c.newMessage
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\$/g, '\\$')
+            .replace(/`/g, '\\`');
+          todoLines.push(`exec git commit --amend -m "${escapedMessage}"`);
+        } else if (c.action === 'reword') {
+          // Reword without message change - keep as pick (no point in reword)
+          todoLines.push(`pick ${c.shortId} ${c.summary}`);
         } else {
           todoLines.push(`${c.action} ${c.shortId} ${c.summary}`);
         }
