@@ -20,6 +20,20 @@ const THRESHOLD_DEBOUNCE_MS = 150;
  */
 export const TRANSPARENCY_ALPHA_THRESHOLD = 10;
 
+/**
+ * Alpha value for highlighted difference pixels (added, removed, changed).
+ * Using semi-transparent overlay (180/255 ≈ 70% opacity) allows the original
+ * image to show through slightly while clearly marking differences.
+ */
+const HIGHLIGHT_ALPHA = 180;
+
+/**
+ * Opacity factor applied to unchanged pixels in difference view.
+ * Dimming unchanged pixels (to 30% opacity) helps highlight the differences
+ * while still providing context for the surrounding image content.
+ */
+const UNCHANGED_OPACITY_FACTOR = 0.3;
+
 @customElement('lv-image-diff')
 export class LvImageDiff extends LitElement {
   static styles = [
@@ -702,14 +716,14 @@ export class LvImageDiff extends LitElement {
               diffData.data[index] = 0;
               diffData.data[index + 1] = 255;
               diffData.data[index + 2] = 0;
-              diffData.data[index + 3] = 180;
+              diffData.data[index + 3] = HIGHLIGHT_ALPHA;
               added++;
             } else if (!oldIsTransparent && newIsTransparent) {
               // Removed pixel (red)
               diffData.data[index] = 255;
               diffData.data[index + 1] = 0;
               diffData.data[index + 2] = 0;
-              diffData.data[index + 3] = 180;
+              diffData.data[index + 3] = HIGHLIGHT_ALPHA;
               removed++;
             } else {
               // Both opaque - calculate color difference
@@ -724,14 +738,14 @@ export class LvImageDiff extends LitElement {
                 diffData.data[index] = 255;
                 diffData.data[index + 1] = 0;
                 diffData.data[index + 2] = 255;
-                diffData.data[index + 3] = 180;
+                diffData.data[index + 3] = HIGHLIGHT_ALPHA;
                 changed++;
               } else {
                 // Unchanged pixel (show dimmed original)
                 diffData.data[index] = newR;
                 diffData.data[index + 1] = newG;
                 diffData.data[index + 2] = newB;
-                diffData.data[index + 3] = Math.floor(newA * 0.3);
+                diffData.data[index + 3] = Math.floor(newA * UNCHANGED_OPACITY_FACTOR);
                 unchanged++;
               }
             }
