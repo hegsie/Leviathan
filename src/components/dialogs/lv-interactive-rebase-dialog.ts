@@ -729,8 +729,8 @@ export class LvInteractiveRebaseDialog extends LitElement {
       return {
         ...c,
         action: newAction,
-        // Initialize newMessage with original summary for reword
-        newMessage: newAction === 'reword' && !c.newMessage ? c.summary : c.newMessage,
+        // Initialize newMessage for reword, clear it for other actions
+        newMessage: newAction === 'reword' ? (c.newMessage ?? c.summary) : undefined,
       };
     });
   }
