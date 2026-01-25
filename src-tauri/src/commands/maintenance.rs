@@ -6,12 +6,12 @@ use tauri::command;
 use crate::error::{LeviathanError, Result};
 use crate::utils::create_command;
 
-/// Result of a garbage collection operation
+/// Result of a repository maintenance operation
 #[derive(Clone, serde::Serialize)]
-pub struct GcResult {
+pub struct MaintenanceResult {
     /// Whether the operation succeeded
     pub success: bool,
-    /// Output message from git gc
+    /// Output message from the maintenance command
     pub message: String,
 }
 
@@ -24,7 +24,7 @@ pub async fn run_gc(
     aggressive: Option<bool>,
     prune: Option<String>,
     auto: Option<bool>,
-) -> Result<GcResult> {
+) -> Result<MaintenanceResult> {
     let repo_path = Path::new(&path);
 
     if !repo_path.exists() {
@@ -65,7 +65,7 @@ pub async fn run_gc(
             format!("{}{}", stdout, stderr).trim().to_string()
         };
 
-        Ok(GcResult {
+        Ok(MaintenanceResult {
             success: true,
             message,
         })
@@ -81,7 +81,7 @@ pub async fn run_gc(
 ///
 /// This verifies the connectivity and validity of objects in the repository.
 #[command]
-pub async fn run_fsck(path: String, full: Option<bool>) -> Result<GcResult> {
+pub async fn run_fsck(path: String, full: Option<bool>) -> Result<MaintenanceResult> {
     let repo_path = Path::new(&path);
 
     if !repo_path.exists() {
@@ -118,7 +118,7 @@ pub async fn run_fsck(path: String, full: Option<bool>) -> Result<GcResult> {
             combined_output
         };
 
-        Ok(GcResult {
+        Ok(MaintenanceResult {
             success: true,
             message,
         })
@@ -132,7 +132,7 @@ pub async fn run_fsck(path: String, full: Option<bool>) -> Result<GcResult> {
 
 /// Prune unreachable objects from the repository
 #[command]
-pub async fn run_prune(path: String, dry_run: Option<bool>) -> Result<GcResult> {
+pub async fn run_prune(path: String, dry_run: Option<bool>) -> Result<MaintenanceResult> {
     let repo_path = Path::new(&path);
 
     if !repo_path.exists() {
@@ -166,7 +166,7 @@ pub async fn run_prune(path: String, dry_run: Option<bool>) -> Result<GcResult> 
             format!("{}{}", stdout, stderr).trim().to_string()
         };
 
-        Ok(GcResult {
+        Ok(MaintenanceResult {
             success: true,
             message,
         })

@@ -327,7 +327,7 @@ export interface RunPruneCommand {
   dryRun?: boolean;
 }
 
-export interface GcResult {
+export interface MaintenanceResult {
   success: boolean;
   message: string;
 }

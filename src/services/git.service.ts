@@ -3386,7 +3386,7 @@ import type {
   RunGcCommand,
   RunFsckCommand,
   RunPruneCommand,
-  GcResult,
+  MaintenanceResult,
 } from "../types/api.types.ts";
 
 /**
@@ -3395,8 +3395,8 @@ import type {
  */
 export async function runGc(
   args: RunGcCommand & { silent?: boolean },
-): Promise<CommandResult<GcResult>> {
-  const result = await invokeCommand<GcResult>("run_gc", args);
+): Promise<CommandResult<MaintenanceResult>> {
+  const result = await invokeCommand<MaintenanceResult>("run_gc", args);
   if (!args?.silent) {
     if (result.success && result.data) {
       showToast(result.data.message, "success");
@@ -3413,8 +3413,8 @@ export async function runGc(
  */
 export async function runFsck(
   args: RunFsckCommand & { silent?: boolean },
-): Promise<CommandResult<GcResult>> {
-  const result = await invokeCommand<GcResult>("run_fsck", args);
+): Promise<CommandResult<MaintenanceResult>> {
+  const result = await invokeCommand<MaintenanceResult>("run_fsck", args);
   if (!args?.silent) {
     if (result.success && result.data) {
       showToast(result.data.message, "success");
@@ -3430,8 +3430,8 @@ export async function runFsck(
  */
 export async function runPrune(
   args: RunPruneCommand & { silent?: boolean },
-): Promise<CommandResult<GcResult>> {
-  const result = await invokeCommand<GcResult>("run_prune", args);
+): Promise<CommandResult<MaintenanceResult>> {
+  const result = await invokeCommand<MaintenanceResult>("run_prune", args);
   if (!args?.silent) {
     if (result.success && result.data) {
       showToast(result.data.message, "success");
