@@ -15,6 +15,7 @@ pub mod github;
 pub mod gitlab;
 pub mod gpg;
 pub mod lfs;
+pub mod maintenance;
 pub mod merge;
 pub mod oauth;
 pub mod profiles;

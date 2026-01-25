@@ -301,3 +301,33 @@ export interface GitSettings {
   pruneOnFetch: boolean;
   rebaseOnPull: boolean;
 }
+
+/**
+ * Maintenance commands
+ */
+export interface RunGcCommand {
+  path: string;
+  /** Run more thorough but slower garbage collection */
+  aggressive?: boolean;
+  /** Prune objects older than this date (e.g., "2.weeks.ago", "now") */
+  prune?: string;
+  /** Only run gc if needed (based on heuristics) */
+  auto?: boolean;
+}
+
+export interface RunFsckCommand {
+  path: string;
+  /** Run a more thorough check */
+  full?: boolean;
+}
+
+export interface RunPruneCommand {
+  path: string;
+  /** Show what would be pruned without actually pruning */
+  dryRun?: boolean;
+}
+
+export interface GcResult {
+  success: boolean;
+  message: string;
+}

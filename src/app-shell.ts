@@ -1484,6 +1484,34 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => { this.showCredentials = true; }),
       },
       {
+        id: 'gc',
+        label: 'Run Garbage Collection',
+        category: 'action',
+        icon: 'trash',
+        action: this.requiresRepository(() => this.handleRunGc()),
+      },
+      {
+        id: 'gc-aggressive',
+        label: 'Run Garbage Collection (Aggressive)',
+        category: 'action',
+        icon: 'trash',
+        action: this.requiresRepository(() => this.handleRunGc(true)),
+      },
+      {
+        id: 'fsck',
+        label: 'Check Repository Integrity',
+        category: 'action',
+        icon: 'search',
+        action: this.requiresRepository(() => this.handleRunFsck()),
+      },
+      {
+        id: 'prune',
+        label: 'Prune Unreachable Objects',
+        category: 'action',
+        icon: 'trash',
+        action: this.requiresRepository(() => this.handleRunPrune()),
+      },
+      {
         id: 'github',
         label: 'GitHub Integration',
         category: 'action',
@@ -1645,6 +1673,29 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
     await gitService.createStash({ path: this.activeRepository.repository.path });
     this.handleRefresh();
+  }
+
+  private async handleRunGc(aggressive = false): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.runGc({
+      path: this.activeRepository.repository.path,
+      aggressive,
+    });
+  }
+
+  private async handleRunFsck(): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.runFsck({
+      path: this.activeRepository.repository.path,
+      full: true,
+    });
+  }
+
+  private async handleRunPrune(): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.runPrune({
+      path: this.activeRepository.repository.path,
+    });
   }
 
   private async handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
