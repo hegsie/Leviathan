@@ -103,9 +103,11 @@ function generatePreview(commits: EditableRebaseCommit[]): PreviewCommit[] {
       j++;
     }
 
-    const summary = commit.action === 'reword' && commit.newMessage
-      ? commit.newMessage.split('\n')[0]
-      : commit.summary;
+    let summary = commit.summary;
+    if (commit.action === 'reword' && commit.newMessage !== undefined) {
+      const firstLine = commit.newMessage.split('\n')[0].trim();
+      summary = firstLine || '(empty message)';
+    }
 
     preview.push({
       shortId: commit.shortId,
@@ -286,6 +288,46 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(preview[0].summary).to.equal('New message');
       expect(preview[1].summary).to.equal('Feature B');
+    });
+
+    it('should use first line of multiline reword message', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', 'First line\nSecond line\nThird line'),
+      ];
+
+      const preview = generatePreview(commits);
+
+      expect(preview[0].summary).to.equal('First line');
+    });
+
+    it('should show placeholder for empty reword message', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', ''),
+      ];
+
+      const preview = generatePreview(commits);
+
+      expect(preview[0].summary).to.equal('(empty message)');
+    });
+
+    it('should show placeholder for reword message starting with newline', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', '\nSecond line'),
+      ];
+
+      const preview = generatePreview(commits);
+
+      expect(preview[0].summary).to.equal('(empty message)');
+    });
+
+    it('should trim whitespace from reword message first line', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', '  Trimmed message  \nSecond line'),
+      ];
+
+      const preview = generatePreview(commits);
+
+      expect(preview[0].summary).to.equal('Trimmed message');
     });
 
     it('should handle all commits dropped', () => {

@@ -661,9 +661,11 @@ export class LvInteractiveRebaseDialog extends LitElement {
         j++;
       }
 
-      const summary = commit.action === 'reword' && commit.newMessage
-        ? commit.newMessage.split('\n')[0]
-        : commit.summary;
+      let summary = commit.summary;
+      if (commit.action === 'reword' && commit.newMessage !== undefined) {
+        const firstLine = commit.newMessage.split('\n')[0].trim();
+        summary = firstLine || '(empty message)';
+      }
 
       preview.push({
         shortId: commit.shortId,
