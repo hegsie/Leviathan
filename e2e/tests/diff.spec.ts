@@ -153,3 +153,89 @@ test.describe('Renamed Files', () => {
     await expect(file).toBeVisible();
   });
 });
+
+test.describe('Image Diff View', () => {
+  let app: AppPage;
+  let rightPanel: RightPanelPage;
+  let graph: GraphPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    rightPanel = new RightPanelPage(page);
+    graph = new GraphPanelPage(page);
+    // Setup with image files
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'assets/logo.png', status: 'modified', isStaged: false, isConflicted: false },
+        { path: 'images/icon.svg', status: 'modified', isStaged: false, isConflicted: false },
+      ])
+    );
+  });
+
+  test('should show image files in file list', async () => {
+    const pngFile = rightPanel.getUnstagedFile('assets/logo.png');
+    await expect(pngFile).toBeVisible();
+
+    const svgFile = rightPanel.getUnstagedFile('images/icon.svg');
+    await expect(svgFile).toBeVisible();
+  });
+
+  test('clicking an image file should open diff overlay', async () => {
+    const file = rightPanel.getUnstagedFile('assets/logo.png');
+    await file.click();
+
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+  });
+
+  test('should close image diff with Escape key', async () => {
+    const file = rightPanel.getUnstagedFile('assets/logo.png');
+    await file.click();
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    await graph.closeDiff();
+    await expect(graph.diffOverlay).not.toBeVisible();
+  });
+});
+
+test.describe('Image Diff New Files', () => {
+  let app: AppPage;
+  let rightPanel: RightPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'new-image.png', status: 'untracked', isStaged: false, isConflicted: false },
+      ])
+    );
+  });
+
+  test('should display new image files', async () => {
+    const file = rightPanel.getUnstagedFile('new-image.png');
+    await expect(file).toBeVisible();
+  });
+});
+
+test.describe('Image Diff Deleted Files', () => {
+  let app: AppPage;
+  let rightPanel: RightPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'deleted-image.jpg', status: 'deleted', isStaged: false, isConflicted: false },
+      ])
+    );
+  });
+
+  test('should display deleted image files', async () => {
+    const file = rightPanel.getUnstagedFile('deleted-image.jpg');
+    await expect(file).toBeVisible();
+  });
+});

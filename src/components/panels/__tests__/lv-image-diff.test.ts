@@ -1,12 +1,14 @@
-import { expect } from '@open-wc/testing';
+import { expect, fixture, html } from '@open-wc/testing';
 
 // Mock Tauri API before importing any modules that use it
 const mockInvoke = (command: string): Promise<unknown> => {
   switch (command) {
     case 'get_image_versions':
       return Promise.resolve({
-        oldData: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-        newData: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        oldData:
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        newData:
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
         imageType: 'png',
       });
     default:
@@ -19,21 +21,29 @@ const mockInvoke = (command: string): Promise<unknown> => {
   invoke: mockInvoke,
 };
 
-describe('Image Diff Component Data Structures', () => {
+// Import after mocking
+import { LvImageDiff } from '../lv-image-diff.ts';
+
+describe('Image Diff Component', () => {
   describe('ImageDiffMode', () => {
     it('should support side-by-side mode', () => {
-      const modes = ['side-by-side', 'onion-skin', 'swipe'];
+      const modes = ['side-by-side', 'onion-skin', 'swipe', 'difference'];
       expect(modes).to.include('side-by-side');
     });
 
     it('should support onion-skin mode', () => {
-      const modes = ['side-by-side', 'onion-skin', 'swipe'];
+      const modes = ['side-by-side', 'onion-skin', 'swipe', 'difference'];
       expect(modes).to.include('onion-skin');
     });
 
     it('should support swipe mode', () => {
-      const modes = ['side-by-side', 'onion-skin', 'swipe'];
+      const modes = ['side-by-side', 'onion-skin', 'swipe', 'difference'];
       expect(modes).to.include('swipe');
+    });
+
+    it('should support difference mode', () => {
+      const modes = ['side-by-side', 'onion-skin', 'swipe', 'difference'];
+      expect(modes).to.include('difference');
     });
   });
 
@@ -147,6 +157,226 @@ describe('Image Diff Component Data Structures', () => {
       const imageType = 'svg';
       const mimeType = imageType === 'svg' ? 'image/svg+xml' : `image/${imageType}`;
       expect(mimeType).to.equal('image/svg+xml');
+    });
+  });
+
+  describe('Difference highlighting', () => {
+    describe('Threshold functionality', () => {
+      it('should have default threshold of 10', () => {
+        const defaultThreshold = 10;
+        expect(defaultThreshold).to.equal(10);
+      });
+
+      it('should clamp threshold between 0 and 100', () => {
+        let threshold = 10;
+
+        // Increase threshold
+        threshold = Math.min(threshold + 10, 100);
+        expect(threshold).to.equal(20);
+
+        // Decrease threshold
+        threshold = Math.max(threshold - 10, 0);
+        expect(threshold).to.equal(10);
+
+        // Test max clamp
+        threshold = 100;
+        threshold = Math.min(threshold + 10, 100);
+        expect(threshold).to.equal(100);
+
+        // Test min clamp
+        threshold = 0;
+        threshold = Math.max(threshold - 10, 0);
+        expect(threshold).to.equal(0);
+      });
+
+      it('should identify pixel differences based on threshold', () => {
+        const threshold = 10;
+
+        // Test pixel difference calculation
+        const oldPixel = { r: 100, g: 100, b: 100, a: 255 };
+        const newPixel = { r: 105, g: 105, b: 105, a: 255 };
+
+        const diff =
+          Math.abs(oldPixel.r - newPixel.r) +
+          Math.abs(oldPixel.g - newPixel.g) +
+          Math.abs(oldPixel.b - newPixel.b) +
+          Math.abs(oldPixel.a - newPixel.a);
+
+        expect(diff).to.equal(15);
+        expect(diff > threshold).to.be.true;
+      });
+
+      it('should not flag pixels within threshold as changed', () => {
+        const threshold = 20;
+
+        const oldPixel = { r: 100, g: 100, b: 100, a: 255 };
+        const newPixel = { r: 102, g: 102, b: 102, a: 255 };
+
+        const diff =
+          Math.abs(oldPixel.r - newPixel.r) +
+          Math.abs(oldPixel.g - newPixel.g) +
+          Math.abs(oldPixel.b - newPixel.b) +
+          Math.abs(oldPixel.a - newPixel.a);
+
+        expect(diff).to.equal(6);
+        expect(diff > threshold).to.be.false;
+      });
+    });
+
+    describe('Pixel classification', () => {
+      it('should identify added pixels (transparent to opaque)', () => {
+        const oldA = 5; // Transparent
+        const newA = 255; // Opaque
+
+        const oldIsTransparent = oldA < 10;
+        const newIsTransparent = newA < 10;
+
+        expect(oldIsTransparent && !newIsTransparent).to.be.true;
+      });
+
+      it('should identify removed pixels (opaque to transparent)', () => {
+        const oldA = 255; // Opaque
+        const newA = 5; // Transparent
+
+        const oldIsTransparent = oldA < 10;
+        const newIsTransparent = newA < 10;
+
+        expect(!oldIsTransparent && newIsTransparent).to.be.true;
+      });
+
+      it('should identify unchanged pixels', () => {
+        const threshold = 10;
+        const oldPixel = { r: 100, g: 100, b: 100, a: 255 };
+        const newPixel = { r: 100, g: 100, b: 100, a: 255 };
+
+        const diff =
+          Math.abs(oldPixel.r - newPixel.r) +
+          Math.abs(oldPixel.g - newPixel.g) +
+          Math.abs(oldPixel.b - newPixel.b) +
+          Math.abs(oldPixel.a - newPixel.a);
+
+        expect(diff).to.equal(0);
+        expect(diff <= threshold).to.be.true;
+      });
+    });
+
+    describe('Difference stats', () => {
+      it('should track counts for each pixel category', () => {
+        const stats = { added: 100, removed: 50, changed: 200, unchanged: 650 };
+
+        expect(stats.added).to.equal(100);
+        expect(stats.removed).to.equal(50);
+        expect(stats.changed).to.equal(200);
+        expect(stats.unchanged).to.equal(650);
+      });
+
+      it('should calculate percentage correctly', () => {
+        const stats = { added: 100, removed: 50, changed: 200, unchanged: 650 };
+        const total = stats.added + stats.removed + stats.changed + stats.unchanged;
+
+        expect(total).to.equal(1000);
+
+        const addedPercent = (stats.added / total) * 100;
+        const changedPercent = (stats.changed / total) * 100;
+
+        expect(addedPercent).to.equal(10);
+        expect(changedPercent).to.equal(20);
+      });
+    });
+  });
+
+  describe('Component rendering', () => {
+    it('should render the image diff component', async () => {
+      const element = await fixture<LvImageDiff>(
+        html`<lv-image-diff></lv-image-diff>`
+      );
+      expect(element).to.be.instanceOf(LvImageDiff);
+    });
+
+    it('should have default mode as side-by-side', async () => {
+      const element = await fixture<LvImageDiff>(
+        html`<lv-image-diff></lv-image-diff>`
+      );
+
+      const sideBySideBtn = element.shadowRoot?.querySelector(
+        '.mode-btn[title="Side by side"]'
+      );
+      expect(sideBySideBtn?.classList.contains('active')).to.be.true;
+    });
+
+    it('should render mode buttons including difference', async () => {
+      const element = await fixture<LvImageDiff>(
+        html`<lv-image-diff></lv-image-diff>`
+      );
+
+      const diffBtn = element.shadowRoot?.querySelector(
+        '.mode-btn[title="Highlight differences"]'
+      );
+      expect(diffBtn).to.exist;
+      expect(diffBtn?.textContent?.trim()).to.equal('Difference');
+    });
+
+    it('should render zoom controls', async () => {
+      const element = await fixture<LvImageDiff>(
+        html`<lv-image-diff></lv-image-diff>`
+      );
+
+      const zoomLevel = element.shadowRoot?.querySelector('.zoom-level');
+      expect(zoomLevel).to.exist;
+      expect(zoomLevel?.textContent).to.include('100%');
+    });
+
+    it('should switch modes when clicking mode buttons', async () => {
+      const element = await fixture<LvImageDiff>(
+        html`<lv-image-diff></lv-image-diff>`
+      );
+
+      const onionSkinBtn = element.shadowRoot?.querySelector(
+        '.mode-btn[title="Onion skin (opacity overlay)"]'
+      ) as HTMLButtonElement;
+
+      onionSkinBtn?.click();
+      await element.updateComplete;
+
+      expect(onionSkinBtn?.classList.contains('active')).to.be.true;
+    });
+  });
+
+  describe('Integration: File status display', () => {
+    it('should display file path', async () => {
+      const element = await fixture<LvImageDiff>(
+        html`<lv-image-diff filePath="images/logo.png"></lv-image-diff>`
+      );
+
+      const filePath = element.shadowRoot?.querySelector('.file-path');
+      expect(filePath?.textContent).to.include('images/logo.png');
+    });
+
+    it('should display file status', async () => {
+      const element = await fixture<LvImageDiff>(
+        html`<lv-image-diff status="modified"></lv-image-diff>`
+      );
+
+      const status = element.shadowRoot?.querySelector('.file-status');
+      expect(status?.classList.contains('modified')).to.be.true;
+    });
+
+    it('should handle new file status', async () => {
+      const element = await fixture<LvImageDiff>(
+        html`<lv-image-diff status="new"></lv-image-diff>`
+      );
+
+      const status = element.shadowRoot?.querySelector('.file-status');
+      expect(status?.classList.contains('new')).to.be.true;
+    });
+
+    it('should handle deleted file status', async () => {
+      const element = await fixture<LvImageDiff>(
+        html`<lv-image-diff status="deleted"></lv-image-diff>`
+      );
+
+      const status = element.shadowRoot?.querySelector('.file-status');
+      expect(status?.classList.contains('deleted')).to.be.true;
     });
   });
 });

@@ -4,7 +4,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { ImageVersions } from '../../types/git.types.ts';
 
-type ImageDiffMode = 'side-by-side' | 'onion-skin' | 'swipe';
+type ImageDiffMode = 'side-by-side' | 'onion-skin' | 'swipe' | 'difference';
 
 /**
  * Image diff component
@@ -323,6 +323,101 @@ export class LvImageDiff extends LitElement {
         height: 200px;
         color: var(--color-error);
       }
+
+      /* Difference mode */
+      .difference-view {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--spacing-md);
+      }
+
+      .difference-container {
+        display: flex;
+        gap: var(--spacing-md);
+        align-items: flex-start;
+      }
+
+      .difference-canvas-wrapper {
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        background: repeating-conic-gradient(#808080 0% 25%, transparent 0% 50%)
+          50% / 16px 16px;
+      }
+
+      .difference-canvas-wrapper canvas {
+        display: block;
+      }
+
+      .difference-controls {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-md);
+        padding: var(--spacing-sm) var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-md);
+      }
+
+      .difference-legend {
+        display: flex;
+        gap: var(--spacing-md);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+      }
+
+      .legend-swatch {
+        width: 16px;
+        height: 16px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--color-border);
+      }
+
+      .legend-swatch.added {
+        background: rgba(0, 255, 0, 0.7);
+      }
+
+      .legend-swatch.removed {
+        background: rgba(255, 0, 0, 0.7);
+      }
+
+      .legend-swatch.changed {
+        background: rgba(255, 0, 255, 0.7);
+      }
+
+      .legend-swatch.unchanged {
+        background: rgba(128, 128, 128, 0.3);
+      }
+
+      .threshold-slider {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+      }
+
+      .threshold-slider label {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+        white-space: nowrap;
+      }
+
+      .threshold-slider input[type="range"] {
+        width: 100px;
+        cursor: pointer;
+      }
+
+      .threshold-value {
+        min-width: 30px;
+        text-align: center;
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+      }
     `,
   ];
 
@@ -340,6 +435,9 @@ export class LvImageDiff extends LitElement {
   @state() private error: string | null = null;
   @state() private imageData: ImageVersions | null = null;
   @state() private isDragging = false;
+  @state() private differenceThreshold = 10;
+  @state() private differenceDataUrl: string | null = null;
+  @state() private differenceStats = { added: 0, removed: 0, changed: 0, unchanged: 0 };
 
   async connectedCallback() {
     super.connectedCallback();
@@ -381,6 +479,9 @@ export class LvImageDiff extends LitElement {
 
   private setMode(mode: ImageDiffMode) {
     this.mode = mode;
+    if (mode === 'difference') {
+      this.computeDifference();
+    }
   }
 
   private zoomIn() {
@@ -431,6 +532,143 @@ export class LvImageDiff extends LitElement {
     if (!data) return '';
     const mimeType = type === 'svg' ? 'image/svg+xml' : `image/${type || 'png'}`;
     return `data:${mimeType};base64,${data}`;
+  }
+
+  private handleThresholdChange(e: Event) {
+    const input = e.target as HTMLInputElement;
+    this.differenceThreshold = parseInt(input.value, 10);
+    this.computeDifference();
+  }
+
+  private async computeDifference() {
+    if (!this.imageData) return;
+
+    const oldSrc = this.getImageSrc(
+      this.imageData.oldData ?? null,
+      this.imageData.imageType ?? null
+    );
+    const newSrc = this.getImageSrc(
+      this.imageData.newData ?? null,
+      this.imageData.imageType ?? null
+    );
+
+    if (!oldSrc && !newSrc) {
+      this.differenceDataUrl = null;
+      return;
+    }
+
+    // Load images
+    const loadImage = (src: string): Promise<HTMLImageElement | null> => {
+      if (!src) return Promise.resolve(null);
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => resolve(null);
+        img.src = src;
+      });
+    };
+
+    const [oldImg, newImg] = await Promise.all([
+      loadImage(oldSrc),
+      loadImage(newSrc),
+    ]);
+
+    // Determine canvas size (use the larger dimensions)
+    const width = Math.max(oldImg?.width ?? 0, newImg?.width ?? 0);
+    const height = Math.max(oldImg?.height ?? 0, newImg?.height ?? 0);
+
+    if (width === 0 || height === 0) {
+      this.differenceDataUrl = null;
+      return;
+    }
+
+    // Create canvases
+    const oldCanvas = document.createElement('canvas');
+    const newCanvas = document.createElement('canvas');
+    const diffCanvas = document.createElement('canvas');
+
+    oldCanvas.width = newCanvas.width = diffCanvas.width = width;
+    oldCanvas.height = newCanvas.height = diffCanvas.height = height;
+
+    const oldCtx = oldCanvas.getContext('2d')!;
+    const newCtx = newCanvas.getContext('2d')!;
+    const diffCtx = diffCanvas.getContext('2d')!;
+
+    // Draw images
+    if (oldImg) {
+      oldCtx.drawImage(oldImg, 0, 0);
+    }
+    if (newImg) {
+      newCtx.drawImage(newImg, 0, 0);
+    }
+
+    // Get image data
+    const oldData = oldCtx.getImageData(0, 0, width, height);
+    const newData = newCtx.getImageData(0, 0, width, height);
+    const diffData = diffCtx.createImageData(width, height);
+
+    // Compute difference
+    let added = 0;
+    let removed = 0;
+    let changed = 0;
+    let unchanged = 0;
+    const threshold = this.differenceThreshold;
+
+    for (let i = 0; i < oldData.data.length; i += 4) {
+      const oldR = oldData.data[i];
+      const oldG = oldData.data[i + 1];
+      const oldB = oldData.data[i + 2];
+      const oldA = oldData.data[i + 3];
+
+      const newR = newData.data[i];
+      const newG = newData.data[i + 1];
+      const newB = newData.data[i + 2];
+      const newA = newData.data[i + 3];
+
+      const oldIsTransparent = oldA < 10;
+      const newIsTransparent = newA < 10;
+
+      // Calculate color difference
+      const diff =
+        Math.abs(oldR - newR) +
+        Math.abs(oldG - newG) +
+        Math.abs(oldB - newB) +
+        Math.abs(oldA - newA);
+
+      if (oldIsTransparent && !newIsTransparent) {
+        // Added pixel (green)
+        diffData.data[i] = 0;
+        diffData.data[i + 1] = 255;
+        diffData.data[i + 2] = 0;
+        diffData.data[i + 3] = 180;
+        added++;
+      } else if (!oldIsTransparent && newIsTransparent) {
+        // Removed pixel (red)
+        diffData.data[i] = 255;
+        diffData.data[i + 1] = 0;
+        diffData.data[i + 2] = 0;
+        diffData.data[i + 3] = 180;
+        removed++;
+      } else if (diff > threshold) {
+        // Changed pixel (magenta)
+        diffData.data[i] = 255;
+        diffData.data[i + 1] = 0;
+        diffData.data[i + 2] = 255;
+        diffData.data[i + 3] = 180;
+        changed++;
+      } else {
+        // Unchanged pixel (show dimmed original)
+        diffData.data[i] = newR;
+        diffData.data[i + 1] = newG;
+        diffData.data[i + 2] = newB;
+        diffData.data[i + 3] = Math.floor(newA * 0.3);
+        unchanged++;
+      }
+    }
+
+    diffCtx.putImageData(diffData, 0, 0);
+    this.differenceDataUrl = diffCanvas.toDataURL('image/png');
+    this.differenceStats = { added, removed, changed, unchanged };
   }
 
   private renderSideBySide() {
@@ -554,6 +792,67 @@ export class LvImageDiff extends LitElement {
     `;
   }
 
+  private renderDifference() {
+    if (!this.differenceDataUrl) {
+      // Try to compute if we have image data
+      if (this.imageData && (this.imageData.oldData || this.imageData.newData)) {
+        this.computeDifference();
+        return html`<div class="loading">Computing difference...</div>`;
+      }
+      return html`<div class="no-image">No images to compare</div>`;
+    }
+
+    const totalPixels =
+      this.differenceStats.added +
+      this.differenceStats.removed +
+      this.differenceStats.changed +
+      this.differenceStats.unchanged;
+
+    const formatPercent = (count: number) =>
+      totalPixels > 0 ? ((count / totalPixels) * 100).toFixed(1) : '0';
+
+    return html`
+      <div class="difference-view">
+        <div class="difference-container">
+          <div class="difference-canvas-wrapper">
+            <img
+              src=${this.differenceDataUrl}
+              alt="Difference"
+              style="transform: scale(${this.zoom / 100})"
+            />
+          </div>
+        </div>
+        <div class="difference-controls">
+          <div class="threshold-slider">
+            <label>Sensitivity:</label>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              .value=${String(this.differenceThreshold)}
+              @input=${this.handleThresholdChange}
+            />
+            <span class="threshold-value">${this.differenceThreshold}</span>
+          </div>
+          <div class="difference-legend">
+            <div class="legend-item">
+              <span class="legend-swatch added"></span>
+              <span>Added (${formatPercent(this.differenceStats.added)}%)</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-swatch removed"></span>
+              <span>Removed (${formatPercent(this.differenceStats.removed)}%)</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-swatch changed"></span>
+              <span>Changed (${formatPercent(this.differenceStats.changed)}%)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   render() {
     return html`
       <div class="header">
@@ -584,6 +883,13 @@ export class LvImageDiff extends LitElement {
             >
               Swipe
             </button>
+            <button
+              class="mode-btn ${this.mode === 'difference' ? 'active' : ''}"
+              @click=${() => this.setMode('difference')}
+              title="Highlight differences"
+            >
+              Difference
+            </button>
           </div>
           <div class="zoom-controls">
             <button class="zoom-btn" @click=${this.zoomOut} title="Zoom out">-</button>
@@ -607,7 +913,9 @@ export class LvImageDiff extends LitElement {
               ? this.renderSideBySide()
               : this.mode === 'onion-skin'
                 ? this.renderOnionSkin()
-                : this.renderSwipe()}
+                : this.mode === 'swipe'
+                  ? this.renderSwipe()
+                  : this.renderDifference()}
       </div>
     `;
   }
