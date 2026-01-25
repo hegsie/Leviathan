@@ -790,13 +790,14 @@ export class LvInteractiveRebaseDialog extends LitElement {
           // Use pick + exec to amend with new message
           // This is more reliable than reword which opens an editor
           todoLines.push(`pick ${c.shortId} ${c.summary}`);
-          // Use $'...' ANSI-C quoting for proper newline handling
-          // This syntax interprets \n as newlines and doesn't expand $ or backticks
+          // Use printf for POSIX shell compatibility (works with dash, sh, bash, zsh)
+          // Single quotes around printf arg prevent shell expansion
+          // '\'' escapes a single quote within single-quoted string
           const escapedMessage = c.newMessage
             .replace(/\\/g, '\\\\')
-            .replace(/'/g, "\\'")
+            .replace(/'/g, "'\\''")
             .replace(/\n/g, '\\n');
-          todoLines.push(`exec git commit --amend -m $'${escapedMessage}'`);
+          todoLines.push(`exec git commit --amend -m "$(printf '%b' '${escapedMessage}')"`);
         } else if (c.action === 'reword') {
           // Reword without message change - keep as pick (no point in reword)
           todoLines.push(`pick ${c.shortId} ${c.summary}`);

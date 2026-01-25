@@ -693,12 +693,12 @@ describe('Interactive Rebase Dialog', () => {
         if (c.action === 'reword' && c.newMessage && c.newMessage !== c.summary) {
           // Use pick + exec to amend with new message
           todoLines.push(`pick ${c.shortId} ${c.summary}`);
-          // Use $'...' ANSI-C quoting for proper newline handling
+          // Use printf for POSIX shell compatibility
           const escapedMessage = c.newMessage
             .replace(/\\/g, '\\\\')
-            .replace(/'/g, "\\'")
+            .replace(/'/g, "'\\''")
             .replace(/\n/g, '\\n');
-          todoLines.push(`exec git commit --amend -m $'${escapedMessage}'`);
+          todoLines.push(`exec git commit --amend -m "$(printf '%b' '${escapedMessage}')"`);
         } else if (c.action === 'reword') {
           // Reword without message change - keep as pick
           todoLines.push(`pick ${c.shortId} ${c.summary}`);
@@ -735,7 +735,7 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 Old message\n' +
-        "exec git commit --amend -m $'New message'"
+        "exec git commit --amend -m \"$(printf '%b' 'New message')\""
       );
     });
 
@@ -766,10 +766,10 @@ describe('Interactive Rebase Dialog', () => {
 
       const todo = generateTodo(commits);
 
-      // $'...' syntax requires escaping single quotes
+      // Single quotes escaped using '\'' technique for shell compatibility
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        "exec git commit --amend -m $'It\\'s working'"
+        "exec git commit --amend -m \"$(printf '%b' 'It'\\''s working')\""
       );
     });
 
@@ -782,12 +782,12 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        "exec git commit --amend -m $'Path\\\\to\\\\file'"
+        "exec git commit --amend -m \"$(printf '%b' 'Path\\\\to\\\\file')\""
       );
     });
 
     it('should not escape dollar signs in reword message', () => {
-      // $'...' syntax doesn't do variable expansion, so $ doesn't need escaping
+      // Single-quoted printf arg doesn't do variable expansion
       const commits = [
         createEditableCommit('abc1234', 'Old', 'reword', 'Cost $100'),
       ];
@@ -796,12 +796,12 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        "exec git commit --amend -m $'Cost $100'"
+        "exec git commit --amend -m \"$(printf '%b' 'Cost $100')\""
       );
     });
 
     it('should not escape backticks in reword message', () => {
-      // $'...' syntax doesn't do command substitution, so backticks don't need escaping
+      // Single-quoted printf arg doesn't do command substitution
       const commits = [
         createEditableCommit('abc1234', 'Old', 'reword', 'Use `code` here'),
       ];
@@ -810,7 +810,7 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        "exec git commit --amend -m $'Use `code` here'"
+        `exec git commit --amend -m "$(printf '%b' 'Use \`code\` here')"`
       );
     });
 
@@ -825,10 +825,10 @@ describe('Interactive Rebase Dialog', () => {
 
       expect(todo).to.equal(
         'pick abc1234 First\n' +
-        "exec git commit --amend -m $'First reworded'\n" +
+        "exec git commit --amend -m \"$(printf '%b' 'First reworded')\"\n" +
         'pick def1234 Second\n' +
         'pick ghi1234 Third\n' +
-        "exec git commit --amend -m $'Third reworded'"
+        "exec git commit --amend -m \"$(printf '%b' 'Third reworded')\""
       );
     });
 
@@ -839,10 +839,10 @@ describe('Interactive Rebase Dialog', () => {
 
       const todo = generateTodo(commits);
 
-      // $'...' syntax interprets \n as actual newlines when executed
+      // printf '%b' interprets \n as actual newlines
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
-        "exec git commit --amend -m $'Line 1\\nLine 2\\nLine 3'"
+        "exec git commit --amend -m \"$(printf '%b' 'Line 1\\nLine 2\\nLine 3')\""
       );
     });
   });
