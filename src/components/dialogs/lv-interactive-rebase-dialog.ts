@@ -172,7 +172,6 @@ export class LvInteractiveRebaseDialog extends LitElement {
       .drag-handle {
         color: var(--color-text-muted);
         cursor: grab;
-        padding-top: 2px;
       }
 
       .drag-handle svg {
