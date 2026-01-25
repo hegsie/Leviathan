@@ -531,6 +531,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.warning = '';
     this.draggedIndex = null;
     this.dropTargetIndex = null;
+    this.showPreview = true;
   }
 
   private async loadCommits(): Promise<void> {
