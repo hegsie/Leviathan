@@ -3377,3 +3377,67 @@ export async function detectRepositoryIntegration(
 
   return null;
 }
+
+// ============================================================================
+// Repository Maintenance
+// ============================================================================
+
+import type {
+  RunGcCommand,
+  RunFsckCommand,
+  RunPruneCommand,
+  MaintenanceResult,
+} from "../types/api.types.ts";
+
+/**
+ * Run garbage collection on a repository
+ * Cleans up unnecessary files and optimizes the local repository
+ */
+export async function runGc(
+  args: RunGcCommand & { silent?: boolean },
+): Promise<CommandResult<MaintenanceResult>> {
+  const result = await invokeCommand<MaintenanceResult>("run_gc", args);
+  if (!args?.silent) {
+    if (result.success && result.data) {
+      showToast(result.data.message, "success");
+    } else {
+      showToast(`Garbage collection failed: ${result.error?.message}`, "error");
+    }
+  }
+  return result;
+}
+
+/**
+ * Run file system check on a repository
+ * Verifies the connectivity and validity of objects in the repository
+ */
+export async function runFsck(
+  args: RunFsckCommand & { silent?: boolean },
+): Promise<CommandResult<MaintenanceResult>> {
+  const result = await invokeCommand<MaintenanceResult>("run_fsck", args);
+  if (!args?.silent) {
+    if (result.success && result.data) {
+      showToast(result.data.message, "success");
+    } else {
+      showToast(`Repository check failed: ${result.error?.message}`, "error");
+    }
+  }
+  return result;
+}
+
+/**
+ * Prune unreachable objects from the repository
+ */
+export async function runPrune(
+  args: RunPruneCommand & { silent?: boolean },
+): Promise<CommandResult<MaintenanceResult>> {
+  const result = await invokeCommand<MaintenanceResult>("run_prune", args);
+  if (!args?.silent) {
+    if (result.success && result.data) {
+      showToast(result.data.message, "success");
+    } else {
+      showToast(`Prune failed: ${result.error?.message}`, "error");
+    }
+  }
+  return result;
+}

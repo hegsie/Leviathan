@@ -274,6 +274,10 @@ pub fn run() {
             commands::lfs::lfs_fetch,
             commands::lfs::lfs_prune,
             commands::lfs::lfs_migrate,
+            // Repository maintenance
+            commands::maintenance::run_gc,
+            commands::maintenance::run_fsck,
+            commands::maintenance::run_prune,
             commands::gpg::get_gpg_config,
             commands::gpg::get_gpg_keys,
             commands::gpg::set_signing_key,
