@@ -10,6 +10,9 @@ type ImageDiffMode = 'side-by-side' | 'onion-skin' | 'swipe' | 'difference';
  * Image diff component
  * Displays visual comparison of image changes with multiple comparison modes
  */
+/** Debounce delay for threshold slider in milliseconds */
+const THRESHOLD_DEBOUNCE_MS = 150;
+
 @customElement('lv-image-diff')
 export class LvImageDiff extends LitElement {
   static styles = [
@@ -438,10 +441,21 @@ export class LvImageDiff extends LitElement {
   @state() private differenceThreshold = 10;
   @state() private differenceDataUrl: string | null = null;
   @state() private differenceStats = { added: 0, removed: 0, changed: 0, unchanged: 0 };
+  @state() private computingDifference = false;
+
+  private thresholdDebounceTimeout: ReturnType<typeof setTimeout> | null = null;
 
   async connectedCallback() {
     super.connectedCallback();
     await this.loadImageVersions();
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this.thresholdDebounceTimeout) {
+      clearTimeout(this.thresholdDebounceTimeout);
+      this.thresholdDebounceTimeout = null;
+    }
   }
 
   async updated(changedProperties: Map<string, unknown>) {
@@ -537,11 +551,27 @@ export class LvImageDiff extends LitElement {
   private handleThresholdChange(e: Event) {
     const input = e.target as HTMLInputElement;
     this.differenceThreshold = parseInt(input.value, 10);
-    this.computeDifference();
+    this.debouncedComputeDifference();
+  }
+
+  /**
+   * Debounced version of computeDifference to prevent excessive computations
+   * while the user drags the threshold slider.
+   */
+  private debouncedComputeDifference(): void {
+    if (this.thresholdDebounceTimeout) {
+      clearTimeout(this.thresholdDebounceTimeout);
+    }
+    this.thresholdDebounceTimeout = setTimeout(() => {
+      this.thresholdDebounceTimeout = null;
+      this.computeDifference();
+    }, THRESHOLD_DEBOUNCE_MS);
   }
 
   private async computeDifference() {
-    if (!this.imageData) return;
+    if (!this.imageData || this.computingDifference) return;
+
+    this.computingDifference = true;
 
     const oldSrc = this.getImageSrc(
       this.imageData.oldData ?? null,
@@ -554,6 +584,7 @@ export class LvImageDiff extends LitElement {
 
     if (!oldSrc && !newSrc) {
       this.differenceDataUrl = null;
+      this.computingDifference = false;
       return;
     }
 
@@ -579,6 +610,7 @@ export class LvImageDiff extends LitElement {
 
     if (width === 0 || height === 0) {
       this.differenceDataUrl = null;
+      this.computingDifference = false;
       return;
     }
 
@@ -590,9 +622,15 @@ export class LvImageDiff extends LitElement {
     oldCanvas.width = newCanvas.width = diffCanvas.width = width;
     oldCanvas.height = newCanvas.height = diffCanvas.height = height;
 
-    const oldCtx = oldCanvas.getContext('2d')!;
-    const newCtx = newCanvas.getContext('2d')!;
-    const diffCtx = diffCanvas.getContext('2d')!;
+    const oldCtx = oldCanvas.getContext('2d');
+    const newCtx = newCanvas.getContext('2d');
+    const diffCtx = diffCanvas.getContext('2d');
+
+    if (!oldCtx || !newCtx || !diffCtx) {
+      this.error = 'Failed to create canvas context for difference computation';
+      this.computingDifference = false;
+      return;
+    }
 
     // Draw images
     if (oldImg) {
@@ -638,14 +676,14 @@ export class LvImageDiff extends LitElement {
           const oldIsTransparent = oldA < 10;
           const newIsTransparent = newA < 10;
 
-          // Calculate color difference
-          const diff =
-            Math.abs(oldR - newR) +
-            Math.abs(oldG - newG) +
-            Math.abs(oldB - newB) +
-            Math.abs(oldA - newA);
-
-          if (oldIsTransparent && !newIsTransparent) {
+          if (oldIsTransparent && newIsTransparent) {
+            // Both transparent - always unchanged (RGB values don't matter)
+            diffData.data[index] = 0;
+            diffData.data[index + 1] = 0;
+            diffData.data[index + 2] = 0;
+            diffData.data[index + 3] = 0;
+            unchanged++;
+          } else if (oldIsTransparent && !newIsTransparent) {
             // Added pixel (green)
             diffData.data[index] = 0;
             diffData.data[index + 1] = 255;
@@ -659,20 +697,29 @@ export class LvImageDiff extends LitElement {
             diffData.data[index + 2] = 0;
             diffData.data[index + 3] = 180;
             removed++;
-          } else if (diff > threshold) {
-            // Changed pixel (magenta)
-            diffData.data[index] = 255;
-            diffData.data[index + 1] = 0;
-            diffData.data[index + 2] = 255;
-            diffData.data[index + 3] = 180;
-            changed++;
           } else {
-            // Unchanged pixel (show dimmed original)
-            diffData.data[index] = newR;
-            diffData.data[index + 1] = newG;
-            diffData.data[index + 2] = newB;
-            diffData.data[index + 3] = Math.floor(newA * 0.3);
-            unchanged++;
+            // Both opaque - calculate color difference
+            const diff =
+              Math.abs(oldR - newR) +
+              Math.abs(oldG - newG) +
+              Math.abs(oldB - newB) +
+              Math.abs(oldA - newA);
+
+            if (diff > threshold) {
+              // Changed pixel (magenta)
+              diffData.data[index] = 255;
+              diffData.data[index + 1] = 0;
+              diffData.data[index + 2] = 255;
+              diffData.data[index + 3] = 180;
+              changed++;
+            } else {
+              // Unchanged pixel (show dimmed original)
+              diffData.data[index] = newR;
+              diffData.data[index + 1] = newG;
+              diffData.data[index + 2] = newB;
+              diffData.data[index + 3] = Math.floor(newA * 0.3);
+              unchanged++;
+            }
           }
         }
 
@@ -689,6 +736,7 @@ export class LvImageDiff extends LitElement {
     diffCtx.putImageData(diffData, 0, 0);
     this.differenceDataUrl = diffCanvas.toDataURL('image/png');
     this.differenceStats = { added, removed, changed, unchanged };
+    this.computingDifference = false;
 
     // Explicitly clear canvas resources to help the browser release memory,
     // especially important for large images and repeated diff computations.
@@ -773,6 +821,7 @@ export class LvImageDiff extends LitElement {
             type="range"
             min="0"
             max="100"
+            aria-label="Opacity blend between before and after images"
             .value=${String(this.opacity)}
             @input=${this.handleOpacityChange}
           />
@@ -823,7 +872,11 @@ export class LvImageDiff extends LitElement {
 
   private renderDifference() {
     if (!this.differenceDataUrl) {
-      // Try to compute if we have image data
+      // Show loading if computation is in progress
+      if (this.computingDifference) {
+        return html`<div class="loading">Computing difference...</div>`;
+      }
+      // Try to compute if we have image data and not already computing
       if (this.imageData && (this.imageData.oldData || this.imageData.newData)) {
         this.computeDifference();
         return html`<div class="loading">Computing difference...</div>`;
@@ -838,7 +891,7 @@ export class LvImageDiff extends LitElement {
       this.differenceStats.unchanged;
 
     const formatPercent = (count: number) =>
-      totalPixels > 0 ? ((count / totalPixels) * 100).toFixed(1) : '0';
+      totalPixels > 0 ? ((count / totalPixels) * 100).toFixed(1) : '0.0';
 
     return html`
       <div class="difference-view">
@@ -858,6 +911,7 @@ export class LvImageDiff extends LitElement {
               type="range"
               min="0"
               max="100"
+              aria-label="Difference detection sensitivity threshold"
               .value=${String(this.differenceThreshold)}
               @input=${this.handleThresholdChange}
             />

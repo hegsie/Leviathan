@@ -283,28 +283,25 @@ describe('Image Diff Component Data Structures', () => {
   });
 
   describe('Image source generation', () => {
-    it('should generate correct data URL for PNG', () => {
-      const data = 'base64data';
-      const type = 'png';
+    // Helper function matching the component's getImageSrc logic
+    function getImageSrc(data: string | null, type: string | null): string {
+      if (!data) return '';
       const mimeType = type === 'svg' ? 'image/svg+xml' : `image/${type || 'png'}`;
-      const dataUrl = `data:${mimeType};base64,${data}`;
+      return `data:${mimeType};base64,${data}`;
+    }
 
-      expect(dataUrl).to.equal('data:image/png;base64,base64data');
+    it('should generate correct data URL for PNG', () => {
+      const result = getImageSrc('base64data', 'png');
+      expect(result).to.equal('data:image/png;base64,base64data');
     });
 
     it('should generate correct data URL for SVG', () => {
-      const data = 'base64data';
-      const type = 'svg';
-      const mimeType = type === 'svg' ? 'image/svg+xml' : `image/${type || 'png'}`;
-      const dataUrl = `data:${mimeType};base64,${data}`;
-
-      expect(dataUrl).to.equal('data:image/svg+xml;base64,base64data');
+      const result = getImageSrc('base64data', 'svg');
+      expect(result).to.equal('data:image/svg+xml;base64,base64data');
     });
 
     it('should return empty string for null data', () => {
-      const data: string | null = null;
-      const result = data ? `data:image/png;base64,${data}` : '';
-
+      const result = getImageSrc(null, 'png');
       expect(result).to.equal('');
     });
   });
@@ -352,20 +349,26 @@ describe('Image Diff Component Data Structures', () => {
         const oldIsTransparent = oldA < 10;
         const newIsTransparent = newA < 10;
 
-        const diff =
-          Math.abs(oldR - newR) +
-          Math.abs(oldG - newG) +
-          Math.abs(oldB - newB) +
-          Math.abs(oldA - newA);
-
-        if (oldIsTransparent && !newIsTransparent) {
+        if (oldIsTransparent && newIsTransparent) {
+          // Both transparent - always unchanged (RGB values don't matter)
+          unchanged++;
+        } else if (oldIsTransparent && !newIsTransparent) {
           added++;
         } else if (!oldIsTransparent && newIsTransparent) {
           removed++;
-        } else if (diff > threshold) {
-          changed++;
         } else {
-          unchanged++;
+          // Both opaque - calculate color difference
+          const diff =
+            Math.abs(oldR - newR) +
+            Math.abs(oldG - newG) +
+            Math.abs(oldB - newB) +
+            Math.abs(oldA - newA);
+
+          if (diff > threshold) {
+            changed++;
+          } else {
+            unchanged++;
+          }
         }
       }
 
@@ -471,6 +474,31 @@ describe('Image Diff Component Data Structures', () => {
 
       expect(result.stats.unchanged).to.equal(0);
       expect(result.stats.changed).to.equal(4);
+      expect(result.stats.added).to.equal(0);
+      expect(result.stats.removed).to.equal(0);
+    });
+
+    it('should treat both-transparent pixels as unchanged regardless of RGB', () => {
+      const width = 2;
+      const height = 1;
+
+      const oldData = new ImageData(width, height);
+      const newData = new ImageData(width, height);
+
+      // Both pixels transparent but with different RGB values
+      // Pixel 0: transparent red vs transparent blue
+      oldData.data.set([255, 0, 0, 0], 0);
+      newData.data.set([0, 0, 255, 0], 0);
+
+      // Pixel 1: transparent black vs transparent white
+      oldData.data.set([0, 0, 0, 5], 4);
+      newData.data.set([255, 255, 255, 5], 4);
+
+      const result = computeDifferenceFromImageData(oldData, newData, 10);
+
+      // Both should be unchanged since both are transparent
+      expect(result.stats.unchanged).to.equal(2);
+      expect(result.stats.changed).to.equal(0);
       expect(result.stats.added).to.equal(0);
       expect(result.stats.removed).to.equal(0);
     });
