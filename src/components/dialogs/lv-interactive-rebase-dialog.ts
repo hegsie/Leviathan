@@ -667,7 +667,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
         squashedFrom: squashedFrom.length > 0 ? squashedFrom : undefined,
       });
 
-      i = j > i + 1 ? j : i + 1;
+      // Advance past any squash/fixup commits we just grouped with this base commit.
+      // j starts at i+1 and only increases, so this either skips to the next unprocessed
+      // commit (j > i+1 when squashes found) or advances by one (j === i+1 when none found).
+      i = j;
     }
 
     return preview;
