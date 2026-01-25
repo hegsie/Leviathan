@@ -617,18 +617,18 @@ These are ideas for the distant future, to be evaluated based on user feedback a
 - Memory usage tracking and optimization
 
 #### Plugin/Extension System
-- Extension API for custom panels and views
-- Community plugins without core cloud integrations
-- Plugin marketplace or registry
-- Safe plugin sandboxing and permissions
-- Plugin development documentation and examples
+- Advanced plugin lifecycle management (versioning, compatibility checks, safe upgrades/rollbacks)
+- Discovery features (search, ratings, tags) for a richer community plugin ecosystem
+- Curated/verified plugin channels with optional organizational approval workflows
+- Enhanced security model (capability-based permissions, review guidelines, and static checks for plugins)
+- Developer tooling for plugins (scaffolding, testing harnesses, sample repos, and best-practices guides)
 
 #### Custom Scripts & Hooks UI
-- Visual configuration for Git hooks
-- Pre-commit, commit-msg, pre-push hook setup
-- Custom command buttons per repository
-- Script templates library
-- Execution logs and debugging tools
+- Centralized management of reusable hook/script presets (per-user and per-organization)
+- Policy-driven enforcement (e.g., required hooks or scripts for specific repos/branches)
+- Safe sandbox and dry-run mode for testing hooks before enabling them on real workflows
+- Step-by-step debugging assistance for failing hooks, with captured inputs and outputs
+- Analytics for automation usage (e.g., which hooks run, failure rates, and execution timing)
 
 #### Internationalization (i18n)
 - Multi-language support
