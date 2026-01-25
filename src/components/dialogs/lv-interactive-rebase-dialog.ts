@@ -62,6 +62,11 @@ export class LvInteractiveRebaseDialog extends LitElement {
         color: var(--color-primary);
       }
 
+      .commit-count {
+        margin-left: var(--spacing-sm);
+        color: var(--color-text-muted);
+      }
+
       .header-actions {
         display: flex;
         gap: var(--spacing-sm);
@@ -921,7 +926,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
             <div class="header-info">
               Rebasing current branch onto <strong>${this.onto}</strong>
               ${this.commits.length > 0 ? html`
-                <span style="margin-left: var(--spacing-sm); color: var(--color-text-muted);">
+                <span class="commit-count">
                   (${this.commits.length} commit${this.commits.length !== 1 ? 's' : ''})
                 </span>
               ` : nothing}
