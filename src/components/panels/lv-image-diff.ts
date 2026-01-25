@@ -370,7 +370,7 @@ export class LvImageDiff extends LitElement {
           50% / 16px 16px;
       }
 
-      .difference-canvas-wrapper canvas {
+      .difference-canvas-wrapper img {
         display: block;
       }
 
