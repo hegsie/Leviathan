@@ -136,7 +136,7 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 #### Multi-Repository Workflows
 
 - **Workspace concept**
-  - Group related repositories (mono-repos or microservices)
+  - Group related repositories (monorepos or microservices)
   - Quick switching between workspace repos
   - Workspace-level search (find across all repos)
   - Batch operations (pull all, fetch all, status overview)
