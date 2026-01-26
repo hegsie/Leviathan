@@ -472,8 +472,8 @@ export class LvKeyboardShortcutsDialog extends LitElement {
     if (shortcut.shift) keys.push(isMac ? '⇧' : 'Shift');
     if (shortcut.alt) keys.push(isMac ? '⌥' : 'Alt');
 
-    // Format special keys
-    let keyDisplay: string;
+    // Format special keys (initialize with uppercase key as fallback)
+    let keyDisplay: string = shortcut.key.toUpperCase();
     switch (shortcut.key.toLowerCase()) {
       case 'arrowup': keyDisplay = '↑'; break;
       case 'arrowdown': keyDisplay = '↓'; break;
@@ -482,7 +482,6 @@ export class LvKeyboardShortcutsDialog extends LitElement {
       case 'enter': keyDisplay = '↵'; break;
       case 'escape': keyDisplay = 'Esc'; break;
       case ' ': keyDisplay = 'Space'; break;
-      default: keyDisplay = shortcut.key.toUpperCase();
     }
     keys.push(keyDisplay);
 
@@ -526,7 +525,7 @@ export class LvKeyboardShortcutsDialog extends LitElement {
             title="Click to change shortcut"
           >
             ${isEditing ? html`
-              <span class="key">Press a key...</span>
+              <span class="key recording-hint">Press a key... (Esc to cancel)</span>
             ` : keys.map((key, i) => html`
               <span class="key">${key}</span>
               ${i < keys.length - 1 ? html`<span class="key-separator"></span>` : ''}
@@ -562,8 +561,8 @@ export class LvKeyboardShortcutsDialog extends LitElement {
     if (binding.shift) keys.push(isMac ? '⇧' : 'Shift');
     if (binding.alt) keys.push(isMac ? '⌥' : 'Alt');
 
-    // Format special keys
-    let keyDisplay: string;
+    // Format special keys (initialize with uppercase key as fallback)
+    let keyDisplay: string = binding.key.toUpperCase();
     switch (binding.key.toLowerCase()) {
       case 'arrowup': keyDisplay = '↑'; break;
       case 'arrowdown': keyDisplay = '↓'; break;
@@ -572,7 +571,6 @@ export class LvKeyboardShortcutsDialog extends LitElement {
       case 'enter': keyDisplay = '↵'; break;
       case 'escape': keyDisplay = 'Esc'; break;
       case ' ': keyDisplay = 'Space'; break;
-      default: keyDisplay = binding.key.toUpperCase();
     }
     keys.push(keyDisplay);
 

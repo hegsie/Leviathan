@@ -1237,7 +1237,9 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    // Check if this is HEAD commit
+    // Check if this is HEAD commit by comparing with the first commit in history.
+    // Note: This works for the common case of a branch checkout. In detached HEAD state,
+    // the first commit in history is still HEAD, so this approach remains valid.
     const historyResult = await gitService.getCommitHistory({
       path: this.activeRepository.repository.path,
       limit: 1,

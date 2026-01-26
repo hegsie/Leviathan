@@ -37,6 +37,10 @@ class ProgressService {
   private cancelledOperations: Set<string> = new Set();
 
   constructor() {
+    // Note: setupListeners is async but we don't await it here.
+    // This is intentional - the service is usable immediately for local operations,
+    // and backend events will be captured once the listeners are ready.
+    // In practice, the listeners initialize within milliseconds.
     this.setupListeners();
   }
 
@@ -162,7 +166,10 @@ class ProgressService {
       this.operations.delete(id);
       this.notifyListeners();
 
-      // Clean up cancellation flag after a delay
+      // Clean up cancellation flag after 5 seconds.
+      // This delay allows any in-flight async operations to check the cancellation
+      // status before the flag is removed. 5 seconds is chosen as a reasonable
+      // window for most operations to complete their cancellation check.
       setTimeout(() => {
         this.cancelledOperations.delete(id);
       }, 5000);
@@ -212,9 +219,6 @@ class ProgressService {
 // Singleton instance
 export const progressService = new ProgressService();
 
-/**
- * Helper to wrap an async operation with progress tracking
- */
 /**
  * Helper to wrap an async operation with progress tracking.
  * Provides cancellation checking via the checkCancelled callback.

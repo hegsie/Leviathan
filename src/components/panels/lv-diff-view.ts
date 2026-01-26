@@ -1266,7 +1266,11 @@ export class LvDiffView extends LitElement {
   }
 
   /**
-   * Create a unique key for a line
+   * Create a unique key for a line in the diff.
+   *
+   * The key is constructed from numeric indices (hunkIndex and lineIndex),
+   * which guarantees no special characters in the key format.
+   * This is used for tracking selected lines in the Set.
    */
   private getLineKey(hunkIndex: number, lineIndex: number): LineKey {
     return `${hunkIndex}-${lineIndex}`;
@@ -1404,11 +1408,14 @@ export class LvDiffView extends LitElement {
           newLineCount++;
         } else if (line.origin === 'deletion') {
           if (isSelected) {
-            // Include this deletion
+            // Include this deletion in the patch
             hunkPatchLines.push('-' + content);
             oldLineCount++;
           } else {
-            // Convert unselected deletion to context (it stays in both)
+            // Unselected deletions become context lines in the patch.
+            // This is correct for partial staging: the line remains in the index
+            // (not staged for deletion) while the working tree still shows it as deleted.
+            // The next diff will continue to show it as a deletion that can be staged.
             hunkPatchLines.push(' ' + content);
             oldLineCount++;
             newLineCount++;

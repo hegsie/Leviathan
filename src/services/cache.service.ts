@@ -171,7 +171,13 @@ export function createCacheKey(repoPath: string, id: string): string {
 }
 
 /**
- * Invalidate all caches for a repository
+ * Invalidate all caches for a repository.
+ *
+ * Should be called after operations that change repository state:
+ * - Commits, rebases, merges, cherry-picks
+ * - Branch/tag creation or deletion
+ * - Checkouts that change HEAD
+ * - Any operation that modifies commit metadata
  */
 export function invalidateRepositoryCache(repoPath: string): void {
   const prefix = escapeRepoPath(repoPath) + ':';
