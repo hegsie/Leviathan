@@ -84,7 +84,8 @@
       "Bash(gh pr list:*)",
       "Bash(gh pr merge:*)",
       "Bash(gh release:*)",
-      "Bash(gh api:*)"
+      "Bash(gh api:*)",
+      "Bash(gh issue list:*)"
     ]
   }
 }
