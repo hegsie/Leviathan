@@ -690,20 +690,26 @@ describe('Interactive Rebase Dialog', () => {
       const todoLines: string[] = [];
 
       for (const c of commits) {
+        // Sanitize summary for todo file format (line-based, no newlines allowed)
+        const sanitizedSummary = c.summary.replace(/[\r\n]+/g, ' ').trim();
+
         if (c.action === 'reword' && c.newMessage && c.newMessage !== c.summary) {
           // Use pick + exec to amend with new message
-          todoLines.push(`pick ${c.shortId} ${c.summary}`);
+          todoLines.push(`pick ${c.shortId} ${sanitizedSummary}`);
           // Use printf for POSIX shell compatibility
+          // Handle both \r\n (CRLF) and \r (CR) line endings
           const escapedMessage = c.newMessage
             .replace(/\\/g, '\\\\')
             .replace(/'/g, "'\\''")
+            .replace(/\r\n/g, '\\n')
+            .replace(/\r/g, '\\n')
             .replace(/\n/g, '\\n');
           todoLines.push(`exec git commit --amend -m "$(printf '%b' '${escapedMessage}')"`);
         } else if (c.action === 'reword') {
           // Reword without message change - keep as pick
-          todoLines.push(`pick ${c.shortId} ${c.summary}`);
+          todoLines.push(`pick ${c.shortId} ${sanitizedSummary}`);
         } else {
-          todoLines.push(`${c.action} ${c.shortId} ${c.summary}`);
+          todoLines.push(`${c.action} ${c.shortId} ${sanitizedSummary}`);
         }
       }
 
@@ -843,6 +849,51 @@ describe('Interactive Rebase Dialog', () => {
       expect(todo).to.equal(
         'pick abc1234 Old\n' +
         "exec git commit --amend -m \"$(printf '%b' 'Line 1\\nLine 2\\nLine 3')\""
+      );
+    });
+
+    it('should escape carriage returns in reword messages', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old', 'reword', 'Line 1\r\nLine 2\rLine 3'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      // Both \r\n and \r should be converted to \n for shell
+      expect(todo).to.equal(
+        'pick abc1234 Old\n' +
+        "exec git commit --amend -m \"$(printf '%b' 'Line 1\\nLine 2\\nLine 3')\""
+      );
+    });
+
+    it('should sanitize commit summaries containing newlines', () => {
+      // Commit summaries with newlines would break todo file format
+      // They should be sanitized to single line
+      const commits = [
+        createEditableCommit('abc1234', 'Feature A\nExtra line\rAnother line', 'pick'),
+        createEditableCommit('def1234', 'Feature B\r\nWith CRLF', 'squash'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      // Newlines in summaries should be replaced with spaces
+      expect(todo).to.equal(
+        'pick abc1234 Feature A Extra line Another line\n' +
+        'squash def1234 Feature B With CRLF'
+      );
+    });
+
+    it('should sanitize reword commit summaries containing newlines', () => {
+      const commits = [
+        createEditableCommit('abc1234', 'Old\nwith newline', 'reword', 'New message'),
+      ];
+
+      const todo = generateTodo(commits);
+
+      // The original summary in the todo line should be sanitized
+      expect(todo).to.equal(
+        'pick abc1234 Old with newline\n' +
+        "exec git commit --amend -m \"$(printf '%b' 'New message')\""
       );
     });
   });
