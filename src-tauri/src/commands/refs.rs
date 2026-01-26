@@ -15,6 +15,12 @@ pub struct RefInfo {
     pub shorthand: String,
     pub ref_type: RefType,
     pub is_head: bool,
+    /// For tags: whether the tag is annotated (has message/tagger)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_annotated: Option<bool>,
+    /// For tags: the tag message (if annotated)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_message: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -52,12 +58,20 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
             continue;
         }
 
-        // Get the target commit OID
-        let target_oid = if reference.is_tag() {
+        // Get the target commit OID and tag metadata
+        let (target_oid, is_annotated, tag_message) = if reference.is_tag() {
+            // Try to peel to tag object first (for annotated tags)
+            let tag_obj = reference.peel_to_tag().ok();
+            let is_annotated = tag_obj.is_some();
+            let tag_message = tag_obj
+                .as_ref()
+                .and_then(|t| t.message().map(|m| m.to_string()));
+
             // For annotated tags, peel to the commit
-            reference.peel_to_commit().ok().map(|c| c.id().to_string())
+            let oid = reference.peel_to_commit().ok().map(|c| c.id().to_string());
+            (oid, Some(is_annotated), tag_message)
         } else {
-            reference.target().map(|oid| oid.to_string())
+            (reference.target().map(|oid| oid.to_string()), None, None)
         };
 
         let target_oid = match target_oid {
@@ -96,6 +110,8 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
             shorthand,
             ref_type,
             is_head,
+            is_annotated,
+            tag_message,
         };
 
         refs_map.entry(target_oid).or_default().push(ref_info);

@@ -175,6 +175,33 @@ export class LvFileStatus extends LitElement {
         color: var(--color-error);
       }
 
+      /* Partial staging indicator - file has some changes staged, some not */
+      .file-item.partial-staged {
+        position: relative;
+      }
+
+      .partial-indicator {
+        position: absolute;
+        left: 6px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: var(--color-warning);
+        box-shadow: 0 0 0 2px var(--color-bg-primary);
+      }
+
+      .partial-badge {
+        font-size: 9px;
+        color: var(--color-warning);
+        background: var(--color-warning-bg);
+        padding: 0 4px;
+        border-radius: var(--radius-sm);
+        margin-left: 4px;
+        flex-shrink: 0;
+      }
+
       .file-name-container {
         flex: 1;
         display: flex;
@@ -870,6 +897,15 @@ export class LvFileStatus extends LitElement {
     return labels[status] || "?";
   }
 
+  /**
+   * Check if a file is partially staged (has changes in both staged and unstaged)
+   */
+  private isPartiallyStaged(filePath: string): boolean {
+    const inStaged = this.stagedFiles.some((f) => f.path === filePath);
+    const inUnstaged = this.unstagedFiles.some((f) => f.path === filePath);
+    return inStaged && inUnstaged;
+  }
+
   private async handleStageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
     const result = await gitService.stageFiles(this.repositoryPath, {
@@ -1154,25 +1190,28 @@ export class LvFileStatus extends LitElement {
   private renderFileItem(file: StatusEntry, staged: boolean, index: number) {
     const isFocused = this.focusedIndex === index;
     const isSelected = this.selectedFiles.has(file.path);
+    const isPartial = this.isPartiallyStaged(file.path);
     const { name, dir } = this.getFileNameAndDir(file.path);
 
     return html`
       <li
         class="file-item ${isSelected ? "selected" : ""} ${isFocused
           ? "focused"
-          : ""}"
+          : ""} ${isPartial ? "partial-staged" : ""}"
         @click=${(e: MouseEvent) => this.handleFileClick(file, e)}
         @contextmenu=${(e: MouseEvent) =>
           this.handleContextMenu(e, file, staged)}
-        title="${file.path}"
+        title="${file.path}${isPartial ? " (partially staged)" : ""}"
         data-index="${index}"
       >
+        ${isPartial ? html`<span class="partial-indicator"></span>` : nothing}
         <span class="file-status ${file.status}"
           >${this.getStatusLabel(file.status)}</span
         >
         <span class="file-name-container">
           <span class="file-name">${name}</span>
           ${dir ? html`<span class="file-dir">${dir}</span>` : nothing}
+          ${isPartial ? html`<span class="partial-badge">partial</span>` : nothing}
         </span>
         <div class="file-actions">
           ${staged
@@ -1249,23 +1288,25 @@ export class LvFileStatus extends LitElement {
       const index = indexOffset;
       const isFocused = this.focusedIndex === index;
       const isSelected = this.selectedFiles.has(file.path);
+      const isPartial = this.isPartiallyStaged(file.path);
 
       return html`
         <li
           class="file-item tree-file-item ${isSelected
             ? "selected"
-            : ""} ${isFocused ? "focused" : ""}"
+            : ""} ${isFocused ? "focused" : ""} ${isPartial ? "partial-staged" : ""}"
           style="--tree-depth: ${depth}"
           @click=${(e: MouseEvent) => this.handleFileClick(file, e)}
           @contextmenu=${(e: MouseEvent) =>
             this.handleContextMenu(e, file, staged)}
-          title="${file.path}"
+          title="${file.path}${isPartial ? " (partially staged)" : ""}"
           data-index="${index}"
         >
+          ${isPartial ? html`<span class="partial-indicator"></span>` : nothing}
           <span class="file-status ${file.status}"
             >${this.getStatusLabel(file.status)}</span
           >
-          <span class="file-name"><span>${name}</span></span>
+          <span class="file-name"><span>${name}</span>${isPartial ? html`<span class="partial-badge">partial</span>` : nothing}</span>
           <div class="file-actions">
             ${staged
               ? html`

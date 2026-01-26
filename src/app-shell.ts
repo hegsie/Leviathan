@@ -38,8 +38,12 @@ import './components/dialogs/lv-migration-dialog.ts';
 import './components/dialogs/lv-create-tag-dialog.ts';
 import './components/dialogs/lv-create-branch-dialog.ts';
 import './components/dialogs/lv-cherry-pick-dialog.ts';
+import './components/dialogs/lv-repository-health-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import './components/common/lv-toast-container.ts';
+import './components/common/lv-progress-indicator.ts';
+import { progressService } from './services/progress.service.ts';
+import type { ProgressOperation } from './components/common/lv-progress-indicator.ts';
 import './components/dashboard/lv-context-dashboard.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
 import type { LvCreateTagDialog } from './components/dialogs/lv-create-tag-dialog.ts';
@@ -412,6 +416,10 @@ export class AppShell extends LitElement {
   @state() private blameFile: string | null = null;
   @state() private blameCommitOid: string | null = null;
 
+  // Progress operations
+  @state() private progressOperations: ProgressOperation[] = [];
+  private progressUnsubscribe?: () => void;
+
   // Settings dialog
   @state() private showSettings = false;
 
@@ -460,6 +468,9 @@ export class AppShell extends LitElement {
 
   // Clean dialog
   @state() private showClean = false;
+
+  // Repository health dialog
+  @state() private showRepositoryHealth = false;
 
   // Bisect dialog
   @state() private showBisect = false;
@@ -659,6 +670,11 @@ export class AppShell extends LitElement {
       createStash: () => this.handleCreateStash(),
       closeDiff: () => this.handleCloseOverlay(),
     });
+
+    // Subscribe to progress updates
+    this.progressUnsubscribe = progressService.subscribe((operations) => {
+      this.progressOperations = operations;
+    });
   }
 
   disconnectedCallback(): void {
@@ -678,6 +694,8 @@ export class AppShell extends LitElement {
     // Clean up update listeners
     this.updateUnlisteners.forEach((unlisten) => unlisten());
     this.updateUnlisteners = [];
+    // Unsubscribe from progress service
+    this.progressUnsubscribe?.();
   }
 
   private async checkUnifiedProfilesMigration(): Promise<void> {
@@ -1133,6 +1151,139 @@ export class AppShell extends LitElement {
     }
   }
 
+  /**
+   * Create a fixup commit targeting the selected commit
+   * Requires staged changes. The fixup commit will be marked with "fixup! <original-message>"
+   * Can be auto-squashed later with interactive rebase --autosquash
+   */
+  private async handleFixupCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Check if there are staged changes
+    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    if (!statusResult.success || !statusResult.data) {
+      showToast('Failed to check status', 'error');
+      return;
+    }
+
+    const hasStagedChanges = statusResult.data.some(f => f.isStaged);
+    if (!hasStagedChanges) {
+      showToast('No staged changes to fixup', 'error');
+      return;
+    }
+
+    // Create fixup commit
+    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+      message: `fixup! ${commit.summary}`,
+    });
+
+    if (result.success) {
+      showToast(`Created fixup commit for ${commit.shortId}`, 'success');
+      this.graphCanvas?.refresh?.();
+      window.dispatchEvent(new CustomEvent('status-refresh'));
+    } else {
+      showToast(result.error?.message || 'Failed to create fixup commit', 'error');
+    }
+  }
+
+  /**
+   * Create a squash commit targeting the selected commit
+   * Similar to fixup but preserves the message for editing during autosquash
+   */
+  private async handleSquashCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Check if there are staged changes
+    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    if (!statusResult.success || !statusResult.data) {
+      showToast('Failed to check status', 'error');
+      return;
+    }
+
+    const hasStagedChanges = statusResult.data.some(f => f.isStaged);
+    if (!hasStagedChanges) {
+      showToast('No staged changes to squash', 'error');
+      return;
+    }
+
+    // Create squash commit
+    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+      message: `squash! ${commit.summary}`,
+    });
+
+    if (result.success) {
+      showToast(`Created squash commit for ${commit.shortId}`, 'success');
+      this.graphCanvas?.refresh?.();
+      window.dispatchEvent(new CustomEvent('status-refresh'));
+    } else {
+      showToast(result.error?.message || 'Failed to create squash commit', 'error');
+    }
+  }
+
+  /**
+   * Reword the selected commit
+   * For HEAD: Opens amend mode in commit panel
+   * For other commits: Dispatches event to open interactive rebase with reword action
+   */
+  private async handleRewordCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Check if this is HEAD commit by comparing with the first commit in history.
+    // Note: This works for the common case of a branch checkout. In detached HEAD state,
+    // the first commit in history is still HEAD, so this approach remains valid.
+    const historyResult = await gitService.getCommitHistory({
+      path: this.activeRepository.repository.path,
+      limit: 1,
+    });
+
+    const isHead = historyResult.success && historyResult.data &&
+      historyResult.data.length > 0 && historyResult.data[0].oid === commit.oid;
+
+    if (isHead) {
+      // For HEAD, just trigger amend mode
+      window.dispatchEvent(new CustomEvent('trigger-amend', {
+        detail: { commit },
+      }));
+    } else {
+      // For other commits, dispatch event to open interactive rebase dialog
+      // pre-configured for rewording this commit
+      this.dispatchEvent(new CustomEvent('open-interactive-rebase', {
+        bubbles: true,
+        composed: true,
+        detail: {
+          upstreamRef: `${commit.oid}^`,
+          mode: 'reword',
+          targetCommitOid: commit.oid,
+        },
+      }));
+    }
+  }
+
+  /**
+   * Quick amend - only available for HEAD commit
+   * Triggers amend mode in commit panel
+   */
+  private handleQuickAmend(): void {
+    const commit = this.contextMenu.commit;
+    if (!commit) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Dispatch event to trigger amend mode in commit panel
+    window.dispatchEvent(new CustomEvent('trigger-amend', {
+      detail: { commit },
+    }));
+  }
+
   private handleConflictResolved(): void {
     this.showConflictDialog = false;
     this.graphCanvas?.refresh?.();
@@ -1523,6 +1674,13 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => this.handleRunPrune()),
       },
       {
+        id: 'repository-health',
+        label: 'Repository Health & Maintenance',
+        category: 'action',
+        icon: 'activity',
+        action: this.requiresRepository(() => { this.showRepositoryHealth = true; }),
+      },
+      {
         id: 'github',
         label: 'GitHub Integration',
         category: 'action',
@@ -1664,20 +1822,45 @@ export class AppShell extends LitElement {
 
   private async handleFetch(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.fetch({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const opId = progressService.startOperation('fetch', 'Fetching from remote...');
+    try {
+      await gitService.fetch({ path: this.activeRepository.repository.path });
+      progressService.completeOperation(opId);
+      this.handleRefresh();
+    } catch {
+      progressService.failOperation(opId);
+      // Error is logged; toast notification is shown via remote-operation-completed event
+    }
   }
 
   private async handlePull(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.pull({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const opId = progressService.startOperation('pull', 'Pulling from remote...');
+    try {
+      await gitService.pull({ path: this.activeRepository.repository.path });
+      progressService.completeOperation(opId);
+      this.handleRefresh();
+    } catch {
+      progressService.failOperation(opId);
+      // Error is logged; toast notification is shown via remote-operation-completed event
+    }
   }
 
   private async handlePush(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.push({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const opId = progressService.startOperation('push', 'Pushing to remote...');
+    try {
+      await gitService.push({ path: this.activeRepository.repository.path });
+      progressService.completeOperation(opId);
+      this.handleRefresh();
+    } catch {
+      progressService.failOperation(opId);
+      // Error is logged; toast notification is shown via remote-operation-completed event
+    }
+  }
+
+  private handleCancelOperation(e: CustomEvent<{ id: string }>): void {
+    progressService.cancelOperation(e.detail.id);
   }
 
   private async handleCreateStash(): Promise<void> {
@@ -1956,6 +2139,40 @@ export class AppShell extends LitElement {
                 <span class="context-menu-summary">${this.contextMenu.commit.summary}</span>
               </div>
               <div class="context-menu-divider"></div>
+              <button class="context-menu-item" @click=${this.handleQuickAmend} title="Amend (edit) this commit">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                </svg>
+                Amend
+              </button>
+              <button class="context-menu-item" @click=${this.handleRewordCommit} title="Change the commit message">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="17" y1="10" x2="3" y2="10"></line>
+                  <line x1="21" y1="6" x2="3" y2="6"></line>
+                  <line x1="21" y1="14" x2="3" y2="14"></line>
+                  <line x1="17" y1="18" x2="3" y2="18"></line>
+                </svg>
+                Reword
+              </button>
+              <div class="context-menu-divider"></div>
+              <button class="context-menu-item" @click=${this.handleFixupCommit} title="Create fixup commit for this commit (requires staged changes)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                Fixup into this
+              </button>
+              <button class="context-menu-item" @click=${this.handleSquashCommit} title="Create squash commit for this commit (requires staged changes)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="9" y1="3" x2="9" y2="21"></line>
+                  <line x1="15" y1="3" x2="15" y2="21"></line>
+                </svg>
+                Squash into this
+              </button>
+              <div class="context-menu-divider"></div>
               <button class="context-menu-item" @click=${this.handleCherryPick}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M8 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2z"/>
@@ -2144,6 +2361,19 @@ export class AppShell extends LitElement {
         ></lv-clean-dialog>
       ` : ''}
 
+      ${this.activeRepository && this.showRepositoryHealth ? html`
+        <lv-modal
+          title="Repository Health"
+          ?open=${this.showRepositoryHealth}
+          @close=${() => { this.showRepositoryHealth = false; }}
+        >
+          <lv-repository-health-dialog
+            .repositoryPath=${this.activeRepository.repository.path}
+            @close=${() => { this.showRepositoryHealth = false; }}
+          ></lv-repository-health-dialog>
+        </lv-modal>
+      ` : ''}
+
       ${this.activeRepository ? html`
         <lv-bisect-dialog
           ?open=${this.showBisect}
@@ -2280,6 +2510,10 @@ export class AppShell extends LitElement {
       ` : ''}
 
       <lv-toast-container></lv-toast-container>
+      <lv-progress-indicator
+        .operations=${this.progressOperations}
+        @cancel-operation=${this.handleCancelOperation}
+      ></lv-progress-indicator>
     `;
   }
 }

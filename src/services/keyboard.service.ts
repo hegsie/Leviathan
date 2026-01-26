@@ -14,6 +14,15 @@ export interface Shortcut {
   category: string;
 }
 
+/** Serializable shortcut binding (without action) */
+export interface ShortcutBinding {
+  key: string;
+  ctrl?: boolean;
+  shift?: boolean;
+  alt?: boolean;
+  meta?: boolean;
+}
+
 export interface ShortcutRegistration {
   id: string;
   shortcut: Shortcut;
@@ -21,15 +30,25 @@ export interface ShortcutRegistration {
 
 export interface KeyboardSettings {
   vimMode: boolean;
-  customBindings: Record<string, string>;
+  /** Map of shortcut ID to custom binding (serialized) */
+  customBindings: Record<string, ShortcutBinding>;
 }
 
 const STORAGE_KEY = 'leviathan-keyboard-settings';
 
 class KeyboardService {
   private shortcuts: Map<string, Shortcut> = new Map();
+  /** Map of shortcut ID to default binding */
+  private defaultBindings: Map<string, ShortcutBinding> = new Map();
+  /** Map of shortcut ID to custom binding (if different from default) */
+  private customBindings: Map<string, ShortcutBinding> = new Map();
+  /** Map of shortcut ID to its metadata (description, category, action) */
+  private shortcutMetadata: Map<string, { description: string; category: string; action: () => void }> = new Map();
+  /** Reverse mapping from key combo to shortcut ID for O(1) lookups */
+  private keyToId: Map<string, string> = new Map();
   private enabled = true;
   private listeners: Set<(e: KeyboardEvent) => void> = new Set();
+  private settingsChangeListeners: Set<() => void> = new Set();
   private vimMode = false;
   private vimPendingKey: string | null = null;
   private vimPendingTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -56,6 +75,12 @@ class KeyboardService {
       if (stored) {
         const settings: KeyboardSettings = JSON.parse(stored);
         this.vimMode = settings.vimMode ?? false;
+        // Load custom bindings
+        if (settings.customBindings) {
+          for (const [id, binding] of Object.entries(settings.customBindings)) {
+            this.customBindings.set(id, binding);
+          }
+        }
       }
     } catch {
       // Ignore parse errors
@@ -64,9 +89,13 @@ class KeyboardService {
 
   private saveSettings(): void {
     try {
+      const customBindingsObj: Record<string, ShortcutBinding> = {};
+      for (const [id, binding] of this.customBindings.entries()) {
+        customBindingsObj[id] = binding;
+      }
       const settings: KeyboardSettings = {
         vimMode: this.vimMode,
-        customBindings: {},
+        customBindings: customBindingsObj,
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
     } catch {
@@ -97,20 +126,231 @@ class KeyboardService {
    * Register a keyboard shortcut
    */
   register(id: string, shortcut: Shortcut): void {
-    const key = this.getShortcutKey(shortcut);
-    this.shortcuts.set(key, { ...shortcut });
+    // Store the default binding
+    const defaultBinding: ShortcutBinding = {
+      key: shortcut.key,
+      ctrl: shortcut.ctrl,
+      shift: shortcut.shift,
+      alt: shortcut.alt,
+      meta: shortcut.meta,
+    };
+    this.defaultBindings.set(id, defaultBinding);
+
+    // Store metadata (description, category, action)
+    this.shortcutMetadata.set(id, {
+      description: shortcut.description,
+      category: shortcut.category,
+      action: shortcut.action,
+    });
+
+    // Use custom binding if available, otherwise use default
+    const activeBinding = this.customBindings.get(id) ?? defaultBinding;
+    const activeShortcut: Shortcut = {
+      ...activeBinding,
+      description: shortcut.description,
+      category: shortcut.category,
+      action: shortcut.action,
+    };
+
+    const key = this.getShortcutKey(activeShortcut);
+    this.shortcuts.set(key, activeShortcut);
+    // Maintain reverse mapping for O(1) lookups
+    this.keyToId.set(key, id);
   }
 
   /**
    * Unregister a keyboard shortcut
    */
   unregister(id: string): void {
-    // Find and remove by iterating (we store by key combo, not id)
-    for (const [key, shortcut] of this.shortcuts.entries()) {
-      if (shortcut.description === id) {
+    // Find and remove using reverse mapping
+    const binding = this.customBindings.get(id) ?? this.defaultBindings.get(id);
+    if (binding) {
+      const metadata = this.shortcutMetadata.get(id);
+      if (metadata) {
+        const shortcut: Shortcut = { ...binding, ...metadata };
+        const key = this.getShortcutKey(shortcut);
         this.shortcuts.delete(key);
-        break;
+        this.keyToId.delete(key);
       }
+    }
+    this.defaultBindings.delete(id);
+    this.customBindings.delete(id);
+    this.shortcutMetadata.delete(id);
+  }
+
+  /**
+   * Rebind a shortcut to a new key combination
+   */
+  rebind(id: string, newBinding: ShortcutBinding): boolean {
+    const metadata = this.shortcutMetadata.get(id);
+    if (!metadata) return false;
+
+    // Check for conflicts with existing bindings
+    const testShortcut: Shortcut = { ...newBinding, ...metadata };
+    const newKey = this.getShortcutKey(testShortcut);
+
+    // Get the current binding to find the old key
+    const currentBinding = this.customBindings.get(id) ?? this.defaultBindings.get(id);
+    let oldKey: string | undefined;
+    if (currentBinding) {
+      const oldShortcut: Shortcut = { ...currentBinding, ...metadata };
+      oldKey = this.getShortcutKey(oldShortcut);
+    }
+
+    // Check if new key is already taken by a different shortcut
+    const existingId = this.keyToId.get(newKey);
+    if (existingId && existingId !== id) {
+      // Conflict with a different shortcut
+      return false;
+    }
+
+    // Remove the old binding
+    if (oldKey) {
+      this.shortcuts.delete(oldKey);
+      this.keyToId.delete(oldKey);
+    }
+
+    // Save the custom binding
+    this.customBindings.set(id, newBinding);
+    this.saveSettings();
+
+    // Register the new binding
+    this.shortcuts.set(newKey, testShortcut);
+    this.keyToId.set(newKey, id);
+
+    // Notify listeners
+    this.notifySettingsChange();
+    return true;
+  }
+
+  /**
+   * Reset a shortcut to its default binding
+   */
+  resetBinding(id: string): void {
+    const metadata = this.shortcutMetadata.get(id);
+    const defaultBinding = this.defaultBindings.get(id);
+    if (!metadata || !defaultBinding) return;
+
+    // Get the current (custom) binding to find and remove the old key
+    const currentBinding = this.customBindings.get(id);
+    if (currentBinding) {
+      const oldShortcut: Shortcut = { ...currentBinding, ...metadata };
+      const oldKey = this.getShortcutKey(oldShortcut);
+      this.shortcuts.delete(oldKey);
+      this.keyToId.delete(oldKey);
+    }
+
+    // Remove custom binding
+    this.customBindings.delete(id);
+    this.saveSettings();
+
+    // Register the default binding
+    const shortcut: Shortcut = { ...defaultBinding, ...metadata };
+    const key = this.getShortcutKey(shortcut);
+    this.shortcuts.set(key, shortcut);
+    this.keyToId.set(key, id);
+
+    // Notify listeners
+    this.notifySettingsChange();
+  }
+
+  /**
+   * Reset all shortcuts to default bindings
+   */
+  resetAllBindings(): void {
+    this.customBindings.clear();
+    this.saveSettings();
+
+    // Rebuild shortcuts map and reverse mapping with defaults
+    this.shortcuts.clear();
+    this.keyToId.clear();
+    for (const [id, metadata] of this.shortcutMetadata.entries()) {
+      const defaultBinding = this.defaultBindings.get(id);
+      if (defaultBinding) {
+        const shortcut: Shortcut = { ...defaultBinding, ...metadata };
+        const key = this.getShortcutKey(shortcut);
+        this.shortcuts.set(key, shortcut);
+        this.keyToId.set(key, id);
+      }
+    }
+
+    // Notify listeners
+    this.notifySettingsChange();
+  }
+
+  /**
+   * Get the current binding for a shortcut (custom or default)
+   */
+  getBinding(id: string): ShortcutBinding | undefined {
+    return this.customBindings.get(id) ?? this.defaultBindings.get(id);
+  }
+
+  /**
+   * Get the default binding for a shortcut
+   */
+  getDefaultBinding(id: string): ShortcutBinding | undefined {
+    return this.defaultBindings.get(id);
+  }
+
+  /**
+   * Check if a shortcut has been customized
+   */
+  isCustomized(id: string): boolean {
+    return this.customBindings.has(id);
+  }
+
+  /**
+   * Get all shortcut IDs with their bindings
+   */
+  getAllBindings(): Array<{
+    id: string;
+    binding: ShortcutBinding;
+    defaultBinding: ShortcutBinding;
+    description: string;
+    category: string;
+    isCustomized: boolean;
+  }> {
+    const result: Array<{
+      id: string;
+      binding: ShortcutBinding;
+      defaultBinding: ShortcutBinding;
+      description: string;
+      category: string;
+      isCustomized: boolean;
+    }> = [];
+
+    for (const [id, metadata] of this.shortcutMetadata.entries()) {
+      const defaultBinding = this.defaultBindings.get(id);
+      if (defaultBinding) {
+        const customBinding = this.customBindings.get(id);
+        result.push({
+          id,
+          binding: customBinding ?? defaultBinding,
+          defaultBinding,
+          description: metadata.description,
+          category: metadata.category,
+          isCustomized: !!customBinding,
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Add a listener for settings changes
+   */
+  addSettingsChangeListener(listener: () => void): () => void {
+    this.settingsChangeListeners.add(listener);
+    return () => this.settingsChangeListeners.delete(listener);
+  }
+
+  /**
+   * Notify settings change listeners
+   */
+  private notifySettingsChange(): void {
+    for (const listener of this.settingsChangeListeners) {
+      listener();
     }
   }
 

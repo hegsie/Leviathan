@@ -353,12 +353,42 @@ export class LvCommitPanel extends LitElement {
 
   private readonly SUMMARY_LIMIT = 72;
 
+  private boundHandleTriggerAmend = this.handleTriggerAmend.bind(this);
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     await this.loadTemplates();
     await this.loadConventionalTypes();
     await this.loadGitTemplate();
     await this.checkAiAvailability();
+
+    // Listen for trigger-amend events from context menu
+    window.addEventListener('trigger-amend', this.boundHandleTriggerAmend);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener('trigger-amend', this.boundHandleTriggerAmend);
+  }
+
+  private handleTriggerAmend(e: Event): void {
+    const event = e as CustomEvent<{ commit: Commit }>;
+    if (event.detail?.commit) {
+      // Store original input before pre-populating
+      this.originalSummary = this.summary;
+      this.originalDescription = this.description;
+
+      // Enable amend mode and populate with commit message
+      this.amend = true;
+      this.lastCommit = event.detail.commit;
+      this.summary = event.detail.commit.summary;
+      this.description = event.detail.commit.body ?? '';
+
+      // Focus the summary input
+      this.updateComplete.then(() => {
+        this.summaryInput?.focus();
+      });
+    }
   }
 
   private async checkAiAvailability(): Promise<void> {

@@ -39,6 +39,9 @@ interface DiffContextMenuState {
   hunk: DiffHunk | null;
 }
 
+/** Unique key for a line within the diff */
+type LineKey = `${number}-${number}`;
+
 /**
  * Diff view component
  * Displays file diff with syntax highlighting and line numbers
@@ -650,6 +653,98 @@ export class LvDiffView extends LitElement {
         color: #a855f7;
       }
 
+      /* Line selection mode */
+      .line-selection-mode .line.addition,
+      .line-selection-mode .line.deletion {
+        cursor: pointer;
+      }
+
+      .line-selection-mode .line.addition:hover,
+      .line-selection-mode .line.deletion:hover {
+        filter: brightness(1.15);
+      }
+
+      .line.selected {
+        outline: 2px solid var(--color-primary);
+        outline-offset: -2px;
+        position: relative;
+      }
+
+      .line.selected::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 4px;
+        background: var(--color-primary);
+      }
+
+      .line-checkbox {
+        display: none;
+        width: 16px;
+        height: 16px;
+        margin: 0 4px;
+        cursor: pointer;
+        accent-color: var(--color-primary);
+        flex-shrink: 0;
+      }
+
+      .line-selection-mode .line.addition .line-checkbox,
+      .line-selection-mode .line.deletion .line-checkbox {
+        display: inline-block;
+      }
+
+      .selection-actions {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-primary-alpha);
+        border-bottom: 1px solid var(--color-primary);
+        font-size: var(--font-size-xs);
+      }
+
+      .selection-info {
+        flex: 1;
+        color: var(--color-primary);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .selection-btn {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 12px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-primary);
+        color: var(--color-text-secondary);
+        font-size: 11px;
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .selection-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .selection-btn.primary {
+        background: var(--color-primary);
+        color: var(--color-text-inverse);
+        border-color: var(--color-primary);
+      }
+
+      .selection-btn.primary:hover {
+        filter: brightness(1.1);
+      }
+
+      .selection-btn svg {
+        width: 12px;
+        height: 12px;
+      }
+
       /* Context menu */
       .context-menu {
         position: fixed;
@@ -710,6 +805,8 @@ export class LvDiffView extends LitElement {
   @state() private conflictRegions: ConflictRegion[] = [];
   @state() private hasConflicts = false;
   @state() private contextMenu: DiffContextMenuState = { visible: false, x: 0, y: 0, line: null, hunk: null };
+  @state() private selectedLines: Set<LineKey> = new Set();
+  @state() private lineSelectionMode = false;
 
   private language: BundledLanguage | null = null;
 
@@ -1169,6 +1266,238 @@ export class LvDiffView extends LitElement {
   }
 
   /**
+   * Create a unique key for a line in the diff.
+   *
+   * The key is constructed from numeric indices (hunkIndex and lineIndex),
+   * which guarantees no special characters in the key format.
+   * This is used for tracking selected lines in the Set.
+   */
+  private getLineKey(hunkIndex: number, lineIndex: number): LineKey {
+    return `${hunkIndex}-${lineIndex}`;
+  }
+
+  /**
+   * Toggle line selection mode
+   */
+  private toggleLineSelectionMode(): void {
+    this.lineSelectionMode = !this.lineSelectionMode;
+    if (!this.lineSelectionMode) {
+      this.selectedLines = new Set();
+    }
+  }
+
+  /**
+   * Toggle selection of a specific line
+   */
+  private toggleLineSelection(hunkIndex: number, lineIndex: number, line: DiffLine): void {
+    // Only allow selecting additions and deletions
+    if (line.origin !== 'addition' && line.origin !== 'deletion') return;
+
+    const key = this.getLineKey(hunkIndex, lineIndex);
+    const newSelected = new Set(this.selectedLines);
+    if (newSelected.has(key)) {
+      newSelected.delete(key);
+    } else {
+      newSelected.add(key);
+    }
+    this.selectedLines = newSelected;
+  }
+
+  /**
+   * Check if a line is selected
+   */
+  private isLineSelected(hunkIndex: number, lineIndex: number): boolean {
+    return this.selectedLines.has(this.getLineKey(hunkIndex, lineIndex));
+  }
+
+  /**
+   * Clear all line selections
+   */
+  private clearLineSelection(): void {
+    this.selectedLines = new Set();
+  }
+
+  /**
+   * Select all lines in a hunk
+   */
+  private selectAllInHunk(hunkIndex: number): void {
+    if (!this.diff) return;
+    const hunk = this.diff.hunks[hunkIndex];
+    if (!hunk) return;
+
+    const newSelected = new Set(this.selectedLines);
+    hunk.lines.forEach((line, lineIndex) => {
+      if (line.origin === 'addition' || line.origin === 'deletion') {
+        newSelected.add(this.getLineKey(hunkIndex, lineIndex));
+      }
+    });
+    this.selectedLines = newSelected;
+  }
+
+  /**
+   * Build a patch from selected lines only
+   * This is more complex than buildHunkPatch because we need to:
+   * 1. Group selected lines by hunk
+   * 2. Include context lines around selected lines
+   * 3. Adjust line numbers in hunk headers
+   */
+  private buildSelectedLinesPatch(): string {
+    if (!this.diff || !this.file || this.selectedLines.size === 0) return '';
+
+    const filePath = this.file.path;
+    const fileStatus = this.diff.status;
+    const patchLines: string[] = [];
+
+    // Add diff header
+    if (fileStatus === 'new' || fileStatus === 'untracked') {
+      patchLines.push('--- /dev/null');
+    } else {
+      patchLines.push(`--- a/${filePath}`);
+    }
+
+    if (fileStatus === 'deleted') {
+      patchLines.push('+++ /dev/null');
+    } else {
+      patchLines.push(`+++ b/${filePath}`);
+    }
+
+    // Group selected lines by hunk
+    const selectedByHunk = new Map<number, Set<number>>();
+    for (const key of this.selectedLines) {
+      const [hunkIndex, lineIndex] = key.split('-').map(Number);
+      if (!selectedByHunk.has(hunkIndex)) {
+        selectedByHunk.set(hunkIndex, new Set());
+      }
+      selectedByHunk.get(hunkIndex)!.add(lineIndex);
+    }
+
+    // Process each hunk with selected lines
+    for (const [hunkIndex, selectedLineIndices] of selectedByHunk) {
+      const hunk = this.diff.hunks[hunkIndex];
+      if (!hunk) continue;
+
+      // Build the lines for this hunk patch
+      // We need to include context lines and adjust for non-selected changes
+      const hunkPatchLines: string[] = [];
+      let oldLineCount = 0;
+      let newLineCount = 0;
+      const firstOldLine = hunk.oldStart;
+      const firstNewLine = hunk.newStart;
+
+      for (let i = 0; i < hunk.lines.length; i++) {
+        const line = hunk.lines[i];
+        const isSelected = selectedLineIndices.has(i);
+
+        // Skip metadata lines
+        if (line.origin === 'hunk-header' || line.origin === 'file-header' || line.origin === 'binary') {
+          continue;
+        }
+
+        // Handle "no newline at end of file" markers
+        if (line.origin === 'del-eofnl' || line.origin === 'add-eofnl') {
+          // Only include if the corresponding line is selected
+          continue;
+        }
+
+        const content = line.content.replace(/\n$/, '').replace(/\r$/, '');
+
+        if (line.origin === 'context') {
+          // Always include context lines
+          hunkPatchLines.push(' ' + content);
+          oldLineCount++;
+          newLineCount++;
+        } else if (line.origin === 'deletion') {
+          if (isSelected) {
+            // Include this deletion in the patch
+            hunkPatchLines.push('-' + content);
+            oldLineCount++;
+          } else {
+            // Unselected deletions become context lines in the patch.
+            // This is correct for partial staging: the line remains in the index
+            // (not staged for deletion) while the working tree still shows it as deleted.
+            // The next diff will continue to show it as a deletion that can be staged.
+            hunkPatchLines.push(' ' + content);
+            oldLineCount++;
+            newLineCount++;
+          }
+        } else if (line.origin === 'addition') {
+          if (isSelected) {
+            // Include this addition
+            hunkPatchLines.push('+' + content);
+            newLineCount++;
+          }
+          // Unselected additions are simply not included
+        }
+      }
+
+      // Only add hunk if it has actual changes
+      if (hunkPatchLines.some(l => l.startsWith('+') || l.startsWith('-'))) {
+        // Create hunk header with adjusted counts
+        const hunkHeader = `@@ -${firstOldLine},${oldLineCount} +${firstNewLine},${newLineCount} @@`;
+        patchLines.push(hunkHeader);
+        patchLines.push(...hunkPatchLines);
+      }
+    }
+
+    // Return empty if no actual hunks were added
+    if (patchLines.length <= 2) return '';
+
+    return patchLines.join('\n') + '\n';
+  }
+
+  /**
+   * Stage selected lines
+   */
+  private async stageSelectedLines(): Promise<void> {
+    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return;
+
+    const patch = this.buildSelectedLinesPatch();
+    if (!patch) return;
+
+    try {
+      const result = await gitService.stageHunk(this.repositoryPath, patch);
+      if (result.success) {
+        this.selectedLines = new Set();
+        this.dispatchEvent(new CustomEvent('status-changed', {
+          bubbles: true,
+          composed: true,
+        }));
+        await this.loadWorkingDiff();
+      } else {
+        console.error('Failed to stage selected lines:', result.error);
+      }
+    } catch (err) {
+      console.error('Failed to stage selected lines:', err);
+    }
+  }
+
+  /**
+   * Unstage selected lines
+   */
+  private async unstageSelectedLines(): Promise<void> {
+    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return;
+
+    const patch = this.buildSelectedLinesPatch();
+    if (!patch) return;
+
+    try {
+      const result = await gitService.unstageHunk(this.repositoryPath, patch);
+      if (result.success) {
+        this.selectedLines = new Set();
+        this.dispatchEvent(new CustomEvent('status-changed', {
+          bubbles: true,
+          composed: true,
+        }));
+        await this.loadWorkingDiff();
+      } else {
+        console.error('Failed to unstage selected lines:', result.error);
+      }
+    } catch (err) {
+      console.error('Failed to unstage selected lines:', err);
+    }
+  }
+
+  /**
    * Stage a specific hunk
    */
   private async handleStageHunk(hunk: DiffHunk, e: Event): Promise<void> {
@@ -1301,6 +1630,50 @@ export class LvDiffView extends LitElement {
     await this.handleUnstageHunk(hunk, new Event('click'));
   }
 
+  /**
+   * Stage a single line from context menu
+   */
+  private async handleContextStageLine(): Promise<void> {
+    const line = this.contextMenu.line;
+    const hunk = this.contextMenu.hunk;
+    if (!line || !hunk || !this.diff) return;
+
+    // Find hunk and line indices
+    const hunkIndex = this.diff.hunks.indexOf(hunk);
+    const lineIndex = hunk.lines.indexOf(line);
+    if (hunkIndex === -1 || lineIndex === -1) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Temporarily select just this line and stage it
+    const prevSelected = this.selectedLines;
+    this.selectedLines = new Set([this.getLineKey(hunkIndex, lineIndex)]);
+    await this.stageSelectedLines();
+    this.selectedLines = prevSelected;
+  }
+
+  /**
+   * Unstage a single line from context menu
+   */
+  private async handleContextUnstageLine(): Promise<void> {
+    const line = this.contextMenu.line;
+    const hunk = this.contextMenu.hunk;
+    if (!line || !hunk || !this.diff) return;
+
+    // Find hunk and line indices
+    const hunkIndex = this.diff.hunks.indexOf(hunk);
+    const lineIndex = hunk.lines.indexOf(line);
+    if (hunkIndex === -1 || lineIndex === -1) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Temporarily select just this line and unstage it
+    const prevSelected = this.selectedLines;
+    this.selectedLines = new Set([this.getLineKey(hunkIndex, lineIndex)]);
+    await this.unstageSelectedLines();
+    this.selectedLines = prevSelected;
+  }
+
   private renderHighlightedContent(content: string): TemplateResult {
     const tokens = highlightLineSync(content, this.language);
     return html`${tokens.map(
@@ -1308,15 +1681,39 @@ export class LvDiffView extends LitElement {
     )}`;
   }
 
-  private renderLine(line: DiffLine, hunk: DiffHunk) {
+  private renderLine(line: DiffLine, hunk: DiffHunk, hunkIndex: number, lineIndex: number) {
     const lineClass = this.getLineClass(line.origin);
     const originChar = this.getOriginChar(line.origin);
+    const isSelectable = line.origin === 'addition' || line.origin === 'deletion';
+    const isSelected = this.isLineSelected(hunkIndex, lineIndex);
+
+    const handleClick = (e: MouseEvent) => {
+      if (this.lineSelectionMode && isSelectable) {
+        e.preventDefault();
+        this.toggleLineSelection(hunkIndex, lineIndex, line);
+      }
+    };
+
+    const handleCheckboxChange = (e: Event) => {
+      e.stopPropagation();
+      this.toggleLineSelection(hunkIndex, lineIndex, line);
+    };
 
     return html`
       <div
-        class="line ${lineClass}"
+        class="line ${lineClass} ${isSelected ? 'selected' : ''}"
         @contextmenu=${(e: MouseEvent) => this.handleLineContextMenu(e, line, hunk)}
+        @click=${handleClick}
       >
+        ${this.lineSelectionMode && isSelectable ? html`
+          <input
+            type="checkbox"
+            class="line-checkbox"
+            .checked=${isSelected}
+            @change=${handleCheckboxChange}
+            @click=${(e: Event) => e.stopPropagation()}
+          />
+        ` : nothing}
         <div class="line-numbers">
           <span class="line-no old">${line.oldLineNo ?? ''}</span>
           <span class="line-no new">${line.newLineNo ?? ''}</span>
@@ -1327,7 +1724,7 @@ export class LvDiffView extends LitElement {
     `;
   }
 
-  private renderHunk(hunk: DiffHunk, _index: number) {
+  private renderHunk(hunk: DiffHunk, hunkIndex: number) {
     // Only show stage/unstage button for working directory diffs (not commit diffs)
     const showStageButton = this.file !== null && !this.commitFile;
     const isStaged = this.file?.isStaged ?? false;
@@ -1338,6 +1735,15 @@ export class LvDiffView extends LitElement {
           <span class="hunk-header-text">${hunk.header}</span>
           ${showStageButton ? html`
             <div class="hunk-actions">
+              ${this.lineSelectionMode ? html`
+                <button
+                  class="stage-btn"
+                  @click=${() => this.selectAllInHunk(hunkIndex)}
+                  title="Select all lines in this hunk"
+                >
+                  Select All
+                </button>
+              ` : nothing}
               ${isStaged ? html`
                 <button
                   class="stage-btn unstage"
@@ -1365,7 +1771,7 @@ export class LvDiffView extends LitElement {
             </div>
           ` : nothing}
         </div>
-        ${hunk.lines.map((line) => this.renderLine(line, hunk))}
+        ${hunk.lines.map((line, lineIndex) => this.renderLine(line, hunk, hunkIndex, lineIndex))}
       </div>
     `;
   }
@@ -1467,8 +1873,34 @@ export class LvDiffView extends LitElement {
   private renderUnifiedView() {
     if (!this.diff) return nothing;
 
+    const isStaged = this.file?.isStaged ?? false;
+
     return html`
-      <div class="diff-content">
+      ${this.lineSelectionMode && this.selectedLines.size > 0 ? html`
+        <div class="selection-actions">
+          <span class="selection-info">${this.selectedLines.size} line${this.selectedLines.size !== 1 ? 's' : ''} selected</span>
+          <button class="selection-btn" @click=${this.clearLineSelection}>
+            Clear
+          </button>
+          ${isStaged ? html`
+            <button class="selection-btn primary" @click=${this.unstageSelectedLines}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Unstage Selected
+            </button>
+          ` : html`
+            <button class="selection-btn primary" @click=${this.stageSelectedLines}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Stage Selected
+            </button>
+          `}
+        </div>
+      ` : nothing}
+      <div class="diff-content ${this.lineSelectionMode ? 'line-selection-mode' : ''}">
         ${this.diff.hunks.length === 0
           ? html`<div class="empty">No changes in this file</div>`
           : this.diff.hunks.map((hunk, i) => this.renderHunk(hunk, i))}
@@ -1479,9 +1911,10 @@ export class LvDiffView extends LitElement {
   private renderContextMenu() {
     if (!this.contextMenu.visible) return nothing;
 
-    const { x, y, hunk } = this.contextMenu;
+    const { x, y, line, hunk } = this.contextMenu;
     const showStageButton = this.file !== null && !this.commitFile && hunk;
     const isStaged = this.file?.isStaged ?? false;
+    const isChangeableLine = line && (line.origin === 'addition' || line.origin === 'deletion');
 
     return html`
       <div class="context-menu" style="left: ${x}px; top: ${y}px">
@@ -1499,6 +1932,25 @@ export class LvDiffView extends LitElement {
           </svg>
           Copy line
         </button>
+        ${showStageButton && isChangeableLine ? html`
+          <div class="context-menu-divider"></div>
+          ${isStaged ? html`
+            <button class="context-menu-item" @click=${this.handleContextUnstageLine}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Unstage line
+            </button>
+          ` : html`
+            <button class="context-menu-item" @click=${this.handleContextStageLine}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Stage line
+            </button>
+          `}
+        ` : nothing}
         ${showStageButton ? html`
           <div class="context-menu-divider"></div>
           ${isStaged ? html`
@@ -1614,6 +2066,18 @@ export class LvDiffView extends LitElement {
           </div>
         </div>
         <div class="view-controls">
+          ${this.file && !this.commitFile ? html`
+            <button
+              class="view-btn ${this.lineSelectionMode ? 'active' : ''}"
+              @click=${this.toggleLineSelectionMode}
+              title="Toggle line selection mode for staging individual lines"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 11l3 3L22 4"></path>
+                <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"></path>
+              </svg>
+            </button>
+          ` : nothing}
           ${this.canEdit
             ? html`
                 <button
