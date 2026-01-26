@@ -5,6 +5,7 @@
 
 import { invokeCommand, listenToEvent } from "./tauri-api.ts";
 import { showToast } from "./notification.service.ts";
+import { commitStatsCache, commitSignatureCache, invalidateRepositoryCache } from "./cache.service.ts";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Repository,
@@ -720,15 +721,65 @@ export async function getCommitFileDiff(
 /**
  * Get stats (additions/deletions) for multiple commits in bulk
  * Optimized for graph view to show commit sizes
+ * Uses caching to avoid redundant API calls
  */
 export async function getCommitsStats(
   repoPath: string,
   commitOids: string[],
 ): Promise<CommandResult<CommitStats[]>> {
-  return invokeCommand<CommitStats[]>("get_commits_stats", {
+  // Check cache for already-fetched stats
+  const cachedStats: CommitStats[] = [];
+  const uncachedOids: string[] = [];
+
+  for (const oid of commitOids) {
+    const cacheKey = `${repoPath}:${oid}`;
+    const cached = commitStatsCache.get(cacheKey);
+    if (cached) {
+      cachedStats.push({
+        oid,
+        additions: cached.additions,
+        deletions: cached.deletions,
+        filesChanged: cached.filesChanged,
+      });
+    } else {
+      uncachedOids.push(oid);
+    }
+  }
+
+  // If all are cached, return immediately
+  if (uncachedOids.length === 0) {
+    return { success: true, data: cachedStats };
+  }
+
+  // Fetch uncached stats
+  const result = await invokeCommand<CommitStats[]>("get_commits_stats", {
     path: repoPath,
-    commitOids,
+    commitOids: uncachedOids,
   });
+
+  if (!result.success || !result.data) {
+    // Return cached ones even if fetch fails
+    if (cachedStats.length > 0) {
+      return { success: true, data: cachedStats };
+    }
+    return result;
+  }
+
+  // Cache the new stats
+  for (const stat of result.data) {
+    const cacheKey = `${repoPath}:${stat.oid}`;
+    commitStatsCache.set(cacheKey, {
+      additions: stat.additions,
+      deletions: stat.deletions,
+      filesChanged: stat.filesChanged,
+    });
+  }
+
+  // Combine cached and newly fetched
+  return {
+    success: true,
+    data: [...cachedStats, ...result.data],
+  };
 }
 
 /**
@@ -1307,13 +1358,53 @@ export async function getCommitsSignatures(
   repoPath: string,
   commitOids: string[],
 ): Promise<CommandResult<Array<[string, CommitSignature]>>> {
-  return invokeCommand<Array<[string, CommitSignature]>>(
+  // Check cache for already-fetched signatures
+  const cachedSigs: Array<[string, CommitSignature]> = [];
+  const uncachedOids: string[] = [];
+
+  for (const oid of commitOids) {
+    const cacheKey = `${repoPath}:${oid}`;
+    const cached = commitSignatureCache.get(cacheKey);
+    if (cached) {
+      cachedSigs.push([oid, cached as CommitSignature]);
+    } else {
+      uncachedOids.push(oid);
+    }
+  }
+
+  // If all are cached, return immediately
+  if (uncachedOids.length === 0) {
+    return { success: true, data: cachedSigs };
+  }
+
+  // Fetch uncached signatures
+  const result = await invokeCommand<Array<[string, CommitSignature]>>(
     "get_commits_signatures",
     {
       path: repoPath,
-      commitOids,
+      commitOids: uncachedOids,
     },
   );
+
+  if (!result.success || !result.data) {
+    // Return cached ones even if fetch fails
+    if (cachedSigs.length > 0) {
+      return { success: true, data: cachedSigs };
+    }
+    return result;
+  }
+
+  // Cache the new signatures
+  for (const [oid, sig] of result.data) {
+    const cacheKey = `${repoPath}:${oid}`;
+    commitSignatureCache.set(cacheKey, sig);
+  }
+
+  // Combine cached and newly fetched
+  return {
+    success: true,
+    data: [...cachedSigs, ...result.data],
+  };
 }
 
 // ============================================================================
@@ -3109,10 +3200,25 @@ export async function setupRemoteOperationListeners(): Promise<void> {
   remoteOperationUnlisten = await listenToEvent<RemoteOperationResult>(
     "remote-operation-completed",
     (result) => {
-      // For auto-fetch background operations, show a success toast
-      // Note: The inline toasts in fetch/pull/push handle user-initiated operations
-      if (result.operation === "fetch" && result.success) {
-        showToast(result.message, "success");
+      // Show toast notifications for all remote operations
+      if (result.success) {
+        // Success notifications
+        switch (result.operation) {
+          case "fetch":
+            showToast(`Fetched from ${result.remote}`, "success", 3000);
+            break;
+          case "pull":
+            showToast(result.message || `Pulled from ${result.remote}`, "success", 3000);
+            break;
+          case "push":
+            showToast(result.message || `Pushed to ${result.remote}`, "success", 3000);
+            break;
+          default:
+            showToast(result.message, "success", 3000);
+        }
+      } else {
+        // Error notifications
+        showToast(`${result.operation} failed: ${result.message}`, "error", 5000);
       }
     },
   );
@@ -3416,6 +3522,51 @@ import type {
   RunPruneCommand,
   MaintenanceResult,
 } from "../types/api.types.ts";
+
+/**
+ * Get repository statistics for health monitoring
+ */
+export async function getRepositoryStats(
+  repoPath: string,
+): Promise<CommandResult<{ count: number; loose: number; sizeKb: number }>> {
+  // Try to get object count from git count-objects
+  const result = await invokeCommand<{ count: number; loose: number; sizeKb: number }>(
+    "get_repository_stats",
+    { path: repoPath },
+  );
+
+  if (!result.success) {
+    // Return sensible defaults if command not available
+    return {
+      success: true,
+      data: { count: 0, loose: 0, sizeKb: 0 },
+    };
+  }
+
+  return result;
+}
+
+/**
+ * Get pack file information for repository
+ */
+export async function getPackInfo(
+  repoPath: string,
+): Promise<CommandResult<{ packCount: number; packSizeKb: number }>> {
+  const result = await invokeCommand<{ packCount: number; packSizeKb: number }>(
+    "get_pack_info",
+    { path: repoPath },
+  );
+
+  if (!result.success) {
+    // Return sensible defaults if command not available
+    return {
+      success: true,
+      data: { packCount: 0, packSizeKb: 0 },
+    };
+  }
+
+  return result;
+}
 
 /**
  * Run garbage collection on a repository

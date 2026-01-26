@@ -279,6 +279,8 @@ pub fn run() {
             commands::maintenance::run_gc,
             commands::maintenance::run_fsck,
             commands::maintenance::run_prune,
+            commands::maintenance::get_repository_stats,
+            commands::maintenance::get_pack_info,
             commands::gpg::get_gpg_config,
             commands::gpg::get_gpg_keys,
             commands::gpg::set_signing_key,

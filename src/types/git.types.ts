@@ -81,6 +81,10 @@ export interface RefInfo {
   shorthand: string;
   refType: RefType;
   isHead: boolean;
+  /** For tags: whether the tag is annotated (has message/tagger) */
+  isAnnotated?: boolean;
+  /** For tags: the tag message (if annotated) */
+  tagMessage?: string;
 }
 
 /** Map of commit OID to refs pointing to it */

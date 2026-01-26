@@ -359,9 +359,7 @@ pub async fn checkout_with_autostash(
             }
         };
 
-        let is_local = repo
-            .find_branch(&ref_name, git2::BranchType::Local)
-            .is_ok();
+        let is_local = repo.find_branch(&ref_name, git2::BranchType::Local).is_ok();
 
         Ok((commit.id(), is_local))
     }; // obj and commit dropped here

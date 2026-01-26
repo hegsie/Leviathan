@@ -38,8 +38,12 @@ import './components/dialogs/lv-migration-dialog.ts';
 import './components/dialogs/lv-create-tag-dialog.ts';
 import './components/dialogs/lv-create-branch-dialog.ts';
 import './components/dialogs/lv-cherry-pick-dialog.ts';
+import './components/dialogs/lv-repository-health-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import './components/common/lv-toast-container.ts';
+import './components/common/lv-progress-indicator.ts';
+import { progressService } from './services/progress.service.ts';
+import type { ProgressOperation } from './components/common/lv-progress-indicator.ts';
 import './components/dashboard/lv-context-dashboard.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
 import type { LvCreateTagDialog } from './components/dialogs/lv-create-tag-dialog.ts';
@@ -412,6 +416,10 @@ export class AppShell extends LitElement {
   @state() private blameFile: string | null = null;
   @state() private blameCommitOid: string | null = null;
 
+  // Progress operations
+  @state() private progressOperations: ProgressOperation[] = [];
+  private progressUnsubscribe?: () => void;
+
   // Settings dialog
   @state() private showSettings = false;
 
@@ -460,6 +468,9 @@ export class AppShell extends LitElement {
 
   // Clean dialog
   @state() private showClean = false;
+
+  // Repository health dialog
+  @state() private showRepositoryHealth = false;
 
   // Bisect dialog
   @state() private showBisect = false;
@@ -659,6 +670,11 @@ export class AppShell extends LitElement {
       createStash: () => this.handleCreateStash(),
       closeDiff: () => this.handleCloseOverlay(),
     });
+
+    // Subscribe to progress updates
+    this.progressUnsubscribe = progressService.subscribe((operations) => {
+      this.progressOperations = operations;
+    });
   }
 
   disconnectedCallback(): void {
@@ -678,6 +694,8 @@ export class AppShell extends LitElement {
     // Clean up update listeners
     this.updateUnlisteners.forEach((unlisten) => unlisten());
     this.updateUnlisteners = [];
+    // Unsubscribe from progress service
+    this.progressUnsubscribe?.();
   }
 
   private async checkUnifiedProfilesMigration(): Promise<void> {
@@ -1665,6 +1683,13 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => this.handleRunPrune()),
       },
       {
+        id: 'repository-health',
+        label: 'Repository Health & Maintenance',
+        category: 'action',
+        icon: 'activity',
+        action: this.requiresRepository(() => { this.showRepositoryHealth = true; }),
+      },
+      {
         id: 'github',
         label: 'GitHub Integration',
         category: 'action',
@@ -1806,20 +1831,45 @@ export class AppShell extends LitElement {
 
   private async handleFetch(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.fetch({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const opId = progressService.startOperation('fetch', 'Fetching from remote...');
+    try {
+      await gitService.fetch({ path: this.activeRepository.repository.path });
+      progressService.completeOperation(opId);
+      this.handleRefresh();
+    } catch (error) {
+      progressService.failOperation(opId);
+      throw error;
+    }
   }
 
   private async handlePull(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.pull({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const opId = progressService.startOperation('pull', 'Pulling from remote...');
+    try {
+      await gitService.pull({ path: this.activeRepository.repository.path });
+      progressService.completeOperation(opId);
+      this.handleRefresh();
+    } catch (error) {
+      progressService.failOperation(opId);
+      throw error;
+    }
   }
 
   private async handlePush(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.push({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const opId = progressService.startOperation('push', 'Pushing to remote...');
+    try {
+      await gitService.push({ path: this.activeRepository.repository.path });
+      progressService.completeOperation(opId);
+      this.handleRefresh();
+    } catch (error) {
+      progressService.failOperation(opId);
+      throw error;
+    }
+  }
+
+  private handleCancelOperation(e: CustomEvent<{ id: string }>): void {
+    progressService.cancelOperation(e.detail.id);
   }
 
   private async handleCreateStash(): Promise<void> {
@@ -2320,6 +2370,19 @@ export class AppShell extends LitElement {
         ></lv-clean-dialog>
       ` : ''}
 
+      ${this.activeRepository && this.showRepositoryHealth ? html`
+        <lv-modal
+          title="Repository Health"
+          ?open=${this.showRepositoryHealth}
+          @close=${() => { this.showRepositoryHealth = false; }}
+        >
+          <lv-repository-health-dialog
+            .repositoryPath=${this.activeRepository.repository.path}
+            @close=${() => { this.showRepositoryHealth = false; }}
+          ></lv-repository-health-dialog>
+        </lv-modal>
+      ` : ''}
+
       ${this.activeRepository ? html`
         <lv-bisect-dialog
           ?open=${this.showBisect}
@@ -2456,6 +2519,10 @@ export class AppShell extends LitElement {
       ` : ''}
 
       <lv-toast-container></lv-toast-container>
+      <lv-progress-indicator
+        .operations=${this.progressOperations}
+        @cancel-operation=${this.handleCancelOperation}
+      ></lv-progress-indicator>
     `;
   }
 }

@@ -8,12 +8,15 @@ import { persist } from 'zustand/middleware';
 
 export type Theme = 'dark' | 'light' | 'system';
 export type FontSize = 'small' | 'medium' | 'large';
+export type Density = 'compact' | 'comfortable' | 'spacious';
+export type GraphColorScheme = 'default' | 'pastel' | 'vibrant' | 'monochrome' | 'high-contrast';
 
 export interface SettingsState {
   // Appearance
   theme: Theme;
   fontSize: FontSize;
   fontFamily: string;
+  density: Density;
 
   // Git defaults
   defaultBranchName: string;
@@ -23,6 +26,7 @@ export interface SettingsState {
   showAvatars: boolean;
   showCommitSize: boolean;
   graphRowHeight: number;
+  graphColorScheme: GraphColorScheme;
 
   // Diff settings
   diffContextLines: number;
@@ -46,6 +50,8 @@ export interface SettingsState {
   setTheme: (theme: Theme) => void;
   setFontSize: (size: FontSize) => void;
   setFontFamily: (family: string) => void;
+  setDensity: (density: Density) => void;
+  setGraphColorScheme: (scheme: GraphColorScheme) => void;
   setDefaultBranchName: (name: string) => void;
   setDefaultRemoteName: (name: string) => void;
   setShowAvatars: (show: boolean) => void;
@@ -69,11 +75,13 @@ const defaultSettings = {
   theme: 'dark' as Theme,
   fontSize: 'medium' as FontSize,
   fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
+  density: 'comfortable' as Density,
   defaultBranchName: 'main',
   defaultRemoteName: 'origin',
   showAvatars: true,
   showCommitSize: true,
   graphRowHeight: 40,
+  graphColorScheme: 'default' as GraphColorScheme,
   diffContextLines: 3,
   wordWrap: true,
   showWhitespace: false,
@@ -102,6 +110,16 @@ export const settingsStore = createStore<SettingsState>()(
       },
 
       setFontFamily: (fontFamily) => set({ fontFamily }),
+
+      setDensity: (density) => {
+        set({ density });
+        applyDensity(density);
+      },
+
+      setGraphColorScheme: (graphColorScheme) => {
+        set({ graphColorScheme });
+        applyGraphColorScheme(graphColorScheme);
+      },
 
       setDefaultBranchName: (defaultBranchName) => set({ defaultBranchName }),
 
@@ -148,6 +166,8 @@ export const settingsStore = createStore<SettingsState>()(
         set(defaultSettings);
         applyTheme(defaultSettings.theme);
         applyFontSize(defaultSettings.fontSize);
+        applyDensity(defaultSettings.density);
+        applyGraphColorScheme(defaultSettings.graphColorScheme);
       },
     }),
     {
@@ -157,6 +177,8 @@ export const settingsStore = createStore<SettingsState>()(
         if (state) {
           applyTheme(state.theme);
           applyFontSize(state.fontSize);
+          applyDensity(state.density);
+          applyGraphColorScheme(state.graphColorScheme);
         }
       },
     }
@@ -188,6 +210,90 @@ function applyFontSize(size: FontSize): void {
     large: '16px',
   };
   root.style.setProperty('--base-font-size', sizes[size]);
+}
+
+/**
+ * Apply density settings to document
+ */
+function applyDensity(density: Density): void {
+  const root = document.documentElement;
+  const settings = {
+    compact: {
+      rowHeight: '28px',
+      spacing: '4px',
+      padding: '4px 8px',
+      graphRowHeight: '28',
+    },
+    comfortable: {
+      rowHeight: '36px',
+      spacing: '8px',
+      padding: '8px 12px',
+      graphRowHeight: '36',
+    },
+    spacious: {
+      rowHeight: '44px',
+      spacing: '12px',
+      padding: '12px 16px',
+      graphRowHeight: '44',
+    },
+  };
+  const s = settings[density];
+  root.style.setProperty('--density-row-height', s.rowHeight);
+  root.style.setProperty('--density-spacing', s.spacing);
+  root.style.setProperty('--density-padding', s.padding);
+  root.style.setProperty('--density-graph-row-height', s.graphRowHeight);
+  root.setAttribute('data-density', density);
+}
+
+/**
+ * Graph color scheme presets
+ */
+const graphColorSchemes: Record<GraphColorScheme, string[]> = {
+  default: [
+    '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
+    '#ce93d8', '#4dd0e1', '#ff8a65', '#aed581',
+  ],
+  pastel: [
+    '#b3e5fc', '#c8e6c9', '#ffcdd2', '#ffe0b2',
+    '#e1bee7', '#b2ebf2', '#ffccbc', '#dcedc8',
+  ],
+  vibrant: [
+    '#00bcd4', '#4caf50', '#f44336', '#ff9800',
+    '#9c27b0', '#00acc1', '#ff5722', '#8bc34a',
+  ],
+  monochrome: [
+    '#90caf9', '#a5d6a7', '#ef9a9a', '#ffe082',
+    '#ce93d8', '#80deea', '#ffab91', '#c5e1a5',
+  ],
+  'high-contrast': [
+    '#00e5ff', '#00e676', '#ff1744', '#ffea00',
+    '#d500f9', '#18ffff', '#ff3d00', '#76ff03',
+  ],
+};
+
+/**
+ * Apply graph color scheme to CSS variables
+ */
+function applyGraphColorScheme(scheme: GraphColorScheme): void {
+  const root = document.documentElement;
+  const colors = graphColorSchemes[scheme];
+  colors.forEach((color, i) => {
+    root.style.setProperty(`--color-branch-${i + 1}`, color);
+  });
+  root.setAttribute('data-graph-scheme', scheme);
+}
+
+/**
+ * Get available graph color schemes for UI
+ */
+export function getGraphColorSchemes(): { id: GraphColorScheme; name: string; colors: string[] }[] {
+  return [
+    { id: 'default', name: 'Default', colors: graphColorSchemes.default },
+    { id: 'pastel', name: 'Pastel', colors: graphColorSchemes.pastel },
+    { id: 'vibrant', name: 'Vibrant', colors: graphColorSchemes.vibrant },
+    { id: 'monochrome', name: 'Monochrome', colors: graphColorSchemes.monochrome },
+    { id: 'high-contrast', name: 'High Contrast', colors: graphColorSchemes['high-contrast'] },
+  ];
 }
 
 // Listen for system theme changes

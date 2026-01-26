@@ -1,12 +1,13 @@
 /**
  * Keyboard Shortcuts Help Dialog
  * Shows all available keyboard shortcuts organized by category
+ * Supports editing shortcuts by clicking on the key combination
  */
 
 import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { keyboardService, type Shortcut } from '../../services/keyboard.service.ts';
+import { keyboardService, type Shortcut, type ShortcutBinding } from '../../services/keyboard.service.ts';
 
 @customElement('lv-keyboard-shortcuts-dialog')
 export class LvKeyboardShortcutsDialog extends LitElement {
@@ -232,27 +233,207 @@ export class LvKeyboardShortcutsDialog extends LitElement {
       .toggle-switch.active::after {
         transform: translateX(16px);
       }
+
+      /* Editable shortcut styles */
+      .shortcut-keys.editable {
+        cursor: pointer;
+        border-radius: var(--radius-sm);
+        padding: 2px 4px;
+        margin: -2px -4px;
+        transition: background var(--transition-fast);
+      }
+
+      .shortcut-keys.editable:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .shortcut-keys.recording {
+        background: var(--color-primary);
+        animation: pulse 1s infinite;
+      }
+
+      .shortcut-keys.recording .key {
+        background: transparent;
+        border-color: transparent;
+        color: white;
+        box-shadow: none;
+      }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
+      }
+
+      .shortcut-row.customized .shortcut-description::after {
+        content: '*';
+        color: var(--color-primary);
+        margin-left: 4px;
+      }
+
+      .reset-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-muted);
+        cursor: pointer;
+        opacity: 0;
+        transition: all var(--transition-fast);
+        margin-left: 8px;
+      }
+
+      .shortcut-row:hover .reset-btn {
+        opacity: 1;
+      }
+
+      .reset-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .reset-btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+      }
+
+      .reset-all-btn {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        background: transparent;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        padding: 4px 8px;
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .reset-all-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .conflict-warning {
+        color: var(--color-error);
+        font-size: var(--font-size-xs);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-error-bg);
+        border-radius: var(--radius-sm);
+        margin-top: var(--spacing-xs);
+      }
     `,
   ];
 
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: Boolean }) vimMode = false;
 
+  /** ID of shortcut currently being edited */
+  @state() private editingId: string | null = null;
+  /** Recorded binding during edit mode */
+  @state() private recordedBinding: ShortcutBinding | null = null;
+  /** Error message for binding conflicts */
+  @state() private conflictError: string | null = null;
+  /** Tracks settings changes to force re-render */
+  @state() private settingsVersion = 0;
+
+  private settingsUnsubscribe?: () => void;
+
   connectedCallback(): void {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
+    // Subscribe to settings changes
+    this.settingsUnsubscribe = keyboardService.addSettingsChangeListener(() => {
+      this.settingsVersion++;
+    });
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this.handleKeyDown);
+    this.settingsUnsubscribe?.();
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // Handle recording mode
+    if (this.editingId) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Cancel on Escape
+      if (e.key === 'Escape') {
+        this.cancelEditing();
+        return;
+      }
+
+      // Ignore modifier-only keypresses
+      if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) {
+        return;
+      }
+
+      // Record the binding
+      const binding: ShortcutBinding = {
+        key: e.key,
+        ctrl: e.ctrlKey || e.metaKey,
+        shift: e.shiftKey,
+        alt: e.altKey,
+      };
+
+      // Try to rebind
+      const success = keyboardService.rebind(this.editingId, binding);
+      if (success) {
+        this.editingId = null;
+        this.recordedBinding = null;
+        this.conflictError = null;
+      } else {
+        this.conflictError = 'This key combination is already in use';
+        // Show the attempted binding briefly
+        this.recordedBinding = binding;
+        setTimeout(() => {
+          if (this.conflictError) {
+            this.conflictError = null;
+            this.recordedBinding = null;
+          }
+        }, 2000);
+      }
+      return;
+    }
+
+    // Normal mode: close on Escape
     if (e.key === 'Escape' && this.open) {
       this.close();
     }
   };
+
+  private startEditing(id: string): void {
+    this.editingId = id;
+    this.recordedBinding = null;
+    this.conflictError = null;
+  }
+
+  private cancelEditing(): void {
+    this.editingId = null;
+    this.recordedBinding = null;
+    this.conflictError = null;
+  }
+
+  private resetBinding(id: string): void {
+    keyboardService.resetBinding(id);
+  }
+
+  private resetAllBindings(): void {
+    if (confirm('Reset all keyboard shortcuts to defaults?')) {
+      keyboardService.resetAllBindings();
+    }
+  }
 
   private handleOverlayClick(e: MouseEvent): void {
     if (e.target === e.currentTarget) {
@@ -318,9 +499,97 @@ export class LvKeyboardShortcutsDialog extends LitElement {
     `;
   }
 
+  private renderEditableShortcut(item: {
+    id: string;
+    binding: ShortcutBinding;
+    defaultBinding: ShortcutBinding;
+    description: string;
+    category: string;
+    isCustomized: boolean;
+  }) {
+    const isEditing = this.editingId === item.id;
+    const displayBinding = isEditing && this.recordedBinding ? this.recordedBinding : item.binding;
+    const keys = this.formatKeyComboFromBinding(displayBinding);
+
+    return html`
+      <div class="shortcut-row ${item.isCustomized ? 'customized' : ''}">
+        <span class="shortcut-description">${item.description}</span>
+        <div class="shortcut-actions" style="display: flex; align-items: center;">
+          <div
+            class="shortcut-keys editable ${isEditing ? 'recording' : ''}"
+            @click=${() => this.startEditing(item.id)}
+            title="Click to change shortcut"
+          >
+            ${isEditing ? html`
+              <span class="key">Press a key...</span>
+            ` : keys.map((key, i) => html`
+              <span class="key">${key}</span>
+              ${i < keys.length - 1 ? html`<span class="key-separator"></span>` : ''}
+            `)}
+          </div>
+          ${item.isCustomized ? html`
+            <button
+              class="reset-btn"
+              @click=${(e: Event) => { e.stopPropagation(); this.resetBinding(item.id); }}
+              title="Reset to default"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+                <path d="M3 3v5h5"></path>
+              </svg>
+            </button>
+          ` : ''}
+        </div>
+      </div>
+      ${isEditing && this.conflictError ? html`
+        <div class="conflict-warning">${this.conflictError}</div>
+      ` : ''}
+    `;
+  }
+
+  private formatKeyComboFromBinding(binding: ShortcutBinding): string[] {
+    const isMac = navigator.platform.toLowerCase().includes('mac');
+    const keys: string[] = [];
+
+    if (binding.ctrl) {
+      keys.push(isMac ? '⌘' : 'Ctrl');
+    }
+    if (binding.shift) keys.push(isMac ? '⇧' : 'Shift');
+    if (binding.alt) keys.push(isMac ? '⌥' : 'Alt');
+
+    // Format special keys
+    let keyDisplay = binding.key;
+    switch (binding.key.toLowerCase()) {
+      case 'arrowup': keyDisplay = '↑'; break;
+      case 'arrowdown': keyDisplay = '↓'; break;
+      case 'arrowleft': keyDisplay = '←'; break;
+      case 'arrowright': keyDisplay = '→'; break;
+      case 'enter': keyDisplay = '↵'; break;
+      case 'escape': keyDisplay = 'Esc'; break;
+      case ' ': keyDisplay = 'Space'; break;
+      default: keyDisplay = binding.key.toUpperCase();
+    }
+    keys.push(keyDisplay);
+
+    return keys;
+  }
+
   render() {
-    const shortcutsByCategory = keyboardService.getShortcutsByCategory();
-    const categories = Array.from(shortcutsByCategory.entries());
+    // Use settingsVersion to force re-render on settings changes
+    void this.settingsVersion;
+
+    // Get all bindings for editing
+    const allBindings = keyboardService.getAllBindings();
+    const hasCustomBindings = allBindings.some(b => b.isCustomized);
+
+    // Group by category
+    const byCategory = new Map<string, typeof allBindings>();
+    for (const item of allBindings) {
+      const existing = byCategory.get(item.category) ?? [];
+      existing.push(item);
+      byCategory.set(item.category, existing);
+    }
+    const categories = Array.from(byCategory.entries());
 
     return html`
       <div class="overlay" @click=${this.handleOverlayClick}></div>
@@ -340,27 +609,34 @@ export class LvKeyboardShortcutsDialog extends LitElement {
             </svg>
             <span class="title">Keyboard Shortcuts</span>
           </div>
-          <button class="close-btn" @click=${this.close}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18"></line>
-              <line x1="6" y1="6" x2="18" y2="18"></line>
-            </svg>
-          </button>
+          <div class="header-actions">
+            ${hasCustomBindings ? html`
+              <button class="reset-all-btn" @click=${this.resetAllBindings}>
+                Reset All
+              </button>
+            ` : ''}
+            <button class="close-btn" @click=${this.close}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div class="content">
-          ${categories.map(([category, shortcuts]) => html`
+          ${categories.map(([category, items]) => html`
             <div class="category">
               <div class="category-title">${category}</div>
               <div class="shortcuts-list">
-                ${shortcuts.map(s => this.renderShortcut(s))}
+                ${items.map(item => this.renderEditableShortcut(item))}
               </div>
             </div>
           `)}
 
           ${this.vimMode ? html`
             <div class="category">
-              <div class="category-title">Vim Mode</div>
+              <div class="category-title">Vim Mode (not customizable)</div>
               <div class="shortcuts-list">
                 <div class="shortcut-row">
                   <span class="shortcut-description">Previous commit</span>
@@ -388,7 +664,7 @@ export class LvKeyboardShortcutsDialog extends LitElement {
         </div>
 
         <div class="footer">
-          <span>Press <span class="key">?</span> to toggle this help</span>
+          <span>Click a shortcut to edit • Press <span class="key">Esc</span> to cancel</span>
           <div class="vim-toggle">
             <label @click=${this.toggleVimMode}>Vim-style navigation</label>
             <div

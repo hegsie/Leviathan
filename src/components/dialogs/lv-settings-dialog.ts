@@ -1,6 +1,6 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { settingsStore, type Theme, type FontSize } from '../../stores/settings.store.ts';
+import { settingsStore, getGraphColorSchemes, type Theme, type FontSize, type Density, type GraphColorScheme } from '../../stores/settings.store.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
 import * as aiService from '../../services/ai.service.ts';
@@ -266,6 +266,25 @@ export class LvSettingsDialog extends LitElement {
         gap: 8px;
         margin-top: 4px;
       }
+
+      .color-scheme-preview {
+        display: flex;
+        gap: 2px;
+        margin-left: 8px;
+      }
+
+      .color-swatch {
+        width: 12px;
+        height: 12px;
+        border-radius: 2px;
+      }
+
+      .scheme-option {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+      }
     `,
   ];
 
@@ -274,6 +293,8 @@ export class LvSettingsDialog extends LitElement {
   @state() private updateStatus: 'idle' | 'checking' | 'available' | 'up-to-date' = 'idle';
   @state() private latestVersion = '';
   @state() private fontSize: FontSize = 'medium';
+  @state() private density: Density = 'comfortable';
+  @state() private graphColorScheme: GraphColorScheme = 'default';
   @state() private defaultBranchName = 'main';
   @state() private showAvatars = true;
   @state() private showCommitSize = true;
@@ -384,6 +405,8 @@ export class LvSettingsDialog extends LitElement {
     const settings = settingsStore.getState();
     this.theme = settings.theme;
     this.fontSize = settings.fontSize;
+    this.density = settings.density;
+    this.graphColorScheme = settings.graphColorScheme;
     this.defaultBranchName = settings.defaultBranchName;
     this.showAvatars = settings.showAvatars;
     this.showCommitSize = settings.showCommitSize;
@@ -402,6 +425,18 @@ export class LvSettingsDialog extends LitElement {
     const select = e.target as HTMLSelectElement;
     this.fontSize = select.value as FontSize;
     settingsStore.getState().setFontSize(this.fontSize);
+  }
+
+  private handleDensityChange(e: Event): void {
+    const select = e.target as HTMLSelectElement;
+    this.density = select.value as Density;
+    settingsStore.getState().setDensity(this.density);
+  }
+
+  private handleGraphColorSchemeChange(e: Event): void {
+    const select = e.target as HTMLSelectElement;
+    this.graphColorScheme = select.value as GraphColorScheme;
+    settingsStore.getState().setGraphColorScheme(this.graphColorScheme);
   }
 
   private handleBranchNameChange(e: Event): void {
@@ -493,6 +528,18 @@ export class LvSettingsDialog extends LitElement {
               <option value="large">Large</option>
             </select>
           </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">UI Density</span>
+              <span class="setting-description">Adjust spacing and row heights</span>
+            </div>
+            <select .value=${this.density} @change=${this.handleDensityChange}>
+              <option value="compact">Compact</option>
+              <option value="comfortable">Comfortable</option>
+              <option value="spacious">Spacious</option>
+            </select>
+          </div>
         </div>
 
         <div class="settings-section">
@@ -512,6 +559,25 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-description">Scale node size based on changes</span>
             </div>
             ${this.renderToggle(this.showCommitSize, 'showCommitSize')}
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Graph Color Scheme</span>
+              <span class="setting-description">Color palette for branch lanes</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <select .value=${this.graphColorScheme} @change=${this.handleGraphColorSchemeChange}>
+                ${getGraphColorSchemes().map(scheme => html`
+                  <option value=${scheme.id}>${scheme.name}</option>
+                `)}
+              </select>
+              <div class="color-scheme-preview">
+                ${getGraphColorSchemes().find(s => s.id === this.graphColorScheme)?.colors.slice(0, 6).map(color => html`
+                  <div class="color-swatch" style="background: ${color}"></div>
+                `)}
+              </div>
+            </div>
           </div>
         </div>
 
