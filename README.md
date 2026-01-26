@@ -194,7 +194,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
   
 - **Hardware**:
   - 4 GB RAM (8 GB recommended for large repositories)
-  - 500 MB disk space (+ ~2 GB for AI model if using commit message generation)
+  - 500 MB disk space (+~2 GB for AI model if using commit message generation)
   - Any x64 or ARM64 processor
   
 - **Software**:
@@ -375,6 +375,7 @@ leviathan/
 │   └── tauri.conf.json     # Tauri configuration
 │
 ├── e2e/                    # End-to-end tests (Playwright)
+│   └── tests/              # E2E test specs
 ├── plan/                   # Technical documentation
 ├── docs/                   # Additional documentation
 └── .github/workflows/      # CI/CD pipelines
@@ -600,7 +601,7 @@ A: Leviathan works with any Git remote (GitHub, GitLab, Bitbucket, Azure DevOps,
 ### AI Features
 
 **Q: How does the AI commit message generation work?**  
-A: Leviathan uses a local LLM ([Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message)) that runs entirely on your machine. It analyzes your staged changes and generates conventional commit messages. The model (~2GB) downloads once on first use.
+A: Leviathan uses a local LLM ([Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message)) that runs entirely on your machine. It analyzes your staged changes and generates [conventional commit messages](https://www.conventionalcommits.org/) (e.g., `feat:`, `fix:`, `docs:`). The model (~2GB) downloads once on first use.
 
 **Q: Do I need an internet connection for AI features?**  
 A: Only for the initial ~2GB model download. After that, AI features work completely offline.
