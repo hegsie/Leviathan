@@ -129,8 +129,8 @@ export interface PushCommand {
  */
 export interface MergeCommand {
   path: string;
-  source_ref: string;
-  no_ff?: boolean;
+  sourceRef: string;
+  noFf?: boolean;
   squash?: boolean;
   message?: string;
 }
@@ -204,13 +204,13 @@ export interface ResetCommand {
 export interface CreateStashCommand {
   path: string;
   message?: string;
-  include_untracked?: boolean;
+  includeUntracked?: boolean;
 }
 
 export interface ApplyStashCommand {
   path: string;
   index: number;
-  drop_after?: boolean;
+  dropAfter?: boolean;
 }
 
 export interface DropStashCommand {

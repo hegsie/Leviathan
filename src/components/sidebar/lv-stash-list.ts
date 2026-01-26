@@ -202,7 +202,7 @@ export class LvStashList extends LitElement {
       const result = await gitService.createStash({
         path: this.repositoryPath,
         message: undefined,
-        include_untracked: true,
+        includeUntracked: true,
       });
 
       if (result.success) {
@@ -242,7 +242,7 @@ export class LvStashList extends LitElement {
     const result = await gitService.applyStash({
       path: this.repositoryPath,
       index: stash.index,
-      drop_after: false,
+      dropAfter: false,
     });
 
     if (result.success) {

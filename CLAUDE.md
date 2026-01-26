@@ -31,6 +31,11 @@ Run all checks in sequence:
 npm run lint && npm run typecheck && cd src-tauri && cargo fmt --check && cargo clippy
 ```
 
+Also verify no snake_case in Tauri API calls (should return no matches):
+```bash
+grep -rn "_[a-z]*:" src/types/api.types.ts | grep -v "//"
+```
+
 ## Testing Requirements
 
 When adding new features, **always** include:
@@ -68,3 +73,19 @@ Remove unused imports flagged by eslint.
 
 ### Rust Formatting
 Run `cargo fmt` to auto-fix formatting issues.
+
+## Tauri Naming Conventions
+
+**IMPORTANT:** Tauri automatically converts between Rust's snake_case and TypeScript's camelCase.
+
+When calling Tauri commands from TypeScript:
+- Rust: `target_ref: String` → TypeScript: `targetRef: string`
+- Rust: `no_ff: Option<bool>` → TypeScript: `noFf?: boolean`
+- Rust: `include_untracked: Option<bool>` → TypeScript: `includeUntracked?: boolean`
+
+### Pre-commit Check for Snake Case
+Before committing, verify no snake_case is used in Tauri command parameters:
+```bash
+grep -rn "_[a-z]*:" src/types/api.types.ts src/services/git.service.ts src/app-shell.ts src/components/ --include="*.ts" | grep -v "node_modules" | grep -v "__tests__"
+```
+If this returns matches in object literals being passed to `invokeCommand` or `gitService.*`, convert them to camelCase.

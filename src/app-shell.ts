@@ -895,7 +895,7 @@ export class AppShell extends LitElement {
 
     const result = await gitService.merge({
       path: this.activeRepository.repository.path,
-      source_ref: refName,
+      sourceRef: refName,
     });
 
     if (result.success) {

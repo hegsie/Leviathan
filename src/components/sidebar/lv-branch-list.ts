@@ -785,7 +785,7 @@ export class LvBranchList extends LitElement {
 
     const result = await gitService.merge({
       path: this.repositoryPath,
-      source_ref: branch.shorthand,
+      sourceRef: branch.shorthand,
     });
 
     if (result.success) {
@@ -1074,7 +1074,7 @@ export class LvBranchList extends LitElement {
 
         const result = await gitService.merge({
           path: this.repositoryPath,
-          source_ref: sourceBranch.shorthand,
+          sourceRef: sourceBranch.shorthand,
         });
 
         if (result.success) {
@@ -1132,7 +1132,7 @@ export class LvBranchList extends LitElement {
       if (action === 'merge') {
         const result = await gitService.merge({
           path: this.repositoryPath,
-          source_ref: sourceBranch.shorthand,
+          sourceRef: sourceBranch.shorthand,
         });
 
         if (result.success) {
