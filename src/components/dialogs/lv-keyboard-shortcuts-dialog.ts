@@ -8,6 +8,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { keyboardService, type Shortcut, type ShortcutBinding } from '../../services/keyboard.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 
 @customElement('lv-keyboard-shortcuts-dialog')
 export class LvKeyboardShortcutsDialog extends LitElement {
@@ -429,8 +430,12 @@ export class LvKeyboardShortcutsDialog extends LitElement {
     keyboardService.resetBinding(id);
   }
 
-  private resetAllBindings(): void {
-    if (confirm('Reset all keyboard shortcuts to defaults?')) {
+  private async resetAllBindings(): Promise<void> {
+    const confirmed = await showConfirm(
+      'Reset Keyboard Shortcuts',
+      'Reset all keyboard shortcuts to their default bindings?'
+    );
+    if (confirmed) {
       keyboardService.resetAllBindings();
     }
   }
@@ -468,7 +473,7 @@ export class LvKeyboardShortcutsDialog extends LitElement {
     if (shortcut.alt) keys.push(isMac ? '⌥' : 'Alt');
 
     // Format special keys
-    let keyDisplay = shortcut.key;
+    let keyDisplay: string;
     switch (shortcut.key.toLowerCase()) {
       case 'arrowup': keyDisplay = '↑'; break;
       case 'arrowdown': keyDisplay = '↓'; break;
@@ -558,7 +563,7 @@ export class LvKeyboardShortcutsDialog extends LitElement {
     if (binding.alt) keys.push(isMac ? '⌥' : 'Alt');
 
     // Format special keys
-    let keyDisplay = binding.key;
+    let keyDisplay: string;
     switch (binding.key.toLowerCase()) {
       case 'arrowup': keyDisplay = '↑'; break;
       case 'arrowdown': keyDisplay = '↓'; break;

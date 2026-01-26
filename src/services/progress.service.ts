@@ -4,7 +4,18 @@
  */
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { ProgressOperation } from '../components/common/lv-progress-indicator.ts';
+
+/**
+ * Represents an ongoing operation with progress tracking.
+ * Defined here to avoid circular dependency with UI component.
+ */
+export interface ProgressOperation {
+  id: string;
+  type: 'fetch' | 'push' | 'pull' | 'clone' | 'checkout' | 'rebase' | 'merge' | 'generic';
+  message: string;
+  progress?: number; // 0-100, undefined = indeterminate
+  cancellable?: boolean;
+}
 
 export type OperationType = ProgressOperation['type'];
 
@@ -204,18 +215,28 @@ export const progressService = new ProgressService();
 /**
  * Helper to wrap an async operation with progress tracking
  */
+/**
+ * Helper to wrap an async operation with progress tracking.
+ * Provides cancellation checking via the checkCancelled callback.
+ */
 export async function withProgress<T>(
   type: OperationType,
   message: string,
-  operation: (updateProgress: (progress: number, message?: string) => void) => Promise<T>,
+  operation: (
+    updateProgress: (progress: number, message?: string) => void,
+    checkCancelled: () => boolean
+  ) => Promise<T>,
   options?: { cancellable?: boolean }
 ): Promise<T> {
   const id = progressService.startOperation(type, message, options);
 
   try {
-    const result = await operation((progress, msg) => {
-      progressService.updateProgress(id, progress, msg);
-    });
+    const result = await operation(
+      (progress, msg) => {
+        progressService.updateProgress(id, progress, msg);
+      },
+      () => progressService.isCancelled(id)
+    );
     progressService.completeOperation(id);
     return result;
   } catch (error) {

@@ -5,7 +5,7 @@
 
 import { invokeCommand, listenToEvent } from "./tauri-api.ts";
 import { showToast } from "./notification.service.ts";
-import { commitStatsCache, commitSignatureCache, invalidateRepositoryCache } from "./cache.service.ts";
+import { commitStatsCache, commitSignatureCache, createCacheKey } from "./cache.service.ts";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Repository,
@@ -732,7 +732,7 @@ export async function getCommitsStats(
   const uncachedOids: string[] = [];
 
   for (const oid of commitOids) {
-    const cacheKey = `${repoPath}:${oid}`;
+    const cacheKey = createCacheKey(repoPath, oid);
     const cached = commitStatsCache.get(cacheKey);
     if (cached) {
       cachedStats.push({
@@ -767,7 +767,7 @@ export async function getCommitsStats(
 
   // Cache the new stats
   for (const stat of result.data) {
-    const cacheKey = `${repoPath}:${stat.oid}`;
+    const cacheKey = createCacheKey(repoPath, stat.oid);
     commitStatsCache.set(cacheKey, {
       additions: stat.additions,
       deletions: stat.deletions,
@@ -1363,7 +1363,7 @@ export async function getCommitsSignatures(
   const uncachedOids: string[] = [];
 
   for (const oid of commitOids) {
-    const cacheKey = `${repoPath}:${oid}`;
+    const cacheKey = createCacheKey(repoPath, oid);
     const cached = commitSignatureCache.get(cacheKey);
     if (cached) {
       cachedSigs.push([oid, cached as CommitSignature]);
@@ -1396,7 +1396,7 @@ export async function getCommitsSignatures(
 
   // Cache the new signatures
   for (const [oid, sig] of result.data) {
-    const cacheKey = `${repoPath}:${oid}`;
+    const cacheKey = createCacheKey(repoPath, oid);
     commitSignatureCache.set(cacheKey, sig);
   }
 

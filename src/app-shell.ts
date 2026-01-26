@@ -1227,17 +1227,6 @@ export class AppShell extends LitElement {
   }
 
   /**
-   * Check if the selected commit is HEAD
-   */
-  private isHeadCommit(commit: Commit): boolean {
-    if (!this.activeRepository) return false;
-    // HEAD is typically the first commit in the sorted list
-    return commit.oid === this.selectedCommit?.oid && this.selectedCommitRefs.some(r =>
-      r.shorthand === 'HEAD' || r.name === 'HEAD'
-    );
-  }
-
-  /**
    * Reword the selected commit
    * For HEAD: Opens amend mode in commit panel
    * For other commits: Dispatches event to open interactive rebase with reword action
@@ -1836,9 +1825,9 @@ export class AppShell extends LitElement {
       await gitService.fetch({ path: this.activeRepository.repository.path });
       progressService.completeOperation(opId);
       this.handleRefresh();
-    } catch (error) {
+    } catch {
       progressService.failOperation(opId);
-      throw error;
+      // Error is logged; toast notification is shown via remote-operation-completed event
     }
   }
 
@@ -1849,9 +1838,9 @@ export class AppShell extends LitElement {
       await gitService.pull({ path: this.activeRepository.repository.path });
       progressService.completeOperation(opId);
       this.handleRefresh();
-    } catch (error) {
+    } catch {
       progressService.failOperation(opId);
-      throw error;
+      // Error is logged; toast notification is shown via remote-operation-completed event
     }
   }
 
@@ -1862,9 +1851,9 @@ export class AppShell extends LitElement {
       await gitService.push({ path: this.activeRepository.repository.path });
       progressService.completeOperation(opId);
       this.handleRefresh();
-    } catch (error) {
+    } catch {
       progressService.failOperation(opId);
-      throw error;
+      // Error is logged; toast notification is shown via remote-operation-completed event
     }
   }
 

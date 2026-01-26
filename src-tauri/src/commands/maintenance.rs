@@ -205,13 +205,54 @@ pub async fn get_repository_stats(path: String) -> Result<RepositoryStats> {
         return Err(LeviathanError::RepositoryNotFound(path));
     }
 
-    // Open the repository
+    // Verify it's a git repository
     let repo = git2::Repository::open(repo_path)?;
     let git_dir = repo.path();
 
-    // Count loose objects in objects/[0-9a-f][0-9a-f]/ directories
+    // Try git count-objects first (more accurate)
+    let mut cmd = create_command("git");
+    cmd.current_dir(repo_path);
+    cmd.args(["count-objects", "-v"]);
+
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut loose_count = 0usize;
+            let mut total_count = 0usize;
+            let mut size_kb = 0usize;
+
+            for line in stdout.lines() {
+                if let Some(value) = line.strip_prefix("count: ") {
+                    if let Ok(count) = value.trim().parse::<usize>() {
+                        loose_count = count;
+                        total_count = count; // Start with loose count
+                    }
+                } else if let Some(value) = line.strip_prefix("size: ") {
+                    if let Ok(s) = value.trim().parse::<usize>() {
+                        size_kb = s;
+                    }
+                } else if let Some(value) = line.strip_prefix("in-pack: ") {
+                    if let Ok(packed) = value.trim().parse::<usize>() {
+                        total_count = loose_count + packed;
+                    }
+                } else if let Some(value) = line.strip_prefix("size-pack: ") {
+                    if let Ok(pack_size) = value.trim().parse::<usize>() {
+                        size_kb += pack_size;
+                    }
+                }
+            }
+
+            return Ok(RepositoryStats {
+                count: total_count,
+                loose: loose_count,
+                size_kb,
+            });
+        }
+    }
+
+    // Fallback: manually count loose objects if git command fails
     let objects_dir = git_dir.join("objects");
-    let mut loose_count = 0;
+    let mut loose_count = 0usize;
     let mut loose_size: u64 = 0;
 
     if objects_dir.exists() {
@@ -235,45 +276,10 @@ pub async fn get_repository_stats(path: String) -> Result<RepositoryStats> {
         }
     }
 
-    // Run git count-objects for more accurate counts
-    let mut cmd = create_command("git");
-    cmd.current_dir(repo_path);
-    cmd.args(["count-objects", "-v"]);
-
-    let output = cmd.output().ok();
-
-    let mut total_count = loose_count;
-    let mut size_kb = (loose_size / 1024) as usize;
-
-    if let Some(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if let Some(value) = line.strip_prefix("count: ") {
-                    if let Ok(count) = value.trim().parse::<usize>() {
-                        loose_count = count;
-                    }
-                } else if let Some(value) = line.strip_prefix("size: ") {
-                    if let Ok(s) = value.trim().parse::<usize>() {
-                        size_kb = s;
-                    }
-                } else if let Some(value) = line.strip_prefix("in-pack: ") {
-                    if let Ok(packed) = value.trim().parse::<usize>() {
-                        total_count = loose_count + packed;
-                    }
-                } else if let Some(value) = line.strip_prefix("size-pack: ") {
-                    if let Ok(pack_size) = value.trim().parse::<usize>() {
-                        size_kb += pack_size;
-                    }
-                }
-            }
-        }
-    }
-
     Ok(RepositoryStats {
-        count: total_count,
+        count: loose_count,
         loose: loose_count,
-        size_kb,
+        size_kb: (loose_size / 1024) as usize,
     })
 }
 

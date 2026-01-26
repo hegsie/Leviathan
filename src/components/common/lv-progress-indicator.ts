@@ -6,14 +6,10 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
+import type { ProgressOperation } from '../../services/progress.service.ts';
 
-export interface ProgressOperation {
-  id: string;
-  type: 'fetch' | 'push' | 'pull' | 'clone' | 'checkout' | 'rebase' | 'merge' | 'generic';
-  message: string;
-  progress?: number; // 0-100, undefined = indeterminate
-  cancellable?: boolean;
-}
+// Re-export for backwards compatibility
+export type { ProgressOperation } from '../../services/progress.service.ts';
 
 @customElement('lv-progress-indicator')
 export class LvProgressIndicator extends LitElement {

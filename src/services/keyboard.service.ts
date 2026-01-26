@@ -44,6 +44,8 @@ class KeyboardService {
   private customBindings: Map<string, ShortcutBinding> = new Map();
   /** Map of shortcut ID to its metadata (description, category, action) */
   private shortcutMetadata: Map<string, { description: string; category: string; action: () => void }> = new Map();
+  /** Reverse mapping from key combo to shortcut ID for O(1) lookups */
+  private keyToId: Map<string, string> = new Map();
   private enabled = true;
   private listeners: Set<(e: KeyboardEvent) => void> = new Set();
   private settingsChangeListeners: Set<() => void> = new Set();
@@ -152,20 +154,27 @@ class KeyboardService {
 
     const key = this.getShortcutKey(activeShortcut);
     this.shortcuts.set(key, activeShortcut);
+    // Maintain reverse mapping for O(1) lookups
+    this.keyToId.set(key, id);
   }
 
   /**
    * Unregister a keyboard shortcut
    */
   unregister(id: string): void {
-    // Find and remove by iterating (we store by key combo, not id)
-    for (const [key, shortcut] of this.shortcuts.entries()) {
-      if (shortcut.description === id) {
+    // Find and remove using reverse mapping
+    const binding = this.customBindings.get(id) ?? this.defaultBindings.get(id);
+    if (binding) {
+      const metadata = this.shortcutMetadata.get(id);
+      if (metadata) {
+        const shortcut: Shortcut = { ...binding, ...metadata };
+        const key = this.getShortcutKey(shortcut);
         this.shortcuts.delete(key);
-        break;
+        this.keyToId.delete(key);
       }
     }
     this.defaultBindings.delete(id);
+    this.customBindings.delete(id);
     this.shortcutMetadata.delete(id);
   }
 
@@ -180,25 +189,25 @@ class KeyboardService {
     const testShortcut: Shortcut = { ...newBinding, ...metadata };
     const newKey = this.getShortcutKey(testShortcut);
 
-    // Find and remove the old binding
-    for (const [key, shortcut] of this.shortcuts.entries()) {
-      if (shortcut.description === metadata.description) {
-        this.shortcuts.delete(key);
-        break;
-      }
+    // Get the current binding to find the old key
+    const currentBinding = this.customBindings.get(id) ?? this.defaultBindings.get(id);
+    let oldKey: string | undefined;
+    if (currentBinding) {
+      const oldShortcut: Shortcut = { ...currentBinding, ...metadata };
+      oldKey = this.getShortcutKey(oldShortcut);
     }
 
-    // Check if new key is already taken
-    const existingShortcut = this.shortcuts.get(newKey);
-    if (existingShortcut && existingShortcut.description !== metadata.description) {
-      // Conflict! Restore the old binding
-      const currentBinding = this.customBindings.get(id) ?? this.defaultBindings.get(id);
-      if (currentBinding) {
-        const oldShortcut: Shortcut = { ...currentBinding, ...metadata };
-        const oldKey = this.getShortcutKey(oldShortcut);
-        this.shortcuts.set(oldKey, oldShortcut);
-      }
+    // Check if new key is already taken by a different shortcut
+    const existingId = this.keyToId.get(newKey);
+    if (existingId && existingId !== id) {
+      // Conflict with a different shortcut
       return false;
+    }
+
+    // Remove the old binding
+    if (oldKey) {
+      this.shortcuts.delete(oldKey);
+      this.keyToId.delete(oldKey);
     }
 
     // Save the custom binding
@@ -207,6 +216,7 @@ class KeyboardService {
 
     // Register the new binding
     this.shortcuts.set(newKey, testShortcut);
+    this.keyToId.set(newKey, id);
 
     // Notify listeners
     this.notifySettingsChange();
@@ -221,12 +231,13 @@ class KeyboardService {
     const defaultBinding = this.defaultBindings.get(id);
     if (!metadata || !defaultBinding) return;
 
-    // Remove the old binding
-    for (const [key, shortcut] of this.shortcuts.entries()) {
-      if (shortcut.description === metadata.description) {
-        this.shortcuts.delete(key);
-        break;
-      }
+    // Get the current (custom) binding to find and remove the old key
+    const currentBinding = this.customBindings.get(id);
+    if (currentBinding) {
+      const oldShortcut: Shortcut = { ...currentBinding, ...metadata };
+      const oldKey = this.getShortcutKey(oldShortcut);
+      this.shortcuts.delete(oldKey);
+      this.keyToId.delete(oldKey);
     }
 
     // Remove custom binding
@@ -237,6 +248,7 @@ class KeyboardService {
     const shortcut: Shortcut = { ...defaultBinding, ...metadata };
     const key = this.getShortcutKey(shortcut);
     this.shortcuts.set(key, shortcut);
+    this.keyToId.set(key, id);
 
     // Notify listeners
     this.notifySettingsChange();
@@ -249,14 +261,16 @@ class KeyboardService {
     this.customBindings.clear();
     this.saveSettings();
 
-    // Rebuild shortcuts map with defaults
+    // Rebuild shortcuts map and reverse mapping with defaults
     this.shortcuts.clear();
+    this.keyToId.clear();
     for (const [id, metadata] of this.shortcutMetadata.entries()) {
       const defaultBinding = this.defaultBindings.get(id);
       if (defaultBinding) {
         const shortcut: Shortcut = { ...defaultBinding, ...metadata };
         const key = this.getShortcutKey(shortcut);
         this.shortcuts.set(key, shortcut);
+        this.keyToId.set(key, id);
       }
     }
 

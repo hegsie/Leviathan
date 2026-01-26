@@ -139,8 +139,7 @@ export const commitStatsCache = new LRUCache<{ additions: number; deletions: num
   ttl: 10 * 60 * 1000, // 10 minutes
 });
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const commitSignatureCache = new LRUCache<any>({
+export const commitSignatureCache = new LRUCache<unknown>({
   maxSize: 500,
   ttl: 30 * 60 * 1000, // 30 minutes (signatures don't change)
 });
@@ -156,10 +155,26 @@ export const diffCache = new LRUCache<unknown>({
 });
 
 /**
+ * Escape repository path for use in cache keys.
+ * Colons are URL-encoded so they don't conflict with our key separator.
+ */
+function escapeRepoPath(repoPath: string): string {
+  return repoPath.replace(/:/g, '%3A');
+}
+
+/**
+ * Create a cache key from repository path and identifier.
+ * Uses escaped repo path to avoid key collisions from paths containing colons.
+ */
+export function createCacheKey(repoPath: string, id: string): string {
+  return `${escapeRepoPath(repoPath)}:${id}`;
+}
+
+/**
  * Invalidate all caches for a repository
  */
 export function invalidateRepositoryCache(repoPath: string): void {
-  const prefix = repoPath + ':';
+  const prefix = escapeRepoPath(repoPath) + ':';
   commitStatsCache.invalidatePrefix(prefix);
   commitSignatureCache.invalidatePrefix(prefix);
   fileContentCache.invalidatePrefix(prefix);
