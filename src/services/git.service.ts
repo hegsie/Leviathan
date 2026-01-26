@@ -143,6 +143,34 @@ export async function checkout(
 }
 
 /**
+ * Result of checkout with auto-stash
+ */
+export interface CheckoutWithStashResult {
+  success: boolean;
+  stashed: boolean;
+  stashApplied: boolean;
+  stashConflict: boolean;
+  message: string;
+}
+
+/**
+ * Checkout with automatic stash handling
+ * 1. Stashes uncommitted changes before checkout
+ * 2. Performs checkout
+ * 3. Re-applies stash after checkout
+ * 4. Reports if stash apply had conflicts
+ */
+export async function checkoutWithAutoStash(
+  path: string,
+  refName: string,
+): Promise<CommandResult<CheckoutWithStashResult>> {
+  return invokeCommand<CheckoutWithStashResult>("checkout_with_autostash", {
+    path,
+    refName,
+  });
+}
+
+/**
  * Commit operations
  */
 export async function getCommitHistory(

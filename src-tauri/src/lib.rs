@@ -180,6 +180,7 @@ pub fn run() {
             commands::branch::delete_branch,
             commands::branch::rename_branch,
             commands::branch::checkout,
+            commands::branch::checkout_with_autostash,
             commands::commit::get_commit_history,
             commands::commit::get_commit,
             commands::commit::create_commit,
