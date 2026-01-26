@@ -130,7 +130,7 @@ function generatePreview(commits: EditableRebaseCommit[]): PreviewCommit[] {
       squashedFrom: squashedFrom.length > 0 ? squashedFrom : undefined,
     });
 
-    i = j > i + 1 ? j : i + 1;
+    i = j;
   }
 
   return preview;

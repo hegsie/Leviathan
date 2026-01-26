@@ -806,6 +806,8 @@ export class LvInteractiveRebaseDialog extends LitElement {
           const escapedMessage = c.newMessage
             .replace(/\\/g, '\\\\')
             .replace(/'/g, "'\\''")
+            .replace(/\r\n/g, '\\n')
+            .replace(/\r/g, '\\n')
             .replace(/\n/g, '\\n');
           todoLines.push(`exec git commit --amend -m "$(printf '%b' '${escapedMessage}')"`);
         } else if (c.action === 'reword') {
@@ -1009,7 +1011,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
             <div class="stats-row">
               <div class="stat">
-                <span>Commits:</span>
+                <span>Resulting:</span>
                 <span class="stat-value">${stats.kept}</span>
               </div>
               ${stats.squashed > 0 ? html`

@@ -745,15 +745,6 @@ export class LvBranchList extends LitElement {
     }));
   }
 
-  private handleRebaseConflict(): void {
-    // Dispatch event to app-shell to open conflict resolution dialog
-    this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
-      bubbles: true,
-      composed: true,
-      detail: { operationType: 'rebase' },
-    }));
-  }
-
   private handleCreateBranchFrom(): void {
     const branch = this.contextMenu.branch;
     if (!branch) return;
@@ -986,7 +977,11 @@ export class LvBranchList extends LitElement {
           await this.loadBranches();
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'REBASE_CONFLICT') {
-          this.dispatchEvent(new CustomEvent('rebase-conflict', { bubbles: true, composed: true }));
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: { operationType: 'rebase' },
+          }));
         }
       }
     } else {
@@ -1032,7 +1027,11 @@ export class LvBranchList extends LitElement {
           await this.loadBranches();
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'REBASE_CONFLICT') {
-          this.dispatchEvent(new CustomEvent('rebase-conflict', { bubbles: true, composed: true }));
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: { operationType: 'rebase' },
+          }));
         }
       }
     }
@@ -1244,7 +1243,6 @@ export class LvBranchList extends LitElement {
       <lv-interactive-rebase-dialog
         .repositoryPath=${this.repositoryPath}
         @rebase-complete=${this.handleRebaseComplete}
-        @rebase-conflict=${this.handleRebaseConflict}
       ></lv-interactive-rebase-dialog>
 
       <!-- Local branches - shown directly without extra header -->
