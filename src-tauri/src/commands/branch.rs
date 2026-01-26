@@ -367,6 +367,7 @@ pub async fn checkout_with_autostash(
     let (target_oid, is_local_branch) = resolve_result.map_err(|msg| {
         // Restore stash if checkout target resolution failed
         if stashed {
+            // Best effort - try to pop stash, but don't fail if it doesn't work
             let _ = repo.stash_pop(0, None);
         }
         LeviathanError::OperationFailed(msg.replace("RESTORE_STASH:", ""))
@@ -396,7 +397,33 @@ pub async fn checkout_with_autostash(
     if let Some(msg) = checkout_error {
         // Restore stash if checkout fails
         if stashed {
-            let _ = repo.stash_pop(0, None);
+            // Verify the stash at index 0 is our auto-stash before popping
+            let mut first_stash_oid: Option<git2::Oid> = None;
+            let _ = repo.stash_foreach(|idx, _name, oid| {
+                if idx == 0 {
+                    first_stash_oid = Some(*oid);
+                    false // Stop iteration
+                } else {
+                    true // Continue (shouldn't happen since we stop at 0)
+                }
+            });
+
+            // Only pop if we can verify it's our stash, or if we didn't save the OID
+            let should_pop = match (stash_oid, first_stash_oid) {
+                (Some(expected), Some(actual)) => expected == actual,
+                (None, Some(_)) => true, // No expected OID, try to pop
+                _ => false,              // No stash found
+            };
+
+            if should_pop {
+                if let Err(pop_err) = repo.stash_pop(0, None) {
+                    return Err(LeviathanError::OperationFailed(format!(
+                        "Checkout failed: {}. Additionally, failed to restore stashed changes: {}",
+                        msg,
+                        pop_err.message()
+                    )));
+                }
+            }
         }
         return Err(LeviathanError::OperationFailed(format!(
             "Checkout failed: {}",

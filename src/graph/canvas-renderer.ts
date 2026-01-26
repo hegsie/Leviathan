@@ -1515,7 +1515,9 @@ export class CanvasRenderer {
         };
       case 'tag': {
         // Check if this is a version tag (semver pattern: v1.0.0, 1.0.0, etc.)
-        const isVersionTag = /^v?\d+\.\d+(\.\d+)?(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$/.test(ref.shorthand);
+        // Match semver-like version tags (e.g., v1.2.3, 1.0.0-beta.1, 2.0.0+build.123)
+        // Requires at least one alphanumeric after - or + to prevent matching "1.2.3-" or "1.2.3+"
+        const isVersionTag = /^v?\d+\.\d+(\.\d+)?(-[a-zA-Z0-9][a-zA-Z0-9.]*)?(\+[a-zA-Z0-9][a-zA-Z0-9.]*)?$/.test(ref.shorthand);
 
         if (isVersionTag) {
           // Version tags get special purple highlighting
