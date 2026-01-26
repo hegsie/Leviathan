@@ -1133,6 +1133,148 @@ export class AppShell extends LitElement {
     }
   }
 
+  /**
+   * Create a fixup commit targeting the selected commit
+   * Requires staged changes. The fixup commit will be marked with "fixup! <original-message>"
+   * Can be auto-squashed later with interactive rebase --autosquash
+   */
+  private async handleFixupCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Check if there are staged changes
+    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    if (!statusResult.success || !statusResult.data) {
+      showToast('Failed to check status', 'error');
+      return;
+    }
+
+    const hasStagedChanges = statusResult.data.some(f => f.isStaged);
+    if (!hasStagedChanges) {
+      showToast('No staged changes to fixup', 'error');
+      return;
+    }
+
+    // Create fixup commit
+    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+      message: `fixup! ${commit.summary}`,
+    });
+
+    if (result.success) {
+      showToast(`Created fixup commit for ${commit.shortId}`, 'success');
+      this.graphCanvas?.refresh?.();
+      window.dispatchEvent(new CustomEvent('status-refresh'));
+    } else {
+      showToast(result.error?.message || 'Failed to create fixup commit', 'error');
+    }
+  }
+
+  /**
+   * Create a squash commit targeting the selected commit
+   * Similar to fixup but preserves the message for editing during autosquash
+   */
+  private async handleSquashCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Check if there are staged changes
+    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    if (!statusResult.success || !statusResult.data) {
+      showToast('Failed to check status', 'error');
+      return;
+    }
+
+    const hasStagedChanges = statusResult.data.some(f => f.isStaged);
+    if (!hasStagedChanges) {
+      showToast('No staged changes to squash', 'error');
+      return;
+    }
+
+    // Create squash commit
+    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+      message: `squash! ${commit.summary}`,
+    });
+
+    if (result.success) {
+      showToast(`Created squash commit for ${commit.shortId}`, 'success');
+      this.graphCanvas?.refresh?.();
+      window.dispatchEvent(new CustomEvent('status-refresh'));
+    } else {
+      showToast(result.error?.message || 'Failed to create squash commit', 'error');
+    }
+  }
+
+  /**
+   * Check if the selected commit is HEAD
+   */
+  private isHeadCommit(commit: Commit): boolean {
+    if (!this.activeRepository) return false;
+    // HEAD is typically the first commit in the sorted list
+    return commit.oid === this.selectedCommit?.oid && this.selectedCommitRefs.some(r =>
+      r.shorthand === 'HEAD' || r.name === 'HEAD'
+    );
+  }
+
+  /**
+   * Reword the selected commit
+   * For HEAD: Opens amend mode in commit panel
+   * For other commits: Dispatches event to open interactive rebase with reword action
+   */
+  private async handleRewordCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Check if this is HEAD commit
+    const historyResult = await gitService.getCommitHistory({
+      path: this.activeRepository.repository.path,
+      limit: 1,
+    });
+
+    const isHead = historyResult.success && historyResult.data &&
+      historyResult.data.length > 0 && historyResult.data[0].oid === commit.oid;
+
+    if (isHead) {
+      // For HEAD, just trigger amend mode
+      window.dispatchEvent(new CustomEvent('trigger-amend', {
+        detail: { commit },
+      }));
+    } else {
+      // For other commits, dispatch event to open interactive rebase dialog
+      // pre-configured for rewording this commit
+      this.dispatchEvent(new CustomEvent('open-interactive-rebase', {
+        bubbles: true,
+        composed: true,
+        detail: {
+          upstreamRef: `${commit.oid}^`,
+          mode: 'reword',
+          targetCommitOid: commit.oid,
+        },
+      }));
+    }
+  }
+
+  /**
+   * Quick amend - only available for HEAD commit
+   * Triggers amend mode in commit panel
+   */
+  private handleQuickAmend(): void {
+    const commit = this.contextMenu.commit;
+    if (!commit) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Dispatch event to trigger amend mode in commit panel
+    window.dispatchEvent(new CustomEvent('trigger-amend', {
+      detail: { commit },
+    }));
+  }
+
   private handleConflictResolved(): void {
     this.showConflictDialog = false;
     this.graphCanvas?.refresh?.();
@@ -1955,6 +2097,40 @@ export class AppShell extends LitElement {
                 <span class="context-menu-oid">${this.contextMenu.commit.oid.substring(0, 7)}</span>
                 <span class="context-menu-summary">${this.contextMenu.commit.summary}</span>
               </div>
+              <div class="context-menu-divider"></div>
+              <button class="context-menu-item" @click=${this.handleQuickAmend} title="Amend (edit) this commit">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                </svg>
+                Amend
+              </button>
+              <button class="context-menu-item" @click=${this.handleRewordCommit} title="Change the commit message">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="17" y1="10" x2="3" y2="10"></line>
+                  <line x1="21" y1="6" x2="3" y2="6"></line>
+                  <line x1="21" y1="14" x2="3" y2="14"></line>
+                  <line x1="17" y1="18" x2="3" y2="18"></line>
+                </svg>
+                Reword
+              </button>
+              <div class="context-menu-divider"></div>
+              <button class="context-menu-item" @click=${this.handleFixupCommit} title="Create fixup commit for this commit (requires staged changes)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                Fixup into this
+              </button>
+              <button class="context-menu-item" @click=${this.handleSquashCommit} title="Create squash commit for this commit (requires staged changes)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="9" y1="3" x2="9" y2="21"></line>
+                  <line x1="15" y1="3" x2="15" y2="21"></line>
+                </svg>
+                Squash into this
+              </button>
               <div class="context-menu-divider"></div>
               <button class="context-menu-item" @click=${this.handleCherryPick}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
