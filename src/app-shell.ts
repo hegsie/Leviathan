@@ -1122,7 +1122,7 @@ export class AppShell extends LitElement {
     const result = await import('./services/git.service.ts').then((m) =>
       m.reset({
         path: this.activeRepository!.repository.path,
-        target_ref: commit.oid,
+        targetRef: commit.oid,
         mode,
       })
     );

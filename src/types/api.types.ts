@@ -194,7 +194,7 @@ export interface AbortRevertCommand {
  */
 export interface ResetCommand {
   path: string;
-  target_ref: string;
+  targetRef: string;
   mode: "soft" | "mixed" | "hard";
 }
 
