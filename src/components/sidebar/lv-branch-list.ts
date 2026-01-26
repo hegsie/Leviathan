@@ -977,7 +977,11 @@ export class LvBranchList extends LitElement {
           await this.loadBranches();
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'REBASE_CONFLICT') {
-          this.dispatchEvent(new CustomEvent('rebase-conflict', { bubbles: true, composed: true }));
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: { operationType: 'rebase' },
+          }));
         }
       }
     } else {
@@ -1023,7 +1027,11 @@ export class LvBranchList extends LitElement {
           await this.loadBranches();
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'REBASE_CONFLICT') {
-          this.dispatchEvent(new CustomEvent('rebase-conflict', { bubbles: true, composed: true }));
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: { operationType: 'rebase' },
+          }));
         }
       }
     }
