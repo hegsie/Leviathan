@@ -42,6 +42,8 @@
   --color-diff-add-line-bg: rgba(52, 168, 83, 0.25);
   --color-diff-del-bg: rgba(234, 67, 53, 0.15);
   --color-diff-del-line-bg: rgba(234, 67, 53, 0.25);
+  --color-diff-ws-bg: rgba(234, 179, 8, 0.1);
+  --color-diff-ws-highlight: rgba(234, 179, 8, 0.35);
 
   /* Primary background for selected items */
   --color-primary-bg: rgba(26, 115, 232, 0.1);
@@ -184,6 +186,8 @@
     --color-diff-add-line-bg: rgba(52, 168, 83, 0.3);
     --color-diff-del-bg: rgba(234, 67, 53, 0.2);
     --color-diff-del-line-bg: rgba(234, 67, 53, 0.3);
+    --color-diff-ws-bg: rgba(234, 179, 8, 0.15);
+    --color-diff-ws-highlight: rgba(234, 179, 8, 0.4);
 
     --color-primary-bg: rgba(79, 195, 247, 0.15);
 
@@ -249,6 +253,8 @@
   --color-diff-add-line-bg: rgba(52, 168, 83, 0.3);
   --color-diff-del-bg: rgba(234, 67, 53, 0.2);
   --color-diff-del-line-bg: rgba(234, 67, 53, 0.3);
+  --color-diff-ws-bg: rgba(234, 179, 8, 0.15);
+  --color-diff-ws-highlight: rgba(234, 179, 8, 0.4);
 
   --color-primary-bg: rgba(79, 195, 247, 0.15);
 

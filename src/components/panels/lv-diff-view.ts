@@ -1,15 +1,16 @@
-import { LitElement, html, css, nothing, TemplateResult } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
+import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import {
-  initHighlighter,
-  detectLanguage,
-  highlightLineSync,
-  preloadLanguage,
-} from '../../utils/shiki-highlighter.ts';
-import type { BundledLanguage } from 'shiki';
+import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { DiffFile, DiffHunk, DiffLine, StatusEntry } from '../../types/git.types.ts';
+import {
+  findWhitespaceOnlyPairs,
+  computeInlineWhitespaceDiff,
+  isWhitespaceOnlyChange,
+  type InlineDiffSegment,
+} from '../../utils/diff-utils.ts';
 import './lv-image-diff.ts';
 
 type DiffViewMode = 'unified' | 'split';
@@ -17,6 +18,8 @@ type DiffViewMode = 'unified' | 'split';
 interface SplitLine {
   left: DiffLine | null;
   right: DiffLine | null;
+  isWhitespaceOnly?: boolean;
+  inlineSegments?: InlineDiffSegment[];
 }
 
 interface ConflictRegion {
@@ -48,9 +51,10 @@ type LineKey = `${number}-${number}`;
  * Supports unified and split view modes
  */
 @customElement('lv-diff-view')
-export class LvDiffView extends LitElement {
+export class LvDiffView extends CodeRenderMixin(LitElement) {
   static styles = [
     sharedStyles,
+    codeStyles,
     css`
       :host {
         display: flex;
@@ -185,23 +189,38 @@ export class LvDiffView extends LitElement {
         border-bottom: none;
       }
 
-      .hunk-header {
+      .hunk-separator {
+        position: relative;
+        height: 8px;
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        padding: var(--spacing-xs) var(--spacing-sm);
-        background: var(--color-bg-tertiary);
-        color: var(--color-text-muted);
-        font-style: italic;
-        border-bottom: 1px solid var(--color-border);
         min-width: max-content;
       }
 
-      .hunk-header-text {
+      .hunk-separator-line {
         flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        height: 1px;
+        background: var(--color-border);
+      }
+
+      .hunk-separator-actions {
+        display: none;
+        position: absolute;
+        right: var(--spacing-sm);
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 1;
+      }
+
+      .hunk-separator:hover .hunk-separator-actions {
+        display: flex;
+        gap: var(--spacing-xs);
+      }
+
+      .hunk-separator-split {
+        height: 4px;
+        border-top: 1px solid var(--color-border);
+        min-width: max-content;
       }
 
       .hunk-actions {
@@ -209,6 +228,10 @@ export class LvDiffView extends LitElement {
         gap: var(--spacing-xs);
         flex-shrink: 0;
         margin-left: var(--spacing-sm);
+      }
+
+      .hunk.active {
+        border-left: 3px solid var(--color-primary);
       }
 
       .stage-btn {
@@ -292,28 +315,12 @@ export class LvDiffView extends LitElement {
         white-space: pre;
       }
 
-      .line.addition {
-        background: var(--color-diff-add-bg);
-      }
-
-      .line.addition .line-origin {
+      .line.code-addition .line-origin {
         color: var(--color-success);
       }
 
-      .line.addition .line-no {
-        background: var(--color-diff-add-line-bg);
-      }
-
-      .line.deletion {
-        background: var(--color-diff-del-bg);
-      }
-
-      .line.deletion .line-origin {
+      .line.code-deletion .line-origin {
         color: var(--color-error);
-      }
-
-      .line.deletion .line-no {
-        background: var(--color-diff-del-line-bg);
       }
 
       /* Split view styles */
@@ -377,21 +384,6 @@ export class LvDiffView extends LitElement {
         background: var(--color-bg-tertiary);
       }
 
-      .split-line.addition {
-        background: var(--color-diff-add-bg);
-      }
-
-      .split-line.addition .split-line-no {
-        background: var(--color-diff-add-line-bg);
-      }
-
-      .split-line.deletion {
-        background: var(--color-diff-del-bg);
-      }
-
-      .split-line.deletion .split-line-no {
-        background: var(--color-diff-del-line-bg);
-      }
 
       .loading {
         display: flex;
@@ -578,35 +570,6 @@ export class LvDiffView extends LitElement {
         transition: all 0.15s ease;
       }
 
-      .conflict-btn.ours {
-        background: rgba(34, 197, 94, 0.15);
-        border: 1px solid var(--color-success);
-        color: var(--color-success);
-      }
-
-      .conflict-btn.ours:hover {
-        background: rgba(34, 197, 94, 0.25);
-      }
-
-      .conflict-btn.theirs {
-        background: rgba(59, 130, 246, 0.15);
-        border: 1px solid var(--color-info);
-        color: var(--color-info);
-      }
-
-      .conflict-btn.theirs:hover {
-        background: rgba(59, 130, 246, 0.25);
-      }
-
-      .conflict-btn.both {
-        background: rgba(168, 85, 247, 0.15);
-        border: 1px solid #a855f7;
-        color: #a855f7;
-      }
-
-      .conflict-btn.both:hover {
-        background: rgba(168, 85, 247, 0.25);
-      }
 
       .conflict-marker {
         display: flex;
@@ -635,32 +598,15 @@ export class LvDiffView extends LitElement {
         transition: all 0.15s ease;
       }
 
-      .conflict-inline-btn.ours {
-        background: var(--color-success-bg);
-        border: 1px solid var(--color-success);
-        color: var(--color-success);
-      }
-
-      .conflict-inline-btn.theirs {
-        background: var(--color-info-bg);
-        border: 1px solid var(--color-info);
-        color: var(--color-info);
-      }
-
-      .conflict-inline-btn.both {
-        background: rgba(168, 85, 247, 0.15);
-        border: 1px solid #a855f7;
-        color: #a855f7;
-      }
 
       /* Line selection mode */
-      .line-selection-mode .line.addition,
-      .line-selection-mode .line.deletion {
+      .line-selection-mode .line.code-addition,
+      .line-selection-mode .line.code-deletion {
         cursor: pointer;
       }
 
-      .line-selection-mode .line.addition:hover,
-      .line-selection-mode .line.deletion:hover {
+      .line-selection-mode .line.code-addition:hover,
+      .line-selection-mode .line.code-deletion:hover {
         filter: brightness(1.15);
       }
 
@@ -690,8 +636,8 @@ export class LvDiffView extends LitElement {
         flex-shrink: 0;
       }
 
-      .line-selection-mode .line.addition .line-checkbox,
-      .line-selection-mode .line.deletion .line-checkbox {
+      .line-selection-mode .line.code-addition .line-checkbox,
+      .line-selection-mode .line.code-deletion .line-checkbox {
         display: inline-block;
       }
 
@@ -743,6 +689,26 @@ export class LvDiffView extends LitElement {
       .selection-btn svg {
         width: 12px;
         height: 12px;
+      }
+
+      /* Whitespace-only change origin color (diff-view specific) */
+      .line.code-ws-change .line-origin {
+        color: var(--color-warning);
+      }
+
+      /* Hunk navigation */
+      .hunk-nav {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+      }
+
+      .hunk-counter {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        padding: 0 4px;
+        min-width: 32px;
+        text-align: center;
       }
 
       /* Context menu */
@@ -807,8 +773,7 @@ export class LvDiffView extends LitElement {
   @state() private contextMenu: DiffContextMenuState = { visible: false, x: 0, y: 0, line: null, hunk: null };
   @state() private selectedLines: Set<LineKey> = new Set();
   @state() private lineSelectionMode = false;
-
-  private language: BundledLanguage | null = null;
+  @state() private currentHunkIndex = 0;
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
@@ -816,14 +781,40 @@ export class LvDiffView extends LitElement {
     }
   };
 
+  private handleKeydown = (e: KeyboardEvent): void => {
+    if (e.altKey && e.key === 'ArrowDown') {
+      e.preventDefault();
+      this.goToNextHunk();
+    } else if (e.altKey && e.key === 'ArrowUp') {
+      e.preventDefault();
+      this.goToPrevHunk();
+    } else if (e.key === ']' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') return;
+      e.preventDefault();
+      this.goToNextHunk();
+    } else if (e.key === '[' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') return;
+      e.preventDefault();
+      this.goToPrevHunk();
+    }
+  };
+
   connectedCallback(): void {
     super.connectedCallback();
     document.addEventListener('click', this.handleDocumentClick);
+    this.addEventListener('keydown', this.handleKeydown);
+    // Make host focusable for keyboard shortcuts
+    if (!this.hasAttribute('tabindex')) {
+      this.setAttribute('tabindex', '0');
+    }
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('click', this.handleDocumentClick);
+    this.removeEventListener('keydown', this.handleKeydown);
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -844,11 +835,7 @@ export class LvDiffView extends LitElement {
 
     try {
       // Initialize highlighter and detect language
-      await initHighlighter();
-      this.language = detectLanguage(this.file.path);
-      if (this.language) {
-        await preloadLanguage(this.language);
-      }
+      await this.initCodeLanguage(this.file.path);
 
       const result = await gitService.getFileDiff(
         this.repositoryPath,
@@ -879,11 +866,7 @@ export class LvDiffView extends LitElement {
 
     try {
       // Initialize highlighter and detect language
-      await initHighlighter();
-      this.language = detectLanguage(this.commitFile.filePath);
-      if (this.language) {
-        await preloadLanguage(this.language);
-      }
+      await this.initCodeLanguage(this.commitFile.filePath);
 
       const result = await gitService.getCommitFileDiff(
         this.repositoryPath,
@@ -1566,9 +1549,9 @@ export class LvDiffView extends LitElement {
   private getLineClass(origin: string): string {
     switch (origin) {
       case 'addition':
-        return 'addition';
+        return 'code-addition';
       case 'deletion':
-        return 'deletion';
+        return 'code-deletion';
       default:
         return 'context';
     }
@@ -1582,6 +1565,35 @@ export class LvDiffView extends LitElement {
         return '-';
       default:
         return ' ';
+    }
+  }
+
+  private get totalHunks(): number {
+    return this.diff?.hunks.length ?? 0;
+  }
+
+  private goToNextHunk(): void {
+    if (this.totalHunks === 0) return;
+    this.currentHunkIndex = (this.currentHunkIndex + 1) % this.totalHunks;
+    this.scrollToHunk(this.currentHunkIndex);
+  }
+
+  private goToPrevHunk(): void {
+    if (this.totalHunks === 0) return;
+    this.currentHunkIndex = (this.currentHunkIndex - 1 + this.totalHunks) % this.totalHunks;
+    this.scrollToHunk(this.currentHunkIndex);
+  }
+
+  private scrollToHunk(index: number): void {
+    const container = this.shadowRoot?.querySelector('.diff-content') ??
+      this.shadowRoot?.querySelector('.split-container');
+    if (!container) return;
+
+    const hunks = container.querySelectorAll('.hunk');
+    const separators = container.querySelectorAll('.hunk-separator');
+    const target = hunks[index] ?? separators[index];
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }
 
@@ -1674,13 +1686,6 @@ export class LvDiffView extends LitElement {
     this.selectedLines = prevSelected;
   }
 
-  private renderHighlightedContent(content: string): TemplateResult {
-    const tokens = highlightLineSync(content, this.language);
-    return html`${tokens.map(
-      (token) => html`<span style="color: ${token.color}">${token.content}</span>`
-    )}`;
-  }
-
   private renderLine(line: DiffLine, hunk: DiffHunk, hunkIndex: number, lineIndex: number) {
     const lineClass = this.getLineClass(line.origin);
     const originChar = this.getOriginChar(line.origin);
@@ -1724,17 +1729,134 @@ export class LvDiffView extends LitElement {
     `;
   }
 
+  private renderWhitespaceOnlyLine(
+    delLine: DiffLine,
+    addLine: DiffLine,
+    hunk: DiffHunk,
+    hunkIndex: number,
+    delIndex: number,
+    addIndex: number,
+  ) {
+    const segments = computeInlineWhitespaceDiff(delLine.content, addLine.content);
+    const isDelSelected = this.isLineSelected(hunkIndex, delIndex);
+    const isAddSelected = this.isLineSelected(hunkIndex, addIndex);
+    const isSelected = isDelSelected || isAddSelected;
+
+    const handleClick = (e: MouseEvent) => {
+      if (this.lineSelectionMode) {
+        e.preventDefault();
+        // Toggle both underlying lines together
+        const newSelected = new Set(this.selectedLines);
+        const delKey = this.getLineKey(hunkIndex, delIndex);
+        const addKey = this.getLineKey(hunkIndex, addIndex);
+        if (isSelected) {
+          newSelected.delete(delKey);
+          newSelected.delete(addKey);
+        } else {
+          newSelected.add(delKey);
+          newSelected.add(addKey);
+        }
+        this.selectedLines = newSelected;
+      }
+    };
+
+    const handleCheckboxChange = (e: Event) => {
+      e.stopPropagation();
+      const newSelected = new Set(this.selectedLines);
+      const delKey = this.getLineKey(hunkIndex, delIndex);
+      const addKey = this.getLineKey(hunkIndex, addIndex);
+      if (isSelected) {
+        newSelected.delete(delKey);
+        newSelected.delete(addKey);
+      } else {
+        newSelected.add(delKey);
+        newSelected.add(addKey);
+      }
+      this.selectedLines = newSelected;
+    };
+
+    return html`
+      <div
+        class="line code-ws-change ${isSelected ? 'selected' : ''}"
+        @contextmenu=${(e: MouseEvent) => this.handleLineContextMenu(e, addLine, hunk)}
+        @click=${handleClick}
+      >
+        ${this.lineSelectionMode ? html`
+          <input
+            type="checkbox"
+            class="line-checkbox"
+            style="display: inline-block"
+            .checked=${isSelected}
+            @change=${handleCheckboxChange}
+            @click=${(e: Event) => e.stopPropagation()}
+          />
+        ` : nothing}
+        <div class="line-numbers">
+          <span class="line-no old">${delLine.oldLineNo ?? ''}</span>
+          <span class="line-no new">${addLine.newLineNo ?? ''}</span>
+        </div>
+        <span class="line-origin">~</span>
+        <span class="line-content">${this.renderInlineWhitespaceContent(segments)}</span>
+      </div>
+    `;
+  }
+
   private renderHunk(hunk: DiffHunk, hunkIndex: number) {
     // Only show stage/unstage button for working directory diffs (not commit diffs)
     const showStageButton = this.file !== null && !this.commitFile;
     const isStaged = this.file?.isStaged ?? false;
+    const isActive = this.currentHunkIndex === hunkIndex;
+
+    // Find whitespace-only pairs for this hunk
+    const wsPairs = findWhitespaceOnlyPairs(hunk.lines);
+    const skipIndices = new Set(wsPairs.values());
 
     return html`
-      <div class="hunk">
-        <div class="hunk-header">
-          <span class="hunk-header-text">${hunk.header}</span>
+      <div class="hunk ${isActive ? 'active' : ''}">
+        ${hunkIndex > 0 ? html`
+          <div class="hunk-separator">
+            <div class="hunk-separator-line"></div>
+            ${showStageButton ? html`
+              <div class="hunk-separator-actions">
+                ${this.lineSelectionMode ? html`
+                  <button
+                    class="stage-btn"
+                    @click=${() => this.selectAllInHunk(hunkIndex)}
+                    title="Select all lines in this hunk"
+                  >
+                    Select All
+                  </button>
+                ` : nothing}
+                ${isStaged ? html`
+                  <button
+                    class="stage-btn unstage"
+                    @click=${(e: Event) => this.handleUnstageHunk(hunk, e)}
+                    title="Unstage this hunk"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                    Unstage
+                  </button>
+                ` : html`
+                  <button
+                    class="stage-btn stage"
+                    @click=${(e: Event) => this.handleStageHunk(hunk, e)}
+                    title="Stage this hunk"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <line x1="12" y1="5" x2="12" y2="19"></line>
+                      <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                    Stage
+                  </button>
+                `}
+              </div>
+            ` : nothing}
+          </div>
+        ` : html`
           ${showStageButton ? html`
-            <div class="hunk-actions">
+            <div class="hunk-separator" style="height: auto; padding: 2px var(--spacing-sm); justify-content: flex-end;">
               ${this.lineSelectionMode ? html`
                 <button
                   class="stage-btn"
@@ -1770,8 +1892,19 @@ export class LvDiffView extends LitElement {
               `}
             </div>
           ` : nothing}
-        </div>
-        ${hunk.lines.map((line, lineIndex) => this.renderLine(line, hunk, hunkIndex, lineIndex))}
+        `}
+        ${hunk.lines.map((line, lineIndex) => {
+          // Skip addition lines that are part of a whitespace-only pair
+          if (skipIndices.has(lineIndex)) return nothing;
+          // Render whitespace-only pairs as a merged line
+          if (wsPairs.has(lineIndex)) {
+            const addIndex = wsPairs.get(lineIndex)!;
+            return this.renderWhitespaceOnlyLine(
+              line, hunk.lines[addIndex], hunk, hunkIndex, lineIndex, addIndex,
+            );
+          }
+          return this.renderLine(line, hunk, hunkIndex, lineIndex);
+        })}
       </div>
     `;
   }
@@ -1780,7 +1913,7 @@ export class LvDiffView extends LitElement {
     const splitLines: SplitLine[] = [];
 
     for (const hunk of hunks) {
-      // Add hunk header as a special line
+      // Add hunk separator as a special line
       splitLines.push({
         left: { content: hunk.header, origin: 'hunk-header', oldLineNo: null, newLineNo: null },
         right: { content: hunk.header, origin: 'hunk-header', oldLineNo: null, newLineNo: null },
@@ -1789,6 +1922,26 @@ export class LvDiffView extends LitElement {
       const deletions: DiffLine[] = [];
       const additions: DiffLine[] = [];
 
+      const flushPending = () => {
+        // Check for whitespace-only pairs while flushing
+        while (deletions.length || additions.length) {
+          const del = deletions.shift() ?? null;
+          const add = additions.shift() ?? null;
+
+          if (del && add && isWhitespaceOnlyChange(del.content, add.content)) {
+            const segments = computeInlineWhitespaceDiff(del.content, add.content);
+            splitLines.push({
+              left: del,
+              right: add,
+              isWhitespaceOnly: true,
+              inlineSegments: segments,
+            });
+          } else {
+            splitLines.push({ left: del, right: add });
+          }
+        }
+      };
+
       for (const line of hunk.lines) {
         if (line.origin === 'deletion') {
           deletions.push(line);
@@ -1796,30 +1949,25 @@ export class LvDiffView extends LitElement {
           additions.push(line);
         } else {
           // Context line - flush any pending deletions/additions first
-          while (deletions.length || additions.length) {
-            splitLines.push({
-              left: deletions.shift() ?? null,
-              right: additions.shift() ?? null,
-            });
-          }
+          flushPending();
           // Add context line to both sides
           splitLines.push({ left: line, right: line });
         }
       }
 
       // Flush remaining deletions/additions
-      while (deletions.length || additions.length) {
-        splitLines.push({
-          left: deletions.shift() ?? null,
-          right: additions.shift() ?? null,
-        });
-      }
+      flushPending();
     }
 
     return splitLines;
   }
 
-  private renderSplitLine(line: DiffLine | null, side: 'left' | 'right') {
+  private renderSplitLineCell(
+    line: DiffLine | null,
+    side: 'left' | 'right',
+    wsOnly?: boolean,
+    segments?: InlineDiffSegment[],
+  ) {
     if (!line) {
       return html`
         <div class="split-line empty">
@@ -1830,18 +1978,27 @@ export class LvDiffView extends LitElement {
     }
 
     if (line.origin === 'hunk-header') {
+      return html`<div class="hunk-separator-split"></div>`;
+    }
+
+    const lineNo = side === 'left' ? line.oldLineNo : line.newLineNo;
+
+    if (wsOnly && segments) {
+      // Whitespace-only: show inline diff with yellow background
+      const filteredSegments = segments.filter(s =>
+        side === 'left' ? s.type !== 'added' : s.type !== 'removed'
+      );
       return html`
-        <div class="split-line" style="background: var(--color-bg-tertiary); font-style: italic; color: var(--color-text-muted);">
-          <span class="split-line-no"></span>
-          <span class="split-line-content">${line.content}</span>
+        <div class="split-line code-ws-change">
+          <span class="split-line-no">${lineNo ?? ''}</span>
+          <span class="split-line-content">${this.renderInlineWhitespaceContent(filteredSegments)}</span>
         </div>
       `;
     }
 
-    const lineNo = side === 'left' ? line.oldLineNo : line.newLineNo;
     let lineClass = '';
-    if (line.origin === 'deletion') lineClass = 'deletion';
-    else if (line.origin === 'addition') lineClass = 'addition';
+    if (line.origin === 'deletion') lineClass = 'code-deletion';
+    else if (line.origin === 'addition') lineClass = 'code-addition';
 
     return html`
       <div class="split-line ${lineClass}">
@@ -1860,11 +2017,11 @@ export class LvDiffView extends LitElement {
       <div class="split-container">
         <div class="split-pane">
           <div class="split-pane-header">Original</div>
-          ${splitLines.map((sl) => this.renderSplitLine(sl.left, 'left'))}
+          ${splitLines.map((sl) => this.renderSplitLineCell(sl.left, 'left', sl.isWhitespaceOnly, sl.inlineSegments))}
         </div>
         <div class="split-pane">
           <div class="split-pane-header">Modified</div>
-          ${splitLines.map((sl) => this.renderSplitLine(sl.right, 'right'))}
+          ${splitLines.map((sl) => this.renderSplitLineCell(sl.right, 'right', sl.isWhitespaceOnly, sl.inlineSegments))}
         </div>
       </div>
     `;
@@ -2078,6 +2235,29 @@ export class LvDiffView extends LitElement {
               </svg>
             </button>
           ` : nothing}
+          ${this.totalHunks > 1 ? html`
+            <div class="hunk-nav">
+              <button
+                class="view-btn"
+                @click=${this.goToPrevHunk}
+                title="Previous change (Alt+Up)"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="18 15 12 9 6 15"></polyline>
+                </svg>
+              </button>
+              <span class="hunk-counter">${this.currentHunkIndex + 1}/${this.totalHunks}</span>
+              <button
+                class="view-btn"
+                @click=${this.goToNextHunk}
+                title="Next change (Alt+Down)"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </button>
+            </div>
+          ` : nothing}
           ${this.canEdit
             ? html`
                 <button
@@ -2129,14 +2309,14 @@ export class LvDiffView extends LitElement {
               </div>
               <div class="conflict-actions">
                 <button
-                  class="conflict-btn ours"
+                  class="conflict-btn code-conflict-btn-ours"
                   @click=${() => this.resolveAllConflicts('ours')}
                   title="Accept all changes from current branch"
                 >
                   Accept All Ours
                 </button>
                 <button
-                  class="conflict-btn theirs"
+                  class="conflict-btn code-conflict-btn-theirs"
                   @click=${() => this.resolveAllConflicts('theirs')}
                   title="Accept all changes from incoming branch"
                 >
@@ -2158,21 +2338,21 @@ export class LvDiffView extends LitElement {
     return html`
       <div class="conflict-inline-actions">
         <button
-          class="conflict-inline-btn ours"
+          class="conflict-inline-btn code-conflict-btn-ours"
           @click=${() => this.resolveConflict(region, 'ours')}
           title="Accept current branch version"
         >
           Ours
         </button>
         <button
-          class="conflict-inline-btn theirs"
+          class="conflict-inline-btn code-conflict-btn-theirs"
           @click=${() => this.resolveConflict(region, 'theirs')}
           title="Accept incoming branch version"
         >
           Theirs
         </button>
         <button
-          class="conflict-inline-btn both"
+          class="conflict-inline-btn code-conflict-btn-both"
           @click=${() => this.resolveConflict(region, 'both')}
           title="Keep both versions"
         >
