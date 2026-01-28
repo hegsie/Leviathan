@@ -27,11 +27,15 @@ async function getVaultPassword(): Promise<string> {
 
   try {
     cachedVaultPassword = await invoke<string>('get_machine_vault_password');
+    if (!cachedVaultPassword) {
+      throw new Error('Backend returned empty vault password');
+    }
     return cachedVaultPassword;
   } catch (error) {
-    log.error('Failed to get machine vault password, using fallback:', error);
-    // Fallback to a default if the backend fails (should not happen in normal operation)
-    return 'leviathan-secure-vault-2024';
+    log.error('Failed to get machine vault password:', error);
+    throw new Error(
+      'Failed to initialize secure vault. Cannot proceed without machine-specific encryption key.'
+    );
   }
 }
 
@@ -107,7 +111,7 @@ async function ensureInitialized(): Promise<Client> {
       } catch {
         // Client doesn't exist, create it
         clientInstance = await strongholdInstance.createClient(CLIENT_NAME);
-        log.debug(' Created new client');
+        log.debug('Created new client');
       }
     } catch (error) {
       log.error(' Failed to initialize:', error);

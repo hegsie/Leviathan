@@ -510,42 +510,42 @@ pub async fn erase_credentials(path: String, host: String, protocol: String) -> 
 /// to ensure each installation has a unique vault password
 #[command]
 pub async fn get_machine_vault_password() -> Result<String> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
 
     // Gather machine-specific information
-    let mut hasher = DefaultHasher::new();
+    let mut components = Vec::new();
 
     // Use hostname
     if let Ok(hostname) = hostname::get() {
-        hostname.hash(&mut hasher);
+        if let Ok(hostname_str) = hostname.into_string() {
+            components.push(hostname_str);
+        }
     }
 
     // Use username
     if let Ok(username) = whoami::username() {
-        username.hash(&mut hasher);
+        components.push(username);
     }
 
     // Use a static salt to make it harder to predict
-    "leviathan-vault-2024-v1".hash(&mut hasher);
+    components.push("leviathan-vault-2024-v1".to_string());
 
-    let hash = hasher.finish();
+    if components.is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "Failed to gather machine-specific information for vault password".to_string(),
+        ));
+    }
 
-    // Create a longer password from multiple hashes
-    "leviathan-vault-2024-v1".hash(&mut hasher);
-    let hash2 = hasher.finish();
+    // Combine all components
+    let combined = components.join("||");
 
-    "leviathan-vault-2024-v1".hash(&mut hasher);
-    let hash3 = hasher.finish();
+    // Hash the combined string using SHA-256
+    let mut hasher = Sha256::new();
+    hasher.update(combined.as_bytes());
+    let hash = hasher.finalize();
 
-    "leviathan-vault-2024-v1".hash(&mut hasher);
-    let hash4 = hasher.finish();
-
-    // Combine into a hex string (64 chars)
-    Ok(format!(
-        "{:016x}{:016x}{:016x}{:016x}",
-        hash, hash2, hash3, hash4
-    ))
+    // Convert to hex string (64 chars)
+    Ok(format!("{:x}", hash))
 }
 
 /// Migrate old vault file to new location if needed
@@ -581,4 +581,35 @@ pub async fn migrate_vault_if_needed(data_dir: String, new_vault_path: String) -
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_machine_vault_password_returns_value() {
+        // Should return a non-empty password
+        let password = get_machine_vault_password().await;
+        assert!(password.is_ok());
+        let password = password.unwrap();
+        assert!(!password.is_empty());
+        // SHA-256 produces 64 hex characters
+        assert_eq!(password.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_get_machine_vault_password_is_deterministic() {
+        // Calling twice should return the same password
+        let password1 = get_machine_vault_password().await.unwrap();
+        let password2 = get_machine_vault_password().await.unwrap();
+        assert_eq!(password1, password2);
+    }
+
+    #[tokio::test]
+    async fn test_get_machine_vault_password_is_hex() {
+        // Result should be valid hexadecimal
+        let password = get_machine_vault_password().await.unwrap();
+        assert!(password.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }
