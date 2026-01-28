@@ -156,8 +156,11 @@ pub fn run() {
 
             #[cfg(debug_assertions)]
             {
-                let window = app.get_webview_window("main").unwrap();
-                window.open_devtools();
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
+                } else {
+                    tracing::warn!("Main window not found, skipping devtools");
+                }
             }
 
             // Start auto-update checking (every 24 hours)
@@ -364,6 +367,7 @@ pub fn run() {
             commands::credentials::store_git_credentials,
             commands::credentials::delete_git_credentials,
             commands::credentials::migrate_vault_if_needed,
+            commands::credentials::get_machine_vault_password,
             // GitHub integration
             commands::github::check_github_connection,
             commands::github::detect_github_repo,
