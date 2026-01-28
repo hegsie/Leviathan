@@ -908,6 +908,13 @@ export class LvFileStatus extends LitElement {
 
   private async handleStageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
+    
+    // If multiple files are selected and this file is one of them, stage all selected
+    if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
+      await this.handleStageSelected();
+      return;
+    }
+    
     const result = await gitService.stageFiles(this.repositoryPath, {
       paths: [file.path],
     });
@@ -918,6 +925,13 @@ export class LvFileStatus extends LitElement {
 
   private async handleUnstageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
+    
+    // If multiple files are selected and this file is one of them, unstage all selected
+    if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
+      await this.handleUnstageSelected();
+      return;
+    }
+    
     const result = await gitService.unstageFiles(this.repositoryPath, {
       paths: [file.path],
     });
@@ -928,6 +942,12 @@ export class LvFileStatus extends LitElement {
 
   private async handleDiscardFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
+    
+    // If multiple files are selected and this file is one of them, discard all selected
+    if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
+      await this.handleDiscardSelected();
+      return;
+    }
 
     const confirmed = await showConfirm(
       "Discard Changes",
