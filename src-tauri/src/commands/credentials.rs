@@ -523,9 +523,8 @@ pub async fn get_machine_vault_password() -> Result<String> {
     }
 
     // Use username
-    if let Ok(username) = whoami::username() {
-        components.push(username);
-    }
+    let username = whoami::username();
+    components.push(username);
 
     // Use a static salt to make it harder to predict
     components.push("leviathan-vault-2024-v1".to_string());
