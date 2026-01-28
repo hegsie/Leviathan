@@ -262,7 +262,7 @@ grep -rn "_[a-z]*:" src/types/api.types.ts src/services/git.service.ts src/app-s
 2. **System Git** for complex operations (rebase, submodules) - avoid libgit2 limitations
 3. **Zustand** for reactive state management on frontend
 4. **SQLite** for caching repository metadata and indexing
-5. **Local LLM** (llama-cpp-2) for AI features - runs entirely offline
+5. **AI features via pluggable providers** (e.g., local Ollama/LM Studio, Anthropic, GitHub Copilot, OpenAI-compatible) - can run entirely offline when using local providers
 
 ### File Organization
 
