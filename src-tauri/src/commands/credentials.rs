@@ -505,6 +505,49 @@ pub async fn erase_credentials(path: String, host: String, protocol: String) -> 
     Ok(())
 }
 
+/// Get a machine-specific vault password
+/// This derives a deterministic password from machine-specific information
+/// to ensure each installation has a unique vault password
+#[command]
+pub async fn get_machine_vault_password() -> Result<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Gather machine-specific information
+    let mut hasher = DefaultHasher::new();
+
+    // Use hostname
+    if let Ok(hostname) = hostname::get() {
+        hostname.hash(&mut hasher);
+    }
+
+    // Use username
+    if let Ok(username) = whoami::username() {
+        username.hash(&mut hasher);
+    }
+
+    // Use a static salt to make it harder to predict
+    "leviathan-vault-2024-v1".hash(&mut hasher);
+
+    let hash = hasher.finish();
+
+    // Create a longer password from multiple hashes
+    "leviathan-vault-2024-v1".hash(&mut hasher);
+    let hash2 = hasher.finish();
+
+    "leviathan-vault-2024-v1".hash(&mut hasher);
+    let hash3 = hasher.finish();
+
+    "leviathan-vault-2024-v1".hash(&mut hasher);
+    let hash4 = hasher.finish();
+
+    // Combine into a hex string (64 chars)
+    Ok(format!(
+        "{:016x}{:016x}{:016x}{:016x}",
+        hash, hash2, hash3, hash4
+    ))
+}
+
 /// Migrate old vault file to new location if needed
 /// Old path was missing the / separator between app dir and filename
 #[command]

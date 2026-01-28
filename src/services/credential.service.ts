@@ -12,7 +12,29 @@ import { loggers } from '../utils/logger.ts';
 
 const log = loggers.credential;
 
-const VAULT_PASSWORD = 'leviathan-secure-vault-2024';
+// Machine-specific vault password - fetched from backend
+let cachedVaultPassword: string | null = null;
+
+/**
+ * Get the machine-specific vault password
+ * This password is derived from machine-specific information (hostname, username)
+ * to ensure each installation has a unique vault password
+ */
+async function getVaultPassword(): Promise<string> {
+  if (cachedVaultPassword) {
+    return cachedVaultPassword;
+  }
+
+  try {
+    cachedVaultPassword = await invoke<string>('get_machine_vault_password');
+    return cachedVaultPassword;
+  } catch (error) {
+    log.error('Failed to get machine vault password, using fallback:', error);
+    // Fallback to a default if the backend fails (should not happen in normal operation)
+    return 'leviathan-secure-vault-2024';
+  }
+}
+
 const CLIENT_NAME = 'leviathan-credentials';
 
 // Credential keys
@@ -73,7 +95,10 @@ async function ensureInitialized(): Promise<Client> {
 
       log.debug('Initializing vault at:', vaultPath);
 
-      strongholdInstance = await Stronghold.load(vaultPath, VAULT_PASSWORD);
+      // Get machine-specific password
+      const vaultPassword = await getVaultPassword();
+
+      strongholdInstance = await Stronghold.load(vaultPath, vaultPassword);
 
       // Try to load existing client or create new one
       try {
