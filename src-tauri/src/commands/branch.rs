@@ -304,20 +304,26 @@ pub async fn set_upstream_branch(
             .find_branch(&branch, git2::BranchType::Local)
             .map_err(|_| LeviathanError::BranchNotFound(branch.clone()))?;
 
-        // Parse the upstream reference (e.g., "origin/main" or "refs/remotes/origin/main")
-        let upstream_ref = if upstream.starts_with("refs/remotes/") {
-            upstream.clone()
+        // Normalize upstream to shorthand form (e.g., "refs/remotes/origin/main" -> "origin/main")
+        let upstream_short = if upstream.starts_with("refs/remotes/") {
+            upstream.strip_prefix("refs/remotes/").unwrap().to_string()
         } else {
-            format!("refs/remotes/{}", upstream)
+            upstream.clone()
         };
+
+        // Build the full ref for existence check
+        let upstream_ref = format!("refs/remotes/{}", upstream_short);
 
         // Check if the upstream reference exists
         repo.find_reference(&upstream_ref).map_err(|_| {
-            LeviathanError::OperationFailed(format!("Upstream reference not found: {}", upstream))
+            LeviathanError::OperationFailed(format!(
+                "Upstream reference not found: {}",
+                upstream_short
+            ))
         })?;
 
-        // Set the upstream
-        local_branch.set_upstream(Some(&upstream))?;
+        // Set the upstream using the shorthand form
+        local_branch.set_upstream(Some(&upstream_short))?;
     }
 
     // Return the updated tracking info

@@ -46,9 +46,9 @@ fn run_git_config(repo_path: &Path, args: &[&str]) -> Result<String> {
     cmd.arg("config");
     cmd.args(args);
 
-    let output = cmd.output().map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to run git config: {}", e))
-    })?;
+    let output = cmd
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git config: {}", e)))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -152,11 +152,7 @@ pub async fn launch_merge_tool(path: String, file_path: String) -> Result<MergeT
     } else {
         Ok(MergeToolResult {
             success: false,
-            message: if stderr.is_empty() {
-                stdout
-            } else {
-                stderr
-            },
+            message: if stderr.is_empty() { stdout } else { stderr },
         })
     }
 }
@@ -230,8 +226,7 @@ mod tests {
     async fn test_set_and_get_merge_tool_config() {
         let repo = TestRepo::with_initial_commit();
 
-        let result =
-            set_merge_tool_config(repo.path_str(), "kdiff3".to_string(), None).await;
+        let result = set_merge_tool_config(repo.path_str(), "kdiff3".to_string(), None).await;
         assert!(result.is_ok());
 
         let config = get_merge_tool_config(repo.path_str()).await.unwrap();

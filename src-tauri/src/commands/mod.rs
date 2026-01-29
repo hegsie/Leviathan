@@ -34,6 +34,7 @@ pub mod issue_templates;
 pub mod lfs;
 pub mod maintenance;
 pub mod merge;
+pub mod merge_tool;
 pub mod notes;
 pub mod oauth;
 pub mod patch;

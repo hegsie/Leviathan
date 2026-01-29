@@ -257,19 +257,51 @@ pub async fn open_in_configured_editor(
     }
 }
 
+/// Split a command string respecting quoted arguments.
+/// Handles double-quoted and single-quoted strings (e.g., `"C:\Program Files\Code\Code.exe" --wait`).
+fn split_command(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_double_quote = false;
+    let mut in_single_quote = false;
+
+    for ch in input.chars() {
+        match ch {
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            c if c.is_whitespace() && !in_double_quote && !in_single_quote => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            c => {
+                current.push(c);
+            }
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
 /// Parse editor command and add line number argument based on editor type
 fn parse_editor_command(
     editor_cmd: &str,
     file_path: &str,
     line: Option<u32>,
 ) -> (String, Vec<String>) {
-    let parts: Vec<&str> = editor_cmd.split_whitespace().collect();
+    let parts = split_command(editor_cmd);
     if parts.is_empty() {
         return (editor_cmd.to_string(), vec![file_path.to_string()]);
     }
 
-    let cmd = parts[0].to_string();
-    let mut args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+    let cmd = parts[0].clone();
+    let mut args: Vec<String> = parts[1..].to_vec();
 
     // Detect editor type and add line number support
     let cmd_lower = cmd.to_lowercase();
@@ -421,6 +453,35 @@ pub async fn set_editor_config(path: String, editor: String, global: bool) -> Re
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    #[test]
+    fn test_split_command_simple() {
+        let parts = split_command("code --wait");
+        assert_eq!(parts, vec!["code", "--wait"]);
+    }
+
+    #[test]
+    fn test_split_command_double_quoted_path() {
+        let parts = split_command(r#""C:\Program Files\VS Code\Code.exe" --wait"#);
+        assert_eq!(parts, vec![r"C:\Program Files\VS Code\Code.exe", "--wait"]);
+    }
+
+    #[test]
+    fn test_split_command_single_quoted_path() {
+        let parts = split_command("'/usr/local/bin/my editor' --line 5");
+        assert_eq!(parts, vec!["/usr/local/bin/my editor", "--line", "5"]);
+    }
+
+    #[test]
+    fn test_parse_editor_command_quoted_path() {
+        let (cmd, args) = parse_editor_command(
+            r#""C:\Program Files\VS Code\Code.exe" --wait"#,
+            "/path/to/file.rs",
+            Some(42),
+        );
+        assert_eq!(cmd, r"C:\Program Files\VS Code\Code.exe");
+        assert!(args.contains(&"--wait".to_string()));
+    }
 
     #[test]
     fn test_parse_editor_command_vscode() {

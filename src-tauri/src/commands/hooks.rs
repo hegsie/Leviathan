@@ -54,10 +54,6 @@ const HOOKS: &[(&str, &str)] = &[
     ("update", "Server-side. Run once per branch being pushed."),
     ("post-receive", "Server-side. Run after accepting a push."),
     ("pre-auto-gc", "Run before automatic garbage collection."),
-    (
-        "post-rewrite",
-        "Run after git commit --amend or git rebase.",
-    ),
     ("pre-applypatch", "Run before applying a patch with git am."),
     ("post-applypatch", "Run after applying a patch with git am."),
 ];
@@ -85,22 +81,7 @@ pub async fn get_hooks(path: String) -> Result<Vec<GitHook>> {
             None
         };
 
-        // A hook is enabled if it exists and is executable
-        let enabled = if exists {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::metadata(&hook_path)
-                    .map(|m| m.permissions().mode() & 0o111 != 0)
-                    .unwrap_or(false)
-            }
-            #[cfg(not(unix))]
-            {
-                true // Windows doesn't use execute permissions the same way
-            }
-        } else {
-            false
-        };
+        let enabled = exists;
 
         hooks.push(GitHook {
             name: name.to_string(),
