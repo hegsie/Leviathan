@@ -335,3 +335,328 @@ pub async fn oauth_wait_for_callback(port: u16) -> Result<String> {
 pub async fn oauth_wait_for_github_callback(port: u16) -> Result<String> {
     oauth_wait_for_callback(port).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==========================================================================
+    // StartOAuthResponse Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_start_oauth_response_serialization() {
+        let response = StartOAuthResponse {
+            authorize_url: "https://example.com/oauth".to_string(),
+            verifier: "test-verifier".to_string(),
+            state: "test-state".to_string(),
+            loopback_port: Some(8080),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("authorizeUrl"));
+        assert!(json.contains("verifier"));
+        assert!(json.contains("state"));
+        assert!(json.contains("loopbackPort"));
+    }
+
+    #[test]
+    fn test_start_oauth_response_without_loopback_port() {
+        let response = StartOAuthResponse {
+            authorize_url: "https://example.com/oauth".to_string(),
+            verifier: "test-verifier".to_string(),
+            state: "test-state".to_string(),
+            loopback_port: None,
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("loopbackPort"));
+        assert!(json.contains("null"));
+    }
+
+    #[test]
+    fn test_start_oauth_response_deserialization() {
+        let json = r#"{
+            "authorizeUrl": "https://example.com/oauth",
+            "verifier": "test-verifier",
+            "state": "test-state",
+            "loopbackPort": 8080
+        }"#;
+
+        let response: StartOAuthResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.authorize_url, "https://example.com/oauth");
+        assert_eq!(response.verifier, "test-verifier");
+        assert_eq!(response.state, "test-state");
+        assert_eq!(response.loopback_port, Some(8080));
+    }
+
+    // ==========================================================================
+    // ExchangeCodeRequest Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_exchange_code_request_serialization() {
+        let request = ExchangeCodeRequest {
+            provider: "github".to_string(),
+            code: "auth-code".to_string(),
+            verifier: "test-verifier".to_string(),
+            instance_url: None,
+            redirect_uri: "http://127.0.0.1:8080/callback".to_string(),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("provider"));
+        assert!(json.contains("code"));
+        assert!(json.contains("verifier"));
+        assert!(json.contains("instanceUrl"));
+        assert!(json.contains("redirectUri"));
+    }
+
+    #[test]
+    fn test_exchange_code_request_with_instance_url() {
+        let request = ExchangeCodeRequest {
+            provider: "gitlab".to_string(),
+            code: "auth-code".to_string(),
+            verifier: "test-verifier".to_string(),
+            instance_url: Some("https://gitlab.example.com".to_string()),
+            redirect_uri: "http://127.0.0.1:8080/callback".to_string(),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("gitlab.example.com"));
+    }
+
+    #[test]
+    fn test_exchange_code_request_deserialization() {
+        let json = r#"{
+            "provider": "github",
+            "code": "auth-code",
+            "verifier": "test-verifier",
+            "instanceUrl": null,
+            "redirectUri": "http://127.0.0.1:8080/callback"
+        }"#;
+
+        let request: ExchangeCodeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.provider, "github");
+        assert_eq!(request.code, "auth-code");
+        assert_eq!(request.verifier, "test-verifier");
+        assert!(request.instance_url.is_none());
+        assert_eq!(request.redirect_uri, "http://127.0.0.1:8080/callback");
+    }
+
+    // ==========================================================================
+    // OAuthState Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_oauth_state_default() {
+        let state = OAuthState::default();
+        let pending = state.pending.lock().unwrap();
+        assert!(pending.is_empty());
+    }
+
+    // ==========================================================================
+    // oauth_get_authorize_url Tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_oauth_get_authorize_url_github() {
+        let result =
+            oauth_get_authorize_url("github".to_string(), None, "test-client-id".to_string()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("github.com"));
+        assert!(response.authorize_url.contains("client_id=test-client-id"));
+        assert!(response.authorize_url.contains("response_type=code"));
+        assert!(response.authorize_url.contains("code_challenge="));
+        assert!(!response.verifier.is_empty());
+        assert!(!response.state.is_empty());
+        assert!(response.loopback_port.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_oauth_get_authorize_url_gitlab() {
+        let result =
+            oauth_get_authorize_url("gitlab".to_string(), None, "test-client-id".to_string()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("gitlab.com"));
+        assert!(response.authorize_url.contains("client_id=test-client-id"));
+        assert!(response.loopback_port.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_oauth_get_authorize_url_gitlab_custom_instance() {
+        let result = oauth_get_authorize_url(
+            "gitlab".to_string(),
+            Some("https://gitlab.example.com".to_string()),
+            "test-client-id".to_string(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("gitlab.example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_get_authorize_url_azure() {
+        let result =
+            oauth_get_authorize_url("azure".to_string(), None, "test-client-id".to_string()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("login.microsoftonline.com"));
+        assert!(response.authorize_url.contains("common"));
+        // Azure uses deep link, not loopback server
+        assert!(response.loopback_port.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_oauth_get_authorize_url_azure_custom_tenant() {
+        let result = oauth_get_authorize_url(
+            "azure".to_string(),
+            Some("my-tenant-id".to_string()),
+            "test-client-id".to_string(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("my-tenant-id"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_get_authorize_url_bitbucket() {
+        let result =
+            oauth_get_authorize_url("bitbucket".to_string(), None, "test-client-id".to_string())
+                .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("bitbucket.org"));
+        assert!(response.loopback_port.is_some());
+        // Bitbucket uses dedicated port 8085
+        assert_eq!(response.loopback_port, Some(8085));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_get_authorize_url_invalid_provider() {
+        let result = oauth_get_authorize_url(
+            "invalid-provider".to_string(),
+            None,
+            "test-client-id".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_oauth_get_authorize_url_generates_unique_state() {
+        let result1 =
+            oauth_get_authorize_url("azure".to_string(), None, "test-client-id".to_string()).await;
+        let result2 =
+            oauth_get_authorize_url("azure".to_string(), None, "test-client-id".to_string()).await;
+
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+
+        let response1 = result1.unwrap();
+        let response2 = result2.unwrap();
+
+        // Each call should generate unique state
+        assert_ne!(response1.state, response2.state);
+        // Each call should generate unique verifier
+        assert_ne!(response1.verifier, response2.verifier);
+    }
+
+    // ==========================================================================
+    // oauth_start_github_flow Tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_oauth_start_github_flow() {
+        let result = oauth_start_github_flow("test-client-id".to_string()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("github.com"));
+        assert!(response.loopback_port.is_some());
+    }
+
+    // ==========================================================================
+    // oauth_wait_for_callback Tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_oauth_wait_for_callback_no_server() {
+        // Attempting to wait on a port with no pending server should fail
+        let result = oauth_wait_for_callback(59999).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_oauth_wait_for_github_callback_alias() {
+        // The alias should behave the same as oauth_wait_for_callback
+        let result = oauth_wait_for_github_callback(59999).await;
+        assert!(result.is_err());
+    }
+
+    // ==========================================================================
+    // Provider Case Sensitivity Tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_oauth_provider_case_insensitive() {
+        let result_lower =
+            oauth_get_authorize_url("github".to_string(), None, "test-client-id".to_string()).await;
+        let result_upper =
+            oauth_get_authorize_url("GITHUB".to_string(), None, "test-client-id".to_string()).await;
+        let result_mixed =
+            oauth_get_authorize_url("GitHub".to_string(), None, "test-client-id".to_string()).await;
+
+        assert!(result_lower.is_ok());
+        assert!(result_upper.is_ok());
+        assert!(result_mixed.is_ok());
+    }
+
+    // ==========================================================================
+    // URL Structure Tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_oauth_authorize_url_contains_pkce() {
+        let result =
+            oauth_get_authorize_url("github".to_string(), None, "test-client-id".to_string()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("code_challenge="));
+        assert!(response
+            .authorize_url
+            .contains("code_challenge_method=S256"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_authorize_url_contains_scopes() {
+        let result =
+            oauth_get_authorize_url("github".to_string(), None, "test-client-id".to_string()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // GitHub scopes include "repo" and "read:user"
+        assert!(response.authorize_url.contains("scope="));
+    }
+}

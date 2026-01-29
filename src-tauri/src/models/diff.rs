@@ -59,6 +59,40 @@ pub struct DiffLine {
     pub new_line_no: Option<u32>,
 }
 
+/// Hunks for a file (used by partial staging API)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHunks {
+    pub file_path: String,
+    pub hunks: Vec<IndexedDiffHunk>,
+    pub total_additions: u32,
+    pub total_deletions: u32,
+}
+
+/// A hunk with index and staging state (used by partial staging API)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedDiffHunk {
+    pub index: u32,
+    pub old_start: u32,
+    pub old_lines: u32,
+    pub new_start: u32,
+    pub new_lines: u32,
+    pub header: String,
+    pub lines: Vec<HunkDiffLine>,
+    pub is_staged: bool,
+}
+
+/// A diff line with string-based type (used by partial staging API)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HunkDiffLine {
+    pub line_type: String,
+    pub content: String,
+    pub old_line_number: Option<u32>,
+    pub new_line_number: Option<u32>,
+}
+
 /// Origin type for a diff line
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

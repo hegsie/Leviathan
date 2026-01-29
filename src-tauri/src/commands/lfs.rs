@@ -344,3 +344,226 @@ pub async fn lfs_migrate(
 
     run_lfs_command(repo_path, &args)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    #[test]
+    fn test_parse_size_bytes() {
+        assert_eq!(parse_size("100 B"), 100);
+    }
+
+    #[test]
+    fn test_parse_size_kilobytes() {
+        assert_eq!(parse_size("1 KB"), 1024);
+        assert_eq!(parse_size("2 KB"), 2048);
+    }
+
+    #[test]
+    fn test_parse_size_megabytes() {
+        assert_eq!(parse_size("1 MB"), 1024 * 1024);
+        assert_eq!(parse_size("1.5 MB"), (1.5 * 1024.0 * 1024.0) as u64);
+    }
+
+    #[test]
+    fn test_parse_size_gigabytes() {
+        assert_eq!(parse_size("1 GB"), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_invalid() {
+        assert_eq!(parse_size("invalid"), 0);
+        assert_eq!(parse_size(""), 0);
+        assert_eq!(parse_size("100"), 0); // Missing unit
+    }
+
+    #[test]
+    fn test_parse_size_whitespace() {
+        assert_eq!(parse_size("  100 KB  "), 100 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_get_lfs_status_no_lfs() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = get_lfs_status(repo.path_str()).await;
+        assert!(result.is_ok());
+
+        let status = result.unwrap();
+        // LFS might or might not be installed on the test system
+        // but the function should not fail
+        if !status.installed {
+            assert!(!status.enabled);
+            assert!(status.patterns.is_empty());
+            assert_eq!(status.file_count, 0);
+            assert_eq!(status.total_size, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_lfs_status_with_gitattributes() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create a .gitattributes file with LFS filter
+        repo.create_file(
+            ".gitattributes",
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        );
+
+        let result = get_lfs_status(repo.path_str()).await;
+        assert!(result.is_ok());
+
+        let status = result.unwrap();
+        if status.installed {
+            assert!(status.enabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_lfs_status_invalid_path() {
+        let result = get_lfs_status("/nonexistent/path".to_string()).await;
+        // Should return status with installed info but not crash
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_init_lfs_when_not_installed() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = init_lfs(repo.path_str()).await;
+        // Result depends on whether LFS is installed on the system
+        // If not installed, should return error
+        if !is_lfs_installed() {
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("not installed"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lfs_track_pattern() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Skip if LFS is not installed
+        if !is_lfs_installed() {
+            return;
+        }
+
+        // Initialize LFS first
+        let _ = init_lfs(repo.path_str()).await;
+
+        let result = lfs_track(repo.path_str(), "*.bin".to_string()).await;
+        assert!(result.is_ok());
+
+        // Verify the pattern was added to .gitattributes
+        let gitattributes = std::fs::read_to_string(repo.path.join(".gitattributes"));
+        assert!(gitattributes.is_ok());
+        assert!(gitattributes.unwrap().contains("*.bin filter=lfs"));
+    }
+
+    #[tokio::test]
+    async fn test_lfs_untrack_pattern() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Skip if LFS is not installed
+        if !is_lfs_installed() {
+            return;
+        }
+
+        // Initialize and track a pattern first
+        let _ = init_lfs(repo.path_str()).await;
+        let _ = lfs_track(repo.path_str(), "*.bin".to_string()).await;
+
+        let result = lfs_untrack(repo.path_str(), "*.bin".to_string()).await;
+        assert!(result.is_ok());
+
+        // Verify the pattern was removed from .gitattributes
+        let gitattributes = std::fs::read_to_string(repo.path.join(".gitattributes"));
+        assert!(gitattributes.is_ok());
+        assert!(!gitattributes.unwrap().contains("*.bin filter=lfs"));
+    }
+
+    #[tokio::test]
+    async fn test_get_lfs_files_empty_repo() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Skip if LFS is not installed
+        if !is_lfs_installed() {
+            return;
+        }
+
+        let result = get_lfs_files(repo.path_str()).await;
+        // Should either succeed with empty list or fail gracefully
+        if result.is_ok() {
+            assert!(result.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lfs_prune_dry_run() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Skip if LFS is not installed
+        if !is_lfs_installed() {
+            return;
+        }
+
+        let _ = init_lfs(repo.path_str()).await;
+
+        let result = lfs_prune(repo.path_str(), Some(true)).await;
+        // Should succeed or fail gracefully (no LFS files to prune)
+        // The command itself should not crash
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn test_lfs_status_struct_serialization() {
+        let status = LfsStatus {
+            installed: true,
+            version: Some("git-lfs/3.0.0".to_string()),
+            enabled: true,
+            patterns: vec![LfsPattern {
+                pattern: "*.bin".to_string(),
+            }],
+            file_count: 5,
+            total_size: 1024 * 1024,
+        };
+
+        let json = serde_json::to_string(&status);
+        assert!(json.is_ok());
+        let json_str = json.unwrap();
+        assert!(json_str.contains("\"installed\":true"));
+        assert!(json_str.contains("\"enabled\":true"));
+        assert!(json_str.contains("\"fileCount\":5"));
+        assert!(json_str.contains("\"totalSize\":1048576"));
+    }
+
+    #[tokio::test]
+    async fn test_lfs_file_struct_serialization() {
+        let file = LfsFile {
+            path: "large-file.bin".to_string(),
+            oid: Some("abc123".to_string()),
+            size: Some(1024),
+            downloaded: true,
+        };
+
+        let json = serde_json::to_string(&file);
+        assert!(json.is_ok());
+        let json_str = json.unwrap();
+        assert!(json_str.contains("\"path\":\"large-file.bin\""));
+        assert!(json_str.contains("\"downloaded\":true"));
+    }
+
+    #[tokio::test]
+    async fn test_lfs_pattern_struct_serialization() {
+        let pattern = LfsPattern {
+            pattern: "*.psd".to_string(),
+        };
+
+        let json = serde_json::to_string(&pattern);
+        assert!(json.is_ok());
+        assert!(json.unwrap().contains("\"pattern\":\"*.psd\""));
+    }
+}

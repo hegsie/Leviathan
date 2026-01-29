@@ -351,3 +351,185 @@ pub async fn submodule_foreach(
 
     run_git_command(repo_path, &args)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    #[tokio::test]
+    async fn test_get_submodules_empty() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_submodules(repo.path_str()).await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_init_submodules_no_submodules() {
+        let repo = TestRepo::with_initial_commit();
+        // Init on repo with no submodules should succeed
+        let result = init_submodules(repo.path_str(), None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_update_submodules_no_submodules() {
+        let repo = TestRepo::with_initial_commit();
+        // Update on repo with no submodules should succeed
+        let result = update_submodules(repo.path_str(), None, None, None, None, None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_deinit_submodule_not_found() {
+        let repo = TestRepo::with_initial_commit();
+        // Deinit on nonexistent submodule should fail
+        let result = deinit_submodule(repo.path_str(), "nonexistent".to_string(), None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_submodule_status_not_found() {
+        let repo = TestRepo::with_initial_commit();
+        // Status on nonexistent submodule should fail
+        let result = get_submodule_status(repo.path_str(), "nonexistent".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_sync_submodules_no_submodules() {
+        let repo = TestRepo::with_initial_commit();
+        // Sync on repo with no submodules should succeed
+        let result = sync_submodules(repo.path_str(), None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_submodule_foreach_no_submodules() {
+        let repo = TestRepo::with_initial_commit();
+        // Foreach with no submodules should succeed (just do nothing)
+        let result = submodule_foreach(repo.path_str(), "pwd".to_string(), None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_add_submodule_invalid_url() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = add_submodule(
+            repo.path_str(),
+            "/nonexistent/path/to/repo".to_string(),
+            "deps/invalid".to_string(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_submodule_status_enum_variants() {
+        // Test that SubmoduleStatus serializes correctly
+        let current = SubmoduleStatus::Current;
+        let modified = SubmoduleStatus::Modified;
+        let uninitialized = SubmoduleStatus::Uninitialized;
+        let missing = SubmoduleStatus::Missing;
+        let dirty = SubmoduleStatus::Dirty;
+
+        // These should all be distinct debug representations
+        assert_ne!(format!("{:?}", current), format!("{:?}", modified));
+        assert_ne!(format!("{:?}", modified), format!("{:?}", uninitialized));
+        assert_ne!(format!("{:?}", uninitialized), format!("{:?}", missing));
+        assert_ne!(format!("{:?}", missing), format!("{:?}", dirty));
+    }
+
+    #[tokio::test]
+    async fn test_submodule_struct_fields() {
+        let submodule = Submodule {
+            name: "test-submodule".to_string(),
+            path: "libs/test".to_string(),
+            url: Some("https://github.com/test/repo.git".to_string()),
+            head_oid: Some("abc123".to_string()),
+            branch: Some("main".to_string()),
+            initialized: true,
+            status: SubmoduleStatus::Current,
+        };
+
+        assert_eq!(submodule.name, "test-submodule");
+        assert_eq!(submodule.path, "libs/test");
+        assert_eq!(
+            submodule.url,
+            Some("https://github.com/test/repo.git".to_string())
+        );
+        assert!(submodule.initialized);
+    }
+
+    #[tokio::test]
+    async fn test_init_submodules_with_paths() {
+        let repo = TestRepo::with_initial_commit();
+        // Init with specific paths on repo with no submodules should succeed
+        let result =
+            init_submodules(repo.path_str(), Some(vec!["nonexistent-path".to_string()])).await;
+        // This may succeed or fail depending on git version
+        // The important thing is it doesn't panic
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn test_update_submodules_with_init() {
+        let repo = TestRepo::with_initial_commit();
+        // Update with init flag on repo with no submodules should succeed
+        let result = update_submodules(
+            repo.path_str(),
+            None,
+            Some(true), // init
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_update_submodules_with_recursive() {
+        let repo = TestRepo::with_initial_commit();
+        // Update with recursive flag on repo with no submodules should succeed
+        let result = update_submodules(
+            repo.path_str(),
+            None,
+            None,
+            Some(true), // recursive
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_submodule_foreach_recursive() {
+        let repo = TestRepo::with_initial_commit();
+        // Foreach with recursive flag and no submodules should succeed
+        let result = submodule_foreach(repo.path_str(), "echo test".to_string(), Some(true)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_deinit_submodule_with_force() {
+        let repo = TestRepo::with_initial_commit();
+        // Deinit with force on nonexistent submodule should still fail
+        let result = deinit_submodule(repo.path_str(), "nonexistent".to_string(), Some(true)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_remove_submodule_not_found() {
+        let repo = TestRepo::with_initial_commit();
+        // Remove on nonexistent submodule should fail
+        let result = remove_submodule(repo.path_str(), "nonexistent".to_string()).await;
+        assert!(result.is_err());
+    }
+}

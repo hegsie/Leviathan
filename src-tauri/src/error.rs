@@ -33,6 +33,9 @@ pub enum LeviathanError {
     #[error("Commit not found: {0}")]
     CommitNotFound(String),
 
+    #[error("Tag not found: {0}")]
+    TagNotFound(String),
+
     #[error("Remote not found: {0}")]
     RemoteNotFound(String),
 
@@ -93,6 +96,7 @@ impl From<LeviathanError> for ErrorResponse {
             LeviathanError::InvalidPath(_) => "INVALID_PATH",
             LeviathanError::BranchNotFound(_) => "BRANCH_NOT_FOUND",
             LeviathanError::CommitNotFound(_) => "COMMIT_NOT_FOUND",
+            LeviathanError::TagNotFound(_) => "TAG_NOT_FOUND",
             LeviathanError::RemoteNotFound(_) => "REMOTE_NOT_FOUND",
             LeviathanError::OperationFailed(_) => "OPERATION_FAILED",
             LeviathanError::AuthenticationRequired => "AUTH_REQUIRED",
@@ -133,6 +137,7 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::InvalidPath(_) => "INVALID_PATH",
                 LeviathanError::BranchNotFound(_) => "BRANCH_NOT_FOUND",
                 LeviathanError::CommitNotFound(_) => "COMMIT_NOT_FOUND",
+                LeviathanError::TagNotFound(_) => "TAG_NOT_FOUND",
                 LeviathanError::RemoteNotFound(_) => "REMOTE_NOT_FOUND",
                 LeviathanError::OperationFailed(_) => "OPERATION_FAILED",
                 LeviathanError::AuthenticationRequired => "AUTH_REQUIRED",

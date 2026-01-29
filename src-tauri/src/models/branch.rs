@@ -46,3 +46,23 @@ pub struct Stash {
     pub message: String,
     pub oid: String,
 }
+
+/// Branch tracking information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchTrackingInfo {
+    /// The local branch name
+    pub local_branch: String,
+    /// The full upstream reference (e.g., "refs/remotes/origin/main")
+    pub upstream: Option<String>,
+    /// Number of commits ahead of upstream
+    pub ahead: u32,
+    /// Number of commits behind upstream
+    pub behind: u32,
+    /// The remote name (e.g., "origin")
+    pub remote: Option<String>,
+    /// The remote branch name (e.g., "main")
+    pub remote_branch: Option<String>,
+    /// Whether the upstream branch was deleted
+    pub is_gone: bool,
+}

@@ -337,6 +337,33 @@ export class LvFileStatus extends LitElement {
       .folder-item .folder-name {
         font-family: var(--font-family-mono);
         font-size: 11px;
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .folder-count {
+        font-size: 10px;
+        color: var(--color-text-muted);
+        background: var(--color-bg-tertiary);
+        padding: 0 5px;
+        border-radius: var(--radius-full);
+        flex-shrink: 0;
+      }
+
+      .folder-actions {
+        display: none;
+        gap: 2px;
+        flex-shrink: 0;
+      }
+
+      .folder-item:hover .folder-actions {
+        display: flex;
+      }
+
+      .folder-item:hover .folder-count {
+        display: none;
       }
 
       .folder-children {
@@ -571,6 +598,89 @@ export class LvFileStatus extends LitElement {
     }
   }
 
+  /** Count all files in a tree node (recursively) */
+  private countTreeNodeFiles(node: {
+    file?: StatusEntry;
+    children: Map<string, unknown>;
+  }): number {
+    if (node.file) return 1;
+    let count = 0;
+    for (const child of node.children.values()) {
+      count += this.countTreeNodeFiles(
+        child as { file?: StatusEntry; children: Map<string, unknown> },
+      );
+    }
+    return count;
+  }
+
+  /** Collect all file paths under a given directory prefix */
+  private getFilesUnderPath(
+    files: StatusEntry[],
+    dirPath: string,
+  ): StatusEntry[] {
+    const prefix = dirPath + "/";
+    return files.filter(
+      (f) => f.path.startsWith(prefix) || f.path === dirPath,
+    );
+  }
+
+  /** Stage all files under a directory */
+  private async handleStageDirectory(
+    dirPath: string,
+    e: Event,
+  ): Promise<void> {
+    e.stopPropagation();
+    const filesToStage = this.getFilesUnderPath(this.unstagedFiles, dirPath);
+    if (filesToStage.length === 0) return;
+
+    const paths = filesToStage.map((f) => f.path);
+    const result = await gitService.stageFiles(this.repositoryPath, { paths });
+    if (result.success) {
+      await this.loadStatus();
+    }
+  }
+
+  /** Unstage all files under a directory */
+  private async handleUnstageDirectory(
+    dirPath: string,
+    e: Event,
+  ): Promise<void> {
+    e.stopPropagation();
+    const filesToUnstage = this.getFilesUnderPath(this.stagedFiles, dirPath);
+    if (filesToUnstage.length === 0) return;
+
+    const paths = filesToUnstage.map((f) => f.path);
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths,
+    });
+    if (result.success) {
+      await this.loadStatus();
+    }
+  }
+
+  /** Discard all changes under a directory */
+  private async handleDiscardDirectory(
+    dirPath: string,
+    e: Event,
+  ): Promise<void> {
+    e.stopPropagation();
+    const filesToDiscard = this.getFilesUnderPath(this.unstagedFiles, dirPath);
+    if (filesToDiscard.length === 0) return;
+
+    const paths = filesToDiscard.map((f) => f.path);
+    const confirmed = await showConfirm(
+      "Discard Changes",
+      `Discard changes to ${paths.length} file${paths.length > 1 ? "s" : ""} in "${dirPath}"? This cannot be undone.`,
+      "warning",
+    );
+    if (!confirmed) return;
+
+    const result = await gitService.discardChanges(this.repositoryPath, paths);
+    if (result.success) {
+      await this.loadStatus();
+    }
+  }
+
   private unsubscribeWatcher: (() => void) | null = null;
   private statusRefreshTimeout: ReturnType<typeof setTimeout> | null = null;
   private hasInitiallyLoaded = false;
@@ -708,12 +818,57 @@ export class LvFileStatus extends LitElement {
   private getAllVisibleFiles(): StatusEntry[] {
     const files: StatusEntry[] = [];
     if (this.stagedExpanded) {
-      files.push(...this.stagedFiles);
+      if (this.viewMode === "tree") {
+        this.collectVisibleTreeFiles(this.stagedFiles, files);
+      } else {
+        files.push(...this.stagedFiles);
+      }
     }
     if (this.unstagedExpanded) {
-      files.push(...this.unstagedFiles);
+      if (this.viewMode === "tree") {
+        this.collectVisibleTreeFiles(this.unstagedFiles, files);
+      } else {
+        files.push(...this.unstagedFiles);
+      }
     }
     return files;
+  }
+
+  /** Collect only files visible in tree view (respecting collapsed folders) */
+  private collectVisibleTreeFiles(
+    sectionFiles: StatusEntry[],
+    result: StatusEntry[],
+  ): void {
+    const tree = this.buildFileTree(sectionFiles);
+    this.collectVisibleFromNode(tree, "", result);
+  }
+
+  private collectVisibleFromNode(
+    children: Map<
+      string,
+      { file?: StatusEntry; children: Map<string, unknown> }
+    >,
+    parentPath: string,
+    result: StatusEntry[],
+  ): void {
+    for (const [name, node] of children.entries()) {
+      const nodePath = parentPath ? `${parentPath}/${name}` : name;
+      if (node.file) {
+        result.push(node.file);
+      } else {
+        // It's a folder - only recurse if expanded
+        if (this.expandedFolders.has(nodePath)) {
+          this.collectVisibleFromNode(
+            node.children as Map<
+              string,
+              { file?: StatusEntry; children: Map<string, unknown> }
+            >,
+            nodePath,
+            result,
+          );
+        }
+      }
+    }
   }
 
   private scrollFocusedIntoView(): void {
@@ -1391,6 +1546,7 @@ export class LvFileStatus extends LitElement {
     // Otherwise, render as a folder with children
     const isExpanded = this.expandedFolders.has(path);
     const children = Array.from(node.children.entries());
+    const fileCount = this.countTreeNodeFiles(node);
     let currentIndex = indexOffset;
 
     return html`
@@ -1398,6 +1554,7 @@ export class LvFileStatus extends LitElement {
         class="folder-item"
         style="--tree-depth: ${depth}"
         @click=${() => this.toggleFolder(path)}
+        title="${path} (${fileCount} file${fileCount !== 1 ? "s" : ""})"
       >
         <svg
           class="chevron ${isExpanded ? "expanded" : ""}"
@@ -1420,6 +1577,64 @@ export class LvFileStatus extends LitElement {
               ></path>`}
         </svg>
         <span class="folder-name">${name}</span>
+        <span class="folder-count">${fileCount}</span>
+        <div class="folder-actions">
+          ${staged
+            ? html`
+                <button
+                  class="file-action"
+                  title="Unstage directory"
+                  @click=${(e: Event) => this.handleUnstageDirectory(path, e)}
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg>
+                </button>
+              `
+            : html`
+                <button
+                  class="file-action"
+                  title="Stage directory"
+                  @click=${(e: Event) => this.handleStageDirectory(path, e)}
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg>
+                </button>
+                <button
+                  class="file-action"
+                  title="Discard directory changes"
+                  @click=${(e: Event) => this.handleDiscardDirectory(path, e)}
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                </button>
+              `}
+        </div>
       </li>
       ${isExpanded
         ? html`
@@ -1437,24 +1652,7 @@ export class LvFileStatus extends LitElement {
                   staged,
                   currentIndex,
                 );
-                // Count files in this subtree for index calculation
-                const countFiles = (n: {
-                  file?: StatusEntry;
-                  children: Map<string, unknown>;
-                }): number => {
-                  if (n.file) return 1;
-                  let count = 0;
-                  for (const child of n.children.values()) {
-                    count += countFiles(
-                      child as {
-                        file?: StatusEntry;
-                        children: Map<string, unknown>;
-                      },
-                    );
-                  }
-                  return count;
-                };
-                currentIndex += countFiles(
+                currentIndex += this.countTreeNodeFiles(
                   childNode as {
                     file?: StatusEntry;
                     children: Map<string, unknown>;
@@ -1527,24 +1725,7 @@ export class LvFileStatus extends LitElement {
               staged,
               currentIndex,
             );
-            // Count files for index calculation
-            const countFiles = (n: {
-              file?: StatusEntry;
-              children: Map<string, unknown>;
-            }): number => {
-              if (n.file) return 1;
-              let count = 0;
-              for (const child of n.children.values()) {
-                count += countFiles(
-                  child as {
-                    file?: StatusEntry;
-                    children: Map<string, unknown>;
-                  },
-                );
-              }
-              return count;
-            };
-            currentIndex += countFiles(node);
+            currentIndex += this.countTreeNodeFiles(node);
             return result;
           })}
         </ul>

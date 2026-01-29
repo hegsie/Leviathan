@@ -102,3 +102,51 @@ export interface GraphRenderOptions {
   compactMode: boolean;
   animateTransitions: boolean;
 }
+
+/**
+ * Backend commit graph data returned from the Rust get_commit_graph command
+ */
+export interface CommitGraphData {
+  nodes: CommitGraphNode[];
+  totalCommits: number;
+  maxLane: number;
+}
+
+/**
+ * A single node in the backend commit graph
+ */
+export interface CommitGraphNode {
+  oid: string;
+  shortOid: string;
+  message: string;
+  authorName: string;
+  authorEmail: string;
+  authorDate: number;
+  parents: string[];
+  children: string[];
+  lane: number;
+  isMerge: boolean;
+  isFork: boolean;
+  refs: CommitGraphRef[];
+  edges: CommitGraphEdge[];
+}
+
+/**
+ * A reference in the backend commit graph
+ */
+export interface CommitGraphRef {
+  name: string;
+  refType: string;
+  isCurrent: boolean;
+}
+
+/**
+ * An edge in the backend commit graph
+ */
+export interface CommitGraphEdge {
+  fromOid: string;
+  toOid: string;
+  fromLane: number;
+  toLane: number;
+  edgeType: string;
+}
