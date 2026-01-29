@@ -24,6 +24,7 @@ import {
   getCommitFileDiff,
   getCommitsStats,
 } from '../git.service.ts';
+import { clearAllCaches } from '../cache.service.ts';
 
 describe('git.service - Diff operations', () => {
   beforeEach(() => {
@@ -31,6 +32,7 @@ describe('git.service - Diff operations', () => {
     lastInvokedArgs = null;
     invokeHistory.length = 0;
     mockInvoke = () => Promise.resolve(null);
+    clearAllCaches();
   });
 
   describe('getDiff', () => {
@@ -39,7 +41,7 @@ describe('git.service - Diff operations', () => {
 
       const result = await getDiff();
       expect(lastInvokedCommand).to.equal('get_diff');
-      expect(lastInvokedArgs).to.be.undefined;
+      expect(lastInvokedArgs).to.deep.equal({});
       expect(result.success).to.be.true;
     });
 

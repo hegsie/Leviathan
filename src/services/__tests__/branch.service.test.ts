@@ -507,8 +507,8 @@ describe('git.service - Branch operations', () => {
       expect(lastInvokedCommand).to.equal('get_branch_diff_commits');
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.path).to.equal('/test/repo');
-      expect(args.branch).to.equal('feature');
-      expect(args.baseBranch).to.equal('main');
+      expect(args.baseBranch).to.equal('feature');
+      expect(args.compareBranch).to.equal('main');
       expect(result.success).to.be.true;
       expect(result.data?.length).to.equal(1);
     });

@@ -230,7 +230,7 @@ pub async fn fixup_commit(
             git2::Delta::Added | git2::Delta::Modified => {
                 // Get the blob from the staged tree
                 let entry = staged_tree.get_path(new_path)?;
-                treebuilder.insert(new_path, entry.id(), entry.filemode().into())?;
+                treebuilder.insert(new_path, entry.id(), entry.filemode())?;
             }
             git2::Delta::Deleted => {
                 treebuilder.remove(new_path)?;

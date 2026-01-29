@@ -337,11 +337,7 @@ pub async fn get_commit_graph(
                 };
 
                 let edge_type = if idx == 0 {
-                    if is_merge {
-                        "normal".to_string()
-                    } else {
-                        "normal".to_string()
-                    }
+                    "normal".to_string()
                 } else {
                     "merge".to_string()
                 };

@@ -64,6 +64,7 @@ pub async fn open_repository(path: String) -> Result<Repository> {
 }
 
 /// Clone a repository with progress reporting
+#[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn clone_repository(
     app: AppHandle,

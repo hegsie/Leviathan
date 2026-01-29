@@ -315,6 +315,7 @@ fn fetch_internal(path: &str, remote_name: &str, prune: bool, token: Option<Stri
 }
 
 /// Push to remote
+#[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn push(
     app_handle: AppHandle,
@@ -411,6 +412,7 @@ pub async fn push(
 }
 
 /// Push via git CLI (used for --force-with-lease and --tags which git2 doesn't support)
+#[allow(clippy::too_many_arguments)]
 fn push_via_cli(
     path: &str,
     remote_name: &str,
@@ -514,6 +516,7 @@ fn push_single_remote(
 }
 
 /// Push to multiple remotes
+#[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn push_to_multiple_remotes(
     app_handle: AppHandle,

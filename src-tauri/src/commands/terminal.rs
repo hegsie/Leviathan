@@ -54,7 +54,7 @@ pub async fn open_terminal(path: String) -> Result<()> {
 
         let mut opened = false;
         for (term, args) in &terminals {
-            if let Ok(mut cmd) = std::process::Command::new(term)
+            if let Ok(_cmd) = std::process::Command::new(term)
                 .args(args)
                 .current_dir(dir)
                 .spawn()

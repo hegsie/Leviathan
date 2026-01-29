@@ -450,7 +450,7 @@ fn parse_iso8601_to_epoch(date_str: &str) -> Option<i64> {
     let month: u32 = parts[1].parse().ok()?;
     let day: u32 = parts[2].parse().ok()?;
 
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 
@@ -469,8 +469,8 @@ fn parse_iso8601_to_epoch(date_str: &str) -> Option<i64> {
         &[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
 
-    for m in 0..(month - 1) as usize {
-        days += days_in_months[m];
+    for dim in days_in_months.iter().take((month - 1) as usize) {
+        days += dim;
     }
 
     days += (day - 1) as i64;

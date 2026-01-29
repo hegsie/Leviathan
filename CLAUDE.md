@@ -20,15 +20,21 @@ npm run typecheck
 cd src-tauri && cargo fmt
 ```
 
-### 4. Rust Clippy (optional but recommended)
+### 4. Rust Clippy
 ```bash
-cd src-tauri && cargo clippy
+cd src-tauri && cargo clippy -- -D warnings
+```
+CI treats all clippy warnings as errors. This check is **mandatory**.
+
+### 5. Unit Tests
+```bash
+npm test
 ```
 
 ## Quick Pre-commit Check
 Run all checks in sequence:
 ```bash
-npm run lint && npm run typecheck && cd src-tauri && cargo fmt --check && cargo clippy
+npm run lint && npm run typecheck && npm test && cd src-tauri && cargo fmt --check && cargo clippy -- -D warnings
 ```
 
 Also verify no snake_case in Tauri API calls (should return no matches):
