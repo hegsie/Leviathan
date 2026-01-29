@@ -32,7 +32,22 @@ const OAUTH_CLIENT_IDS: Partial<Record<OAuthProvider, string>> = {
 
 /**
  * OAuth Client Secrets for providers that require them
- * Note: For desktop apps, these aren't truly secret (see docs/oauth-setup.md)
+ *
+ * SECURITY NOTE: These secrets are embedded in the compiled application
+ * and can be extracted by anyone. This is a known limitation of desktop OAuth apps.
+ *
+ * Best Practices:
+ * - For GitHub: Client secret is optional when using PKCE (Proof Key for Code Exchange).
+ *   Consider removing it and using PKCE-only flow.
+ * - For Bitbucket: May require client secret for token exchange depending on configuration.
+ *
+ * Possible Future Improvements:
+ * 1. Use PKCE-only flows where supported (no client secret needed)
+ * 2. Accept client secrets via build-time environment variables so developers
+ *    building from source can substitute their own credentials
+ * 3. Implement a backend proxy service to handle token exchange securely
+ *
+ * See: https://datatracker.ietf.org/doc/html/rfc7636 (OAuth PKCE)
  */
 const OAUTH_CLIENT_SECRETS: Partial<Record<OAuthProvider, string>> = {
   github: '5b7d15b2c5658908e0ced1682e53168269513592',

@@ -507,6 +507,60 @@ pub async fn erase_credentials(path: String, host: String, protocol: String) -> 
     Ok(())
 }
 
+/// Get a machine-specific vault password
+///
+/// Derives a deterministic password from machine-specific information
+/// (hostname + username) to ensure each installation has a unique vault password.
+///
+/// **Stability note:** The derived password depends on the machine's hostname and
+/// the current OS username. If either changes (e.g., machine rename, user profile
+/// change), the existing vault will fail to decrypt. The frontend handles this by
+/// falling back to the legacy hardcoded password for existing vaults. A future
+/// improvement could persist a random vault key in the OS keyring for full stability.
+#[command]
+pub async fn get_machine_vault_password() -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    // Gather machine-specific information
+    let mut components = Vec::new();
+
+    // Use hostname
+    if let Ok(hostname) = hostname::get() {
+        if let Ok(hostname_str) = hostname.into_string() {
+            components.push(hostname_str);
+        }
+    }
+
+    // Use username
+    let username = whoami::username();
+    if !username.trim().is_empty() {
+        components.push(username);
+    }
+
+    // Ensure we collected at least one machine-specific component
+    // before adding the static salt — otherwise the password would be
+    // SHA256("leviathan-vault-2024-v1"), identical across all installs.
+    if components.is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "Failed to gather machine-specific information for vault password".to_string(),
+        ));
+    }
+
+    // Use a static salt to make it harder to predict
+    components.push("leviathan-vault-2024-v1".to_string());
+
+    // Combine all components
+    let combined = components.join("||");
+
+    // Hash the combined string using SHA-256
+    let mut hasher = Sha256::new();
+    hasher.update(combined.as_bytes());
+    let hash = hasher.finalize();
+
+    // Convert to hex string (64 chars)
+    Ok(format!("{:x}", hash))
+}
+
 /// Migrate old vault file to new location if needed
 /// Old path was missing the / separator between app dir and filename
 #[command]
@@ -547,6 +601,32 @@ mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_get_machine_vault_password_returns_value() {
+        // Should return a non-empty password
+        let password = get_machine_vault_password().await;
+        assert!(password.is_ok());
+        let password = password.unwrap();
+        assert!(!password.is_empty());
+        // SHA-256 produces 64 hex characters
+        assert_eq!(password.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_get_machine_vault_password_is_deterministic() {
+        // Calling twice should return the same password
+        let password1 = get_machine_vault_password().await.unwrap();
+        let password2 = get_machine_vault_password().await.unwrap();
+        assert_eq!(password1, password2);
+    }
+
+    #[tokio::test]
+    async fn test_get_machine_vault_password_is_hex() {
+        // Result should be valid hexadecimal
+        let password = get_machine_vault_password().await.unwrap();
+        assert!(password.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 
     #[test]
     fn test_extract_helper_name_simple() {

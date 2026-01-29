@@ -12,7 +12,33 @@ import { loggers } from '../utils/logger.ts';
 
 const log = loggers.credential;
 
-const VAULT_PASSWORD = 'leviathan-secure-vault-2024';
+// Machine-specific vault password - fetched from backend
+let cachedVaultPassword: string | null = null;
+
+/**
+ * Get the machine-specific vault password
+ * This password is derived from machine-specific information (hostname, username)
+ * to ensure each installation has a unique vault password
+ */
+async function getVaultPassword(): Promise<string> {
+  if (cachedVaultPassword) {
+    return cachedVaultPassword;
+  }
+
+  try {
+    cachedVaultPassword = await invoke<string>('get_machine_vault_password');
+    if (!cachedVaultPassword) {
+      throw new Error('Backend returned empty vault password');
+    }
+    return cachedVaultPassword;
+  } catch (error) {
+    log.error('Failed to get machine vault password:', error);
+    throw new Error(
+      'Failed to initialize secure vault. Cannot proceed without machine-specific encryption key.'
+    );
+  }
+}
+
 const CLIENT_NAME = 'leviathan-credentials';
 
 // Credential keys
@@ -48,6 +74,10 @@ async function migrateOldVaultIfNeeded(dataDir: string, newVaultPath: string): P
   }
 }
 
+// Legacy hardcoded password used before machine-specific derivation was added.
+// Kept as a fallback so existing vaults created with the old password can still be opened.
+const LEGACY_VAULT_PASSWORD = 'leviathan-secure-vault-2024';
+
 /**
  * Initialize the Stronghold vault
  */
@@ -73,7 +103,18 @@ async function ensureInitialized(): Promise<Client> {
 
       log.debug('Initializing vault at:', vaultPath);
 
-      strongholdInstance = await Stronghold.load(vaultPath, VAULT_PASSWORD);
+      // Try machine-specific password first, fall back to legacy password
+      // so existing vaults created before the security fix still work.
+      const vaultPassword = await getVaultPassword();
+
+      try {
+        strongholdInstance = await Stronghold.load(vaultPath, vaultPassword);
+      } catch {
+        log.warn(
+          'Failed to open vault with machine-specific password, trying legacy password'
+        );
+        strongholdInstance = await Stronghold.load(vaultPath, LEGACY_VAULT_PASSWORD);
+      }
 
       // Try to load existing client or create new one
       try {
@@ -82,10 +123,10 @@ async function ensureInitialized(): Promise<Client> {
       } catch {
         // Client doesn't exist, create it
         clientInstance = await strongholdInstance.createClient(CLIENT_NAME);
-        log.debug(' Created new client');
+        log.debug('Created new client');
       }
     } catch (error) {
-      log.error(' Failed to initialize:', error);
+      log.error('Failed to initialize:', error);
       throw error;
     }
   })();
