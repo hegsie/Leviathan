@@ -186,10 +186,10 @@ mod tests {
 
     #[test]
     fn test_md5_hex_email() {
-        // MD5("test@example.com") = 973dfe463ec85785f5f95af5ba3906ee
+        // MD5("test@example.com") = 55502f40dc8b7c769880b10874abc9d0
         assert_eq!(
             md5_hex(b"test@example.com"),
-            "973dfe463ec85785f5f95af5ba3906ee"
+            "55502f40dc8b7c769880b10874abc9d0"
         );
     }
 

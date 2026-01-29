@@ -443,9 +443,13 @@ pub async fn search_commits_by_content(
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() {
-            // Empty line marks end of file list for a commit
-            if let Some(commit) = current_commit.take() {
-                results.push(commit);
+            // Empty line can appear between the header and the file list,
+            // or after the file list. Only finalize if the commit has matches
+            // (to avoid finalizing before file names are parsed).
+            if let Some(ref commit) = current_commit {
+                if !commit.matches.is_empty() {
+                    results.push(current_commit.take().unwrap());
+                }
             }
             continue;
         }
@@ -526,9 +530,13 @@ pub async fn search_commits_by_file(
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() {
-            // Empty line marks end of file list for a commit
-            if let Some(commit) = current_commit.take() {
-                results.push(commit);
+            // Empty line can appear between the header and the file list,
+            // or after the file list. Only finalize if the commit has matches
+            // (to avoid finalizing before file names are parsed).
+            if let Some(ref commit) = current_commit {
+                if !commit.matches.is_empty() {
+                    results.push(current_commit.take().unwrap());
+                }
             }
             continue;
         }

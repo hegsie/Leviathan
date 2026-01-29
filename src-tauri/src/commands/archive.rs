@@ -304,7 +304,9 @@ mod tests {
         let result = get_archive_files(repo.path_str(), None).await;
         assert!(result.is_ok());
         let files = result.unwrap();
-        assert!(files.len() >= 3); // README.md, src/main.rs, + initial
+        // After with_initial_commit (README.md) + second commit (src/main.rs, README.md),
+        // the tree contains README.md and src/main.rs = 2 files
+        assert!(files.len() >= 2);
     }
 
     #[tokio::test]

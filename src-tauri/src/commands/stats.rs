@@ -153,7 +153,8 @@ pub async fn get_repo_stats(path: String, max_commits: Option<usize>) -> Result<
     let max = max_commits.unwrap_or(10000);
 
     let mut revwalk = repo.revwalk()?;
-    revwalk.push_head()?;
+    // push_head may fail for empty repos - that's OK
+    let _ = revwalk.push_head();
     revwalk.set_sorting(git2::Sort::TIME)?;
 
     // Try to include all branches

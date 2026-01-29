@@ -146,14 +146,16 @@ fn extract_helper_name(cmd: &str) -> String {
     // - "manager-core" -> "manager-core"
     // - "/path/to/helper" -> "helper"
     // - "!helper" -> "helper"
+    // - "cache --timeout=3600" -> "cache"
+    // - "store --file ~/.git-credentials" -> "store"
     let clean = cmd.trim_start_matches('!');
-    clean
+    // First split by whitespace to isolate the command from its arguments
+    let command_part = clean.split_whitespace().next().unwrap_or(clean);
+    // Then extract basename from path
+    command_part
         .split('/')
         .next_back()
-        .unwrap_or(clean)
-        .split_whitespace()
-        .next()
-        .unwrap_or(clean)
+        .unwrap_or(command_part)
         .to_string()
 }
 

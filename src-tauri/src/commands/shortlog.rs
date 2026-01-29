@@ -96,12 +96,20 @@ pub async fn shortlog(
             }
         }
     } else {
-        // Default: just HEAD
-        revwalk.push_head()?;
+        // Default: just HEAD (may fail for empty repos)
+        if revwalk.push_head().is_err() {
+            // Empty repo or detached HEAD with no target - return empty result
+            return Ok(ShortlogResult {
+                entries: Vec::new(),
+                total_commits: 0,
+                total_contributors: 0,
+            });
+        }
     }
 
     // Group commits by author/committer
-    let mut contributors_map: HashMap<String, (String, Option<String>, Vec<String>)> =
+    // Tuple: (name, email, commit_count, commit_messages)
+    let mut contributors_map: HashMap<String, (String, Option<String>, u32, Vec<String>)> =
         HashMap::new();
     let mut total_commits: u32 = 0;
 
@@ -132,7 +140,7 @@ pub async fn shortlog(
 
         let entry = contributors_map
             .entry(key)
-            .or_insert_with(|| (person_name.clone(), person_email.clone(), Vec::new()));
+            .or_insert_with(|| (person_name.clone(), person_email.clone(), 0, Vec::new()));
 
         // Update name if we have a better one (non-Unknown)
         if entry.0 == "Unknown" && person_name != "Unknown" {
@@ -143,19 +151,22 @@ pub async fn shortlog(
             entry.1 = person_email;
         }
 
+        // Always increment the commit count
+        entry.2 += 1;
+
         // Add commit message if not in summary mode
         if !use_summary {
-            entry.2.push(commit_summary);
+            entry.3.push(commit_summary);
         }
     }
 
     // Build result entries
     let mut entries: Vec<ShortlogEntry> = contributors_map
         .into_iter()
-        .map(|(_, (name, email, commits))| ShortlogEntry {
+        .map(|(_, (name, email, count, commits))| ShortlogEntry {
             name: name.clone(),
             email,
-            count: commits.len() as u32,
+            count,
             commits,
         })
         .collect();

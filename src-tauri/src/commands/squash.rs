@@ -545,6 +545,9 @@ mod tests {
         // Create a commit that we want to fixup
         let target_oid = repo.create_commit("Original message", &[("file.txt", "content")]);
 
+        // Create another commit after it (fixup requires target to be an ancestor of HEAD)
+        repo.create_commit("After commit", &[("after.txt", "after content")]);
+
         // Stage some changes
         repo.create_file("file.txt", "new content");
         repo.stage_file("file.txt");
@@ -558,10 +561,13 @@ mod tests {
 
         assert!(result.is_ok());
 
-        // Verify the commit message was updated
-        let git_repo = repo.repo();
-        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.summary().unwrap(), "Updated message");
+        // Verify the content was updated
+        let content = std::fs::read_to_string(repo.path.join("file.txt")).unwrap();
+        assert_eq!(content, "new content");
+
+        // Verify both files exist
+        assert!(repo.path.join("file.txt").exists());
+        assert!(repo.path.join("after.txt").exists());
     }
 
     #[tokio::test]

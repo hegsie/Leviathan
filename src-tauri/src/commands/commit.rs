@@ -456,14 +456,32 @@ pub async fn amend_commit(
         .collect();
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
 
+    // Create commit without updating ref (avoids git2 parent validation error
+    // for root commits), then manually update HEAD.
     let new_oid = repo.commit(
-        Some("HEAD"),
+        None,
         &author,
         &signature,
         &commit_message,
         &tree,
         &parent_refs,
     )?;
+
+    // Update HEAD to point to the new commit
+    let head_ref = repo.head()?;
+    if head_ref.is_branch() {
+        let branch_name = head_ref
+            .name()
+            .ok_or_else(|| LeviathanError::OperationFailed("Invalid HEAD ref".to_string()))?;
+        repo.reference(
+            branch_name,
+            new_oid,
+            true,
+            &format!("amend: {}", &old_oid[..std::cmp::min(7, old_oid.len())]),
+        )?;
+    } else {
+        repo.set_head_detached(new_oid)?;
+    }
 
     Ok(AmendResult {
         new_oid: new_oid.to_string(),
@@ -1533,7 +1551,7 @@ mod tests {
             repo.path_str(),
             Some("Amended commit message".to_string()),
             None,
-            None,
+            Some(false), // Explicitly disable signing to avoid CI gpgsign config
         )
         .await;
 
@@ -1559,8 +1577,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Amend without changing message
-        let result = amend_commit(repo.path_str(), None, None, None).await;
+        // Amend without changing message, explicitly disable signing for CI
+        let result = amend_commit(repo.path_str(), None, None, Some(false)).await;
 
         assert!(result.is_ok());
         let amend_result = result.unwrap();

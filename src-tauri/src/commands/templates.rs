@@ -44,7 +44,13 @@ fn load_templates() -> Result<Vec<CommitTemplate>> {
         LeviathanError::OperationFailed(format!("Failed to read templates file: {}", e))
     })?;
 
-    serde_json::from_str(&content).map_err(|e| {
+    // Handle empty or whitespace-only files gracefully
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    serde_json::from_str(trimmed).map_err(|e| {
         LeviathanError::OperationFailed(format!("Failed to parse templates file: {}", e))
     })
 }
