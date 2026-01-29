@@ -75,3 +75,28 @@ pub enum FileStatus {
     Typechange,
     Conflicted,
 }
+
+/// Sorted file status result with summary counts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortedFileStatus {
+    pub files: Vec<SortedStatusEntry>,
+    pub total_count: u32,
+    pub staged_count: u32,
+    pub unstaged_count: u32,
+    pub untracked_count: u32,
+    pub conflicted_count: u32,
+}
+
+/// A status entry enriched with sorting-related metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortedStatusEntry {
+    pub path: String,
+    pub filename: String,
+    pub directory: String,
+    pub extension: Option<String>,
+    pub status: String,
+    pub is_staged: bool,
+    pub is_conflicted: bool,
+}

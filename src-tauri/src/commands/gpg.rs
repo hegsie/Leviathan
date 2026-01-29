@@ -69,6 +69,20 @@ pub struct CommitSignature {
     pub trust: Option<String>,
 }
 
+/// Signing status for a repository - indicates if signing is configured and available
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SigningStatus {
+    /// Whether commit signing is enabled (commit.gpgsign = true)
+    pub gpg_sign_enabled: bool,
+    /// The configured signing key (user.signingkey)
+    pub signing_key: Option<String>,
+    /// The configured GPG program (gpg.program)
+    pub gpg_program: Option<String>,
+    /// Whether signing is possible (GPG available and key configured)
+    pub can_sign: bool,
+}
+
 /// Run a command and capture output
 fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
     let output = create_command(cmd)
@@ -184,6 +198,57 @@ pub async fn get_gpg_config(path: String) -> Result<GpgConfig> {
         sign_commits,
         sign_tags,
         gpg_program,
+    })
+}
+
+/// Get signing status for a repository
+///
+/// Returns whether GPG signing is enabled, the configured signing key,
+/// the GPG program path, and whether signing is actually possible.
+#[command]
+pub async fn get_signing_status(path: String) -> Result<SigningStatus> {
+    let repo_path = Path::new(&path);
+    let gpg_available = is_gpg_available();
+
+    // Check if commit signing is enabled
+    let gpg_sign_enabled = run_git_command(repo_path, &["config", "--get", "commit.gpgsign"])
+        .ok()
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false);
+
+    // Get signing key from git config
+    let signing_key = run_git_command(repo_path, &["config", "--get", "user.signingkey"])
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    // Get GPG program if configured
+    let gpg_program = run_git_command(repo_path, &["config", "--get", "gpg.program"])
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    // Determine if signing is possible
+    // We can sign if GPG is available and either:
+    // 1. A signing key is explicitly configured, or
+    // 2. There are GPG secret keys available (GPG will use default)
+    let can_sign = if !gpg_available {
+        false
+    } else if signing_key.is_some() {
+        // A signing key is configured - verify it exists
+        let key_id = signing_key.as_ref().unwrap();
+        run_command("gpg", &["--list-secret-keys", key_id]).is_ok()
+    } else {
+        // No signing key configured - check if there are any secret keys
+        run_command("gpg", &["--list-secret-keys"])
+            .ok()
+            .map(|output| output.contains("sec"))
+            .unwrap_or(false)
+    };
+
+    Ok(SigningStatus {
+        gpg_sign_enabled,
+        signing_key,
+        gpg_program,
+        can_sign,
     })
 }
 
@@ -433,4 +498,385 @@ pub async fn get_commits_signatures(
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    #[test]
+    fn test_is_gpg_available() {
+        // This test just checks that the function runs without panicking
+        // The actual availability depends on the system configuration
+        let _result = is_gpg_available();
+    }
+
+    #[test]
+    fn test_get_gpg_version() {
+        // This test just checks that the function runs without panicking
+        // Returns Some if GPG is installed, None otherwise
+        let _result = get_gpg_version();
+    }
+
+    #[tokio::test]
+    async fn test_get_gpg_config() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_gpg_config(repo.path_str()).await;
+        assert!(result.is_ok());
+
+        let config = result.unwrap();
+        // gpg_available depends on system; other fields should have default values
+        // sign_commits and sign_tags should be false by default
+        assert!(!config.sign_commits);
+        assert!(!config.sign_tags);
+    }
+
+    #[tokio::test]
+    async fn test_get_gpg_keys() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_gpg_keys(repo.path_str()).await;
+        assert!(result.is_ok());
+        // The list may be empty if no GPG keys are configured on the system
+        let _keys = result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_set_signing_key() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Set a signing key (doesn't need to be a real key for config purposes)
+        let result =
+            set_signing_key(repo.path_str(), Some("ABCD1234".to_string()), Some(false)).await;
+        assert!(result.is_ok());
+
+        // Verify it was set
+        let config = get_gpg_config(repo.path_str()).await.unwrap();
+        assert_eq!(config.signing_key, Some("ABCD1234".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_set_signing_key_unset() {
+        let repo = TestRepo::with_initial_commit();
+
+        // First set a key
+        set_signing_key(repo.path_str(), Some("ABCD1234".to_string()), Some(false))
+            .await
+            .unwrap();
+
+        // Then unset it
+        let result = set_signing_key(repo.path_str(), None, Some(false)).await;
+        assert!(result.is_ok());
+
+        // Verify it was unset
+        let config = get_gpg_config(repo.path_str()).await.unwrap();
+        assert!(config.signing_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_commit_signing_enabled() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = set_commit_signing(repo.path_str(), true, Some(false)).await;
+        assert!(result.is_ok());
+
+        let config = get_gpg_config(repo.path_str()).await.unwrap();
+        assert!(config.sign_commits);
+    }
+
+    #[tokio::test]
+    async fn test_set_commit_signing_disabled() {
+        let repo = TestRepo::with_initial_commit();
+
+        // First enable
+        set_commit_signing(repo.path_str(), true, Some(false))
+            .await
+            .unwrap();
+
+        // Then disable
+        let result = set_commit_signing(repo.path_str(), false, Some(false)).await;
+        assert!(result.is_ok());
+
+        let config = get_gpg_config(repo.path_str()).await.unwrap();
+        assert!(!config.sign_commits);
+    }
+
+    #[tokio::test]
+    async fn test_set_tag_signing_enabled() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = set_tag_signing(repo.path_str(), true, Some(false)).await;
+        assert!(result.is_ok());
+
+        let config = get_gpg_config(repo.path_str()).await.unwrap();
+        assert!(config.sign_tags);
+    }
+
+    #[tokio::test]
+    async fn test_set_tag_signing_disabled() {
+        let repo = TestRepo::with_initial_commit();
+
+        // First enable
+        set_tag_signing(repo.path_str(), true, Some(false))
+            .await
+            .unwrap();
+
+        // Then disable
+        let result = set_tag_signing(repo.path_str(), false, Some(false)).await;
+        assert!(result.is_ok());
+
+        let config = get_gpg_config(repo.path_str()).await.unwrap();
+        assert!(!config.sign_tags);
+    }
+
+    #[tokio::test]
+    async fn test_get_commit_signature_unsigned() {
+        let repo = TestRepo::with_initial_commit();
+        let head_oid = repo.head_oid().to_string();
+
+        let result = get_commit_signature(repo.path_str(), head_oid).await;
+        assert!(result.is_ok());
+
+        let sig = result.unwrap();
+        // Commits created by TestRepo are unsigned
+        assert!(!sig.signed);
+        assert!(!sig.valid);
+    }
+
+    #[tokio::test]
+    async fn test_get_commit_signature_invalid_oid() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Use an invalid OID
+        let result = get_commit_signature(
+            repo.path_str(),
+            "0000000000000000000000000000000000000000".to_string(),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let sig = result.unwrap();
+        // Should return a "not signed" result for invalid commits
+        assert!(!sig.signed);
+    }
+
+    #[tokio::test]
+    async fn test_get_commits_signatures() {
+        let repo = TestRepo::with_initial_commit();
+        let oid1 = repo.head_oid().to_string();
+
+        // Create another commit
+        repo.create_commit("Second commit", &[("file2.txt", "content2")]);
+        let oid2 = repo.head_oid().to_string();
+
+        let result =
+            get_commits_signatures(repo.path_str(), vec![oid1.clone(), oid2.clone()]).await;
+        assert!(result.is_ok());
+
+        let signatures = result.unwrap();
+        assert_eq!(signatures.len(), 2);
+        assert_eq!(signatures[0].0, oid1);
+        assert_eq!(signatures[1].0, oid2);
+    }
+
+    #[tokio::test]
+    async fn test_get_commits_signatures_empty_list() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = get_commits_signatures(repo.path_str(), vec![]).await;
+        assert!(result.is_ok());
+
+        let signatures = result.unwrap();
+        assert!(signatures.is_empty());
+    }
+
+    #[test]
+    fn test_gpg_key_struct() {
+        let key = GpgKey {
+            key_id: "ABCD1234".to_string(),
+            key_id_long: "1234567890ABCD1234".to_string(),
+            user_id: "Test User <test@example.com>".to_string(),
+            email: "test@example.com".to_string(),
+            created: Some("2024-01-01".to_string()),
+            expires: None,
+            is_signing_key: true,
+            key_type: "RSA".to_string(),
+            key_size: 4096,
+            trust: "Ultimate".to_string(),
+        };
+
+        assert_eq!(key.key_id, "ABCD1234");
+        assert_eq!(key.key_size, 4096);
+        assert!(key.is_signing_key);
+        assert!(key.expires.is_none());
+    }
+
+    #[test]
+    fn test_gpg_config_struct() {
+        let config = GpgConfig {
+            gpg_available: true,
+            gpg_version: Some("gpg (GnuPG) 2.2.27".to_string()),
+            signing_key: Some("ABCD1234".to_string()),
+            sign_commits: true,
+            sign_tags: false,
+            gpg_program: None,
+        };
+
+        assert!(config.gpg_available);
+        assert!(config.sign_commits);
+        assert!(!config.sign_tags);
+        assert!(config.gpg_program.is_none());
+    }
+
+    #[test]
+    fn test_commit_signature_struct() {
+        let sig = CommitSignature {
+            signed: true,
+            status: Some("G".to_string()),
+            key_id: Some("ABCD1234".to_string()),
+            signer: Some("Test User".to_string()),
+            valid: true,
+            trust: Some("ultimate".to_string()),
+        };
+
+        assert!(sig.signed);
+        assert!(sig.valid);
+        assert_eq!(sig.status, Some("G".to_string()));
+    }
+
+    #[test]
+    fn test_commit_signature_unsigned() {
+        let sig = CommitSignature {
+            signed: false,
+            status: None,
+            key_id: None,
+            signer: None,
+            valid: false,
+            trust: None,
+        };
+
+        assert!(!sig.signed);
+        assert!(!sig.valid);
+        assert!(sig.key_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_gpg_config_with_no_gpg() {
+        // This test verifies the structure works even when GPG isn't available
+        let config = GpgConfig {
+            gpg_available: false,
+            gpg_version: None,
+            signing_key: None,
+            sign_commits: false,
+            sign_tags: false,
+            gpg_program: None,
+        };
+
+        assert!(!config.gpg_available);
+        assert!(config.gpg_version.is_none());
+        assert!(config.signing_key.is_none());
+    }
+
+    #[test]
+    fn test_run_command_git() {
+        // Test that we can run basic git commands
+        let result = run_command("git", &["--version"]);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("git version"));
+    }
+
+    #[tokio::test]
+    async fn test_run_git_command_in_repo() {
+        let repo = TestRepo::with_initial_commit();
+        let result = run_git_command(&repo.path, &["status", "--porcelain"]);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_git_command_config() {
+        let repo = TestRepo::with_initial_commit();
+        let result = run_git_command(&repo.path, &["config", "--get", "user.name"]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Test User");
+    }
+
+    #[tokio::test]
+    async fn test_get_signing_status_defaults() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_signing_status(repo.path_str()).await;
+        assert!(result.is_ok());
+
+        let status = result.unwrap();
+        // By default, signing should not be enabled
+        assert!(!status.gpg_sign_enabled);
+        // No signing key configured by default
+        assert!(status.signing_key.is_none());
+        // No custom GPG program by default
+        assert!(status.gpg_program.is_none());
+        // can_sign depends on whether GPG is available on the system
+    }
+
+    #[tokio::test]
+    async fn test_get_signing_status_with_signing_enabled() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Enable commit signing
+        set_commit_signing(repo.path_str(), true, Some(false))
+            .await
+            .unwrap();
+
+        let result = get_signing_status(repo.path_str()).await;
+        assert!(result.is_ok());
+
+        let status = result.unwrap();
+        assert!(status.gpg_sign_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_get_signing_status_with_signing_key() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Set a signing key
+        set_signing_key(repo.path_str(), Some("ABCD1234".to_string()), Some(false))
+            .await
+            .unwrap();
+
+        let result = get_signing_status(repo.path_str()).await;
+        assert!(result.is_ok());
+
+        let status = result.unwrap();
+        assert_eq!(status.signing_key, Some("ABCD1234".to_string()));
+        // can_sign should be false because the key doesn't actually exist
+        assert!(!status.can_sign);
+    }
+
+    #[test]
+    fn test_signing_status_struct() {
+        let status = SigningStatus {
+            gpg_sign_enabled: true,
+            signing_key: Some("ABCD1234".to_string()),
+            gpg_program: Some("/usr/bin/gpg".to_string()),
+            can_sign: true,
+        };
+
+        assert!(status.gpg_sign_enabled);
+        assert_eq!(status.signing_key, Some("ABCD1234".to_string()));
+        assert_eq!(status.gpg_program, Some("/usr/bin/gpg".to_string()));
+        assert!(status.can_sign);
+    }
+
+    #[test]
+    fn test_signing_status_struct_defaults() {
+        let status = SigningStatus {
+            gpg_sign_enabled: false,
+            signing_key: None,
+            gpg_program: None,
+            can_sign: false,
+        };
+
+        assert!(!status.gpg_sign_enabled);
+        assert!(status.signing_key.is_none());
+        assert!(status.gpg_program.is_none());
+        assert!(!status.can_sign);
+    }
 }

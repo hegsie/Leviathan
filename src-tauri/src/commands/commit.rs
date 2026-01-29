@@ -6,6 +6,132 @@ use tauri::command;
 use crate::error::{LeviathanError, Result};
 use crate::models::Commit;
 
+/// Parse an ISO 8601 date string into a git2::Time
+///
+/// Supports formats like:
+/// - "2024-01-15T10:30:00Z"
+/// - "2024-01-15T10:30:00+05:00"
+/// - "2024-01-15T10:30:00-03:00"
+/// - Unix timestamp as string (e.g., "1705312200")
+fn parse_iso8601_to_git_time(date_str: &str) -> std::result::Result<git2::Time, LeviathanError> {
+    // Try parsing as unix timestamp first
+    if let Ok(ts) = date_str.parse::<i64>() {
+        return Ok(git2::Time::new(ts, 0));
+    }
+
+    // Try parsing ISO 8601 format
+    // Format: YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]
+    let (datetime_str, offset_minutes) = if let Some(stripped) = date_str.strip_suffix('Z') {
+        (stripped, 0i32)
+    } else if date_str.len() > 6 {
+        // Check for +HH:MM or -HH:MM suffix
+        let last6 = &date_str[date_str.len() - 6..];
+        if (last6.starts_with('+') || last6.starts_with('-')) && last6.chars().nth(3) == Some(':') {
+            let sign = if last6.starts_with('+') { 1 } else { -1 };
+            let hours: i32 = last6[1..3].parse().map_err(|_| {
+                LeviathanError::OperationFailed(format!("Invalid timezone offset in: {}", date_str))
+            })?;
+            let mins: i32 = last6[4..6].parse().map_err(|_| {
+                LeviathanError::OperationFailed(format!("Invalid timezone offset in: {}", date_str))
+            })?;
+            (&date_str[..date_str.len() - 6], sign * (hours * 60 + mins))
+        } else {
+            (date_str, 0)
+        }
+    } else {
+        (date_str, 0)
+    };
+
+    // Parse datetime: YYYY-MM-DDTHH:MM:SS
+    let parts: Vec<&str> = datetime_str.split('T').collect();
+    if parts.len() != 2 {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Invalid ISO 8601 date format: {}. Expected YYYY-MM-DDTHH:MM:SS[Z|+HH:MM]",
+            date_str
+        )));
+    }
+
+    let date_parts: Vec<&str> = parts[0].split('-').collect();
+    let time_parts: Vec<&str> = parts[1].split(':').collect();
+
+    if date_parts.len() != 3 || time_parts.len() < 2 {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Invalid ISO 8601 date format: {}. Expected YYYY-MM-DDTHH:MM:SS[Z|+HH:MM]",
+            date_str
+        )));
+    }
+
+    let year: i32 = date_parts[0].parse().map_err(|_| {
+        LeviathanError::OperationFailed(format!("Invalid year in date: {}", date_str))
+    })?;
+    let month: u32 = date_parts[1].parse().map_err(|_| {
+        LeviathanError::OperationFailed(format!("Invalid month in date: {}", date_str))
+    })?;
+    let day: u32 = date_parts[2].parse().map_err(|_| {
+        LeviathanError::OperationFailed(format!("Invalid day in date: {}", date_str))
+    })?;
+    let hour: u32 = time_parts[0].parse().map_err(|_| {
+        LeviathanError::OperationFailed(format!("Invalid hour in date: {}", date_str))
+    })?;
+    let minute: u32 = time_parts[1].parse().map_err(|_| {
+        LeviathanError::OperationFailed(format!("Invalid minute in date: {}", date_str))
+    })?;
+    let second: u32 = if time_parts.len() >= 3 {
+        // Handle fractional seconds by taking only the integer part
+        let sec_str = time_parts[2].split('.').next().unwrap_or("0");
+        sec_str.parse().map_err(|_| {
+            LeviathanError::OperationFailed(format!("Invalid second in date: {}", date_str))
+        })?
+    } else {
+        0
+    };
+
+    // Convert to Unix timestamp
+    // Simple calculation - days from epoch
+    let mut days: i64 = 0;
+    for y in 1970..year {
+        days += if is_leap_year(y) { 366 } else { 365 };
+    }
+    let month_days = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for m in 1..month {
+        days += month_days[m as usize] as i64;
+        if m == 2 && is_leap_year(year) {
+            days += 1;
+        }
+    }
+    days += (day as i64) - 1;
+
+    let timestamp = days * 86400 + (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64);
+
+    // Adjust for timezone offset (offset is in minutes from UTC)
+    let adjusted_timestamp = timestamp - (offset_minutes as i64) * 60;
+
+    Ok(git2::Time::new(adjusted_timestamp, offset_minutes))
+}
+
+/// Check if a year is a leap year
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Build a git2::Signature with an optional custom date
+///
+/// If `date_str` is provided, creates a signature with the given name/email but
+/// with the specified date. Otherwise returns the original signature as-is.
+fn signature_with_date<'a>(
+    name: &str,
+    email: &str,
+    date_str: Option<&str>,
+) -> std::result::Result<git2::Signature<'a>, LeviathanError> {
+    match date_str {
+        Some(ds) => {
+            let time = parse_iso8601_to_git_time(ds)?;
+            Ok(git2::Signature::new(name, email, &time)?)
+        }
+        None => Ok(git2::Signature::now(name, email)?),
+    }
+}
+
 /// Get commit history
 #[command]
 pub async fn get_commit_history(
@@ -67,11 +193,69 @@ pub async fn get_commit(path: String, oid: String) -> Result<Commit> {
 }
 
 /// Create a new commit
+///
+/// If `sign_commit` is Some(true), the commit will be GPG signed.
+/// If `sign_commit` is Some(false), the commit will not be signed.
+/// If `sign_commit` is None, the repository's default setting (commit.gpgsign) is used.
+/// If `allow_empty` is Some(true), the commit is created even with no staged changes.
+/// If `author_date` is provided, uses it as the author date (ISO 8601 format).
+/// If `committer_date` is provided, uses it as the committer date (ISO 8601 format).
 #[command]
-pub async fn create_commit(path: String, message: String, amend: Option<bool>) -> Result<Commit> {
+pub async fn create_commit(
+    path: String,
+    message: String,
+    amend: Option<bool>,
+    sign_commit: Option<bool>,
+    allow_empty: Option<bool>,
+    author_date: Option<String>,
+    committer_date: Option<String>,
+) -> Result<Commit> {
+    let is_allow_empty = allow_empty.unwrap_or(false);
+    let has_custom_dates = author_date.is_some() || committer_date.is_some();
+
+    // Check if we need to sign via git CLI
+    let should_sign = should_sign_commit(&path, sign_commit)?;
+
+    // Use git CLI for signed commits, allow-empty commits, or custom dates with signing
+    if should_sign || is_allow_empty {
+        return create_commit_with_git_cli(
+            &path,
+            &message,
+            amend.unwrap_or(false),
+            should_sign,
+            is_allow_empty,
+            author_date.as_deref(),
+            committer_date.as_deref(),
+        )
+        .await;
+    }
+
+    // Use git2 for unsigned commits (faster)
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    let signature = repo.signature()?;
+    let default_signature = repo.signature()?;
+
+    // Build author and committer signatures, optionally with custom dates
+    let author_sig = if has_custom_dates {
+        signature_with_date(
+            default_signature.name().unwrap_or("Unknown"),
+            default_signature.email().unwrap_or(""),
+            author_date.as_deref(),
+        )?
+    } else {
+        default_signature.clone()
+    };
+
+    let committer_sig = if has_custom_dates {
+        signature_with_date(
+            default_signature.name().unwrap_or("Unknown"),
+            default_signature.email().unwrap_or(""),
+            committer_date.as_deref(),
+        )?
+    } else {
+        default_signature
+    };
+
     let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
@@ -87,8 +271,8 @@ pub async fn create_commit(path: String, message: String, amend: Option<bool>) -
 
         repo.commit(
             Some("HEAD"),
-            &signature,
-            &signature,
+            &author_sig,
+            &committer_sig,
             &message,
             &tree,
             &parent_refs,
@@ -99,8 +283,8 @@ pub async fn create_commit(path: String, message: String, amend: Option<bool>) -
 
         repo.commit(
             Some("HEAD"),
-            &signature,
-            &signature,
+            &author_sig,
+            &committer_sig,
             &message,
             &tree,
             &parents,
@@ -109,6 +293,729 @@ pub async fn create_commit(path: String, message: String, amend: Option<bool>) -
 
     let commit = repo.find_commit(commit_oid)?;
     Ok(Commit::from_git2(&commit))
+}
+
+/// Check if a commit should be signed based on explicit parameter or repo config
+fn should_sign_commit(path: &str, sign_commit: Option<bool>) -> Result<bool> {
+    match sign_commit {
+        Some(sign) => Ok(sign),
+        None => {
+            // Check repository config for commit.gpgsign
+            let repo = git2::Repository::open(Path::new(path))?;
+            let config = repo.config()?;
+            Ok(config.get_bool("commit.gpgsign").unwrap_or(false))
+        }
+    }
+}
+
+/// Create a commit using git CLI (supports GPG signing, allow-empty, and custom dates)
+async fn create_commit_with_git_cli(
+    path: &str,
+    message: &str,
+    amend: bool,
+    sign: bool,
+    allow_empty: bool,
+    author_date: Option<&str>,
+    committer_date: Option<&str>,
+) -> Result<Commit> {
+    let mut args = vec!["commit", "-m", message];
+
+    if sign {
+        args.push("-S");
+    }
+
+    if amend {
+        args.push("--amend");
+    }
+
+    if allow_empty {
+        args.push("--allow-empty");
+    }
+
+    let mut cmd = crate::utils::create_command("git");
+    cmd.current_dir(path).args(&args);
+
+    // Set date environment variables if provided
+    if let Some(ad) = author_date {
+        cmd.env("GIT_AUTHOR_DATE", ad);
+    }
+    if let Some(cd) = committer_date {
+        cmd.env("GIT_COMMITTER_DATE", cd);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git commit: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LeviathanError::OperationFailed(format!(
+            "Git commit failed: {}",
+            stderr
+        )));
+    }
+
+    // Get the new commit
+    let repo = git2::Repository::open(Path::new(path))?;
+    let head_commit = repo.head()?.peel_to_commit()?;
+    Ok(Commit::from_git2(&head_commit))
+}
+
+/// Amend the HEAD commit message without changing any files
+///
+/// This only updates the commit message; the tree and parents remain the same.
+#[command]
+pub async fn amend_commit_message(path: String, message: String) -> Result<Commit> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let head_commit = repo
+        .head()?
+        .peel_to_commit()
+        .map_err(|_| LeviathanError::CommitNotFound("HEAD".to_string()))?;
+
+    let tree = head_commit.tree()?;
+    let signature = repo.signature()?;
+
+    let parent_ids: Vec<git2::Oid> = head_commit.parent_ids().collect();
+    let parents: Vec<git2::Commit> = parent_ids
+        .iter()
+        .filter_map(|id| repo.find_commit(*id).ok())
+        .collect();
+    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+
+    let new_oid = repo.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        &message,
+        &tree,
+        &parent_refs,
+    )?;
+
+    let new_commit = repo.find_commit(new_oid)?;
+    Ok(Commit::from_git2(&new_commit))
+}
+
+/// Result of an amend operation
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmendResult {
+    pub new_oid: String,
+    pub old_oid: String,
+    pub success: bool,
+}
+
+/// Amend the HEAD commit
+///
+/// This can update the commit message and/or reset the author.
+/// If message is None, the original message is preserved.
+/// If reset_author is true, the author is updated to the current user.
+/// If sign_amend is Some(true), the amended commit will be GPG signed.
+/// If sign_amend is Some(false), the amended commit will not be signed.
+/// If sign_amend is None, the repository's default setting (commit.gpgsign) is used.
+#[command]
+pub async fn amend_commit(
+    path: String,
+    message: Option<String>,
+    reset_author: Option<bool>,
+    sign_amend: Option<bool>,
+) -> Result<AmendResult> {
+    // Check if we need to sign via git CLI
+    let should_sign = should_sign_commit(&path, sign_amend)?;
+
+    if should_sign {
+        return amend_commit_with_git_cli(&path, message.as_deref(), reset_author.unwrap_or(false))
+            .await;
+    }
+
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let head_commit = repo
+        .head()?
+        .peel_to_commit()
+        .map_err(|_| LeviathanError::CommitNotFound("HEAD".to_string()))?;
+
+    let old_oid = head_commit.id().to_string();
+    let tree = head_commit.tree()?;
+    let signature = repo.signature()?;
+
+    // Use the new message or keep the original
+    let commit_message = message.unwrap_or_else(|| head_commit.message().unwrap_or("").to_string());
+
+    // Use new author if reset_author is true, otherwise keep original
+    let author = if reset_author.unwrap_or(false) {
+        signature.clone()
+    } else {
+        head_commit.author()
+    };
+
+    let parent_ids: Vec<git2::Oid> = head_commit.parent_ids().collect();
+    let parents: Vec<git2::Commit> = parent_ids
+        .iter()
+        .filter_map(|id| repo.find_commit(*id).ok())
+        .collect();
+    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+
+    // Create commit without updating ref (avoids git2 parent validation error
+    // for root commits), then manually update HEAD.
+    let new_oid = repo.commit(
+        None,
+        &author,
+        &signature,
+        &commit_message,
+        &tree,
+        &parent_refs,
+    )?;
+
+    // Update HEAD to point to the new commit
+    let head_ref = repo.head()?;
+    if head_ref.is_branch() {
+        let branch_name = head_ref
+            .name()
+            .ok_or_else(|| LeviathanError::OperationFailed("Invalid HEAD ref".to_string()))?;
+        repo.reference(
+            branch_name,
+            new_oid,
+            true,
+            &format!("amend: {}", &old_oid[..std::cmp::min(7, old_oid.len())]),
+        )?;
+    } else {
+        repo.set_head_detached(new_oid)?;
+    }
+
+    Ok(AmendResult {
+        new_oid: new_oid.to_string(),
+        old_oid,
+        success: true,
+    })
+}
+
+/// Amend a commit using git CLI (supports GPG signing)
+async fn amend_commit_with_git_cli(
+    path: &str,
+    message: Option<&str>,
+    reset_author: bool,
+) -> Result<AmendResult> {
+    // Get the old OID before amending
+    let repo = git2::Repository::open(Path::new(path))?;
+    let old_oid = repo.head()?.peel_to_commit()?.id().to_string();
+    drop(repo);
+
+    let mut args = vec!["commit", "--amend", "-S"];
+
+    if let Some(msg) = message {
+        args.push("-m");
+        args.push(msg);
+    } else {
+        args.push("--no-edit");
+    }
+
+    if reset_author {
+        args.push("--reset-author");
+    }
+
+    let output = crate::utils::create_command("git")
+        .current_dir(path)
+        .args(&args)
+        .output()
+        .map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to run git commit --amend: {}", e))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LeviathanError::OperationFailed(format!(
+            "Git commit --amend failed: {}",
+            stderr
+        )));
+    }
+
+    // Get the new commit OID
+    let repo = git2::Repository::open(Path::new(path))?;
+    let new_oid = repo.head()?.peel_to_commit()?.id().to_string();
+
+    Ok(AmendResult {
+        new_oid,
+        old_oid,
+        success: true,
+    })
+}
+
+/// Get the full commit message for a commit
+#[command]
+pub async fn get_commit_message(path: String, oid: String) -> Result<String> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let oid = git2::Oid::from_str(&oid)?;
+    let commit = repo
+        .find_commit(oid)
+        .map_err(|_| LeviathanError::CommitNotFound(oid.to_string()))?;
+
+    Ok(commit.message().unwrap_or("").to_string())
+}
+
+/// Edit the author and/or committer date of an existing commit
+///
+/// For the HEAD commit, this recreates the commit with updated signatures.
+/// For non-HEAD commits, this uses interactive rebase with environment variables
+/// to set `GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE`.
+///
+/// Dates should be in ISO 8601 format (e.g., "2024-01-15T10:30:00Z") or unix timestamps.
+#[command]
+pub async fn edit_commit_date(
+    path: String,
+    oid: String,
+    author_date: Option<String>,
+    committer_date: Option<String>,
+) -> Result<AmendResult> {
+    if author_date.is_none() && committer_date.is_none() {
+        return Err(LeviathanError::OperationFailed(
+            "At least one of author_date or committer_date must be provided".to_string(),
+        ));
+    }
+
+    // Extract commit info in a closure to ensure git2 objects are dropped before any .await
+    struct CommitDateInfo {
+        is_head: bool,
+        author_name: String,
+        author_email: String,
+        committer_name: String,
+        committer_email: String,
+        message: String,
+        parent_ids: Vec<git2::Oid>,
+    }
+
+    let info: std::result::Result<CommitDateInfo, LeviathanError> = (|| {
+        let repo = git2::Repository::open(Path::new(&path))?;
+
+        let target_oid =
+            git2::Oid::from_str(&oid).map_err(|_| LeviathanError::CommitNotFound(oid.clone()))?;
+        let target_commit = repo
+            .find_commit(target_oid)
+            .map_err(|_| LeviathanError::CommitNotFound(oid.clone()))?;
+
+        let head_oid = repo.head()?.peel_to_commit()?.id();
+        let is_head = head_oid == target_oid;
+
+        if repo.state() != git2::RepositoryState::Clean {
+            return Err(LeviathanError::OperationFailed(
+                "Another operation is in progress".to_string(),
+            ));
+        }
+
+        // Extract all values from signatures before they are dropped
+        let author_name = target_commit
+            .author()
+            .name()
+            .unwrap_or("Unknown")
+            .to_string();
+        let author_email = target_commit.author().email().unwrap_or("").to_string();
+        let committer_name = target_commit
+            .committer()
+            .name()
+            .unwrap_or("Unknown")
+            .to_string();
+        let committer_email = target_commit.committer().email().unwrap_or("").to_string();
+        let message = target_commit.message().unwrap_or("").to_string();
+        let parent_ids = target_commit.parent_ids().collect();
+
+        Ok(CommitDateInfo {
+            is_head,
+            author_name,
+            author_email,
+            committer_name,
+            committer_email,
+            message,
+            parent_ids,
+        })
+    })();
+
+    let info = info?;
+
+    if info.is_head {
+        // For HEAD commit, recreate it with updated dates using git2
+        let repo = git2::Repository::open(Path::new(&path))?;
+        let target_oid = git2::Oid::from_str(&oid)?;
+        let target_commit = repo.find_commit(target_oid)?;
+
+        let old_oid = target_oid.to_string();
+
+        // Build author signature with optional new date
+        let new_author = if let Some(ref ad) = author_date {
+            let time = parse_iso8601_to_git_time(ad)?;
+            git2::Signature::new(&info.author_name, &info.author_email, &time)?
+        } else {
+            target_commit.author()
+        };
+
+        // Build committer signature with optional new date
+        let new_committer = if let Some(ref cd) = committer_date {
+            let time = parse_iso8601_to_git_time(cd)?;
+            git2::Signature::new(&info.committer_name, &info.committer_email, &time)?
+        } else {
+            target_commit.committer()
+        };
+
+        let tree = target_commit.tree()?;
+        let parents: Vec<git2::Commit> = info
+            .parent_ids
+            .iter()
+            .filter_map(|id| repo.find_commit(*id).ok())
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+
+        // Create commit without updating ref (avoids git2 parent validation error),
+        // then manually update HEAD to point to the new commit.
+        let new_oid = repo.commit(
+            None,
+            &new_author,
+            &new_committer,
+            &info.message,
+            &tree,
+            &parent_refs,
+        )?;
+
+        // Update HEAD to point to the new commit
+        let head_ref = repo.head()?;
+        if head_ref.is_branch() {
+            // HEAD points to a branch - update the branch target
+            let branch_name = head_ref
+                .name()
+                .ok_or_else(|| LeviathanError::OperationFailed("Invalid HEAD ref".to_string()))?;
+            repo.reference(
+                branch_name,
+                new_oid,
+                true,
+                &format!("edit_commit_date: updated {}", &old_oid[..7]),
+            )?;
+        } else {
+            // Detached HEAD - update HEAD directly
+            repo.set_head_detached(new_oid)?;
+        }
+
+        Ok(AmendResult {
+            new_oid: new_oid.to_string(),
+            old_oid,
+            success: true,
+        })
+    } else {
+        // For non-HEAD commits, use git CLI with rebase and environment variables
+        edit_commit_date_with_rebase(
+            &path,
+            &oid,
+            author_date.as_deref(),
+            committer_date.as_deref(),
+        )
+        .await
+    }
+}
+
+/// Edit a non-HEAD commit's date using interactive rebase with env vars
+async fn edit_commit_date_with_rebase(
+    path: &str,
+    oid: &str,
+    author_date: Option<&str>,
+    committer_date: Option<&str>,
+) -> Result<AmendResult> {
+    // Find the parent of the target commit for the rebase base
+    let parent_oid_str = {
+        let repo = git2::Repository::open(Path::new(path))?;
+        let target_oid = git2::Oid::from_str(oid)
+            .map_err(|_| LeviathanError::CommitNotFound(oid.to_string()))?;
+        let target_commit = repo
+            .find_commit(target_oid)
+            .map_err(|_| LeviathanError::CommitNotFound(oid.to_string()))?;
+
+        let parent = target_commit.parent(0).map_err(|_| {
+            LeviathanError::OperationFailed("Cannot edit date of root commit".to_string())
+        })?;
+        parent.id().to_string()
+    };
+
+    let git_dir = std::path::Path::new(path).join(".git");
+    let short_oid = &oid[..std::cmp::min(7, oid.len())];
+
+    // Create a GIT_SEQUENCE_EDITOR script that changes 'pick <oid>' to 'edit <oid>'
+    let editor_script = if cfg!(target_os = "windows") {
+        let script_path = git_dir.join("date-edit-editor.bat");
+        let script_content = format!(
+            "@echo off\r\n\
+             powershell -Command \"(Get-Content '%1') -replace '^pick {}', 'edit {}' | Set-Content '%1'\"",
+            short_oid, short_oid
+        );
+        std::fs::write(&script_path, &script_content)?;
+        script_path.to_string_lossy().to_string()
+    } else {
+        let script_path = git_dir.join("date-edit-editor.sh");
+        let script_content = format!(
+            "#!/bin/sh\nsed -i.bak 's/^pick {}/edit {}/' \"$1\"",
+            short_oid, short_oid
+        );
+        std::fs::write(&script_path, &script_content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        script_path.to_string_lossy().to_string()
+    };
+
+    // Start the rebase
+    let output = crate::utils::create_command("git")
+        .current_dir(path)
+        .env("GIT_SEQUENCE_EDITOR", &editor_script)
+        .args(["rebase", "-i", &parent_oid_str])
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to start rebase: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Clean up
+        let _ = std::fs::remove_file(git_dir.join("date-edit-editor.bat"));
+        let _ = std::fs::remove_file(git_dir.join("date-edit-editor.sh"));
+        return Err(LeviathanError::OperationFailed(format!(
+            "Rebase failed: {}",
+            stderr
+        )));
+    }
+
+    // Now amend the commit with the new date(s)
+    let mut amend_cmd = crate::utils::create_command("git");
+    amend_cmd
+        .current_dir(path)
+        .args(["commit", "--amend", "--no-edit", "--allow-empty"]);
+
+    if let Some(ad) = author_date {
+        amend_cmd.env("GIT_AUTHOR_DATE", ad);
+    }
+    if let Some(cd) = committer_date {
+        amend_cmd.env("GIT_COMMITTER_DATE", cd);
+    }
+
+    let amend_output = amend_cmd.output().map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to amend commit date: {}", e))
+    })?;
+
+    if !amend_output.status.success() {
+        let stderr = String::from_utf8_lossy(&amend_output.stderr);
+        // Abort the rebase on failure
+        let _ = crate::utils::create_command("git")
+            .current_dir(path)
+            .args(["rebase", "--abort"])
+            .output();
+        let _ = std::fs::remove_file(git_dir.join("date-edit-editor.bat"));
+        let _ = std::fs::remove_file(git_dir.join("date-edit-editor.sh"));
+        return Err(LeviathanError::OperationFailed(format!(
+            "Failed to amend commit date: {}",
+            stderr
+        )));
+    }
+
+    // Continue the rebase
+    let continue_output = crate::utils::create_command("git")
+        .current_dir(path)
+        .args(["rebase", "--continue"])
+        .output()
+        .map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to continue rebase: {}", e))
+        })?;
+
+    // Clean up temp files
+    let _ = std::fs::remove_file(git_dir.join("date-edit-editor.bat"));
+    let _ = std::fs::remove_file(git_dir.join("date-edit-editor.sh"));
+
+    if !continue_output.status.success() {
+        let stderr = String::from_utf8_lossy(&continue_output.stderr);
+        if stderr.contains("CONFLICT") || stderr.contains("conflict") {
+            return Err(LeviathanError::RebaseConflict);
+        }
+        // Sometimes rebase --continue fails because there's nothing to continue
+        // (single commit case) - check if we're in a clean state
+        let repo = git2::Repository::open(Path::new(path))?;
+        if repo.state() != git2::RepositoryState::Clean {
+            let _ = crate::utils::create_command("git")
+                .current_dir(path)
+                .args(["rebase", "--abort"])
+                .output();
+            return Err(LeviathanError::OperationFailed(format!(
+                "Rebase continue failed: {}",
+                stderr
+            )));
+        }
+    }
+
+    // Get the new HEAD
+    let repo = git2::Repository::open(Path::new(path))?;
+    let new_head = repo.head()?.peel_to_commit()?;
+
+    Ok(AmendResult {
+        new_oid: new_head.id().to_string(),
+        old_oid: oid.to_string(),
+        success: true,
+    })
+}
+
+/// Reword a commit that is not HEAD by performing an interactive rebase
+///
+/// This uses git CLI under the hood as git2 doesn't support interactive rebase well.
+#[command]
+pub async fn reword_commit(path: String, oid: String, message: String) -> Result<AmendResult> {
+    // Use a closure to ensure git2 objects are dropped before any .await
+    // This is necessary because git2 types are not Send
+    let result: std::result::Result<(bool, Option<git2::Oid>), LeviathanError> = (|| {
+        let repo = git2::Repository::open(Path::new(&path))?;
+
+        // Verify the commit exists
+        let target_oid =
+            git2::Oid::from_str(&oid).map_err(|_| LeviathanError::CommitNotFound(oid.clone()))?;
+        let target_commit = repo
+            .find_commit(target_oid)
+            .map_err(|_| LeviathanError::CommitNotFound(oid.clone()))?;
+
+        // Check if this is the HEAD commit - if so, use amend instead
+        let head_oid = repo.head()?.peel_to_commit()?.id();
+        let is_head = head_oid == target_oid;
+
+        // Check for existing operations in progress
+        if repo.state() != git2::RepositoryState::Clean {
+            return Err(LeviathanError::OperationFailed(
+                "Another operation is in progress".to_string(),
+            ));
+        }
+
+        // For non-HEAD commits, we need to use git rebase
+        // Find the parent of the target commit to use as the base
+        let parent_oid = if !is_head {
+            Some(
+                target_commit
+                    .parent(0)
+                    .map_err(|_| {
+                        LeviathanError::OperationFailed("Cannot reword root commit".to_string())
+                    })?
+                    .id(),
+            )
+        } else {
+            None
+        };
+
+        Ok((is_head, parent_oid))
+    })();
+
+    let (is_head, parent_oid) = result?;
+
+    // Now we can safely await since all git2 objects are dropped
+    if is_head {
+        return amend_commit(path, Some(message), None, None).await;
+    }
+
+    let parent_oid = parent_oid.expect("parent_oid should be set for non-HEAD commits");
+
+    // Write the new message to a temporary file
+    let git_dir = Path::new(&path).join(".git");
+    let msg_file = git_dir.join("REWORD_MSG");
+    std::fs::write(&msg_file, &message)?;
+
+    // Create a GIT_SEQUENCE_EDITOR script that will change 'pick' to 'reword' for our target commit
+    let editor_script = if cfg!(target_os = "windows") {
+        // On Windows, create a batch file
+        let script_path = git_dir.join("reword-editor.bat");
+        let script_content = format!(
+            "@echo off\r\n\
+             powershell -Command \"(Get-Content '%1') -replace '^pick {}', 'reword {}' | Set-Content '%1'\"",
+            &oid[..7],
+            &oid[..7]
+        );
+        std::fs::write(&script_path, &script_content)?;
+        script_path.to_string_lossy().to_string()
+    } else {
+        // On Unix, create a shell script
+        let script_path = git_dir.join("reword-editor.sh");
+        let script_content = format!(
+            "#!/bin/sh\nsed -i.bak 's/^pick {}/reword {}/' \"$1\"",
+            &oid[..7],
+            &oid[..7]
+        );
+        std::fs::write(&script_path, &script_content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        script_path.to_string_lossy().to_string()
+    };
+
+    // Create a COMMIT_EDITOR script that uses our saved message
+    let commit_editor_script = if cfg!(target_os = "windows") {
+        let script_path = git_dir.join("commit-editor.bat");
+        let msg_file_escaped = msg_file.to_string_lossy().replace('\\', "\\\\");
+        let script_content = format!("@echo off\r\ncopy /Y \"{}\" \"%1\" >nul", msg_file_escaped);
+        std::fs::write(&script_path, &script_content)?;
+        script_path.to_string_lossy().to_string()
+    } else {
+        let script_path = git_dir.join("commit-editor.sh");
+        let script_content = format!("#!/bin/sh\ncp \"{}\" \"$1\"", msg_file.to_string_lossy());
+        std::fs::write(&script_path, &script_content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        script_path.to_string_lossy().to_string()
+    };
+
+    // Run the rebase
+    let output = crate::utils::create_command("git")
+        .current_dir(&path)
+        .env("GIT_SEQUENCE_EDITOR", &editor_script)
+        .env("GIT_EDITOR", &commit_editor_script)
+        .args(["rebase", "-i", &parent_oid.to_string()])
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
+
+    // Clean up temporary files
+    let _ = std::fs::remove_file(&msg_file);
+    let _ = std::fs::remove_file(git_dir.join("reword-editor.bat"));
+    let _ = std::fs::remove_file(git_dir.join("reword-editor.sh"));
+    let _ = std::fs::remove_file(git_dir.join("commit-editor.bat"));
+    let _ = std::fs::remove_file(git_dir.join("commit-editor.sh"));
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("CONFLICT") || stderr.contains("conflict") {
+            return Err(LeviathanError::RebaseConflict);
+        }
+        return Err(LeviathanError::OperationFailed(format!(
+            "Rebase failed: {}",
+            stderr
+        )));
+    }
+
+    // Reopen the repository to get the new state after rebase
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    // Get the new HEAD to find the reworded commit's new OID
+    let new_head = repo.head()?.peel_to_commit()?;
+
+    // Walk back to find the commit that replaced our target
+    // The new commit will be at approximately the same position in history
+    let mut revwalk = repo.revwalk()?;
+    revwalk.push(new_head.id())?;
+    revwalk.set_sorting(git2::Sort::TOPOLOGICAL)?;
+
+    let mut new_commit_oid = new_head.id().to_string();
+    for rev_oid in revwalk.flatten() {
+        let commit = repo.find_commit(rev_oid)?;
+        // The reworded commit will have our new message
+        if commit.message().unwrap_or("") == message {
+            new_commit_oid = rev_oid.to_string();
+            break;
+        }
+    }
+
+    Ok(AmendResult {
+        new_oid: new_commit_oid,
+        old_oid: oid,
+        success: true,
+    })
 }
 
 /// Search commits with filters
@@ -407,10 +1314,42 @@ mod tests {
         repo.create_file("new-file.txt", "new content");
         repo.stage_file("new-file.txt");
 
-        let result = create_commit(repo.path_str(), "Test commit message".to_string(), None).await;
+        let result = create_commit(
+            repo.path_str(),
+            "Test commit message".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_ok());
         let commit = result.unwrap();
         assert!(commit.summary.contains("Test commit message"));
+    }
+
+    #[tokio::test]
+    async fn test_create_empty_commit() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_oid = repo.head_oid();
+
+        // Create an empty commit (no staged changes)
+        let result = create_commit(
+            repo.path_str(),
+            "Empty commit message".to_string(),
+            None,
+            None,
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+        let commit = result.unwrap();
+        assert!(commit.summary.contains("Empty commit message"));
+        // The new commit should have a different OID from the initial commit
+        assert_ne!(commit.oid, initial_oid.to_string());
     }
 
     // Note: The amend test is complex because git2's commit() with update_ref
@@ -581,5 +1520,385 @@ mod tests {
         let commit = result.unwrap();
         assert_eq!(commit.parent_ids.len(), 1);
         assert_eq!(commit.parent_ids[0], initial_oid.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_get_commit_message() {
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+
+        let result = get_commit_message(repo.path_str(), oid.to_string()).await;
+        assert!(result.is_ok());
+        let message = result.unwrap();
+        assert!(message.contains("Initial commit"));
+    }
+
+    #[tokio::test]
+    async fn test_get_commit_message_not_found() {
+        let repo = TestRepo::with_initial_commit();
+        let fake_oid = "0000000000000000000000000000000000000000".to_string();
+
+        let result = get_commit_message(repo.path_str(), fake_oid).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_amend_commit_with_new_message() {
+        let repo = TestRepo::with_initial_commit();
+        let old_oid = repo.head_oid();
+
+        let result = amend_commit(
+            repo.path_str(),
+            Some("Amended commit message".to_string()),
+            None,
+            Some(false), // Explicitly disable signing to avoid CI gpgsign config
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let amend_result = result.unwrap();
+        assert!(amend_result.success);
+        assert_eq!(amend_result.old_oid, old_oid.to_string());
+        assert_ne!(amend_result.new_oid, old_oid.to_string());
+
+        // Verify the new message
+        let commit_result = get_commit(repo.path_str(), amend_result.new_oid.clone()).await;
+        assert!(commit_result.is_ok());
+        assert_eq!(commit_result.unwrap().summary, "Amended commit message");
+    }
+
+    #[tokio::test]
+    async fn test_amend_commit_keep_message() {
+        let repo = TestRepo::with_initial_commit();
+        let old_oid = repo.head_oid();
+
+        // Get original message
+        let original_message = get_commit_message(repo.path_str(), old_oid.to_string())
+            .await
+            .unwrap();
+
+        // Amend without changing message, explicitly disable signing for CI
+        let result = amend_commit(repo.path_str(), None, None, Some(false)).await;
+
+        assert!(result.is_ok());
+        let amend_result = result.unwrap();
+        assert!(amend_result.success);
+
+        // Verify message is preserved
+        let new_message = get_commit_message(repo.path_str(), amend_result.new_oid.clone())
+            .await
+            .unwrap();
+        assert_eq!(new_message, original_message);
+    }
+
+    #[tokio::test]
+    async fn test_amend_result_serialization() {
+        let result = AmendResult {
+            new_oid: "abc123".to_string(),
+            old_oid: "def456".to_string(),
+            success: true,
+        };
+
+        let json = serde_json::to_string(&result);
+        assert!(json.is_ok());
+        let json_str = json.unwrap();
+        assert!(json_str.contains("\"newOid\":\"abc123\""));
+        assert!(json_str.contains("\"oldOid\":\"def456\""));
+        assert!(json_str.contains("\"success\":true"));
+    }
+
+    #[test]
+    fn test_parse_iso8601_utc() {
+        let time = parse_iso8601_to_git_time("2024-01-15T10:30:00Z").unwrap();
+        // 2024-01-15T10:30:00Z = 1705314600
+        assert_eq!(time.seconds(), 1705314600);
+        assert_eq!(time.offset_minutes(), 0);
+    }
+
+    #[test]
+    fn test_parse_iso8601_positive_offset() {
+        let time = parse_iso8601_to_git_time("2024-01-15T15:30:00+05:00").unwrap();
+        // 2024-01-15T15:30:00+05:00 = 2024-01-15T10:30:00Z = 1705314600
+        assert_eq!(time.seconds(), 1705314600);
+        assert_eq!(time.offset_minutes(), 300);
+    }
+
+    #[test]
+    fn test_parse_iso8601_negative_offset() {
+        let time = parse_iso8601_to_git_time("2024-01-15T07:30:00-03:00").unwrap();
+        // 2024-01-15T07:30:00-03:00 = 2024-01-15T10:30:00Z = 1705314600
+        assert_eq!(time.seconds(), 1705314600);
+        assert_eq!(time.offset_minutes(), -180);
+    }
+
+    #[test]
+    fn test_parse_unix_timestamp() {
+        let time = parse_iso8601_to_git_time("1705312200").unwrap();
+        assert_eq!(time.seconds(), 1705312200);
+        assert_eq!(time.offset_minutes(), 0);
+    }
+
+    #[test]
+    fn test_parse_iso8601_invalid_format() {
+        let result = parse_iso8601_to_git_time("not-a-date");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_iso8601_no_time() {
+        let result = parse_iso8601_to_git_time("2024-01-15");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_commit_with_custom_author_date() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file("dated-file.txt", "content");
+        repo.stage_file("dated-file.txt");
+
+        let custom_date = "2020-06-15T12:00:00Z"; // June 15, 2020 at noon UTC
+        let result = create_commit(
+            repo.path_str(),
+            "Commit with custom date".to_string(),
+            None,
+            None,
+            None,
+            Some(custom_date.to_string()),
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let commit = result.unwrap();
+        assert!(commit.summary.contains("Commit with custom date"));
+
+        // Verify the author date was set correctly
+        // 2020-06-15T12:00:00Z = 1592222400
+        assert_eq!(commit.author.timestamp, 1592222400);
+    }
+
+    #[tokio::test]
+    async fn test_create_commit_with_custom_committer_date() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file("dated-file2.txt", "content");
+        repo.stage_file("dated-file2.txt");
+
+        let custom_date = "2020-06-15T12:00:00Z"; // June 15, 2020 at noon UTC
+        let result = create_commit(
+            repo.path_str(),
+            "Commit with custom committer date".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some(custom_date.to_string()),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let commit = result.unwrap();
+        // Verify the committer date was set
+        assert_eq!(commit.committer.timestamp, 1592222400);
+    }
+
+    #[tokio::test]
+    async fn test_create_commit_with_both_custom_dates() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file("dated-file3.txt", "content");
+        repo.stage_file("dated-file3.txt");
+
+        let author_date = "2020-06-15T12:00:00Z";
+        let committer_date = "2021-03-20T08:00:00Z"; // March 20, 2021 at 8am UTC = 1616227200
+
+        let result = create_commit(
+            repo.path_str(),
+            "Commit with both custom dates".to_string(),
+            None,
+            None,
+            None,
+            Some(author_date.to_string()),
+            Some(committer_date.to_string()),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let commit = result.unwrap();
+        assert_eq!(commit.author.timestamp, 1592222400);
+        assert_eq!(commit.committer.timestamp, 1616227200);
+    }
+
+    #[tokio::test]
+    async fn test_edit_commit_date_head_author() {
+        let repo = TestRepo::with_initial_commit();
+        let old_oid = repo.head_oid();
+
+        let new_date = "2019-12-25T00:00:00Z"; // Christmas 2019 = 1577232000
+
+        let result = edit_commit_date(
+            repo.path_str(),
+            old_oid.to_string(),
+            Some(new_date.to_string()),
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let amend_result = result.unwrap();
+        assert!(amend_result.success);
+        assert_eq!(amend_result.old_oid, old_oid.to_string());
+        assert_ne!(amend_result.new_oid, old_oid.to_string());
+
+        // Verify the new author date
+        let commit_result = get_commit(repo.path_str(), amend_result.new_oid).await;
+        assert!(commit_result.is_ok());
+        let commit = commit_result.unwrap();
+        assert_eq!(commit.author.timestamp, 1577232000);
+    }
+
+    #[tokio::test]
+    async fn test_edit_commit_date_head_committer() {
+        let repo = TestRepo::with_initial_commit();
+        let old_oid = repo.head_oid();
+
+        let new_date = "2019-12-25T00:00:00Z"; // Christmas 2019
+
+        let result = edit_commit_date(
+            repo.path_str(),
+            old_oid.to_string(),
+            None,
+            Some(new_date.to_string()),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let amend_result = result.unwrap();
+        assert!(amend_result.success);
+
+        // Verify the new committer date
+        let commit_result = get_commit(repo.path_str(), amend_result.new_oid).await;
+        assert!(commit_result.is_ok());
+        let commit = commit_result.unwrap();
+        assert_eq!(commit.committer.timestamp, 1577232000);
+    }
+
+    #[tokio::test]
+    async fn test_edit_commit_date_head_both_dates() {
+        let repo = TestRepo::with_initial_commit();
+        let old_oid = repo.head_oid();
+
+        let author_date = "2019-12-25T00:00:00Z"; // 1577232000
+        let committer_date = "2020-01-01T00:00:00Z"; // 1577836800
+
+        let result = edit_commit_date(
+            repo.path_str(),
+            old_oid.to_string(),
+            Some(author_date.to_string()),
+            Some(committer_date.to_string()),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let amend_result = result.unwrap();
+        assert!(amend_result.success);
+
+        let commit_result = get_commit(repo.path_str(), amend_result.new_oid).await;
+        assert!(commit_result.is_ok());
+        let commit = commit_result.unwrap();
+        assert_eq!(commit.author.timestamp, 1577232000);
+        assert_eq!(commit.committer.timestamp, 1577836800);
+    }
+
+    #[tokio::test]
+    async fn test_edit_commit_date_no_dates_provided() {
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+
+        let result = edit_commit_date(repo.path_str(), oid.to_string(), None, None).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_edit_commit_date_invalid_commit() {
+        let repo = TestRepo::with_initial_commit();
+        let fake_oid = "0000000000000000000000000000000000000000".to_string();
+
+        let result = edit_commit_date(
+            repo.path_str(),
+            fake_oid,
+            Some("2020-01-01T00:00:00Z".to_string()),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_edit_commit_date_preserves_message() {
+        let repo = TestRepo::with_initial_commit();
+        let old_oid = repo.head_oid();
+
+        // Get original message
+        let original_message = get_commit_message(repo.path_str(), old_oid.to_string())
+            .await
+            .unwrap();
+
+        let result = edit_commit_date(
+            repo.path_str(),
+            old_oid.to_string(),
+            Some("2020-06-15T12:00:00Z".to_string()),
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let amend_result = result.unwrap();
+
+        // Verify message is preserved
+        let new_message = get_commit_message(repo.path_str(), amend_result.new_oid)
+            .await
+            .unwrap();
+        assert_eq!(new_message, original_message);
+    }
+
+    #[tokio::test]
+    async fn test_edit_commit_date_preserves_author_info() {
+        let repo = TestRepo::with_initial_commit();
+        let old_oid = repo.head_oid();
+
+        // Get original author info
+        let original = get_commit(repo.path_str(), old_oid.to_string())
+            .await
+            .unwrap();
+
+        let result = edit_commit_date(
+            repo.path_str(),
+            old_oid.to_string(),
+            Some("2020-06-15T12:00:00Z".to_string()),
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let amend_result = result.unwrap();
+
+        let new_commit = get_commit(repo.path_str(), amend_result.new_oid)
+            .await
+            .unwrap();
+        // Author name and email should be preserved
+        assert_eq!(new_commit.author.name, original.author.name);
+        assert_eq!(new_commit.author.email, original.author.email);
+        // Only the date should change
+        assert_ne!(new_commit.author.timestamp, original.author.timestamp);
+    }
+
+    #[test]
+    fn test_is_leap_year() {
+        assert!(is_leap_year(2000));
+        assert!(is_leap_year(2024));
+        assert!(!is_leap_year(1900));
+        assert!(!is_leap_year(2023));
+        assert!(is_leap_year(2400));
     }
 }

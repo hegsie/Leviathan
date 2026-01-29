@@ -166,3 +166,182 @@ fn get_staged_diff(repo_path: &str) -> Result<String> {
 
     Ok(diff_str)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    // ========================================================================
+    // get_staged_diff Tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_staged_diff_empty_repo() {
+        let repo = TestRepo::new();
+        let result = get_staged_diff(&repo.path_str());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_staged_diff_no_staged_changes() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_staged_diff(&repo.path_str());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_staged_diff_with_staged_new_file() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create and stage a new file
+        repo.create_file("new_file.txt", "Hello, World!");
+        repo.stage_file("new_file.txt");
+
+        let result = get_staged_diff(&repo.path_str());
+        assert!(result.is_ok());
+        let diff = result.unwrap();
+        assert!(!diff.is_empty());
+        assert!(diff.contains("+Hello, World!"));
+    }
+
+    #[test]
+    fn test_get_staged_diff_with_modified_file() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Modify the README and stage it
+        repo.create_file("README.md", "Modified content");
+        repo.stage_file("README.md");
+
+        let result = get_staged_diff(&repo.path_str());
+        assert!(result.is_ok());
+        let diff = result.unwrap();
+        assert!(!diff.is_empty());
+        assert!(diff.contains("-# Test Repo"));
+        assert!(diff.contains("+Modified content"));
+    }
+
+    #[test]
+    fn test_get_staged_diff_unstaged_changes_not_included() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create a file but don't stage it
+        repo.create_file("unstaged.txt", "This should not appear in diff");
+
+        let result = get_staged_diff(&repo.path_str());
+        assert!(result.is_ok());
+        let diff = result.unwrap();
+        // Unstaged changes should not appear in the diff
+        assert!(!diff.contains("unstaged.txt"));
+        assert!(!diff.contains("This should not appear"));
+    }
+
+    #[test]
+    fn test_get_staged_diff_invalid_path() {
+        let result = get_staged_diff("/nonexistent/path/to/repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_staged_diff_multiple_files() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create and stage multiple files
+        repo.create_file("file1.txt", "Content 1");
+        repo.create_file("file2.txt", "Content 2");
+        repo.stage_file("file1.txt");
+        repo.stage_file("file2.txt");
+
+        let result = get_staged_diff(&repo.path_str());
+        assert!(result.is_ok());
+        let diff = result.unwrap();
+        assert!(diff.contains("+Content 1"));
+        assert!(diff.contains("+Content 2"));
+    }
+
+    // ========================================================================
+    // AiProviderType Tests
+    // ========================================================================
+
+    #[test]
+    fn test_ai_provider_type_serialization() {
+        use crate::services::ai::AiProviderType;
+
+        let provider = AiProviderType::OpenAi;
+        let json = serde_json::to_string(&provider).expect("Failed to serialize");
+        assert!(json.contains("open_ai") || json.contains("openai") || json.contains("OpenAi"));
+
+        let provider = AiProviderType::Anthropic;
+        let json = serde_json::to_string(&provider).expect("Failed to serialize");
+        assert!(
+            json.contains("anthropic") || json.contains("Anthropic") || json.contains("ANTHROPIC")
+        );
+    }
+
+    #[test]
+    fn test_ai_provider_type_all() {
+        use crate::services::ai::AiProviderType;
+
+        let all = AiProviderType::all();
+        assert!(all.len() >= 4); // At least Ollama, LmStudio, OpenAi, Anthropic
+        assert!(all.contains(&AiProviderType::Ollama));
+        assert!(all.contains(&AiProviderType::OpenAi));
+        assert!(all.contains(&AiProviderType::Anthropic));
+    }
+
+    #[test]
+    fn test_ai_provider_type_requires_api_key() {
+        use crate::services::ai::AiProviderType;
+
+        // Local providers don't require API key
+        assert!(!AiProviderType::Ollama.requires_api_key());
+        assert!(!AiProviderType::LmStudio.requires_api_key());
+
+        // Cloud providers require API key
+        assert!(AiProviderType::OpenAi.requires_api_key());
+        assert!(AiProviderType::Anthropic.requires_api_key());
+    }
+
+    #[test]
+    fn test_generated_commit_message_structure() {
+        use crate::services::ai::GeneratedCommitMessage;
+
+        let msg = GeneratedCommitMessage {
+            summary: "feat: add new feature".to_string(),
+            body: Some("This commit adds a new feature\n\nDetails here".to_string()),
+        };
+
+        assert_eq!(msg.summary, "feat: add new feature");
+        assert!(msg.body.is_some());
+        assert!(msg.body.unwrap().contains("This commit adds a new feature"));
+    }
+
+    #[test]
+    fn test_generated_commit_message_without_body() {
+        use crate::services::ai::GeneratedCommitMessage;
+
+        let msg = GeneratedCommitMessage {
+            summary: "fix: typo in readme".to_string(),
+            body: None,
+        };
+
+        assert_eq!(msg.summary, "fix: typo in readme");
+        assert!(msg.body.is_none());
+    }
+
+    #[test]
+    fn test_generated_commit_message_serialization() {
+        use crate::services::ai::GeneratedCommitMessage;
+
+        let msg = GeneratedCommitMessage {
+            summary: "test commit".to_string(),
+            body: Some("body text".to_string()),
+        };
+
+        let json = serde_json::to_string(&msg).expect("Failed to serialize");
+        assert!(json.contains("summary"));
+        assert!(json.contains("test commit"));
+    }
+}

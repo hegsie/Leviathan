@@ -1,0 +1,1006 @@
+/**
+ * Git Hooks Dialog
+ * Manage git hooks: view, edit, create, delete, enable/disable
+ */
+
+import { LitElement, html, css, nothing } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
+import { sharedStyles } from '../../styles/shared-styles.ts';
+import { getHooks, getHook, saveHook, deleteHook, toggleHook } from '../../services/git.service.ts';
+import type { GitHook } from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
+
+@customElement('lv-hooks-dialog')
+export class LvHooksDialog extends LitElement {
+  static styles = [
+    sharedStyles,
+    css`
+      :host {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: var(--z-modal, 200);
+      }
+
+      :host([open]) {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        backdrop-filter: blur(2px);
+      }
+
+      .dialog {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        width: 800px;
+        max-width: 90vw;
+        max-height: 85vh;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-lg);
+        overflow: hidden;
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--spacing-md) var(--spacing-lg);
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-bg-tertiary);
+      }
+
+      .header-left {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+      }
+
+      .header-icon {
+        width: 20px;
+        height: 20px;
+        color: var(--color-primary);
+      }
+
+      .title {
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+      }
+
+      .close-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .close-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .close-btn svg {
+        width: 16px;
+        height: 16px;
+      }
+
+      .body {
+        display: flex;
+        flex: 1;
+        overflow: hidden;
+        min-height: 0;
+      }
+
+      /* Hook list sidebar */
+      .hook-list-panel {
+        width: 260px;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid var(--color-border);
+        overflow: hidden;
+      }
+
+      .hook-list-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--spacing-sm) var(--spacing-md);
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-bg-tertiary);
+      }
+
+      .hook-list-title {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .hook-count {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        background: var(--color-bg-primary);
+        padding: 1px 6px;
+        border-radius: var(--radius-sm);
+      }
+
+      .hook-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: var(--spacing-xs);
+      }
+
+      .hook-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-sm) var(--spacing-md);
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        transition: background var(--transition-fast);
+        user-select: none;
+      }
+
+      .hook-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .hook-item.active {
+        background: var(--color-bg-selected);
+      }
+
+      .hook-item-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .hook-item-name {
+        font-family: var(--font-mono);
+        font-size: var(--font-size-sm);
+        color: var(--color-text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .hook-item-desc {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        margin-top: 1px;
+      }
+
+      .hook-status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .hook-status-dot.exists-enabled {
+        background: var(--color-success, #27ae60);
+      }
+
+      .hook-status-dot.exists-disabled {
+        background: var(--color-warning, #f39c12);
+      }
+
+      .hook-status-dot.not-exists {
+        background: var(--color-text-muted);
+        opacity: 0.4;
+      }
+
+      /* Editor panel */
+      .editor-panel {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .editor-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--spacing-sm) var(--spacing-md);
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-bg-tertiary);
+        gap: var(--spacing-sm);
+      }
+
+      .editor-header-left {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        min-width: 0;
+      }
+
+      .editor-hook-name {
+        font-family: var(--font-mono);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .editor-badge {
+        font-size: var(--font-size-xs);
+        padding: 1px 6px;
+        border-radius: var(--radius-sm);
+        flex-shrink: 0;
+        font-weight: var(--font-weight-medium);
+      }
+
+      .editor-badge.enabled {
+        background: var(--color-success-bg, rgba(39, 174, 96, 0.15));
+        color: var(--color-success, #27ae60);
+      }
+
+      .editor-badge.disabled {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+      }
+
+      .editor-badge.new-hook {
+        background: var(--color-primary-bg, rgba(52, 152, 219, 0.15));
+        color: var(--color-primary);
+      }
+
+      .editor-header-right {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        flex-shrink: 0;
+      }
+
+      .editor-content {
+        flex: 1;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .editor-textarea {
+        flex: 1;
+        width: 100%;
+        padding: var(--spacing-md);
+        background: var(--color-bg-primary);
+        border: none;
+        color: var(--color-text-primary);
+        font-family: var(--font-mono);
+        font-size: var(--font-size-sm);
+        line-height: 1.6;
+        resize: none;
+        outline: none;
+        tab-size: 4;
+      }
+
+      .editor-textarea::placeholder {
+        color: var(--color-text-muted);
+      }
+
+      .editor-empty {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: var(--spacing-xl);
+        color: var(--color-text-muted);
+        text-align: center;
+      }
+
+      .editor-empty svg {
+        width: 48px;
+        height: 48px;
+        margin-bottom: var(--spacing-md);
+        opacity: 0.5;
+      }
+
+      .editor-empty-text {
+        font-size: var(--font-size-sm);
+        margin-bottom: var(--spacing-xs);
+      }
+
+      .editor-empty-hint {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
+      /* Toggle switch */
+      .toggle {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        cursor: pointer;
+        user-select: none;
+        gap: var(--spacing-xs);
+      }
+
+      .toggle-input {
+        position: absolute;
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .toggle-track {
+        position: relative;
+        width: 32px;
+        height: 18px;
+        background: var(--color-bg-primary);
+        border: 1px solid var(--color-border);
+        border-radius: 9px;
+        transition: all var(--transition-fast);
+      }
+
+      .toggle-input:checked + .toggle-track {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+      }
+
+      .toggle-track::after {
+        content: '';
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 12px;
+        height: 12px;
+        background: white;
+        border-radius: 50%;
+        transition: transform var(--transition-fast);
+      }
+
+      .toggle-input:checked + .toggle-track::after {
+        transform: translateX(14px);
+      }
+
+      .toggle-label {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+      }
+
+      /* Action buttons in editor header */
+      .icon-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .icon-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .icon-btn:hover.danger {
+        background: var(--color-error-bg, rgba(231, 76, 60, 0.15));
+        color: var(--color-error);
+      }
+
+      .icon-btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .icon-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .icon-btn:disabled:hover {
+        background: transparent;
+        color: var(--color-text-secondary);
+      }
+
+      /* Footer */
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--spacing-md) var(--spacing-lg);
+        border-top: 1px solid var(--color-border);
+        background: var(--color-bg-tertiary);
+      }
+
+      .footer-left {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-muted);
+      }
+
+      .footer-right {
+        display: flex;
+        gap: var(--spacing-sm);
+      }
+
+      .btn {
+        padding: var(--spacing-sm) var(--spacing-md);
+        border-radius: var(--radius-md);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .btn-secondary {
+        background: var(--color-bg-tertiary);
+        border: 1px solid var(--color-border);
+        color: var(--color-text-primary);
+      }
+
+      .btn-secondary:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .btn-primary {
+        background: var(--color-primary);
+        border: 1px solid var(--color-primary);
+        color: white;
+      }
+
+      .btn-primary:hover {
+        background: var(--color-primary-hover, #2980b9);
+      }
+
+      .btn-primary:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-danger {
+        background: var(--color-error);
+        border: 1px solid var(--color-error);
+        color: white;
+      }
+
+      .btn-danger:hover {
+        background: var(--color-error-hover, #c0392b);
+      }
+
+      .btn-danger:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      /* Loading / empty states */
+      .loading, .empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: var(--spacing-xl);
+        color: var(--color-text-muted);
+        text-align: center;
+      }
+
+      .empty svg {
+        width: 48px;
+        height: 48px;
+        margin-bottom: var(--spacing-md);
+        opacity: 0.5;
+      }
+
+      /* Confirm delete overlay */
+      .confirm-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+        backdrop-filter: blur(2px);
+      }
+
+      .confirm-dialog {
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        padding: var(--spacing-lg);
+        max-width: 400px;
+        box-shadow: var(--shadow-lg);
+      }
+
+      .confirm-title {
+        font-size: var(--font-size-md);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+        margin-bottom: var(--spacing-sm);
+      }
+
+      .confirm-message {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        margin-bottom: var(--spacing-lg);
+        line-height: 1.5;
+      }
+
+      .confirm-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: var(--spacing-sm);
+      }
+
+      /* Unsaved indicator */
+      .unsaved-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--color-warning);
+        flex-shrink: 0;
+      }
+    `,
+  ];
+
+  @property({ type: Boolean, reflect: true }) open = false;
+  @property({ type: String }) repoPath = '';
+
+  @state() private hooks: GitHook[] = [];
+  @state() private selectedHook: GitHook | null = null;
+  @state() private editContent = '';
+  @state() private loading = false;
+  @state() private saving = false;
+  @state() private hasUnsavedChanges = false;
+  @state() private confirmingDelete: string | null = null;
+
+  async updated(changedProps: Map<string, unknown>): Promise<void> {
+    if (changedProps.has('open') && this.open) {
+      await this.loadHooks();
+    }
+  }
+
+  private async loadHooks(): Promise<void> {
+    if (!this.repoPath) return;
+
+    this.loading = true;
+    this.hooks = [];
+    this.selectedHook = null;
+    this.editContent = '';
+    this.hasUnsavedChanges = false;
+    this.confirmingDelete = null;
+
+    try {
+      const result = await getHooks(this.repoPath);
+
+      if (result.success && result.data) {
+        this.hooks = result.data;
+      } else {
+        showToast('Failed to load hooks', 'error');
+      }
+    } catch (err) {
+      console.error('Failed to load hooks:', err);
+      showToast('Failed to load hooks', 'error');
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private async selectHook(hook: GitHook): Promise<void> {
+    if (this.hasUnsavedChanges) {
+      const discard = window.confirm('You have unsaved changes. Discard them?');
+      if (!discard) return;
+    }
+
+    if (hook.exists) {
+      try {
+        const result = await getHook(this.repoPath, hook.name);
+        if (result.success && result.data) {
+          this.selectedHook = result.data;
+          this.editContent = result.data.content ?? '';
+        } else {
+          this.selectedHook = hook;
+          this.editContent = hook.content ?? '';
+        }
+      } catch {
+        this.selectedHook = hook;
+        this.editContent = hook.content ?? '';
+      }
+    } else {
+      this.selectedHook = hook;
+      this.editContent = this.getDefaultHookContent(hook.name);
+    }
+    this.hasUnsavedChanges = false;
+  }
+
+  private getDefaultHookContent(hookName: string): string {
+    return `#!/bin/sh\n#\n# ${hookName} hook\n#\n\n`;
+  }
+
+  private handleContentChange(e: Event): void {
+    const textarea = e.target as HTMLTextAreaElement;
+    this.editContent = textarea.value;
+
+    if (this.selectedHook) {
+      const originalContent = this.selectedHook.exists
+        ? (this.selectedHook.content ?? '')
+        : this.getDefaultHookContent(this.selectedHook.name);
+      this.hasUnsavedChanges = this.editContent !== originalContent;
+    }
+  }
+
+  private handleTabKey(e: KeyboardEvent): void {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const textarea = e.target as HTMLTextAreaElement;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const value = textarea.value;
+      textarea.value = value.substring(0, start) + '\t' + value.substring(end);
+      textarea.selectionStart = textarea.selectionEnd = start + 1;
+      this.editContent = textarea.value;
+      this.hasUnsavedChanges = true;
+    }
+  }
+
+  private async handleSave(): Promise<void> {
+    if (!this.selectedHook || !this.repoPath) return;
+
+    this.saving = true;
+
+    try {
+      const result = await saveHook(this.repoPath, this.selectedHook.name, this.editContent);
+
+      if (result.success) {
+        showToast(`Hook "${this.selectedHook.name}" saved successfully`, 'success');
+        this.hasUnsavedChanges = false;
+        // Reload hooks to update status
+        const hooksResult = await getHooks(this.repoPath);
+        if (hooksResult.success && hooksResult.data) {
+          this.hooks = hooksResult.data;
+          // Update selected hook reference
+          const updated = this.hooks.find(h => h.name === this.selectedHook?.name);
+          if (updated) {
+            this.selectedHook = { ...updated, content: this.editContent };
+          }
+        }
+      } else {
+        showToast(`Failed to save hook: ${result.error ?? 'Unknown error'}`, 'error');
+      }
+    } catch (err) {
+      console.error('Failed to save hook:', err);
+      showToast('Failed to save hook', 'error');
+    } finally {
+      this.saving = false;
+    }
+  }
+
+  private async handleToggle(hook: GitHook): Promise<void> {
+    if (!this.repoPath || !hook.exists) return;
+
+    try {
+      const result = await toggleHook(this.repoPath, hook.name, !hook.enabled);
+
+      if (result.success) {
+        showToast(
+          `Hook "${hook.name}" ${!hook.enabled ? 'enabled' : 'disabled'}`,
+          'success'
+        );
+        // Reload hooks
+        const hooksResult = await getHooks(this.repoPath);
+        if (hooksResult.success && hooksResult.data) {
+          this.hooks = hooksResult.data;
+          if (this.selectedHook?.name === hook.name) {
+            const updated = this.hooks.find(h => h.name === hook.name);
+            if (updated) {
+              this.selectedHook = { ...updated, content: this.editContent };
+            }
+          }
+        }
+      } else {
+        showToast(`Failed to toggle hook: ${result.error ?? 'Unknown error'}`, 'error');
+      }
+    } catch (err) {
+      console.error('Failed to toggle hook:', err);
+      showToast('Failed to toggle hook', 'error');
+    }
+  }
+
+  private requestDelete(hookName: string): void {
+    this.confirmingDelete = hookName;
+  }
+
+  private cancelDelete(): void {
+    this.confirmingDelete = null;
+  }
+
+  private async confirmDelete(): Promise<void> {
+    if (!this.confirmingDelete || !this.repoPath) return;
+
+    const hookName = this.confirmingDelete;
+    this.confirmingDelete = null;
+
+    try {
+      const result = await deleteHook(this.repoPath, hookName);
+
+      if (result.success) {
+        showToast(`Hook "${hookName}" deleted`, 'success');
+        // Clear editor if we deleted the selected hook
+        if (this.selectedHook?.name === hookName) {
+          this.selectedHook = null;
+          this.editContent = '';
+          this.hasUnsavedChanges = false;
+        }
+        // Reload hooks
+        const hooksResult = await getHooks(this.repoPath);
+        if (hooksResult.success && hooksResult.data) {
+          this.hooks = hooksResult.data;
+        }
+      } else {
+        showToast(`Failed to delete hook: ${result.error ?? 'Unknown error'}`, 'error');
+      }
+    } catch (err) {
+      console.error('Failed to delete hook:', err);
+      showToast('Failed to delete hook', 'error');
+    }
+  }
+
+  private handleOverlayClick(e: MouseEvent): void {
+    if (e.target === e.currentTarget) {
+      this.close();
+    }
+  }
+
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      if (this.confirmingDelete) {
+        this.cancelDelete();
+      } else {
+        this.close();
+      }
+    }
+  };
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    document.addEventListener('keydown', this.handleKeyDown);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('keydown', this.handleKeyDown);
+  }
+
+  public close(): void {
+    if (this.hasUnsavedChanges) {
+      const discard = window.confirm('You have unsaved changes. Discard them?');
+      if (!discard) return;
+    }
+    this.open = false;
+    this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
+  }
+
+  private getHookStatusClass(hook: GitHook): string {
+    if (!hook.exists) return 'not-exists';
+    return hook.enabled ? 'exists-enabled' : 'exists-disabled';
+  }
+
+  private getActiveHookCount(): number {
+    return this.hooks.filter(h => h.exists && h.enabled).length;
+  }
+
+  private renderHookItem(hook: GitHook) {
+    const isActive = this.selectedHook?.name === hook.name;
+
+    return html`
+      <div
+        class="hook-item ${isActive ? 'active' : ''}"
+        @click=${() => this.selectHook(hook)}
+      >
+        <span class="hook-status-dot ${this.getHookStatusClass(hook)}"
+              title=${hook.exists ? (hook.enabled ? 'Enabled' : 'Disabled') : 'Not configured'}
+        ></span>
+        <div class="hook-item-info">
+          <div class="hook-item-name">${hook.name}</div>
+          <div class="hook-item-desc">${hook.description}</div>
+        </div>
+        ${isActive && this.hasUnsavedChanges ? html`<span class="unsaved-dot" title="Unsaved changes"></span>` : nothing}
+      </div>
+    `;
+  }
+
+  private renderEditorPanel() {
+    if (!this.selectedHook) {
+      return html`
+        <div class="editor-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"></path>
+          </svg>
+          <div class="editor-empty-text">Select a hook to view or edit</div>
+          <div class="editor-empty-hint">
+            Choose a hook from the list to configure it
+          </div>
+        </div>
+      `;
+    }
+
+    const hook = this.selectedHook;
+    const isExisting = hook.exists;
+
+    return html`
+      <div class="editor-header">
+        <div class="editor-header-left">
+          <span class="editor-hook-name">${hook.name}</span>
+          ${isExisting
+            ? html`<span class="editor-badge ${hook.enabled ? 'enabled' : 'disabled'}">
+                ${hook.enabled ? 'Enabled' : 'Disabled'}
+              </span>`
+            : html`<span class="editor-badge new-hook">New</span>`
+          }
+        </div>
+        <div class="editor-header-right">
+          ${isExisting ? html`
+            <label class="toggle" title="${hook.enabled ? 'Disable hook' : 'Enable hook'}">
+              <input
+                class="toggle-input"
+                type="checkbox"
+                .checked=${hook.enabled}
+                @change=${(e: Event) => {
+                  e.stopPropagation();
+                  this.handleToggle(hook);
+                }}
+              />
+              <span class="toggle-track"></span>
+            </label>
+            <button
+              class="icon-btn danger"
+              title="Delete hook"
+              @click=${() => this.requestDelete(hook.name)}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
+              </svg>
+            </button>
+          ` : nothing}
+        </div>
+      </div>
+      <div class="editor-content">
+        <textarea
+          class="editor-textarea"
+          .value=${this.editContent}
+          @input=${this.handleContentChange}
+          @keydown=${this.handleTabKey}
+          placeholder="Enter hook script content..."
+          spellcheck="false"
+        ></textarea>
+      </div>
+    `;
+  }
+
+  private renderConfirmDelete() {
+    if (!this.confirmingDelete) return nothing;
+
+    return html`
+      <div class="confirm-overlay" @click=${(e: MouseEvent) => {
+        if (e.target === e.currentTarget) this.cancelDelete();
+      }}>
+        <div class="confirm-dialog">
+          <div class="confirm-title">Delete Hook</div>
+          <div class="confirm-message">
+            Are you sure you want to delete the <strong>${this.confirmingDelete}</strong> hook?
+            This action cannot be undone.
+          </div>
+          <div class="confirm-actions">
+            <button class="btn btn-secondary" @click=${this.cancelDelete}>Cancel</button>
+            <button class="btn btn-danger" @click=${this.confirmDelete}>Delete</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  render() {
+    const activeCount = this.getActiveHookCount();
+
+    return html`
+      <div class="overlay" @click=${this.handleOverlayClick}></div>
+      <div class="dialog">
+        <div class="header">
+          <div class="header-left">
+            <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"></path>
+            </svg>
+            <span class="title">Git Hooks</span>
+          </div>
+          <button class="close-btn" @click=${this.close}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <div class="body">
+          <div class="hook-list-panel">
+            <div class="hook-list-header">
+              <span class="hook-list-title">Hooks</span>
+              <span class="hook-count">${activeCount} active</span>
+            </div>
+            <div class="hook-list">
+              ${this.loading
+                ? html`<div class="loading">Loading hooks...</div>`
+                : this.hooks.length === 0
+                  ? html`<div class="empty">No hooks found</div>`
+                  : this.hooks.map(hook => this.renderHookItem(hook))
+              }
+            </div>
+          </div>
+
+          <div class="editor-panel">
+            ${this.renderEditorPanel()}
+          </div>
+        </div>
+
+        <div class="footer">
+          <div class="footer-left">
+            ${this.selectedHook && this.hasUnsavedChanges
+              ? html`Unsaved changes`
+              : this.selectedHook
+                ? html`${this.selectedHook.description}`
+                : html`${this.hooks.filter(h => h.exists).length} of ${this.hooks.length} hooks configured`
+            }
+          </div>
+          <div class="footer-right">
+            <button class="btn btn-secondary" @click=${this.close}>Close</button>
+            ${this.selectedHook ? html`
+              <button
+                class="btn btn-primary"
+                ?disabled=${!this.hasUnsavedChanges || this.saving}
+                @click=${this.handleSave}
+              >
+                ${this.saving ? 'Saving...' : this.selectedHook.exists ? 'Save Hook' : 'Create Hook'}
+              </button>
+            ` : nothing}
+          </div>
+        </div>
+
+        ${this.renderConfirmDelete()}
+      </div>
+    `;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'lv-hooks-dialog': LvHooksDialog;
+  }
+}

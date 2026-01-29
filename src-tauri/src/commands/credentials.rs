@@ -146,14 +146,16 @@ fn extract_helper_name(cmd: &str) -> String {
     // - "manager-core" -> "manager-core"
     // - "/path/to/helper" -> "helper"
     // - "!helper" -> "helper"
+    // - "cache --timeout=3600" -> "cache"
+    // - "store --file ~/.git-credentials" -> "store"
     let clean = cmd.trim_start_matches('!');
-    clean
+    // First split by whitespace to isolate the command from its arguments
+    let command_part = clean.split_whitespace().next().unwrap_or(clean);
+    // Then extract basename from path
+    command_part
         .split('/')
         .next_back()
-        .unwrap_or(clean)
-        .split_whitespace()
-        .next()
-        .unwrap_or(clean)
+        .unwrap_or(command_part)
         .to_string()
 }
 
@@ -597,6 +599,8 @@ pub async fn migrate_vault_if_needed(data_dir: String, new_vault_path: String) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TestRepo;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_get_machine_vault_password_returns_value() {
@@ -622,5 +626,297 @@ mod tests {
         // Result should be valid hexadecimal
         let password = get_machine_vault_password().await.unwrap();
         assert!(password.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_extract_helper_name_simple() {
+        assert_eq!(extract_helper_name("osxkeychain"), "osxkeychain");
+        assert_eq!(extract_helper_name("manager-core"), "manager-core");
+        assert_eq!(extract_helper_name("store"), "store");
+        assert_eq!(extract_helper_name("cache"), "cache");
+    }
+
+    #[test]
+    fn test_extract_helper_name_with_path() {
+        assert_eq!(
+            extract_helper_name("/usr/local/bin/git-credential-helper"),
+            "git-credential-helper"
+        );
+        assert_eq!(
+            extract_helper_name("/path/to/custom-helper"),
+            "custom-helper"
+        );
+    }
+
+    #[test]
+    fn test_extract_helper_name_with_bang() {
+        assert_eq!(extract_helper_name("!helper"), "helper");
+        assert_eq!(extract_helper_name("!/path/to/helper"), "helper");
+    }
+
+    #[test]
+    fn test_extract_helper_name_with_args() {
+        assert_eq!(extract_helper_name("cache --timeout=3600"), "cache");
+        assert_eq!(
+            extract_helper_name("store --file ~/.git-credentials"),
+            "store"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_https() {
+        assert_eq!(
+            extract_host("https://github.com/user/repo.git"),
+            "github.com"
+        );
+        assert_eq!(extract_host("https://gitlab.com/user/repo"), "gitlab.com");
+        assert_eq!(
+            extract_host("https://bitbucket.org/user/repo.git"),
+            "bitbucket.org"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_http() {
+        assert_eq!(
+            extract_host("http://github.com/user/repo.git"),
+            "github.com"
+        );
+        assert_eq!(
+            extract_host("http://internal-git.company.com/repo"),
+            "internal-git.company.com"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_ssh() {
+        assert_eq!(extract_host("git@github.com:user/repo.git"), "github.com");
+        assert_eq!(
+            extract_host("git@gitlab.com:group/project.git"),
+            "gitlab.com"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_ssh_url() {
+        assert_eq!(
+            extract_host("ssh://git@github.com/user/repo.git"),
+            "github.com"
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_username_github() {
+        assert_eq!(
+            extract_ssh_username("Hi testuser! You've successfully authenticated"),
+            Some("testuser".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_username_gitlab() {
+        assert_eq!(
+            extract_ssh_username("Welcome to GitLab, @testuser!"),
+            Some("testuser".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_username_bitbucket() {
+        assert_eq!(
+            extract_ssh_username("logged in as testuser."),
+            Some("testuser".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_username_no_match() {
+        assert_eq!(extract_ssh_username("Connection refused"), None);
+        assert_eq!(extract_ssh_username("Permission denied"), None);
+    }
+
+    #[tokio::test]
+    async fn test_get_credential_helpers() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_credential_helpers(repo.path_str()).await;
+        assert!(result.is_ok());
+        // Result may or may not have helpers depending on system config
+        let _helpers = result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_set_credential_helper_local() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Set a local credential helper
+        let result = set_credential_helper(
+            Some(repo.path_str()),
+            "cache".to_string(),
+            Some(false),
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+
+        // Verify it was set
+        let helpers = get_credential_helpers(repo.path_str()).await.unwrap();
+        let local_helper = helpers.iter().find(|h| h.scope == "local");
+        assert!(local_helper.is_some());
+        assert_eq!(local_helper.unwrap().name, "cache");
+    }
+
+    #[tokio::test]
+    async fn test_unset_credential_helper_local() {
+        let repo = TestRepo::with_initial_commit();
+
+        // First set a helper
+        set_credential_helper(
+            Some(repo.path_str()),
+            "cache".to_string(),
+            Some(false),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Then unset it
+        let result = unset_credential_helper(Some(repo.path_str()), Some(false), None).await;
+        assert!(result.is_ok());
+
+        // Verify it was unset
+        let helpers = get_credential_helpers(repo.path_str()).await.unwrap();
+        let local_helper = helpers.iter().find(|h| h.scope == "local");
+        assert!(local_helper.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_credential_helper_with_url_pattern() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Set a URL-specific helper
+        let result = set_credential_helper(
+            Some(repo.path_str()),
+            "cache".to_string(),
+            Some(false),
+            Some("https://github.com".to_string()),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        // Verify it was set
+        let helpers = get_credential_helpers(repo.path_str()).await.unwrap();
+        let url_helper = helpers
+            .iter()
+            .find(|h| h.scope == "url" && h.url_pattern.as_deref() == Some("https://github.com"));
+        assert!(url_helper.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_available_helpers() {
+        let result = get_available_helpers().await;
+        assert!(result.is_ok());
+
+        let helpers = result.unwrap();
+        // Should always have cache and store as available
+        let cache_helper = helpers.iter().find(|h| h.name == "cache");
+        let store_helper = helpers.iter().find(|h| h.name == "store");
+
+        assert!(cache_helper.is_some());
+        assert!(store_helper.is_some());
+        assert!(cache_helper.unwrap().available);
+        assert!(store_helper.unwrap().available);
+    }
+
+    #[tokio::test]
+    async fn test_erase_credentials() {
+        let repo = TestRepo::with_initial_commit();
+
+        // This should not fail even if no credentials exist
+        let result = erase_credentials(
+            repo.path_str(),
+            "github.com".to_string(),
+            "https".to_string(),
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_migrate_vault_if_needed_no_old_vault() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let data_dir = dir.path().join("app_data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let new_vault_path = data_dir.join("credentials.hold");
+
+        let result = migrate_vault_if_needed(
+            data_dir.to_string_lossy().to_string(),
+            new_vault_path.to_string_lossy().to_string(),
+        )
+        .await;
+        assert!(result.is_ok());
+        // New vault should not exist since there was no old vault
+        assert!(!new_vault_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_migrate_vault_if_needed_new_vault_exists() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let data_dir = dir.path().join("app_data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let new_vault_path = data_dir.join("credentials.hold");
+        std::fs::write(&new_vault_path, "existing vault content").unwrap();
+
+        let result = migrate_vault_if_needed(
+            data_dir.to_string_lossy().to_string(),
+            new_vault_path.to_string_lossy().to_string(),
+        )
+        .await;
+        assert!(result.is_ok());
+        // Should still have the original content
+        assert!(new_vault_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_credential_helper_struct() {
+        let helper = CredentialHelper {
+            name: "cache".to_string(),
+            command: "cache --timeout=3600".to_string(),
+            scope: "local".to_string(),
+            url_pattern: None,
+        };
+
+        assert_eq!(helper.name, "cache");
+        assert_eq!(helper.scope, "local");
+        assert!(helper.url_pattern.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_credential_test_result_struct() {
+        let result = CredentialTestResult {
+            success: true,
+            host: "github.com".to_string(),
+            protocol: "https".to_string(),
+            username: Some("testuser".to_string()),
+            message: "Credentials found".to_string(),
+        };
+
+        assert!(result.success);
+        assert_eq!(result.host, "github.com");
+        assert_eq!(result.protocol, "https");
+        assert_eq!(result.username, Some("testuser".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_available_helper_struct() {
+        let helper = AvailableHelper {
+            name: "osxkeychain".to_string(),
+            description: "macOS Keychain".to_string(),
+            available: true,
+        };
+
+        assert_eq!(helper.name, "osxkeychain");
+        assert!(helper.available);
     }
 }

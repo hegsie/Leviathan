@@ -44,7 +44,13 @@ fn load_templates() -> Result<Vec<CommitTemplate>> {
         LeviathanError::OperationFailed(format!("Failed to read templates file: {}", e))
     })?;
 
-    serde_json::from_str(&content).map_err(|e| {
+    // Handle empty or whitespace-only files gracefully
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    serde_json::from_str(trimmed).map_err(|e| {
         LeviathanError::OperationFailed(format!("Failed to parse templates file: {}", e))
     })
 }
@@ -220,4 +226,231 @@ pub struct ConventionalType {
     pub type_name: String,
     pub description: String,
     pub emoji: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    #[test]
+    fn test_commit_template_serialization() {
+        let template = CommitTemplate {
+            id: "test-id".to_string(),
+            name: "Test Template".to_string(),
+            content: "feat: add new feature".to_string(),
+            is_conventional: true,
+            created_at: 1234567890,
+        };
+
+        let json = serde_json::to_string(&template).unwrap();
+        let deserialized: CommitTemplate = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.id, "test-id");
+        assert_eq!(deserialized.name, "Test Template");
+        assert_eq!(deserialized.content, "feat: add new feature");
+        assert!(deserialized.is_conventional);
+        assert_eq!(deserialized.created_at, 1234567890);
+    }
+
+    #[test]
+    fn test_commit_template_default_is_conventional() {
+        // Test that is_conventional defaults to false when not provided
+        let json = r#"{"id":"test","name":"Test","content":"test content","createdAt":0}"#;
+        let template: CommitTemplate = serde_json::from_str(json).unwrap();
+        assert!(!template.is_conventional);
+    }
+
+    #[tokio::test]
+    async fn test_get_conventional_types() {
+        let types = get_conventional_types().await;
+
+        assert!(!types.is_empty());
+
+        // Check for common types
+        let type_names: Vec<&str> = types.iter().map(|t| t.type_name.as_str()).collect();
+        assert!(type_names.contains(&"feat"));
+        assert!(type_names.contains(&"fix"));
+        assert!(type_names.contains(&"docs"));
+        assert!(type_names.contains(&"refactor"));
+        assert!(type_names.contains(&"test"));
+        assert!(type_names.contains(&"chore"));
+    }
+
+    #[tokio::test]
+    async fn test_conventional_types_have_descriptions() {
+        let types = get_conventional_types().await;
+
+        for conv_type in types {
+            assert!(!conv_type.type_name.is_empty());
+            assert!(!conv_type.description.is_empty());
+            // Most types should have emojis
+            if conv_type.type_name != "style" {
+                assert!(conv_type.emoji.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn test_conventional_type_serialization() {
+        let conv_type = ConventionalType {
+            type_name: "feat".to_string(),
+            description: "A new feature".to_string(),
+            emoji: Some("sparkles".to_string()),
+        };
+
+        let json = serde_json::to_string(&conv_type).unwrap();
+        assert!(json.contains("typeName")); // Check camelCase serialization
+        assert!(json.contains("feat"));
+
+        let deserialized: ConventionalType = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.type_name, "feat");
+    }
+
+    #[tokio::test]
+    async fn test_get_commit_template_no_template() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_commit_template(repo.path_str()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_commit_template_with_gitmessage() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create a .gitmessage file in the repo root
+        let gitmessage_content = "# Commit message template\n\nTicket: ";
+        repo.create_file(".gitmessage", gitmessage_content);
+
+        let result = get_commit_template(repo.path_str()).await;
+        assert!(result.is_ok());
+        let template = result.unwrap();
+        assert!(template.is_some());
+        assert_eq!(template.unwrap(), gitmessage_content);
+    }
+
+    #[tokio::test]
+    async fn test_get_commit_template_with_config() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create a custom template file
+        let template_content = "feat: describe your feature\n\nWhy:\n- ";
+        repo.create_file("my-template.txt", template_content);
+
+        // Set the git config to use this template
+        let git_repo = repo.repo();
+        let mut config = git_repo.config().unwrap();
+        config
+            .set_str("commit.template", "my-template.txt")
+            .unwrap();
+
+        let result = get_commit_template(repo.path_str()).await;
+        assert!(result.is_ok());
+        let template = result.unwrap();
+        assert!(template.is_some());
+        assert_eq!(template.unwrap(), template_content);
+    }
+
+    #[tokio::test]
+    async fn test_get_commit_template_invalid_repo() {
+        let result = get_commit_template("/nonexistent/path".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_templates_integration() {
+        // This tests the actual list_templates function
+        // Note: This may affect actual user data if templates exist
+        let result = list_templates().await;
+        assert!(result.is_ok());
+        // Should return a vector (empty or with templates)
+    }
+
+    #[tokio::test]
+    async fn test_save_and_delete_template_integration() {
+        let template = CommitTemplate {
+            id: format!(
+                "test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis()
+            ),
+            name: "Integration Test Template".to_string(),
+            content: "test: integration test".to_string(),
+            is_conventional: true,
+            created_at: 0,
+        };
+
+        // Save the template
+        let save_result = save_template(template.clone()).await;
+        assert!(save_result.is_ok());
+        let saved = save_result.unwrap();
+        assert_eq!(saved.id, template.id);
+        assert_eq!(saved.name, template.name);
+
+        // Verify it's in the list
+        let list_result = list_templates().await.unwrap();
+        assert!(list_result.iter().any(|t| t.id == template.id));
+
+        // Delete the template
+        let delete_result = delete_template(template.id.clone()).await;
+        assert!(delete_result.is_ok());
+
+        // Verify it's removed from the list
+        let list_after_delete = list_templates().await.unwrap();
+        assert!(!list_after_delete.iter().any(|t| t.id == template.id));
+    }
+
+    #[tokio::test]
+    async fn test_save_template_updates_existing() {
+        let template_id = format!(
+            "test-update-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+
+        let template = CommitTemplate {
+            id: template_id.clone(),
+            name: "Original Name".to_string(),
+            content: "original content".to_string(),
+            is_conventional: false,
+            created_at: 0,
+        };
+
+        // Save original
+        save_template(template).await.unwrap();
+
+        // Update with same ID
+        let updated = CommitTemplate {
+            id: template_id.clone(),
+            name: "Updated Name".to_string(),
+            content: "updated content".to_string(),
+            is_conventional: true,
+            created_at: 1,
+        };
+
+        let result = save_template(updated).await;
+        assert!(result.is_ok());
+
+        // Verify update
+        let templates = list_templates().await.unwrap();
+        let found = templates.iter().find(|t| t.id == template_id);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "Updated Name");
+        assert_eq!(found.unwrap().content, "updated content");
+
+        // Cleanup
+        delete_template(template_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_template() {
+        // Deleting a non-existent template should succeed (no-op)
+        let result = delete_template("nonexistent-template-id".to_string()).await;
+        assert!(result.is_ok());
+    }
 }

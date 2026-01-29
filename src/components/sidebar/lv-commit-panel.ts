@@ -316,6 +316,123 @@ export class LvCommitPanel extends LitElement {
         from { transform: rotate(0deg); }
         to { transform: rotate(360deg); }
       }
+
+      .message-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .message-label {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+      }
+
+      .history-wrapper {
+        position: relative;
+      }
+
+      .history-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        background: transparent;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .history-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .history-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .history-btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .history-dropdown {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        z-index: 100;
+        width: 300px;
+        max-height: 240px;
+        overflow-y: auto;
+        background: var(--color-bg-primary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      }
+
+      .history-dropdown-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border-bottom: 1px solid var(--color-border);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+      }
+
+      .history-clear-btn {
+        padding: 2px var(--spacing-xs);
+        background: transparent;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-muted);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .history-clear-btn:hover {
+        color: var(--color-error);
+        border-color: var(--color-error);
+      }
+
+      .history-item {
+        display: block;
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: transparent;
+        border: none;
+        border-bottom: 1px solid var(--color-border);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-xs);
+        text-align: left;
+        cursor: pointer;
+        transition: background var(--transition-fast);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .history-item:last-child {
+        border-bottom: none;
+      }
+
+      .history-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .history-empty {
+        padding: var(--spacing-sm);
+        color: var(--color-text-muted);
+        font-size: var(--font-size-xs);
+        text-align: center;
+      }
     `,
   ];
 
@@ -349,18 +466,28 @@ export class LvCommitPanel extends LitElement {
   @state() private isGenerating: boolean = false;
   @state() private generationError: string | null = null;
 
+  // History state
+  @state() private commitHistory: string[] = [];
+  @state() private showHistory: boolean = false;
+
   @query('.summary-input') private summaryInput!: HTMLTextAreaElement;
 
   private readonly SUMMARY_LIMIT = 72;
+
+  private readonly HISTORY_STORAGE_KEY = 'leviathan-commit-history';
+  private readonly HISTORY_MAX_ENTRIES = 20;
 
   private boundHandleTriggerAmend = this.handleTriggerAmend.bind(this);
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    this.loadCommitHistory();
     await this.loadTemplates();
     await this.loadConventionalTypes();
     await this.loadGitTemplate();
     await this.checkAiAvailability();
+    this._onDocumentClick = this._onDocumentClick.bind(this);
+    document.addEventListener('click', this._onDocumentClick);
 
     // Listen for trigger-amend events from context menu
     window.addEventListener('trigger-amend', this.boundHandleTriggerAmend);
@@ -368,7 +495,20 @@ export class LvCommitPanel extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    document.removeEventListener('click', this._onDocumentClick);
     window.removeEventListener('trigger-amend', this.boundHandleTriggerAmend);
+  }
+
+  private _onDocumentClick(e: MouseEvent): void {
+    if (this.showHistory) {
+      const path = e.composedPath();
+      const isInside = path.some(
+        (el) => el instanceof HTMLElement && (el.classList?.contains('history-wrapper'))
+      );
+      if (!isInside) {
+        this.showHistory = false;
+      }
+    }
   }
 
   private handleTriggerAmend(e: Event): void {
@@ -393,6 +533,57 @@ export class LvCommitPanel extends LitElement {
 
   private async checkAiAvailability(): Promise<void> {
     this.aiAvailable = await aiService.isAiAvailable();
+  }
+
+  private loadCommitHistory(): void {
+    try {
+      const stored = localStorage.getItem(this.HISTORY_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          this.commitHistory = parsed.filter(
+            (item): item is string => typeof item === 'string'
+          );
+        }
+      }
+    } catch {
+      this.commitHistory = [];
+    }
+  }
+
+  private saveToHistory(message: string): void {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+
+    // Remove duplicates, then prepend
+    const filtered = this.commitHistory.filter((m) => m !== trimmed);
+    const updated = [trimmed, ...filtered].slice(0, this.HISTORY_MAX_ENTRIES);
+
+    this.commitHistory = updated;
+    try {
+      localStorage.setItem(this.HISTORY_STORAGE_KEY, JSON.stringify(updated));
+    } catch {
+      // localStorage quota exceeded or unavailable - silently ignore
+    }
+  }
+
+  private handleHistoryToggle(e: Event): void {
+    e.stopPropagation();
+    this.showHistory = !this.showHistory;
+  }
+
+  private handleHistorySelect(message: string): void {
+    // Parse message: first line is summary, rest is description
+    const lines = message.split('\n');
+    this.summary = lines[0] || '';
+    this.description = lines.slice(1).join('\n').replace(/^\n+/, '').trimEnd();
+    this.showHistory = false;
+  }
+
+  private handleClearHistory(): void {
+    this.commitHistory = [];
+    localStorage.removeItem(this.HISTORY_STORAGE_KEY);
+    this.showHistory = false;
   }
 
   private async loadTemplates(): Promise<void> {
@@ -618,6 +809,7 @@ export class LvCommitPanel extends LitElement {
       });
 
       if (result.success) {
+        this.saveToHistory(message);
         this.success = `Created commit ${result.data?.shortId}`;
         this.summary = '';
         this.description = '';
@@ -756,6 +948,44 @@ export class LvCommitPanel extends LitElement {
           />
         </div>
       ` : nothing}
+
+      <div class="message-header">
+        <span class="message-label">Message</span>
+        <div class="history-wrapper">
+          <button
+            class="history-btn"
+            @click=${this.handleHistoryToggle}
+            title="Recent commit messages"
+            ?disabled=${this.commitHistory.length === 0}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+          </button>
+          ${this.showHistory ? html`
+            <div class="history-dropdown">
+              <div class="history-dropdown-header">
+                <span>Recent messages</span>
+                <button class="history-clear-btn" @click=${this.handleClearHistory}>Clear</button>
+              </div>
+              ${this.commitHistory.length > 0
+                ? this.commitHistory.map(
+                    (msg) => html`
+                      <button
+                        class="history-item"
+                        @click=${() => this.handleHistorySelect(msg)}
+                        title=${msg}
+                      >
+                        ${msg.split('\n')[0]}
+                      </button>
+                    `
+                  )
+                : html`<div class="history-empty">No recent messages</div>`}
+            </div>
+          ` : nothing}
+        </div>
+      </div>
 
       <div class="message-container">
         <textarea

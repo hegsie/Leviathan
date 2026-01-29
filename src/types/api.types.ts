@@ -30,6 +30,9 @@ export interface CloneRepositoryCommand {
   bare?: boolean;
   branch?: string;
   token?: string;
+  depth?: number;
+  filter?: string;
+  singleBranch?: boolean;
 }
 
 export interface InitRepositoryCommand {
@@ -54,11 +57,25 @@ export interface DeleteBranchCommand {
 export interface RenameBranchCommand {
   oldName: string;
   newName: string;
+  updateTracking?: boolean;
 }
 
 export interface CheckoutCommand {
   ref: string;
   force?: boolean;
+}
+
+export interface SetUpstreamBranchCommand {
+  branch: string;
+  upstream: string;
+}
+
+export interface UnsetUpstreamBranchCommand {
+  branch: string;
+}
+
+export interface GetBranchTrackingInfoCommand {
+  branch: string;
 }
 
 /**
@@ -67,6 +84,19 @@ export interface CheckoutCommand {
 export interface CreateCommitCommand {
   message: string;
   amend?: boolean;
+  /** Sign the commit with GPG. If not provided, uses repository's commit.gpgsign setting. */
+  signCommit?: boolean;
+  /** Allow creating a commit with no staged changes. */
+  allowEmpty?: boolean;
+  /** Author date in ISO 8601 format (e.g., "2024-01-15T10:30:00Z") or unix timestamp. */
+  authorDate?: string;
+  /** Committer date in ISO 8601 format (e.g., "2024-01-15T10:30:00Z") or unix timestamp. */
+  committerDate?: string;
+}
+
+export interface CreateOrphanBranchCommand {
+  name: string;
+  checkout: boolean;
 }
 
 export interface GetCommitCommand {
@@ -80,6 +110,51 @@ export interface GetCommitHistoryCommand {
   skip?: number;
   /** Load commits from all branches, not just HEAD */
   allBranches?: boolean;
+}
+
+export interface AmendCommitCommand {
+  /** New commit message. If not provided, keeps the original message. */
+  message?: string;
+  /** Reset the author to current user. */
+  resetAuthor?: boolean;
+  /** Sign the amended commit with GPG. If not provided, uses repository's commit.gpgsign setting. */
+  signAmend?: boolean;
+}
+
+/**
+ * Signing status for a repository
+ */
+export interface SigningStatus {
+  /** Whether commit signing is enabled (commit.gpgsign = true) */
+  gpgSignEnabled: boolean;
+  /** The configured signing key (user.signingkey) */
+  signingKey: string | null;
+  /** The configured GPG program (gpg.program) */
+  gpgProgram: string | null;
+  /** Whether signing is possible (GPG available and key configured) */
+  canSign: boolean;
+}
+
+export interface RewordCommitCommand {
+  /** The OID of the commit to reword. */
+  oid: string;
+  /** The new commit message. */
+  message: string;
+}
+
+export interface EditCommitDateCommand {
+  /** The OID of the commit to edit. */
+  oid: string;
+  /** New author date in ISO 8601 format (e.g., "2024-01-15T10:30:00Z") or unix timestamp. */
+  authorDate?: string;
+  /** New committer date in ISO 8601 format (e.g., "2024-01-15T10:30:00Z") or unix timestamp. */
+  committerDate?: string;
+}
+
+export interface AmendResult {
+  newOid: string;
+  oldOid: string;
+  success: boolean;
 }
 
 /**
@@ -120,8 +195,79 @@ export interface PushCommand {
   remote?: string;
   branch?: string;
   force?: boolean;
+  forceWithLease?: boolean;
+  pushTags?: boolean;
   setUpstream?: boolean;
   token?: string;
+}
+
+export interface PushToMultipleRemotesCommand {
+  path: string;
+  remotes: string[];
+  branch?: string;
+  force: boolean;
+  forceWithLease: boolean;
+  pushTags: boolean;
+  token?: string;
+}
+
+/**
+ * Result of pushing to multiple remotes
+ */
+export interface MultiPushResult {
+  results: RemotePushResult[];
+  totalSuccess: number;
+  totalFailed: number;
+}
+
+/**
+ * Result of pushing to a single remote (used in multi-push)
+ */
+export interface RemotePushResult {
+  remote: string;
+  success: boolean;
+  message?: string;
+}
+
+export interface FetchAllRemotesCommand {
+  path: string;
+  prune: boolean;
+  tags: boolean;
+  token?: string;
+}
+
+export interface GetFetchStatusCommand {
+  path: string;
+}
+
+/**
+ * Result of fetching all remotes
+ */
+export interface FetchAllResult {
+  remotes: RemoteFetchResult[];
+  success: boolean;
+  totalFetched: number;
+  totalFailed: number;
+}
+
+/**
+ * Result of fetching a single remote
+ */
+export interface RemoteFetchResult {
+  remote: string;
+  success: boolean;
+  message?: string;
+  refsUpdated: number;
+}
+
+/**
+ * Status of a remote for fetch operations
+ */
+export interface RemoteFetchStatus {
+  remote: string;
+  url: string;
+  lastFetch?: number;
+  branches: string[];
 }
 
 /**
@@ -155,6 +301,23 @@ export interface AbortRebaseCommand {
   path: string;
 }
 
+export interface GetRebaseStateCommand {
+  path: string;
+}
+
+export interface GetRebaseTodoCommand {
+  path: string;
+}
+
+export interface UpdateRebaseTodoCommand {
+  path: string;
+  entries: import('./git.types.ts').RebaseTodoEntry[];
+}
+
+export interface SkipRebaseCommitCommand {
+  path: string;
+}
+
 /**
  * Cherry-pick commands
  */
@@ -171,6 +334,12 @@ export interface ContinueCherryPickCommand {
 
 export interface AbortCherryPickCommand {
   path: string;
+}
+
+export interface CherryPickFromBranchCommand {
+  path: string;
+  branch: string;
+  count?: number;
 }
 
 /**
@@ -199,6 +368,22 @@ export interface ResetCommand {
 }
 
 /**
+ * Squash commands
+ */
+export interface SquashCommitsCommand {
+  path: string;
+  fromOid: string;
+  toOid: string;
+  message: string;
+}
+
+export interface FixupCommitCommand {
+  path: string;
+  targetOid: string;
+  amendMessage?: string;
+}
+
+/**
  * Stash commands
  */
 export interface CreateStashCommand {
@@ -223,6 +408,13 @@ export interface PopStashCommand {
   index: number;
 }
 
+export interface StashShowCommand {
+  path: string;
+  index: number;
+  stat?: boolean;
+  patch?: boolean;
+}
+
 /**
  * Tag commands
  */
@@ -245,6 +437,54 @@ export interface PushTagCommand {
   force?: boolean;
 }
 
+export interface GetTagDetailsCommand {
+  path: string;
+  name: string;
+}
+
+export interface EditTagMessageCommand {
+  path: string;
+  name: string;
+  message: string;
+}
+
+/**
+ * Describe commands
+ */
+export interface DescribeOptions {
+  /** Commit to describe (defaults to HEAD) */
+  commitish?: string;
+  /** Include lightweight tags (--tags flag) */
+  tags?: boolean;
+  /** Use any ref (--all flag) */
+  all?: boolean;
+  /** Always output long format (--long flag) */
+  long?: boolean;
+  /** Set abbrev length (--abbrev=N) */
+  abbrev?: number;
+  /** Pattern to match tags (--match) */
+  matchPattern?: string;
+  /** Pattern to exclude tags (--exclude) */
+  excludePattern?: string;
+  /** Follow only first parent (--first-parent) */
+  firstParent?: boolean;
+  /** Describe working tree, append -dirty if dirty (--dirty) */
+  dirty?: boolean;
+}
+
+export interface DescribeResult {
+  /** The full describe string (e.g., "v1.0.0-5-gabcdef1") */
+  description: string;
+  /** The tag name if found */
+  tag: string | null;
+  /** Number of commits ahead of the tag (if any) */
+  commitsAhead: number | null;
+  /** The abbreviated commit hash (if not exactly on a tag) */
+  commitHash: string | null;
+  /** Whether the working tree is dirty */
+  isDirty: boolean;
+}
+
 /**
  * Diff commands
  */
@@ -253,6 +493,35 @@ export interface GetDiffCommand {
   staged?: boolean;
   commit?: string;
   compareWith?: string;
+}
+
+/**
+ * Whitespace handling mode for diffs.
+ * - "all":    Ignore all whitespace changes (-w)
+ * - "change": Ignore changes in amount of whitespace (-b)
+ * - "eol":    Ignore whitespace at end of line (--ignore-space-at-eol)
+ * - "none":   Don't ignore any whitespace (default)
+ */
+export type DiffWhitespaceMode = "all" | "change" | "eol" | "none";
+
+/**
+ * Advanced diff options command - supports whitespace handling, context lines,
+ * and diff algorithm selection.
+ */
+export interface GetDiffWithOptionsCommand {
+  path: string;
+  filePath?: string;
+  staged?: boolean;
+  commit?: string;
+  compareWith?: string;
+  /** Number of context lines to show around changes (default: 3) */
+  contextLines?: number;
+  /** Whitespace handling mode */
+  ignoreWhitespace?: DiffWhitespaceMode;
+  /** Use patience diff algorithm */
+  patience?: boolean;
+  /** Use histogram diff algorithm (approximated via minimal) */
+  histogram?: boolean;
 }
 
 /**
@@ -300,6 +569,67 @@ export interface GitSettings {
   autoStash: boolean;
   pruneOnFetch: boolean;
   rebaseOnPull: boolean;
+}
+
+/**
+ * Avatar commands
+ */
+export interface GetAvatarUrlCommand {
+  email: string;
+  size?: number;
+}
+
+export interface GetAvatarUrlsCommand {
+  emails: string[];
+  size?: number;
+}
+
+/**
+ * Graph commands
+ */
+export interface GetCommitGraphCommand {
+  path: string;
+  maxCount?: number;
+  branch?: string;
+  skip?: number;
+}
+
+/**
+ * Keyboard shortcut types
+ */
+export interface KeyboardShortcutConfig {
+  action: string;
+  label: string;
+  shortcut: string;
+  category: string;
+  isCustom: boolean;
+}
+
+export interface GetKeyboardShortcutsCommand {
+  path?: string;
+}
+
+export interface SetKeyboardShortcutCommand {
+  action: string;
+  shortcut: string;
+}
+
+/**
+ * Checkout file commands
+ */
+export interface CheckoutFileFromCommitCommand {
+  filePath: string;
+  commit: string;
+}
+
+export interface CheckoutFileFromBranchCommand {
+  filePath: string;
+  branch: string;
+}
+
+export interface GetFileAtCommitCommand {
+  filePath: string;
+  commit: string;
 }
 
 /**
