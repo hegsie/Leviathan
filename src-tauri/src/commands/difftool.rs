@@ -359,11 +359,7 @@ mod tests {
 
         // Configure a non-interactive mock diff tool to prevent git from
         // falling back to an interactive tool (e.g. vim) which blocks CI
-        run_git_config(
-            Some(Path::new(&repo.path_str())),
-            &["diff.tool", "mock"],
-        )
-        .unwrap();
+        run_git_config(Some(Path::new(&repo.path_str())), &["diff.tool", "mock"]).unwrap();
         run_git_config(
             Some(Path::new(&repo.path_str())),
             &["difftool.mock.cmd", "true"],
@@ -387,11 +383,7 @@ mod tests {
 
         // Configure a non-interactive mock diff tool to prevent git from
         // falling back to an interactive tool (e.g. vim) which blocks CI
-        run_git_config(
-            Some(Path::new(&repo.path_str())),
-            &["diff.tool", "mock"],
-        )
-        .unwrap();
+        run_git_config(Some(Path::new(&repo.path_str())), &["diff.tool", "mock"]).unwrap();
         run_git_config(
             Some(Path::new(&repo.path_str())),
             &["difftool.mock.cmd", "true"],
