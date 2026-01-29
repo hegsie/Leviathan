@@ -14,20 +14,26 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
+import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import {
-  initHighlighter,
-  detectLanguage,
-  highlightLineSync,
-  preloadLanguage,
-} from '../../utils/shiki-highlighter.ts';
-import type { BundledLanguage } from 'shiki';
+import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
+import { isWhitespaceOnlyChange, computeInlineWhitespaceDiff } from '../../utils/diff-utils.ts';
+
+interface OutputSegment {
+  type: 'resolved' | 'conflict';
+  lines: string[];
+  oursLines: string[];
+  theirsLines: string[];
+  oursLabel: string;
+  theirsLabel: string;
+}
 
 @customElement('lv-merge-editor')
-export class LvMergeEditor extends LitElement {
+export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   static styles = [
     sharedStyles,
+    codeStyles,
     css`
       :host {
         display: flex;
@@ -103,6 +109,16 @@ export class LvMergeEditor extends LitElement {
 
       .btn-theirs:hover {
         background: rgba(var(--color-info-rgb, 59, 130, 246), 0.25);
+      }
+
+      .btn-both {
+        background: rgba(168, 85, 247, 0.15);
+        border-color: #a855f7;
+        color: #a855f7;
+      }
+
+      .btn-both:hover {
+        background: rgba(168, 85, 247, 0.25);
       }
 
       .editor-container {
@@ -191,7 +207,7 @@ export class LvMergeEditor extends LitElement {
       .panel-content {
         flex: 1;
         overflow: auto;
-        font-family: var(--font-mono);
+        font-family: var(--font-family-mono);
         font-size: var(--font-size-sm);
         line-height: 1.5;
         background: var(--color-bg-primary);
@@ -234,16 +250,41 @@ export class LvMergeEditor extends LitElement {
         word-break: break-all;
       }
 
-      .line-added {
-        background: rgba(var(--color-success-rgb, 34, 197, 94), 0.15);
-      }
-
-      .line-removed {
-        background: rgba(var(--color-error-rgb, 239, 68, 68), 0.15);
-      }
-
       .line-conflict {
         background: rgba(var(--color-warning-rgb, 234, 179, 8), 0.2);
+      }
+
+      .line-conflict .line-content {
+        background: rgba(var(--color-warning-rgb, 234, 179, 8), 0.2);
+      }
+
+      .line-conflict .line-number {
+        background: rgba(var(--color-warning-rgb, 234, 179, 8), 0.3);
+      }
+
+      /* Resolved line origin highlighting in output */
+      .resolved-ours .line-content {
+        background: rgba(var(--color-success-rgb, 34, 197, 94), 0.1);
+      }
+
+      .resolved-ours .line-number {
+        border-left: 3px solid var(--color-success);
+      }
+
+      .resolved-theirs .line-content {
+        background: rgba(var(--color-info-rgb, 59, 130, 246), 0.1);
+      }
+
+      .resolved-theirs .line-number {
+        border-left: 3px solid var(--color-info);
+      }
+
+      .resolved-both .line-content {
+        background: rgba(168, 85, 247, 0.1);
+      }
+
+      .resolved-both .line-number {
+        border-left: 3px solid #a855f7;
       }
 
       .panel-content textarea {
@@ -252,7 +293,7 @@ export class LvMergeEditor extends LitElement {
         border: none;
         background: var(--color-bg-primary);
         color: var(--color-text-primary);
-        font-family: var(--font-mono);
+        font-family: var(--font-family-mono);
         font-size: var(--font-size-sm);
         line-height: 1.5;
         padding: var(--spacing-sm);
@@ -284,7 +325,7 @@ export class LvMergeEditor extends LitElement {
         height: 1.5em;
         padding: 0 var(--spacing-sm);
         text-align: right;
-        font-family: var(--font-mono);
+        font-family: var(--font-family-mono);
         font-size: var(--font-size-sm);
         line-height: 1.5;
         color: var(--color-text-muted);
@@ -292,7 +333,7 @@ export class LvMergeEditor extends LitElement {
 
       .editable-textarea {
         flex: 1;
-        font-family: var(--font-mono);
+        font-family: var(--font-family-mono);
         font-size: var(--font-size-sm);
         line-height: 1.5;
         padding: 0 var(--spacing-sm);
@@ -368,6 +409,21 @@ export class LvMergeEditor extends LitElement {
         color: var(--color-text-muted);
         margin-left: auto;
       }
+
+      .conflict-pick-btn {
+        padding: 2px 8px;
+        font-size: var(--font-size-xs);
+      }
+
+      .output-mode-toggle {
+        margin-left: var(--spacing-sm);
+      }
+
+      .conflict-count {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        margin-left: auto;
+      }
     `,
   ];
 
@@ -379,8 +435,56 @@ export class LvMergeEditor extends LitElement {
   @state() private theirsContent = '';
   @state() private outputContent = '';
   @state() private loading = false;
+  @state() private outputEditMode: 'visual' | 'raw' = 'visual';
 
-  private language: BundledLanguage | null = null;
+  /**
+   * Maps output line index (within resolved segments) to resolution origin.
+   * Used to color-code resolved lines in the output visual.
+   */
+  private lineOrigins: Map<number, 'ours' | 'theirs' | 'both'> = new Map();
+
+  /**
+   * Compute line origins by comparing resolved output lines against base/ours/theirs.
+   * Lines not present in base but present in ours → 'ours', in theirs → 'theirs'.
+   */
+  private computeLineOrigins(): void {
+    const baseLines = this.baseContent.split('\n');
+    const oursLines = this.oursContent.split('\n');
+    const theirsLines = this.theirsContent.split('\n');
+
+    const baseSet = new Set(baseLines);
+    const oursNewLines = new Set(oursLines.filter(l => !baseSet.has(l)));
+    const theirsNewLines = new Set(theirsLines.filter(l => !baseSet.has(l)));
+
+    const newOrigins = new Map<number, 'ours' | 'theirs' | 'both'>();
+    const segments = this.parseOutputSegments();
+    let lineIdx = 0;
+
+    for (const segment of segments) {
+      if (segment.type === 'resolved') {
+        for (const line of segment.lines) {
+          if (!baseSet.has(line)) {
+            const inOurs = oursNewLines.has(line);
+            const inTheirs = theirsNewLines.has(line);
+
+            if (inOurs && !inTheirs) {
+              newOrigins.set(lineIdx, 'ours');
+            } else if (inTheirs && !inOurs) {
+              newOrigins.set(lineIdx, 'theirs');
+            } else if (inOurs && inTheirs) {
+              newOrigins.set(lineIdx, 'both');
+            }
+          }
+          lineIdx++;
+        }
+      } else {
+        // Skip conflict marker lines in the old output
+        lineIdx += 1 + segment.oursLines.length + 1 + segment.theirsLines.length + 1;
+      }
+    }
+
+    this.lineOrigins = newOrigins;
+  }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('conflictFile') && this.conflictFile) {
@@ -394,11 +498,7 @@ export class LvMergeEditor extends LitElement {
     this.loading = true;
 
     // Initialize Shiki highlighter and detect language
-    await initHighlighter();
-    this.language = detectLanguage(this.conflictFile.path);
-    if (this.language) {
-      await preloadLanguage(this.language);
-    }
+    await this.initCodeLanguage(this.conflictFile.path);
 
     try {
       // Load all three versions and the working directory file in parallel
@@ -426,6 +526,8 @@ export class LvMergeEditor extends LitElement {
       this.outputContent = workdirResult.success && workdirResult.data
         ? workdirResult.data
         : this.performAutoMerge();
+      // Compute which output lines came from which branch
+      this.computeLineOrigins();
     } catch (err) {
       console.error('Failed to load conflict contents:', err);
     } finally {
@@ -475,6 +577,79 @@ export class LvMergeEditor extends LitElement {
     return result.join('\n');
   }
 
+  private parseOutputSegments(): OutputSegment[] {
+    const lines = this.outputContent.split('\n');
+    const segments: OutputSegment[] = [];
+    let currentResolved: string[] = [];
+    let inConflict = false;
+    let inOurs = false;
+    let oursLines: string[] = [];
+    let theirsLines: string[] = [];
+    let oursLabel = '';
+    let theirsLabel = '';
+
+    for (const line of lines) {
+      if (line.startsWith('<<<<<<<')) {
+        // Flush any accumulated resolved lines
+        if (currentResolved.length > 0) {
+          segments.push({
+            type: 'resolved',
+            lines: currentResolved,
+            oursLines: [],
+            theirsLines: [],
+            oursLabel: '',
+            theirsLabel: '',
+          });
+          currentResolved = [];
+        }
+        inConflict = true;
+        inOurs = true;
+        oursLines = [];
+        theirsLines = [];
+        oursLabel = line.slice(7).trim() || 'OURS';
+        theirsLabel = '';
+      } else if (line.startsWith('=======') && inConflict) {
+        inOurs = false;
+      } else if (line.startsWith('>>>>>>>') && inConflict) {
+        theirsLabel = line.slice(7).trim() || 'THEIRS';
+        segments.push({
+          type: 'conflict',
+          lines: [],
+          oursLines: [...oursLines],
+          theirsLines: [...theirsLines],
+          oursLabel,
+          theirsLabel,
+        });
+        inConflict = false;
+        inOurs = false;
+        oursLines = [];
+        theirsLines = [];
+      } else if (inConflict) {
+        if (inOurs) {
+          oursLines.push(line);
+        } else {
+          theirsLines.push(line);
+        }
+      } else {
+        currentResolved.push(line);
+      }
+    }
+
+    // Flush remaining resolved lines
+    if (currentResolved.length > 0) {
+      segments.push({
+        type: 'resolved',
+        lines: currentResolved,
+        oursLines: [],
+        theirsLines: [],
+        oursLabel: '',
+        theirsLabel: '',
+      });
+    }
+
+    return segments;
+  }
+
   private handleOutputChange(e: Event): void {
     const textarea = e.target as HTMLTextAreaElement;
     this.outputContent = textarea.value;
@@ -482,33 +657,38 @@ export class LvMergeEditor extends LitElement {
 
   private handleAcceptOurs(): void {
     this.outputContent = this.oursContent;
+    this.computeLineOrigins();
   }
 
   private handleAcceptTheirs(): void {
     this.outputContent = this.theirsContent;
+    this.computeLineOrigins();
   }
 
   private handleAcceptBase(): void {
     this.outputContent = this.baseContent;
+    this.computeLineOrigins();
   }
 
   private handleAcceptOursPanel(): void {
     this.outputContent = this.oursContent;
+    this.computeLineOrigins();
   }
 
   private handleAcceptTheirsPanel(): void {
     this.outputContent = this.theirsContent;
+    this.computeLineOrigins();
   }
 
   private async handleMarkResolved(): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile) return;
 
-    // Check for remaining conflict markers
-    if (this.outputContent.includes('<<<<<<<') ||
-        this.outputContent.includes('=======') ||
-        this.outputContent.includes('>>>>>>>')) {
+    // Check for remaining conflicts using segment parsing
+    const segments = this.parseOutputSegments();
+    const unresolvedCount = segments.filter(s => s.type === 'conflict').length;
+    if (unresolvedCount > 0) {
       const proceed = confirm(
-        'The output still contains conflict markers. Are you sure you want to mark this as resolved?'
+        `There ${unresolvedCount === 1 ? 'is' : 'are'} ${unresolvedCount} unresolved conflict${unresolvedCount === 1 ? '' : 's'}. Are you sure you want to mark this as resolved?`
       );
       if (!proceed) return;
     }
@@ -534,13 +714,6 @@ export class LvMergeEditor extends LitElement {
     return this.outputContent;
   }
 
-  private renderHighlightedContent(content: string) {
-    const tokens = highlightLineSync(content, this.language);
-    return html`${tokens.map(
-      (token) => html`<span style="color: ${token.color}">${token.content}</span>`
-    )}`;
-  }
-
   private renderCodeView(content: string, diffAgainst?: string): ReturnType<typeof html> {
     const lines = content.split('\n');
     const compareLines = diffAgainst?.split('\n') ?? [];
@@ -550,19 +723,29 @@ export class LvMergeEditor extends LitElement {
         ${lines.map((line, index) => {
           const compareLine = compareLines[index];
           let lineClass = '';
+          let wsSegments: ReturnType<typeof computeInlineWhitespaceDiff> | null = null;
 
           if (diffAgainst !== undefined) {
             if (compareLine === undefined) {
-              lineClass = 'line-added';
+              lineClass = 'code-addition';
             } else if (line !== compareLine) {
-              lineClass = 'line-conflict';
+              if (isWhitespaceOnlyChange(compareLine, line)) {
+                lineClass = 'code-ws-change';
+                wsSegments = computeInlineWhitespaceDiff(compareLine, line);
+              } else {
+                lineClass = 'line-conflict';
+              }
             }
           }
+
+          const lineContent = wsSegments
+            ? this.renderInlineWhitespaceContent(wsSegments)
+            : (this.renderHighlightedContent(line) || html`${' '}`);
 
           return html`
             <div class="code-line ${lineClass}">
               <span class="line-number">${index + 1}</span>
-              <span class="line-content">${this.renderHighlightedContent(line) || ' '}</span>
+              <span class="line-content">${lineContent}</span>
             </div>
           `;
         })}
@@ -593,6 +776,139 @@ export class LvMergeEditor extends LitElement {
         ></textarea>
       </div>
     `;
+  }
+
+  private renderOutputVisual(): ReturnType<typeof html> {
+    const segments = this.parseOutputSegments();
+    let lineNum = 1;
+    let lineIdx = 0;
+
+    return html`
+      <div class="code-view">
+        ${segments.map((segment, segIdx) => {
+          if (segment.type === 'resolved') {
+            return html`${segment.lines.map((line) => {
+              const num = lineNum++;
+              const origin = this.lineOrigins.get(lineIdx);
+              lineIdx++;
+              const originClass = origin === 'ours' ? 'resolved-ours'
+                : origin === 'theirs' ? 'resolved-theirs'
+                : origin === 'both' ? 'resolved-both'
+                : '';
+              return html`
+                <div class="code-line ${originClass}">
+                  <span class="line-number">${num}</span>
+                  <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
+                </div>
+              `;
+            })}`;
+          }
+          // Skip conflict marker lines for lineIdx tracking
+          lineIdx += 1 + segment.oursLines.length + 1 + segment.theirsLines.length + 1;
+          // Conflict segment
+          const oursStart = lineNum;
+          const oursEnd = oursStart + segment.oursLines.length;
+          const theirsEnd = oursEnd + segment.theirsLines.length;
+          // Advance lineNum past all conflict content lines
+          lineNum = theirsEnd;
+
+          return html`
+            <div class="code-conflict-block">
+              <div class="code-conflict-header">
+                <span>Conflict</span>
+                <div class="code-conflict-header-actions">
+                  <button class="btn btn-ours conflict-pick-btn" @click=${() => this.resolveOutputConflict(segIdx, 'ours')}>
+                    Use Ours
+                  </button>
+                  <button class="btn btn-theirs conflict-pick-btn" @click=${() => this.resolveOutputConflict(segIdx, 'theirs')}>
+                    Use Theirs
+                  </button>
+                  <button class="btn btn-both conflict-pick-btn" @click=${() => this.resolveOutputConflict(segIdx, 'both')}>
+                    Use Both
+                  </button>
+                </div>
+              </div>
+              <div class="code-conflict-side-ours">
+                <div class="code-conflict-side-label">${segment.oursLabel}</div>
+                ${segment.oursLines.map((line, i) => html`
+                  <div class="code-line">
+                    <span class="line-number">${oursStart + i}</span>
+                    <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
+                  </div>
+                `)}
+              </div>
+              <div class="code-conflict-divider"></div>
+              <div class="code-conflict-side-theirs">
+                <div class="code-conflict-side-label">${segment.theirsLabel}</div>
+                ${segment.theirsLines.map((line, i) => html`
+                  <div class="code-line">
+                    <span class="line-number">${oursEnd + i}</span>
+                    <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
+                  </div>
+                `)}
+              </div>
+            </div>
+          `;
+        })}
+      </div>
+    `;
+  }
+
+  private resolveOutputConflict(segmentIndex: number, choice: 'ours' | 'theirs' | 'both'): void {
+    const segments = this.parseOutputSegments();
+
+    const resultLines: string[] = [];
+    let conflictIdx = 0;
+
+    for (const segment of segments) {
+      if (segment.type === 'resolved') {
+        resultLines.push(...segment.lines);
+      } else {
+        if (conflictIdx === segmentIndex) {
+          if (choice === 'ours' || choice === 'both') {
+            resultLines.push(...segment.oursLines);
+          }
+          if (choice === 'theirs' || choice === 'both') {
+            resultLines.push(...segment.theirsLines);
+          }
+        } else {
+          // Keep conflict markers for unresolved conflicts
+          resultLines.push(`<<<<<<< ${segment.oursLabel}`);
+          resultLines.push(...segment.oursLines);
+          resultLines.push('=======');
+          resultLines.push(...segment.theirsLines);
+          resultLines.push(`>>>>>>> ${segment.theirsLabel}`);
+        }
+        conflictIdx++;
+      }
+    }
+
+    this.outputContent = resultLines.join('\n');
+    this.computeLineOrigins();
+  }
+
+  private toggleOutputEditMode(): void {
+    this.outputEditMode = this.outputEditMode === 'visual' ? 'raw' : 'visual';
+  }
+
+  /**
+   * Sync scroll position from the output panel to all source panels.
+   * Uses scroll percentage to handle panels with different content heights.
+   */
+  private handleOutputScroll(e: Event): void {
+    const output = e.target as HTMLElement;
+    const scrollRatio = output.scrollHeight > output.clientHeight
+      ? output.scrollTop / (output.scrollHeight - output.clientHeight)
+      : 0;
+
+    const panelIds = ['panel-ours', 'panel-base', 'panel-theirs'];
+    for (const id of panelIds) {
+      const panel = this.shadowRoot?.getElementById(id);
+      if (panel) {
+        const maxScroll = panel.scrollHeight - panel.clientHeight;
+        panel.scrollTop = scrollRatio * maxScroll;
+      }
+    }
   }
 
   /**
@@ -634,7 +950,8 @@ export class LvMergeEditor extends LitElement {
 
     const oursChanges = this.getDiffCount(this.oursContent, this.baseContent);
     const theirsChanges = this.getDiffCount(this.theirsContent, this.baseContent);
-    const hasConflictMarkers = this.outputContent.includes('<<<<<<<');
+    const outputSegments = this.parseOutputSegments();
+    const conflictCount = outputSegments.filter(s => s.type === 'conflict').length;
 
     return html`
       <div class="toolbar">
@@ -665,7 +982,7 @@ export class LvMergeEditor extends LitElement {
                 Use
               </button>
             </div>
-            <div class="panel-content readonly">
+            <div class="panel-content readonly" id="panel-ours">
               ${this.renderCodeView(this.oursContent, this.baseContent)}
             </div>
           </div>
@@ -675,7 +992,7 @@ export class LvMergeEditor extends LitElement {
               Base (Common Ancestor)
               <span class="panel-stats">${this.getLineCount(this.baseContent)} lines</span>
             </div>
-            <div class="panel-content readonly">
+            <div class="panel-content readonly" id="panel-base">
               ${this.renderCodeView(this.baseContent)}
             </div>
           </div>
@@ -688,7 +1005,7 @@ export class LvMergeEditor extends LitElement {
                 Use
               </button>
             </div>
-            <div class="panel-content readonly">
+            <div class="panel-content readonly" id="panel-theirs">
               ${this.renderCodeView(this.theirsContent, this.baseContent)}
             </div>
           </div>
@@ -696,14 +1013,22 @@ export class LvMergeEditor extends LitElement {
 
         <div class="output-panel">
           <div class="panel-header output">
-            Output (Edit to Resolve)
-            ${hasConflictMarkers
-              ? html`<span class="diff-indicator has-changes" title="Contains conflict markers"></span>`
-              : html`<span class="diff-indicator no-changes" title="No conflict markers"></span>`}
-            <span class="panel-stats">${this.getLineCount(this.outputContent)} lines</span>
+            Output
+            ${conflictCount > 0
+              ? html`<span class="conflict-count">${conflictCount} conflict${conflictCount === 1 ? '' : 's'} remaining</span>`
+              : html`<span class="conflict-count">No conflicts</span>`}
+            <button class="panel-header-btn output-mode-toggle" @click=${this.toggleOutputEditMode}>
+              ${this.outputEditMode === 'visual' ? 'Raw Edit' : 'Visual'}
+            </button>
           </div>
-          <div class="panel-content">
-            ${this.renderEditableCodeView(this.outputContent)}
+          <div
+            class="panel-content${this.outputEditMode === 'visual' ? ' readonly' : ''}"
+            id="panel-output"
+            @scroll=${this.handleOutputScroll}
+          >
+            ${this.outputEditMode === 'visual'
+              ? this.renderOutputVisual()
+              : this.renderEditableCodeView(this.outputContent)}
           </div>
         </div>
       </div>

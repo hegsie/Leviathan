@@ -163,6 +163,7 @@ export function assignLanes(commits: GraphCommit[]): GraphLayout {
     for (const childOid of children) {
       const childLane = oidToLane.get(childOid);
       const childNode = nodes.get(childOid);
+
       if (childLane !== undefined && childNode) {
         edges.push({
           fromOid: commit.oid,
@@ -441,7 +442,7 @@ export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
       const childLane = oidToLane.get(childOid);
       const childNode = nodes.get(childOid);
       if (childLane !== undefined && childNode) {
-        edges.push({
+        const edge = {
           fromOid: commit.oid,
           toOid: childOid,
           fromRow: row,
@@ -449,7 +450,8 @@ export function assignLanesOptimized(commits: GraphCommit[]): GraphLayout {
           fromLane: lane,
           toLane: childLane,
           isMerge: childNode.commit.parentIds.length > 1,
-        });
+        };
+        edges.push(edge);
 
         if (lane !== childLane) {
           const childCommit = commitMap.get(childOid)!;

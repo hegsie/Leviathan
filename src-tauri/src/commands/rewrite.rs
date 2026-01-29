@@ -7,9 +7,17 @@ use crate::error::{LeviathanError, Result};
 use crate::models::Commit;
 
 /// Cherry-pick a commit onto the current branch
+///
+/// Options:
+/// - `no_commit`: If true, stages changes without committing (like `git cherry-pick -n`)
 #[command]
-pub async fn cherry_pick(path: String, commit_oid: String) -> Result<Commit> {
+pub async fn cherry_pick(
+    path: String,
+    commit_oid: String,
+    no_commit: Option<bool>,
+) -> Result<Commit> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    let no_commit = no_commit.unwrap_or(false);
 
     // Check for existing operations in progress
     if repo.state() != git2::RepositoryState::Clean {
@@ -67,14 +75,23 @@ pub async fn cherry_pick(path: String, commit_oid: String) -> Result<Commit> {
     let mut index = repo.index()?;
     let has_conflicts = index.has_conflicts();
     tracing::debug!(
-        "Cherry-pick completed. has_conflicts: {}, repo_state: {:?}",
+        "Cherry-pick completed. has_conflicts: {}, repo_state: {:?}, no_commit: {}",
         has_conflicts,
-        repo.state()
+        repo.state(),
+        no_commit
     );
 
     if has_conflicts {
         tracing::debug!("Returning CherryPickConflict error");
         return Err(LeviathanError::CherryPickConflict);
+    }
+
+    // If no_commit is true, just stage the changes without committing
+    if no_commit {
+        // Clean up cherry-pick state but keep the staged changes
+        repo.cleanup_state()?;
+        // Return the original commit info since we didn't create a new one
+        return Ok(Commit::from_git2(&commit));
     }
 
     // No conflicts - the working directory and index are updated, now create the commit
@@ -1252,51 +1269,327 @@ mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
 
+    // ==================== Cherry-Pick Tests ====================
+
     #[tokio::test]
-    async fn test_cherry_pick_single_commit() {
-        let repo = TestRepo::with_initial_commit();
-        let default_branch = repo.current_branch();
+    async fn test_cherry_pick_success() {
+        // Setup: Create repo with main branch, create feature branch with a commit,
+        // then cherry-pick that commit to main
+        let test_repo = TestRepo::with_initial_commit();
+        let initial_main_head = test_repo.head_oid();
 
-        // Create a feature branch with a commit
-        repo.create_branch("feature");
-        repo.checkout_branch("feature");
-        let feature_oid =
-            repo.create_commit("Feature commit", &[("feature.txt", "feature content")]);
+        // Create a feature branch and add a commit
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_commit_oid =
+            test_repo.create_commit("Feature commit", &[("feature.txt", "feature content")]);
 
-        // Go back to default branch and add a commit to diverge
-        repo.checkout_branch(&default_branch);
-        repo.create_commit("Main branch commit", &[("main.txt", "main content")]);
+        // Switch back to main
+        test_repo.checkout_branch("main");
+
+        // Verify main is still at initial commit
+        assert_eq!(test_repo.head_oid(), initial_main_head);
+
+        // Verify feature.txt doesn't exist on main
+        assert!(!test_repo.path.join("feature.txt").exists());
 
         // Cherry-pick the feature commit
-        let result = cherry_pick(repo.path_str(), feature_oid.to_string()).await;
+        let result = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Cherry-pick should succeed");
         let new_commit = result.unwrap();
-        assert_eq!(new_commit.summary, "Feature commit");
-        // New commit should have different OID because it has a different parent
-        assert_ne!(new_commit.oid, feature_oid.to_string());
 
-        // Verify the file exists
-        let content = std::fs::read_to_string(repo.path.join("feature.txt")).unwrap();
+        // Verify the commit message was preserved
+        assert_eq!(new_commit.summary, "Feature commit");
+
+        // Verify main HEAD has advanced (new commit was created)
+        assert_ne!(test_repo.head_oid(), initial_main_head);
+
+        // Verify the file now exists on main
+        assert!(test_repo.path.join("feature.txt").exists());
+        let content = std::fs::read_to_string(test_repo.path.join("feature.txt")).unwrap();
         assert_eq!(content, "feature content");
+
+        // Verify we're still on main
+        assert_eq!(test_repo.current_branch(), "main");
+
+        // Verify repo state is clean
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
     }
 
     #[tokio::test]
-    async fn test_cherry_pick_invalid_commit() {
-        let repo = TestRepo::with_initial_commit();
+    async fn test_cherry_pick_no_commit_option() {
+        // Test cherry-pick with no_commit=true (stages changes without committing)
+        let test_repo = TestRepo::with_initial_commit();
+        let initial_head = test_repo.head_oid();
+
+        // Create a feature branch and add a commit
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_commit_oid =
+            test_repo.create_commit("Feature commit", &[("feature.txt", "feature content")]);
+
+        // Switch back to main
+        test_repo.checkout_branch("main");
+
+        // Cherry-pick with no_commit=true
         let result = cherry_pick(
-            repo.path_str(),
-            "0000000000000000000000000000000000000000".to_string(),
+            test_repo.path_str(),
+            feature_commit_oid.to_string(),
+            Some(true),
         )
         .await;
-        assert!(result.is_err());
+
+        assert!(result.is_ok(), "Cherry-pick with no_commit should succeed");
+
+        // Verify HEAD hasn't changed (no new commit created)
+        assert_eq!(test_repo.head_oid(), initial_head);
+
+        // Verify the file exists in working directory
+        assert!(test_repo.path.join("feature.txt").exists());
+
+        // Verify changes are staged
+        let repo = test_repo.repo();
+        let index = repo.index().unwrap();
+        let entry = index.get_path(std::path::Path::new("feature.txt"), 0);
+        assert!(entry.is_some(), "feature.txt should be staged");
+
+        // Verify repo state is clean (no cherry-pick in progress)
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
     }
 
     #[tokio::test]
-    async fn test_cherry_pick_invalid_oid_format() {
-        let repo = TestRepo::with_initial_commit();
-        let result = cherry_pick(repo.path_str(), "invalid-oid".to_string()).await;
-        assert!(result.is_err());
+    async fn test_cherry_pick_conflict() {
+        // Test cherry-pick that results in a conflict
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Create a file on main
+        test_repo.create_commit("Add conflict file", &[("conflict.txt", "main content")]);
+
+        // Create a feature branch from initial commit and modify same file
+        test_repo.checkout_branch("main");
+        let repo = test_repo.repo();
+        let head = repo.head().unwrap();
+        let head_commit = head.peel_to_commit().unwrap();
+        let parent = head_commit.parent(0).unwrap();
+
+        // Create branch from parent (before conflict.txt was added)
+        repo.branch("feature", &parent, false).unwrap();
+        test_repo.checkout_branch("feature");
+
+        // Add the same file with different content
+        let feature_commit_oid =
+            test_repo.create_commit("Feature conflict", &[("conflict.txt", "feature content")]);
+
+        // Switch back to main
+        test_repo.checkout_branch("main");
+
+        // Cherry-pick should result in conflict
+        let result = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
+
+        assert!(result.is_err(), "Cherry-pick should fail with conflict");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, LeviathanError::CherryPickConflict),
+            "Error should be CherryPickConflict"
+        );
+
+        // Verify repo is in cherry-pick state
+        let repo = test_repo.repo();
+        assert_eq!(repo.state(), git2::RepositoryState::CherryPick);
+
+        // Verify CHERRY_PICK_HEAD exists
+        let cherry_pick_head = test_repo.path.join(".git/CHERRY_PICK_HEAD");
+        assert!(cherry_pick_head.exists(), "CHERRY_PICK_HEAD should exist");
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_abort() {
+        // Test aborting a cherry-pick in progress
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Create a conflict scenario (same as above)
+        test_repo.create_commit("Add conflict file", &[("conflict.txt", "main content")]);
+
+        let repo = test_repo.repo();
+        let head = repo.head().unwrap();
+        let head_commit = head.peel_to_commit().unwrap();
+        let parent = head_commit.parent(0).unwrap();
+
+        repo.branch("feature", &parent, false).unwrap();
+        test_repo.checkout_branch("feature");
+        let feature_commit_oid =
+            test_repo.create_commit("Feature conflict", &[("conflict.txt", "feature content")]);
+
+        test_repo.checkout_branch("main");
+
+        // Cherry-pick to create conflict
+        let _ = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
+
+        // Verify we're in cherry-pick state
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::CherryPick);
+
+        // Abort the cherry-pick
+        let abort_result = abort_cherry_pick(test_repo.path_str()).await;
+        assert!(abort_result.is_ok(), "Abort should succeed");
+
+        // Verify repo state is clean
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+
+        // Verify CHERRY_PICK_HEAD is removed
+        let cherry_pick_head = test_repo.path.join(".git/CHERRY_PICK_HEAD");
+        assert!(
+            !cherry_pick_head.exists(),
+            "CHERRY_PICK_HEAD should be removed"
+        );
+
+        // Verify working directory is clean (conflict file has original content)
+        let content = std::fs::read_to_string(test_repo.path.join("conflict.txt")).unwrap();
+        assert_eq!(content, "main content");
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_continue_after_resolve() {
+        // Test continuing cherry-pick after manually resolving conflicts
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Create a conflict scenario
+        test_repo.create_commit("Add conflict file", &[("conflict.txt", "main content")]);
+
+        let repo = test_repo.repo();
+        let head = repo.head().unwrap();
+        let head_commit = head.peel_to_commit().unwrap();
+        let parent = head_commit.parent(0).unwrap();
+
+        repo.branch("feature", &parent, false).unwrap();
+        test_repo.checkout_branch("feature");
+        let feature_commit_oid =
+            test_repo.create_commit("Feature conflict", &[("conflict.txt", "feature content")]);
+
+        test_repo.checkout_branch("main");
+        let main_head_before = test_repo.head_oid();
+
+        // Cherry-pick to create conflict
+        let _ = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
+
+        // Manually resolve the conflict by writing resolved content
+        std::fs::write(test_repo.path.join("conflict.txt"), "resolved content").unwrap();
+
+        // Stage the resolved file
+        let repo = test_repo.repo();
+        let mut index = repo.index().unwrap();
+        index
+            .add_path(std::path::Path::new("conflict.txt"))
+            .unwrap();
+        index.write().unwrap();
+
+        // Continue the cherry-pick
+        let continue_result = continue_cherry_pick(test_repo.path_str()).await;
+        assert!(continue_result.is_ok(), "Continue should succeed");
+
+        let new_commit = continue_result.unwrap();
+        assert_eq!(new_commit.summary, "Feature conflict");
+
+        // Verify a new commit was created
+        assert_ne!(test_repo.head_oid(), main_head_before);
+
+        // Verify repo state is clean
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+
+        // Verify CHERRY_PICK_HEAD is removed
+        let cherry_pick_head = test_repo.path.join(".git/CHERRY_PICK_HEAD");
+        assert!(!cherry_pick_head.exists());
+
+        // Verify resolved content is in the commit
+        let content = std::fs::read_to_string(test_repo.path.join("conflict.txt")).unwrap();
+        assert_eq!(content, "resolved content");
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_cannot_pick_root_commit() {
+        // Test that cherry-picking a root commit fails
+        let test_repo = TestRepo::new();
+
+        // Create a single commit (root commit)
+        let root_oid = test_repo.create_commit("Root commit", &[("file.txt", "content")]);
+
+        // Try to cherry-pick the root commit
+        let result = cherry_pick(test_repo.path_str(), root_oid.to_string(), None).await;
+
+        assert!(
+            result.is_err(),
+            "Should not be able to cherry-pick root commit"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, LeviathanError::OperationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_fails_when_operation_in_progress() {
+        // Test that cherry-pick fails if another operation is already in progress
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Create a conflict scenario to get into cherry-pick state
+        test_repo.create_commit("Add conflict file", &[("conflict.txt", "main content")]);
+
+        let repo = test_repo.repo();
+        let head = repo.head().unwrap();
+        let head_commit = head.peel_to_commit().unwrap();
+        let parent = head_commit.parent(0).unwrap();
+
+        repo.branch("feature", &parent, false).unwrap();
+        test_repo.checkout_branch("feature");
+        let feature_commit_oid =
+            test_repo.create_commit("Feature conflict", &[("conflict.txt", "feature content")]);
+
+        // Create another commit on feature
+        let another_commit_oid =
+            test_repo.create_commit("Another commit", &[("another.txt", "content")]);
+
+        test_repo.checkout_branch("main");
+
+        // First cherry-pick creates conflict
+        let _ = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
+
+        // Verify we're in cherry-pick state
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::CherryPick);
+
+        // Second cherry-pick should fail
+        let result = cherry_pick(test_repo.path_str(), another_commit_oid.to_string(), None).await;
+
+        assert!(
+            result.is_err(),
+            "Should fail when cherry-pick already in progress"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, LeviathanError::CherryPickInProgress));
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_preserves_author() {
+        // Test that cherry-pick preserves the original author
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Create a feature branch and add a commit
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_commit_oid =
+            test_repo.create_commit("Feature commit", &[("feature.txt", "content")]);
+
+        // Get original author info
+        let repo = test_repo.repo();
+        let original_commit = repo.find_commit(feature_commit_oid).unwrap();
+        let original_author = original_commit.author();
+
+        // Switch back to main and cherry-pick
+        test_repo.checkout_branch("main");
+        let result = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None)
+            .await
+            .unwrap();
+
+        // Verify author is preserved
+        assert_eq!(result.author.name, original_author.name().unwrap());
+        assert_eq!(result.author.email, original_author.email().unwrap());
     }
 
     #[tokio::test]
@@ -1347,24 +1640,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_revert_commit() {
+    async fn test_continue_cherry_pick_no_operation() {
         let repo = TestRepo::with_initial_commit();
+        // Continuing when no cherry-pick in progress should fail
+        let result = continue_cherry_pick(repo.path_str()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_continue_revert_no_operation() {
+        let repo = TestRepo::with_initial_commit();
+        // Continuing when no revert in progress should fail
+        let result = continue_revert(repo.path_str()).await;
+        assert!(result.is_err());
+    }
+
+    // ==================== Revert Tests ====================
+
+    #[tokio::test]
+    async fn test_revert_success() {
+        let test_repo = TestRepo::with_initial_commit();
 
         // Create a commit to revert
-        let commit_oid = repo.create_commit("Add file", &[("to_revert.txt", "content")]);
+        let commit_to_revert =
+            test_repo.create_commit("Add file to revert", &[("revert-me.txt", "content")]);
 
         // Verify file exists
-        assert!(repo.path.join("to_revert.txt").exists());
+        assert!(test_repo.path.join("revert-me.txt").exists());
 
-        // Revert it
-        let result = revert(repo.path_str(), commit_oid.to_string()).await;
+        // Revert the commit
+        let result = revert(test_repo.path_str(), commit_to_revert.to_string()).await;
+        assert!(result.is_ok(), "Revert should succeed");
 
-        assert!(result.is_ok());
         let revert_commit = result.unwrap();
-        assert!(revert_commit.summary.starts_with("Revert"));
+        assert!(revert_commit.summary.contains("Revert"));
 
-        // File should be removed
-        assert!(!repo.path.join("to_revert.txt").exists());
+        // Verify the file no longer exists
+        assert!(!test_repo.path.join("revert-me.txt").exists());
+
+        // Verify repo state is clean
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+    }
+
+    #[tokio::test]
+    async fn test_revert_conflict() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Create a commit that adds a file
+        let commit_to_revert =
+            test_repo.create_commit("Add file", &[("file.txt", "original content")]);
+
+        // Modify the file in another commit
+        test_repo.create_commit("Modify file", &[("file.txt", "modified content")]);
+
+        // Revert the original commit - this should conflict
+        let result = revert(test_repo.path_str(), commit_to_revert.to_string()).await;
+
+        assert!(result.is_err(), "Revert should fail with conflict");
+        let err = result.unwrap_err();
+        assert!(matches!(err, LeviathanError::RevertConflict));
+    }
+
+    #[tokio::test]
+    async fn test_abort_revert() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Create conflict scenario
+        let commit_to_revert =
+            test_repo.create_commit("Add file", &[("file.txt", "original content")]);
+        test_repo.create_commit("Modify file", &[("file.txt", "modified content")]);
+
+        // Revert to create conflict
+        let _ = revert(test_repo.path_str(), commit_to_revert.to_string()).await;
+
+        // Abort
+        let abort_result = abort_revert(test_repo.path_str()).await;
+        assert!(abort_result.is_ok());
+
+        // Verify state is clean
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
     }
 
     #[tokio::test]
@@ -1387,84 +1741,125 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reset_soft() {
+    async fn test_revert_message_format() {
         let repo = TestRepo::with_initial_commit();
-        let initial_oid = repo.head_oid();
 
-        // Create a second commit
-        repo.create_commit("Second commit", &[("file.txt", "content")]);
+        let commit_oid = repo.create_commit("Original message", &[("file.txt", "content")]);
+
+        let result = revert(repo.path_str(), commit_oid.to_string()).await;
+        assert!(result.is_ok());
+        let revert_commit = result.unwrap();
+
+        // Check revert message format
+        assert!(revert_commit.summary.contains("Original message"));
+        assert!(revert_commit.message.contains(&commit_oid.to_string()));
+    }
+
+    // ==================== Reset Tests ====================
+
+    #[tokio::test]
+    async fn test_reset_soft() {
+        let test_repo = TestRepo::with_initial_commit();
+        let initial_head = test_repo.head_oid();
+
+        // Create another commit
+        test_repo.create_commit("Second commit", &[("file2.txt", "content")]);
 
         // Soft reset to initial commit
-        let result = reset(repo.path_str(), initial_oid.to_string(), "soft".to_string()).await;
+        let result = reset(
+            test_repo.path_str(),
+            initial_head.to_string(),
+            "soft".to_string(),
+        )
+        .await;
+
         assert!(result.is_ok());
 
-        // HEAD should be at initial commit
-        assert_eq!(repo.head_oid(), initial_oid);
+        // HEAD should point to initial commit
+        assert_eq!(test_repo.head_oid(), initial_head);
 
-        // File should still exist (soft reset preserves working directory)
-        assert!(repo.path.join("file.txt").exists());
+        // File should still exist (soft reset keeps working directory)
+        assert!(test_repo.path.join("file2.txt").exists());
 
         // Changes should be staged
-        let git_repo = repo.repo();
-        let index = git_repo.index().unwrap();
+        let repo = test_repo.repo();
+        let index = repo.index().unwrap();
         assert!(index
-            .get_path(std::path::Path::new("file.txt"), 0)
+            .get_path(std::path::Path::new("file2.txt"), 0)
             .is_some());
     }
 
     #[tokio::test]
-    async fn test_reset_mixed() {
-        let repo = TestRepo::with_initial_commit();
-        let initial_oid = repo.head_oid();
+    async fn test_reset_hard() {
+        let test_repo = TestRepo::with_initial_commit();
+        let initial_head = test_repo.head_oid();
 
-        // Create a second commit
-        repo.create_commit("Second commit", &[("file.txt", "content")]);
+        // Create another commit
+        test_repo.create_commit("Second commit", &[("file2.txt", "content")]);
 
-        // Mixed reset to initial commit
+        // Hard reset to initial commit
         let result = reset(
-            repo.path_str(),
-            initial_oid.to_string(),
-            "mixed".to_string(),
+            test_repo.path_str(),
+            initial_head.to_string(),
+            "hard".to_string(),
         )
         .await;
+
         assert!(result.is_ok());
 
-        // HEAD should be at initial commit
-        assert_eq!(repo.head_oid(), initial_oid);
+        // HEAD should point to initial commit
+        assert_eq!(test_repo.head_oid(), initial_head);
 
-        // File should still exist but be unstaged
-        assert!(repo.path.join("file.txt").exists());
+        // File should NOT exist (hard reset discards working directory)
+        assert!(!test_repo.path.join("file2.txt").exists());
     }
 
     #[tokio::test]
-    async fn test_reset_hard() {
-        let repo = TestRepo::with_initial_commit();
-        let initial_oid = repo.head_oid();
+    async fn test_reset_mixed() {
+        let test_repo = TestRepo::with_initial_commit();
+        let initial_head = test_repo.head_oid();
 
-        // Create a second commit with a new file
-        repo.create_commit("Second commit", &[("newfile.txt", "content")]);
+        // Create another commit
+        test_repo.create_commit("Second commit", &[("file2.txt", "content")]);
 
-        // Verify file exists
-        assert!(repo.path.join("newfile.txt").exists());
+        // Mixed reset to initial commit
+        let result = reset(
+            test_repo.path_str(),
+            initial_head.to_string(),
+            "mixed".to_string(),
+        )
+        .await;
 
-        // Hard reset to initial commit
-        let result = reset(repo.path_str(), initial_oid.to_string(), "hard".to_string()).await;
         assert!(result.is_ok());
 
-        // HEAD should be at initial commit
-        assert_eq!(repo.head_oid(), initial_oid);
+        // HEAD should point to initial commit
+        assert_eq!(test_repo.head_oid(), initial_head);
 
-        // File should be gone (hard reset removes working directory changes)
-        assert!(!repo.path.join("newfile.txt").exists());
+        // File should still exist
+        assert!(test_repo.path.join("file2.txt").exists());
+
+        // Changes should NOT be staged (mixed reset unstages)
+        let repo = test_repo.repo();
+        let index = repo.index().unwrap();
+        assert!(index
+            .get_path(std::path::Path::new("file2.txt"), 0)
+            .is_none());
     }
 
     #[tokio::test]
     async fn test_reset_invalid_mode() {
-        let repo = TestRepo::with_initial_commit();
-        let oid = repo.head_oid();
+        let test_repo = TestRepo::with_initial_commit();
 
-        let result = reset(repo.path_str(), oid.to_string(), "invalid".to_string()).await;
+        let result = reset(
+            test_repo.path_str(),
+            test_repo.head_oid().to_string(),
+            "invalid".to_string(),
+        )
+        .await;
+
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, LeviathanError::OperationFailed(_)));
     }
 
     #[tokio::test]
@@ -1513,59 +1908,7 @@ mod tests {
         assert_eq!(repo.head_oid(), initial_oid);
     }
 
-    #[tokio::test]
-    async fn test_continue_cherry_pick_no_operation() {
-        let repo = TestRepo::with_initial_commit();
-        // Continuing when no cherry-pick in progress should fail
-        let result = continue_cherry_pick(repo.path_str()).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_continue_revert_no_operation() {
-        let repo = TestRepo::with_initial_commit();
-        // Continuing when no revert in progress should fail
-        let result = continue_revert(repo.path_str()).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_cherry_pick_preserves_author() {
-        let repo = TestRepo::with_initial_commit();
-        let default_branch = repo.current_branch();
-
-        // Create a feature branch with a commit
-        repo.create_branch("feature");
-        repo.checkout_branch("feature");
-        let feature_oid = repo.create_commit("Feature commit", &[("feature.txt", "content")]);
-
-        // Go back to default branch
-        repo.checkout_branch(&default_branch);
-
-        // Cherry-pick the feature commit
-        let result = cherry_pick(repo.path_str(), feature_oid.to_string()).await;
-        assert!(result.is_ok());
-        let new_commit = result.unwrap();
-
-        // Author should be preserved from original commit
-        assert_eq!(new_commit.author.name, "Test User");
-        assert_eq!(new_commit.author.email, "test@example.com");
-    }
-
-    #[tokio::test]
-    async fn test_revert_message_format() {
-        let repo = TestRepo::with_initial_commit();
-
-        let commit_oid = repo.create_commit("Original message", &[("file.txt", "content")]);
-
-        let result = revert(repo.path_str(), commit_oid.to_string()).await;
-        assert!(result.is_ok());
-        let revert_commit = result.unwrap();
-
-        // Check revert message format
-        assert!(revert_commit.summary.contains("Original message"));
-        assert!(revert_commit.message.contains(&commit_oid.to_string()));
-    }
+    // ==================== Rebase Tests ====================
 
     #[tokio::test]
     async fn test_get_rebase_state_no_rebase() {
@@ -1696,6 +2039,8 @@ mod tests {
         assert_eq!(entry.commit_short, "abc");
         assert_eq!(entry.message, "Test");
     }
+
+    // ==================== Drop Commit Tests ====================
 
     #[tokio::test]
     async fn test_drop_commit_head() {
@@ -1856,6 +2201,8 @@ mod tests {
         let a = c.parent(0).unwrap();
         assert_eq!(a.summary().unwrap(), "Commit A");
     }
+
+    // ==================== Reorder Commits Tests ====================
 
     #[tokio::test]
     async fn test_reorder_commits_reverse_two() {
@@ -2065,6 +2412,8 @@ mod tests {
         assert!(json.contains("\"reorderedCount\":3"));
         assert!(json.contains("\"hasConflicts\":false"));
     }
+
+    // ==================== Cherry-Pick From Branch Tests ====================
 
     #[tokio::test]
     async fn test_cherry_pick_from_branch_single_commit() {

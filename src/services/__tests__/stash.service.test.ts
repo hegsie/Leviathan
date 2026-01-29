@@ -113,16 +113,16 @@ describe('git.service - Stash operations', () => {
       expect(result.data?.message).to.equal('My custom stash message');
     });
 
-    it('invokes create_stash with include_untracked', async () => {
+    it('invokes create_stash with includeUntracked', async () => {
       mockInvoke = () =>
         Promise.resolve({ index: 0, message: 'WIP', oid: 'stash123' });
 
       await createStash({
         path: '/test/repo',
-        include_untracked: true,
+        includeUntracked: true,
       });
       const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.include_untracked).to.be.true;
+      expect(args.includeUntracked).to.be.true;
     });
 
     it('invokes create_stash with all options', async () => {
@@ -132,12 +132,12 @@ describe('git.service - Stash operations', () => {
       await createStash({
         path: '/test/repo',
         message: 'Custom message',
-        include_untracked: true,
+        includeUntracked: true,
       });
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.path).to.equal('/test/repo');
       expect(args.message).to.equal('Custom message');
-      expect(args.include_untracked).to.be.true;
+      expect(args.includeUntracked).to.be.true;
     });
 
     it('handles error when nothing to stash', async () => {
@@ -170,12 +170,12 @@ describe('git.service - Stash operations', () => {
       expect(args.index).to.equal(2);
     });
 
-    it('invokes apply_stash with drop_after option', async () => {
+    it('invokes apply_stash with dropAfter option', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      await applyStash({ path: '/test/repo', index: 0, drop_after: true });
+      await applyStash({ path: '/test/repo', index: 0, dropAfter: true });
       const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.drop_after).to.be.true;
+      expect(args.dropAfter).to.be.true;
     });
 
     it('handles error when stash index not found', async () => {

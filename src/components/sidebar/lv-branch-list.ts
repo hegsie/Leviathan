@@ -296,6 +296,54 @@ export class LvBranchList extends LitElement {
         margin: var(--spacing-xs) 0;
       }
 
+      /* Local section header */
+      .local-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 2px 8px;
+        border-bottom: 1px solid var(--color-border);
+      }
+
+      .local-header-title {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-secondary);
+      }
+
+      .cleanup-btn {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border: none;
+        background: none;
+        color: var(--color-text-muted);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        border-radius: var(--radius-sm);
+        transition: all var(--transition-fast);
+      }
+
+      .cleanup-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .cleanup-btn svg {
+        width: 12px;
+        height: 12px;
+      }
+
+      .cleanup-btn .badge {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+        padding: 0 4px;
+        border-radius: var(--radius-full);
+        font-size: 10px;
+        font-weight: var(--font-weight-medium);
+      }
+
       /* Drag and drop styles */
       .branch-item[draggable="true"] {
         cursor: grab;
@@ -739,6 +787,82 @@ export class LvBranchList extends LitElement {
     });
   }
 
+  /**
+   * Find all local branches that are merged into HEAD
+   */
+  private getMergedBranches(): Branch[] {
+    const allLocal = this.localBranchGroups.flatMap(g => g.branches);
+    // A branch is considered merged if it's:
+    // 1. Not HEAD
+    // 2. Behind 0 commits (meaning HEAD contains all its commits)
+    // Note: This is a simple heuristic. For perfect accuracy,
+    // we'd need to check if HEAD is a descendant of the branch.
+    return allLocal.filter(b =>
+      !b.isHead &&
+      b.aheadBehind &&
+      b.aheadBehind.ahead === 0
+    );
+  }
+
+  /**
+   * Delete all branches that are merged into HEAD
+   */
+  private async handleDeleteMergedBranches(): Promise<void> {
+    const mergedBranches = this.getMergedBranches();
+
+    if (mergedBranches.length === 0) {
+      await showConfirm(
+        'No Merged Branches',
+        'There are no local branches that are fully merged into the current branch.',
+        'info'
+      );
+      return;
+    }
+
+    const branchNames = mergedBranches.map(b => `  • ${b.shorthand}`).join('\n');
+    const confirmed = await showConfirm(
+      'Delete Merged Branches',
+      `The following ${mergedBranches.length} branch${mergedBranches.length > 1 ? 'es are' : ' is'} merged and will be deleted:\n\n${branchNames}\n\nThis action cannot be undone.`,
+      'warning'
+    );
+
+    if (!confirmed) return;
+
+    // Delete branches one by one
+    let deleted = 0;
+    let failed = 0;
+
+    for (const branch of mergedBranches) {
+      const result = await gitService.deleteBranch(
+        this.repositoryPath,
+        branch.name,
+        false
+      );
+      if (result.success) {
+        deleted++;
+      } else {
+        failed++;
+        console.error(`Failed to delete ${branch.name}:`, result.error);
+      }
+    }
+
+    if (deleted > 0) {
+      await this.loadBranches();
+      this.dispatchEvent(new CustomEvent('branches-changed', {
+        bubbles: true,
+        composed: true,
+      }));
+    }
+
+    if (failed > 0) {
+      await showConfirm(
+        'Partial Success',
+        `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}, but ${failed} failed to delete.`,
+        'warning'
+      );
+    }
+  }
+
   private async handleBranchCreated(): Promise<void> {
     await this.loadBranches();
     this.dispatchEvent(new CustomEvent('branches-changed', {
@@ -871,7 +995,7 @@ export class LvBranchList extends LitElement {
 
     const result = await gitService.merge({
       path: this.repositoryPath,
-      source_ref: branch.shorthand,
+      sourceRef: branch.shorthand,
     });
 
     if (result.success) {
@@ -1160,7 +1284,7 @@ export class LvBranchList extends LitElement {
 
         const result = await gitService.merge({
           path: this.repositoryPath,
-          source_ref: sourceBranch.shorthand,
+          sourceRef: sourceBranch.shorthand,
         });
 
         if (result.success) {
@@ -1187,7 +1311,11 @@ export class LvBranchList extends LitElement {
           await this.loadBranches();
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'REBASE_CONFLICT') {
-          this.dispatchEvent(new CustomEvent('rebase-conflict', { bubbles: true, composed: true }));
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: { operationType: 'rebase' },
+          }));
         }
       }
     } else {
@@ -1214,7 +1342,7 @@ export class LvBranchList extends LitElement {
       if (action === 'merge') {
         const result = await gitService.merge({
           path: this.repositoryPath,
-          source_ref: sourceBranch.shorthand,
+          sourceRef: sourceBranch.shorthand,
         });
 
         if (result.success) {
@@ -1233,7 +1361,11 @@ export class LvBranchList extends LitElement {
           await this.loadBranches();
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'REBASE_CONFLICT') {
-          this.dispatchEvent(new CustomEvent('rebase-conflict', { bubbles: true, composed: true }));
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: { operationType: 'rebase' },
+          }));
         }
       }
     }
@@ -1559,8 +1691,25 @@ export class LvBranchList extends LitElement {
         @rebase-complete=${this.handleRebaseComplete}
       ></lv-interactive-rebase-dialog>
 
-      <!-- Local branches - shown directly without extra header -->
+      <!-- Local branches -->
       ${this.localBranchGroups.length > 0 ? html`
+        <div class="local-header">
+          <span class="local-header-title">Local Branches</span>
+          ${this.getMergedBranches().length > 0 ? html`
+            <button
+              class="cleanup-btn"
+              @click=${this.handleDeleteMergedBranches}
+              title="Delete branches that are merged into current branch"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
+              </svg>
+              Clean up
+              <span class="badge">${this.getMergedBranches().length}</span>
+            </button>
+          ` : nothing}
+        </div>
         <div class="local-section">
           ${this.localBranchGroups.map((group) => this.renderLocalGroup(group))}
         </div>

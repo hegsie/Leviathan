@@ -275,8 +275,8 @@ export interface RemoteFetchStatus {
  */
 export interface MergeCommand {
   path: string;
-  source_ref: string;
-  no_ff?: boolean;
+  sourceRef: string;
+  noFf?: boolean;
   squash?: boolean;
   message?: string;
 }
@@ -324,6 +324,8 @@ export interface SkipRebaseCommitCommand {
 export interface CherryPickCommand {
   path: string;
   commitOid: string;
+  /** If true, stages changes without committing (like `git cherry-pick -n`) */
+  noCommit?: boolean;
 }
 
 export interface ContinueCherryPickCommand {
@@ -361,7 +363,7 @@ export interface AbortRevertCommand {
  */
 export interface ResetCommand {
   path: string;
-  target_ref: string;
+  targetRef: string;
   mode: "soft" | "mixed" | "hard";
 }
 
@@ -387,13 +389,13 @@ export interface FixupCommitCommand {
 export interface CreateStashCommand {
   path: string;
   message?: string;
-  include_untracked?: boolean;
+  includeUntracked?: boolean;
 }
 
 export interface ApplyStashCommand {
   path: string;
   index: number;
-  drop_after?: boolean;
+  dropAfter?: boolean;
 }
 
 export interface DropStashCommand {
@@ -628,4 +630,34 @@ export interface CheckoutFileFromBranchCommand {
 export interface GetFileAtCommitCommand {
   filePath: string;
   commit: string;
+}
+
+/**
+ * Maintenance commands
+ */
+export interface RunGcCommand {
+  path: string;
+  /** Run more thorough but slower garbage collection */
+  aggressive?: boolean;
+  /** Prune objects older than this date (e.g., "2.weeks.ago", "now") */
+  prune?: string;
+  /** Only run gc if needed (based on heuristics) */
+  auto?: boolean;
+}
+
+export interface RunFsckCommand {
+  path: string;
+  /** Run a more thorough check */
+  full?: boolean;
+}
+
+export interface RunPruneCommand {
+  path: string;
+  /** Show what would be pruned without actually pruning */
+  dryRun?: boolean;
+}
+
+export interface MaintenanceResult {
+  success: boolean;
+  message: string;
 }

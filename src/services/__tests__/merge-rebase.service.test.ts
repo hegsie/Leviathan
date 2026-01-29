@@ -41,27 +41,27 @@ describe('git.service - Merge operations', () => {
   });
 
   describe('merge', () => {
-    it('invokes merge with source_ref', async () => {
-      const result = await merge({ path: '/test/repo', source_ref: 'feature/login' });
+    it('invokes merge with sourceRef', async () => {
+      const result = await merge({ path: '/test/repo', sourceRef: 'feature/login' });
       expect(lastInvokedCommand).to.equal('merge');
-      expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo', source_ref: 'feature/login' });
+      expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo', sourceRef: 'feature/login' });
       expect(result.success).to.be.true;
     });
 
-    it('invokes merge with no_ff option', async () => {
-      await merge({ path: '/test/repo', source_ref: 'develop', no_ff: true });
+    it('invokes merge with noFf option', async () => {
+      await merge({ path: '/test/repo', sourceRef: 'develop', noFf: true });
       const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.no_ff).to.be.true;
+      expect(args.noFf).to.be.true;
     });
 
     it('invokes merge with squash option', async () => {
-      await merge({ path: '/test/repo', source_ref: 'feature/x', squash: true });
+      await merge({ path: '/test/repo', sourceRef: 'feature/x', squash: true });
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.squash).to.be.true;
     });
 
     it('invokes merge with custom message', async () => {
-      await merge({ path: '/test/repo', source_ref: 'develop', message: 'Merge develop' });
+      await merge({ path: '/test/repo', sourceRef: 'develop', message: 'Merge develop' });
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.message).to.equal('Merge develop');
     });
@@ -69,7 +69,7 @@ describe('git.service - Merge operations', () => {
     it('handles merge conflict error', async () => {
       mockInvoke = () => Promise.reject({ code: 'MERGE_CONFLICT', message: 'Merge conflict' });
 
-      const result = await merge({ path: '/test/repo', source_ref: 'feature/conflict' });
+      const result = await merge({ path: '/test/repo', sourceRef: 'feature/conflict' });
       expect(result.success).to.be.false;
       expect(result.error?.code).to.equal('MERGE_CONFLICT');
     });

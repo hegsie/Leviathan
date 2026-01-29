@@ -262,11 +262,11 @@ describe('git.service - Reset operations', () => {
     it('invokes reset with soft mode', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      const result = await reset({ path: '/test/repo', target_ref: 'abc123', mode: 'soft' });
+      const result = await reset({ path: '/test/repo', targetRef: 'abc123', mode: 'soft' });
       expect(lastInvokedCommand).to.equal('reset');
       expect(lastInvokedArgs).to.deep.equal({
         path: '/test/repo',
-        target_ref: 'abc123',
+        targetRef: 'abc123',
         mode: 'soft',
       });
       expect(result.success).to.be.true;
@@ -275,7 +275,7 @@ describe('git.service - Reset operations', () => {
     it('invokes reset with mixed mode', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      const result = await reset({ path: '/test/repo', target_ref: 'def456', mode: 'mixed' });
+      const result = await reset({ path: '/test/repo', targetRef: 'def456', mode: 'mixed' });
       expect(lastInvokedCommand).to.equal('reset');
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.mode).to.equal('mixed');
@@ -285,35 +285,35 @@ describe('git.service - Reset operations', () => {
     it('invokes reset with hard mode', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      const result = await reset({ path: '/test/repo', target_ref: 'ghi789', mode: 'hard' });
+      const result = await reset({ path: '/test/repo', targetRef: 'ghi789', mode: 'hard' });
       expect(lastInvokedCommand).to.equal('reset');
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.mode).to.equal('hard');
       expect(result.success).to.be.true;
     });
 
-    it('supports branch name as target_ref', async () => {
+    it('supports branch name as targetRef', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      const result = await reset({ path: '/test/repo', target_ref: 'main', mode: 'soft' });
+      const result = await reset({ path: '/test/repo', targetRef: 'main', mode: 'soft' });
       const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.target_ref).to.equal('main');
+      expect(args.targetRef).to.equal('main');
       expect(result.success).to.be.true;
     });
 
-    it('supports HEAD~N notation as target_ref', async () => {
+    it('supports HEAD~N notation as targetRef', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      const result = await reset({ path: '/test/repo', target_ref: 'HEAD~3', mode: 'mixed' });
+      const result = await reset({ path: '/test/repo', targetRef: 'HEAD~3', mode: 'mixed' });
       const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.target_ref).to.equal('HEAD~3');
+      expect(args.targetRef).to.equal('HEAD~3');
       expect(result.success).to.be.true;
     });
 
     it('handles commit not found error', async () => {
       mockInvoke = () => Promise.reject({ code: 'COMMIT_NOT_FOUND', message: 'Target not found' });
 
-      const result = await reset({ path: '/test/repo', target_ref: 'nonexistent', mode: 'soft' });
+      const result = await reset({ path: '/test/repo', targetRef: 'nonexistent', mode: 'soft' });
       expect(result.success).to.be.false;
       expect(result.error?.code).to.equal('COMMIT_NOT_FOUND');
     });
@@ -321,7 +321,7 @@ describe('git.service - Reset operations', () => {
     it('handles operation in progress error', async () => {
       mockInvoke = () => Promise.reject({ code: 'OPERATION_FAILED', message: 'Another operation is in progress' });
 
-      const result = await reset({ path: '/test/repo', target_ref: 'abc123', mode: 'hard' });
+      const result = await reset({ path: '/test/repo', targetRef: 'abc123', mode: 'hard' });
       expect(result.success).to.be.false;
     });
   });

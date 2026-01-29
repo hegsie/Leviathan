@@ -56,6 +56,7 @@ export interface RepositoryState {
   setTags: (tags: Tag[]) => void;
   setStashes: (stashes: Stash[]) => void;
   setStatus: (status: StatusEntry[]) => void;
+  updateActiveRepository: (repo: Repository) => void;
 
   // Actions - Recent repositories
   addRecentRepository: (path: string, name: string) => void;
@@ -249,6 +250,18 @@ export const repositoryStore = createStore<RepositoryState>()(
             status,
             stagedFiles: status.filter((s) => s.isStaged),
             unstagedFiles: status.filter((s) => !s.isStaged),
+          };
+          return { openRepositories: newRepos };
+        });
+      },
+
+      updateActiveRepository: (repo) => {
+        set((state) => {
+          if (state.activeIndex < 0) return state;
+          const newRepos = [...state.openRepositories];
+          newRepos[state.activeIndex] = {
+            ...newRepos[state.activeIndex],
+            repository: repo,
           };
           return { openRepositories: newRepos };
         });

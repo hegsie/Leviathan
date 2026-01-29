@@ -489,6 +489,250 @@ pub async fn create_orphan_branch(path: String, name: String, checkout: bool) ->
     Ok(())
 }
 
+/// Result of checkout with auto-stash
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutWithStashResult {
+    /// Whether checkout was successful
+    pub success: bool,
+    /// Whether changes were stashed
+    pub stashed: bool,
+    /// Whether stash was applied back
+    pub stash_applied: bool,
+    /// Whether stash apply had conflicts
+    pub stash_conflict: bool,
+    /// Message describing what happened
+    pub message: String,
+}
+
+/// Checkout a branch with automatic stash handling
+/// 1. If there are uncommitted changes, stash them
+/// 2. Perform the checkout
+/// 3. Try to apply the stash
+/// 4. Return status including any conflicts
+#[command]
+pub async fn checkout_with_autostash(
+    path: String,
+    ref_name: String,
+) -> Result<CheckoutWithStashResult> {
+    let mut repo = git2::Repository::open(Path::new(&path))?;
+
+    // Check if there are uncommitted changes
+    let has_changes = {
+        let statuses = repo.statuses(None)?;
+        statuses.iter().any(|s| {
+            let flags = s.status();
+            flags.intersects(
+                git2::Status::WT_MODIFIED
+                    | git2::Status::WT_NEW
+                    | git2::Status::WT_DELETED
+                    | git2::Status::WT_RENAMED
+                    | git2::Status::WT_TYPECHANGE
+                    | git2::Status::INDEX_MODIFIED
+                    | git2::Status::INDEX_NEW
+                    | git2::Status::INDEX_DELETED
+                    | git2::Status::INDEX_RENAMED
+                    | git2::Status::INDEX_TYPECHANGE,
+            )
+        })
+    }; // statuses is dropped here
+
+    let mut stashed = false;
+    let mut stash_oid: Option<git2::Oid> = None;
+
+    // If there are changes, stash them
+    if has_changes {
+        let sig = repo.signature()?;
+        let stash_message = format!("Auto-stash before checkout to {}", ref_name);
+
+        match repo.stash_save(
+            &sig,
+            &stash_message,
+            Some(git2::StashFlags::INCLUDE_UNTRACKED),
+        ) {
+            Ok(oid) => {
+                stashed = true;
+                stash_oid = Some(oid);
+            }
+            Err(e) => {
+                return Ok(CheckoutWithStashResult {
+                    success: false,
+                    stashed: false,
+                    stash_applied: false,
+                    stash_conflict: false,
+                    message: format!("Failed to stash changes: {}", e.message()),
+                });
+            }
+        }
+    }
+
+    // Get target commit OID for checkout - use block to limit borrow scope
+    let resolve_result: std::result::Result<(git2::Oid, bool), String> = {
+        let obj = match repo.revparse_single(&ref_name) {
+            Ok(obj) => obj,
+            Err(e) => {
+                return Err(LeviathanError::OperationFailed(format!(
+                    "RESTORE_STASH:Could not find ref '{}': {}",
+                    ref_name,
+                    e.message()
+                )));
+            }
+        };
+
+        let commit = match obj.peel_to_commit() {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(LeviathanError::OperationFailed(format!(
+                    "RESTORE_STASH:Could not resolve commit: {}",
+                    e.message()
+                )));
+            }
+        };
+
+        let is_local = repo.find_branch(&ref_name, git2::BranchType::Local).is_ok();
+
+        Ok((commit.id(), is_local))
+    }; // obj and commit dropped here
+
+    let (target_oid, is_local_branch) = resolve_result.map_err(|msg| {
+        // Restore stash if checkout target resolution failed
+        if stashed {
+            // Best effort - try to pop stash, but don't fail if it doesn't work
+            let _ = repo.stash_pop(0, None);
+        }
+        LeviathanError::OperationFailed(msg.replace("RESTORE_STASH:", ""))
+    })?;
+
+    // Perform checkout using the OID
+    let checkout_error: Option<String> = {
+        let obj = match repo.find_object(target_oid, None) {
+            Ok(o) => o,
+            Err(e) => {
+                // Can't restore stash here due to borrow, signal error
+                return Err(LeviathanError::OperationFailed(format!(
+                    "Could not find object: {}",
+                    e.message()
+                )));
+            }
+        };
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        checkout_opts.safe();
+
+        match repo.checkout_tree(&obj, Some(&mut checkout_opts)) {
+            Ok(()) => None,
+            Err(e) => Some(e.message().to_string()),
+        }
+    }; // obj dropped here
+
+    if let Some(msg) = checkout_error {
+        // Restore stash if checkout fails
+        if stashed {
+            // Verify the stash at index 0 is our auto-stash before popping
+            let mut first_stash_oid: Option<git2::Oid> = None;
+            let _ = repo.stash_foreach(|idx, _name, oid| {
+                if idx == 0 {
+                    first_stash_oid = Some(*oid);
+                    false // Stop iteration
+                } else {
+                    true // Continue (shouldn't happen since we stop at 0)
+                }
+            });
+
+            // Only pop if we can verify it's our stash, or if we didn't save the OID
+            let should_pop = match (stash_oid, first_stash_oid) {
+                (Some(expected), Some(actual)) => expected == actual,
+                (None, Some(_)) => true, // No expected OID, try to pop
+                _ => false,              // No stash found
+            };
+
+            if should_pop {
+                if let Err(pop_err) = repo.stash_pop(0, None) {
+                    return Err(LeviathanError::OperationFailed(format!(
+                        "Checkout failed: {}. Additionally, failed to restore stashed changes: {}",
+                        msg,
+                        pop_err.message()
+                    )));
+                }
+            }
+        }
+        return Err(LeviathanError::OperationFailed(format!(
+            "Checkout failed: {}",
+            msg
+        )));
+    }
+
+    // Set HEAD
+    if is_local_branch {
+        if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
+            repo.set_head(branch.get().name().unwrap())?;
+        }
+    } else {
+        repo.set_head_detached(target_oid)?;
+    }
+
+    // If we stashed, try to apply the stash
+    if stashed {
+        // Try to apply the stash
+        let mut stash_apply_opts = git2::StashApplyOptions::new();
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        checkout_opts.safe();
+        stash_apply_opts.checkout_options(checkout_opts);
+
+        match repo.stash_pop(0, Some(&mut stash_apply_opts)) {
+            Ok(()) => {
+                return Ok(CheckoutWithStashResult {
+                    success: true,
+                    stashed: true,
+                    stash_applied: true,
+                    stash_conflict: false,
+                    message: format!("Switched to {} and re-applied stashed changes", ref_name),
+                });
+            }
+            Err(e) => {
+                // Stash apply failed - might be conflicts
+                let has_conflicts = e.code() == git2::ErrorCode::MergeConflict
+                    || e.message().contains("conflict")
+                    || e.message().contains("CONFLICT");
+
+                if has_conflicts {
+                    // The stash is still in the stash list since pop failed
+                    return Ok(CheckoutWithStashResult {
+                        success: true,
+                        stashed: true,
+                        stash_applied: false,
+                        stash_conflict: true,
+                        message: format!(
+                            "Switched to {} but stash apply had conflicts. Stash saved as {}",
+                            ref_name,
+                            stash_oid.map(|o| o.to_string()).unwrap_or_default()
+                        ),
+                    });
+                } else {
+                    return Ok(CheckoutWithStashResult {
+                        success: true,
+                        stashed: true,
+                        stash_applied: false,
+                        stash_conflict: false,
+                        message: format!(
+                            "Switched to {} but failed to re-apply stash: {}",
+                            ref_name,
+                            e.message()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(CheckoutWithStashResult {
+        success: true,
+        stashed: false,
+        stash_applied: false,
+        stash_conflict: false,
+        message: format!("Switched to {}", ref_name),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

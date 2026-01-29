@@ -1,15 +1,10 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
+import { codeStyles } from '../../styles/code-styles.ts';
 import { getFileBlame } from '../../services/git.service.ts';
 import { formatRelativeTime } from '../../utils/format.ts';
-import {
-  initHighlighter,
-  detectLanguage,
-  highlightLineSync,
-  preloadLanguage,
-} from '../../utils/shiki-highlighter.ts';
-import type { BundledLanguage } from 'shiki';
+import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { BlameLine } from '../../types/git.types.ts';
 
 // Group of consecutive lines from the same commit
@@ -42,9 +37,10 @@ function getAuthorColor(name: string): string {
 }
 
 @customElement('lv-blame-view')
-export class LvBlameView extends LitElement {
+export class LvBlameView extends CodeRenderMixin(LitElement) {
   static styles = [
     sharedStyles,
+    codeStyles,
     css`
       :host {
         display: flex;
@@ -244,11 +240,6 @@ export class LvBlameView extends LitElement {
         width: 50px;
         min-width: 50px;
         padding: 0 var(--spacing-xs);
-        text-align: right;
-        color: var(--color-text-muted);
-        background: var(--color-bg-secondary);
-        border-right: 1px solid var(--color-border);
-        user-select: none;
         flex-shrink: 0;
       }
 
@@ -388,8 +379,6 @@ export class LvBlameView extends LitElement {
   @state() private error: string | null = null;
   @state() private contextMenu: BlameContextMenuState = { visible: false, x: 0, y: 0, group: null, line: null };
 
-  private language: BundledLanguage | null = null;
-
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
@@ -430,11 +419,7 @@ export class LvBlameView extends LitElement {
     this.error = null;
 
     // Initialize Shiki highlighter and detect language
-    await initHighlighter();
-    this.language = detectLanguage(this.filePath);
-    if (this.language) {
-      await preloadLanguage(this.language);
-    }
+    await this.initCodeLanguage(this.filePath);
 
     try {
       const result = await getFileBlame(
@@ -539,13 +524,6 @@ export class LvBlameView extends LitElement {
     } catch (err) {
       console.error('Failed to copy line:', err);
     }
-  }
-
-  private renderHighlightedContent(content: string) {
-    const tokens = highlightLineSync(content, this.language);
-    return html`${tokens.map(
-      (token) => html`<span style="color: ${token.color}">${token.content}</span>`
-    )}`;
   }
 
   private getFileName(): string {
@@ -682,7 +660,7 @@ export class LvBlameView extends LitElement {
                         class="blame-line"
                         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, group, line)}
                       >
-                        <div class="line-number">${line.lineNumber}</div>
+                        <div class="line-number code-line-no">${line.lineNumber}</div>
                         <div class="line-content">${this.renderHighlightedContent(line.content)}</div>
                       </div>
                     `

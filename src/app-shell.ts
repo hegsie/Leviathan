@@ -37,12 +37,18 @@ import './components/dialogs/lv-profile-manager-dialog.ts';
 import './components/dialogs/lv-migration-dialog.ts';
 import './components/dialogs/lv-create-tag-dialog.ts';
 import './components/dialogs/lv-create-branch-dialog.ts';
+import './components/dialogs/lv-cherry-pick-dialog.ts';
+import './components/dialogs/lv-repository-health-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import './components/common/lv-toast-container.ts';
+import './components/common/lv-progress-indicator.ts';
+import { progressService } from './services/progress.service.ts';
+import type { ProgressOperation } from './components/common/lv-progress-indicator.ts';
 import './components/dashboard/lv-context-dashboard.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
 import type { LvCreateTagDialog } from './components/dialogs/lv-create-tag-dialog.ts';
 import type { LvCreateBranchDialog } from './components/dialogs/lv-create-branch-dialog.ts';
+import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dialog.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
@@ -99,6 +105,97 @@ export class AppShell extends LitElement {
         flex: 1;
         overflow: hidden;
         background: var(--color-bg-primary);
+      }
+
+      .operation-banner {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-xs) var(--spacing-md);
+        background: var(--color-warning-bg, #3d3000);
+        border-bottom: 1px solid var(--color-warning-border, #665200);
+        color: var(--color-warning-text, #ffd700);
+        font-size: var(--font-size-sm);
+      }
+
+      .operation-banner.cherrypick {
+        background: var(--color-info-bg, #002d4d);
+        border-color: var(--color-info-border, #004d80);
+        color: var(--color-info-text, #66b3ff);
+      }
+
+      .operation-banner.merge {
+        background: var(--color-success-bg, #0d3d0d);
+        border-color: var(--color-success-border, #1a661a);
+        color: var(--color-success-text, #66ff66);
+      }
+
+      .operation-banner.rebase,
+      .operation-banner.rebase-interactive,
+      .operation-banner.rebase-merge {
+        background: var(--color-warning-bg, #3d3000);
+        border-color: var(--color-warning-border, #665200);
+        color: var(--color-warning-text, #ffd700);
+      }
+
+      .operation-banner.revert {
+        background: var(--color-error-bg, #3d0d0d);
+        border-color: var(--color-error-border, #661a1a);
+        color: var(--color-error-text, #ff6666);
+      }
+
+      .operation-icon {
+        display: flex;
+        align-items: center;
+      }
+
+      .operation-text {
+        flex: 1;
+        font-weight: var(--font-weight-medium);
+      }
+
+      .operation-btn {
+        padding: var(--spacing-xxs) var(--spacing-sm);
+        border: 1px solid currentColor;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: inherit;
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: background-color 0.15s;
+      }
+
+      .operation-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .operation-btn-primary {
+        background: rgba(255, 255, 255, 0.15);
+        border-color: rgba(255, 255, 255, 0.3);
+      }
+
+      .operation-btn-primary:hover {
+        background: rgba(255, 255, 255, 0.25);
+      }
+
+      .operation-abort-btn {
+        padding: var(--spacing-xxs) var(--spacing-sm);
+        border: 1px solid currentColor;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: inherit;
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: background-color 0.15s;
+      }
+
+      .operation-abort-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .operation-banner-actions {
+        display: flex;
+        gap: var(--spacing-xs);
       }
 
       .diff-area {
@@ -319,6 +416,10 @@ export class AppShell extends LitElement {
   @state() private blameFile: string | null = null;
   @state() private blameCommitOid: string | null = null;
 
+  // Progress operations
+  @state() private progressOperations: ProgressOperation[] = [];
+  private progressUnsubscribe?: () => void;
+
   // Settings dialog
   @state() private showSettings = false;
 
@@ -332,6 +433,16 @@ export class AppShell extends LitElement {
     y: number;
     commit: Commit | null;
   } = { visible: false, x: 0, y: 0, commit: null };
+
+  // Ref (branch/tag) context menu
+  @state() private refContextMenu: {
+    visible: boolean;
+    x: number;
+    y: number;
+    refName: string;
+    fullName: string;
+    refType: 'localBranch' | 'remoteBranch' | 'tag';
+  } = { visible: false, x: 0, y: 0, refName: '', fullName: '', refType: 'localBranch' };
 
   // Conflict resolution dialog
   @state() private showConflictDialog = false;
@@ -357,6 +468,9 @@ export class AppShell extends LitElement {
 
   // Clean dialog
   @state() private showClean = false;
+
+  // Repository health dialog
+  @state() private showRepositoryHealth = false;
 
   // Bisect dialog
   @state() private showBisect = false;
@@ -416,6 +530,7 @@ export class AppShell extends LitElement {
   @query('lv-graph-canvas') private graphCanvas?: LvGraphCanvas;
   @query('lv-create-tag-dialog') private createTagDialog?: LvCreateTagDialog;
   @query('lv-create-branch-dialog') private createBranchDialog?: LvCreateBranchDialog;
+  @query('lv-cherry-pick-dialog') private cherryPickDialog?: LvCherryPickDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -442,6 +557,15 @@ export class AppShell extends LitElement {
   // Handle repository-refresh events from window (e.g., after commit)
   private handleWindowRefresh = (): void => {
     this.graphCanvas?.refresh?.();
+  };
+
+  // Handle open-conflict-dialog events from child components (e.g., interactive rebase)
+  private handleOpenConflictDialogEvent = (e: Event): void => {
+    const customEvent = e as CustomEvent<{ operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' }>;
+    if (customEvent.detail?.operationType) {
+      this.conflictOperationType = customEvent.detail.operationType;
+    }
+    this.showConflictDialog = true;
   };
 
   connectedCallback(): void {
@@ -492,6 +616,7 @@ export class AppShell extends LitElement {
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('contextmenu', this.handleContextMenu);
     window.addEventListener('repository-refresh', this.handleWindowRefresh);
+    this.addEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
 
     // Load vim mode from keyboard service
     this.vimMode = keyboardService.isVimMode();
@@ -545,6 +670,11 @@ export class AppShell extends LitElement {
       createStash: () => this.handleCreateStash(),
       closeDiff: () => this.handleCloseOverlay(),
     });
+
+    // Subscribe to progress updates
+    this.progressUnsubscribe = progressService.subscribe((operations) => {
+      this.progressOperations = operations;
+    });
   }
 
   disconnectedCallback(): void {
@@ -557,12 +687,15 @@ export class AppShell extends LitElement {
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('contextmenu', this.handleContextMenu);
     window.removeEventListener('repository-refresh', this.handleWindowRefresh);
+    this.removeEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
     gitService.cleanupRemoteOperationListeners();
     // Stop periodic token validation
     unifiedProfileService.stopPeriodicTokenValidation();
     // Clean up update listeners
     this.updateUnlisteners.forEach((unlisten) => unlisten());
     this.updateUnlisteners = [];
+    // Unsubscribe from progress service
+    this.progressUnsubscribe?.();
   }
 
   private async checkUnifiedProfilesMigration(): Promise<void> {
@@ -682,6 +815,8 @@ export class AppShell extends LitElement {
       this.showReflog = false;
     } else if (this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
+    } else if (this.refContextMenu.visible) {
+      this.refContextMenu = { ...this.refContextMenu, visible: false };
     } else if (this.showDiff) {
       this.handleCloseDiff();
     } else if (this.showBlame) {
@@ -694,6 +829,9 @@ export class AppShell extends LitElement {
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+    if (this.refContextMenu.visible) {
+      this.refContextMenu = { ...this.refContextMenu, visible: false };
     }
   };
 
@@ -712,29 +850,197 @@ export class AppShell extends LitElement {
     };
   }
 
-  private async handleCherryPick(): Promise<void> {
+  private handleRefContextMenu(e: CustomEvent): void {
+    const { refName, fullName, refType, position } = e.detail as {
+      refName: string;
+      fullName: string;
+      refType: 'localBranch' | 'remoteBranch' | 'tag';
+      position: { x: number; y: number };
+    };
+
+    this.refContextMenu = {
+      visible: true,
+      x: position.x,
+      y: position.y,
+      refName,
+      fullName,
+      refType,
+    };
+  }
+
+  private async handleRefCheckout(): Promise<void> {
+    if (!this.activeRepository) return;
+
+    const refName = this.refContextMenu.refName;
+    this.refContextMenu = { ...this.refContextMenu, visible: false };
+
+    const result = await gitService.checkout(
+      this.activeRepository.repository.path,
+      { ref: refName }
+    );
+
+    if (result.success) {
+      this.graphCanvas?.refresh?.();
+    } else {
+      log.error('Checkout failed:', result.error);
+      showToast(result.error?.message || 'Checkout failed', 'error');
+    }
+  }
+
+  private async handleRefMerge(): Promise<void> {
+    if (!this.activeRepository) return;
+
+    const refName = this.refContextMenu.refName;
+    this.refContextMenu = { ...this.refContextMenu, visible: false };
+
+    const result = await gitService.merge({
+      path: this.activeRepository.repository.path,
+      sourceRef: refName,
+    });
+
+    if (result.success) {
+      this.graphCanvas?.refresh?.();
+      showToast(`Merged ${refName}`, 'success');
+    } else if (result.error?.code === 'MERGE_CONFLICT') {
+      this.conflictOperationType = 'merge';
+      this.showConflictDialog = true;
+    } else {
+      log.error('Merge failed:', result.error);
+      showToast(result.error?.message || 'Merge failed', 'error');
+    }
+  }
+
+  private async handleRefRebase(): Promise<void> {
+    if (!this.activeRepository) return;
+
+    const refName = this.refContextMenu.refName;
+    this.refContextMenu = { ...this.refContextMenu, visible: false };
+
+    const result = await gitService.rebase({
+      path: this.activeRepository.repository.path,
+      onto: refName,
+    });
+
+    if (result.success) {
+      this.graphCanvas?.refresh?.();
+      showToast(`Rebased onto ${refName}`, 'success');
+    } else if (result.error?.code === 'REBASE_CONFLICT') {
+      this.conflictOperationType = 'rebase';
+      this.showConflictDialog = true;
+    } else {
+      log.error('Rebase failed:', result.error);
+      showToast(result.error?.message || 'Rebase failed', 'error');
+    }
+  }
+
+  private async handleRefDeleteBranch(): Promise<void> {
+    if (!this.activeRepository) return;
+
+    const branchName = this.refContextMenu.refName;
+    this.refContextMenu = { ...this.refContextMenu, visible: false };
+
+    const result = await gitService.deleteBranch(
+      this.activeRepository.repository.path,
+      branchName,
+      false
+    );
+
+    if (result.success) {
+      this.graphCanvas?.refresh?.();
+      showToast(`Deleted branch ${branchName}`, 'success');
+    } else {
+      log.error('Delete branch failed:', result.error);
+      showToast(result.error?.message || 'Delete branch failed', 'error');
+    }
+  }
+
+  private async handleRefDeleteTag(): Promise<void> {
+    if (!this.activeRepository) return;
+
+    const tagName = this.refContextMenu.refName;
+    this.refContextMenu = { ...this.refContextMenu, visible: false };
+
+    const result = await gitService.deleteTag({
+      path: this.activeRepository.repository.path,
+      name: tagName,
+    });
+
+    if (result.success) {
+      this.graphCanvas?.refresh?.();
+      showToast(`Deleted tag ${tagName}`, 'success');
+    } else {
+      log.error('Delete tag failed:', result.error);
+      showToast(result.error?.message || 'Delete tag failed', 'error');
+    }
+  }
+
+  private async handleRefPushTag(): Promise<void> {
+    if (!this.activeRepository) return;
+
+    const tagName = this.refContextMenu.refName;
+    this.refContextMenu = { ...this.refContextMenu, visible: false };
+
+    const result = await gitService.pushTag({
+      path: this.activeRepository.repository.path,
+      name: tagName,
+    });
+
+    if (result.success) {
+      showToast(`Pushed tag ${tagName}`, 'success');
+    } else {
+      log.error('Push tag failed:', result.error);
+      showToast(result.error?.message || 'Push tag failed', 'error');
+    }
+  }
+
+  private handleCherryPick(): void {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    const result = await import('./services/git.service.ts').then((m) =>
-      m.cherryPick({
-        path: this.activeRepository!.repository.path,
-        commitOid: commit.oid,
-      })
-    );
+    // Open the cherry-pick dialog
+    this.cherryPickDialog?.open(commit);
+  }
 
-    if (result.success) {
-      this.graphCanvas?.refresh?.();
-    } else if (result.error?.code === 'CHERRY_PICK_CONFLICT') {
-      // Show conflict resolution dialog
-      this.conflictOperationType = 'cherry-pick';
-      this.showConflictDialog = true;
+  private handleCherryPickComplete(e: CustomEvent): void {
+    const { sourceCommit, noCommit } = e.detail;
+    this.graphCanvas?.refresh?.();
+    if (noCommit) {
+      showToast(`Staged changes from ${sourceCommit.oid.substring(0, 7)}`, 'success');
     } else {
-      log.error('Cherry-pick failed:', result.error);
-      showToast(result.error?.message || 'Cherry-pick failed', 'error');
+      showToast(`Cherry-picked ${sourceCommit.oid.substring(0, 7)}`, 'success');
     }
+    this.handleRefresh();
+  }
+
+  private handleCherryPickConflict(): void {
+    // Show conflict resolution dialog
+    this.conflictOperationType = 'cherry-pick';
+    this.showConflictDialog = true;
+    this.handleRefresh();
+  }
+
+  private canResolveConflicts(state: string): boolean {
+    // These operations can have conflicts that need resolution
+    return ['cherrypick', 'merge', 'rebase', 'rebase-interactive', 'rebase-merge', 'revert'].includes(state);
+  }
+
+  private handleOpenConflictDialog(): void {
+    if (!this.activeRepository) return;
+
+    const state = this.activeRepository.repository.state;
+    if (state === 'cherrypick') {
+      this.conflictOperationType = 'cherry-pick';
+    } else if (state === 'merge') {
+      this.conflictOperationType = 'merge';
+    } else if (state === 'rebase' || state === 'rebase-interactive' || state === 'rebase-merge') {
+      this.conflictOperationType = 'rebase';
+    } else if (state === 'revert') {
+      this.conflictOperationType = 'revert';
+    }
+
+    this.showConflictDialog = true;
   }
 
   private async handleRevertCommit(): Promise<void> {
@@ -752,6 +1058,7 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       this.graphCanvas?.refresh?.();
+      showToast(`Reverted ${commit.oid.substring(0, 7)}`, 'success');
     } else if (result.error?.code === 'REVERT_CONFLICT') {
       // Show conflict resolution dialog
       this.conflictOperationType = 'revert';
@@ -759,6 +1066,42 @@ export class AppShell extends LitElement {
     } else {
       log.error('Revert failed:', result.error);
       showToast(result.error?.message || 'Revert failed', 'error');
+    }
+  }
+
+  private async handleAbortOperation(): Promise<void> {
+    if (!this.activeRepository) return;
+
+    const state = this.activeRepository.repository.state;
+    const path = this.activeRepository.repository.path;
+    let result;
+
+    switch (state) {
+      case 'cherrypick':
+        result = await gitService.abortCherryPick({ path });
+        break;
+      case 'merge':
+        result = await gitService.abortMerge({ path });
+        break;
+      case 'rebase':
+      case 'rebase-interactive':
+      case 'rebase-merge':
+        result = await gitService.abortRebase({ path });
+        break;
+      case 'revert':
+        result = await gitService.abortRevert({ path });
+        break;
+      default:
+        showToast(`Cannot abort operation: ${state}`, 'error');
+        return;
+    }
+
+    if (result.success) {
+      showToast(`Aborted ${state}`, 'success');
+      this.handleRefresh();
+    } else {
+      log.error('Abort failed:', result.error);
+      showToast(result.error?.message || 'Abort failed', 'error');
     }
   }
 
@@ -779,7 +1122,7 @@ export class AppShell extends LitElement {
     const result = await import('./services/git.service.ts').then((m) =>
       m.reset({
         path: this.activeRepository!.repository.path,
-        target_ref: commit.oid,
+        targetRef: commit.oid,
         mode,
       })
     );
@@ -806,6 +1149,139 @@ export class AppShell extends LitElement {
     if (commit) {
       this.createBranchDialog?.open(commit.oid);
     }
+  }
+
+  /**
+   * Create a fixup commit targeting the selected commit
+   * Requires staged changes. The fixup commit will be marked with "fixup! <original-message>"
+   * Can be auto-squashed later with interactive rebase --autosquash
+   */
+  private async handleFixupCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Check if there are staged changes
+    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    if (!statusResult.success || !statusResult.data) {
+      showToast('Failed to check status', 'error');
+      return;
+    }
+
+    const hasStagedChanges = statusResult.data.some(f => f.isStaged);
+    if (!hasStagedChanges) {
+      showToast('No staged changes to fixup', 'error');
+      return;
+    }
+
+    // Create fixup commit
+    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+      message: `fixup! ${commit.summary}`,
+    });
+
+    if (result.success) {
+      showToast(`Created fixup commit for ${commit.shortId}`, 'success');
+      this.graphCanvas?.refresh?.();
+      window.dispatchEvent(new CustomEvent('status-refresh'));
+    } else {
+      showToast(result.error?.message || 'Failed to create fixup commit', 'error');
+    }
+  }
+
+  /**
+   * Create a squash commit targeting the selected commit
+   * Similar to fixup but preserves the message for editing during autosquash
+   */
+  private async handleSquashCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Check if there are staged changes
+    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    if (!statusResult.success || !statusResult.data) {
+      showToast('Failed to check status', 'error');
+      return;
+    }
+
+    const hasStagedChanges = statusResult.data.some(f => f.isStaged);
+    if (!hasStagedChanges) {
+      showToast('No staged changes to squash', 'error');
+      return;
+    }
+
+    // Create squash commit
+    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+      message: `squash! ${commit.summary}`,
+    });
+
+    if (result.success) {
+      showToast(`Created squash commit for ${commit.shortId}`, 'success');
+      this.graphCanvas?.refresh?.();
+      window.dispatchEvent(new CustomEvent('status-refresh'));
+    } else {
+      showToast(result.error?.message || 'Failed to create squash commit', 'error');
+    }
+  }
+
+  /**
+   * Reword the selected commit
+   * For HEAD: Opens amend mode in commit panel
+   * For other commits: Dispatches event to open interactive rebase with reword action
+   */
+  private async handleRewordCommit(): Promise<void> {
+    const commit = this.contextMenu.commit;
+    if (!commit || !this.activeRepository) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Check if this is HEAD commit by comparing with the first commit in history.
+    // Note: This works for the common case of a branch checkout. In detached HEAD state,
+    // the first commit in history is still HEAD, so this approach remains valid.
+    const historyResult = await gitService.getCommitHistory({
+      path: this.activeRepository.repository.path,
+      limit: 1,
+    });
+
+    const isHead = historyResult.success && historyResult.data &&
+      historyResult.data.length > 0 && historyResult.data[0].oid === commit.oid;
+
+    if (isHead) {
+      // For HEAD, just trigger amend mode
+      window.dispatchEvent(new CustomEvent('trigger-amend', {
+        detail: { commit },
+      }));
+    } else {
+      // For other commits, dispatch event to open interactive rebase dialog
+      // pre-configured for rewording this commit
+      this.dispatchEvent(new CustomEvent('open-interactive-rebase', {
+        bubbles: true,
+        composed: true,
+        detail: {
+          upstreamRef: `${commit.oid}^`,
+          mode: 'reword',
+          targetCommitOid: commit.oid,
+        },
+      }));
+    }
+  }
+
+  /**
+   * Quick amend - only available for HEAD commit
+   * Triggers amend mode in commit panel
+   */
+  private handleQuickAmend(): void {
+    const commit = this.contextMenu.commit;
+    if (!commit) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Dispatch event to trigger amend mode in commit panel
+    window.dispatchEvent(new CustomEvent('trigger-amend', {
+      detail: { commit },
+    }));
   }
 
   private handleConflictResolved(): void {
@@ -950,7 +1426,14 @@ export class AppShell extends LitElement {
     window.dispatchEvent(new CustomEvent('unstage-all'));
   }
 
-  private handleRefresh(): void {
+  private async handleRefresh(): Promise<void> {
+    // Refresh the repository state (e.g., after cherry-pick, merge, rebase)
+    if (this.activeRepository) {
+      const result = await gitService.openRepository({ path: this.activeRepository.repository.path });
+      if (result.success && result.data) {
+        repositoryStore.getState().updateActiveRepository(result.data);
+      }
+    }
     // Trigger refresh of the graph
     this.graphCanvas?.refresh?.();
     // Dispatch event for other components (like context dashboard) to update
@@ -1163,6 +1646,41 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => { this.showCredentials = true; }),
       },
       {
+        id: 'gc',
+        label: 'Run Garbage Collection',
+        category: 'action',
+        icon: 'trash',
+        action: this.requiresRepository(() => this.handleRunGc()),
+      },
+      {
+        id: 'gc-aggressive',
+        label: 'Run Garbage Collection (Aggressive)',
+        category: 'action',
+        icon: 'trash',
+        action: this.requiresRepository(() => this.handleRunGc(true)),
+      },
+      {
+        id: 'fsck',
+        label: 'Check Repository Integrity',
+        category: 'action',
+        icon: 'search',
+        action: this.requiresRepository(() => this.handleRunFsck()),
+      },
+      {
+        id: 'prune',
+        label: 'Prune Unreachable Objects',
+        category: 'action',
+        icon: 'trash',
+        action: this.requiresRepository(() => this.handleRunPrune()),
+      },
+      {
+        id: 'repository-health',
+        label: 'Repository Health & Maintenance',
+        category: 'action',
+        icon: 'activity',
+        action: this.requiresRepository(() => { this.showRepositoryHealth = true; }),
+      },
+      {
         id: 'github',
         label: 'GitHub Integration',
         category: 'action',
@@ -1304,26 +1822,74 @@ export class AppShell extends LitElement {
 
   private async handleFetch(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.fetch({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const opId = progressService.startOperation('fetch', 'Fetching from remote...');
+    try {
+      await gitService.fetch({ path: this.activeRepository.repository.path });
+      progressService.completeOperation(opId);
+      this.handleRefresh();
+    } catch {
+      progressService.failOperation(opId);
+      // Error is logged; toast notification is shown via remote-operation-completed event
+    }
   }
 
   private async handlePull(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.pull({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const opId = progressService.startOperation('pull', 'Pulling from remote...');
+    try {
+      await gitService.pull({ path: this.activeRepository.repository.path });
+      progressService.completeOperation(opId);
+      this.handleRefresh();
+    } catch {
+      progressService.failOperation(opId);
+      // Error is logged; toast notification is shown via remote-operation-completed event
+    }
   }
 
   private async handlePush(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.push({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const opId = progressService.startOperation('push', 'Pushing to remote...');
+    try {
+      await gitService.push({ path: this.activeRepository.repository.path });
+      progressService.completeOperation(opId);
+      this.handleRefresh();
+    } catch {
+      progressService.failOperation(opId);
+      // Error is logged; toast notification is shown via remote-operation-completed event
+    }
+  }
+
+  private handleCancelOperation(e: CustomEvent<{ id: string }>): void {
+    progressService.cancelOperation(e.detail.id);
   }
 
   private async handleCreateStash(): Promise<void> {
     if (!this.activeRepository) return;
     await gitService.createStash({ path: this.activeRepository.repository.path });
     this.handleRefresh();
+  }
+
+  private async handleRunGc(aggressive = false): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.runGc({
+      path: this.activeRepository.repository.path,
+      aggressive,
+    });
+  }
+
+  private async handleRunFsck(): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.runFsck({
+      path: this.activeRepository.repository.path,
+      full: true,
+    });
+  }
+
+  private async handleRunPrune(): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.runPrune({
+      path: this.activeRepository.repository.path,
+    });
   }
 
   private async handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
@@ -1403,11 +1969,47 @@ export class AppShell extends LitElement {
               ` : ''}
 
               <main class="center-panel">
+                ${this.activeRepository.repository.state !== 'clean'
+                  ? html`
+                      <div class="operation-banner ${this.activeRepository.repository.state}">
+                        <span class="operation-icon">
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <line x1="12" y1="8" x2="12" y2="12"></line>
+                            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                          </svg>
+                        </span>
+                        <span class="operation-text">
+                          ${this.activeRepository.repository.state === 'cherrypick' ? 'Cherry-pick in progress' :
+                            this.activeRepository.repository.state === 'merge' ? 'Merge in progress' :
+                            this.activeRepository.repository.state === 'rebase' ||
+                            this.activeRepository.repository.state === 'rebase-interactive' ||
+                            this.activeRepository.repository.state === 'rebase-merge' ? 'Rebase in progress' :
+                            this.activeRepository.repository.state === 'revert' ? 'Revert in progress' :
+                            this.activeRepository.repository.state === 'bisect' ? 'Bisect in progress' :
+                            `Operation in progress: ${this.activeRepository.repository.state}`}
+                        </span>
+                        <div class="operation-banner-actions">
+                          ${this.canResolveConflicts(this.activeRepository.repository.state)
+                            ? html`
+                                <button class="operation-btn operation-btn-primary" @click=${this.handleOpenConflictDialog}>
+                                  Resolve Conflicts
+                                </button>
+                              `
+                            : ''}
+                          <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
+                            Abort
+                          </button>
+                        </div>
+                      </div>
+                    `
+                  : ''}
                 <div class="graph-area">
                   <lv-graph-canvas
                     repositoryPath=${this.activeRepository.repository.path}
                     @commit-selected=${this.handleCommitSelected}
                     @commit-context-menu=${this.handleCommitContextMenu}
+                    @ref-context-menu=${this.handleRefContextMenu}
                     @checkout-branch=${this.handleCheckoutBranchFromGraph}
                     @copy-sha=${this.handleCopySha}
                   ></lv-graph-canvas>
@@ -1537,6 +2139,40 @@ export class AppShell extends LitElement {
                 <span class="context-menu-summary">${this.contextMenu.commit.summary}</span>
               </div>
               <div class="context-menu-divider"></div>
+              <button class="context-menu-item" @click=${this.handleQuickAmend} title="Amend (edit) this commit">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                </svg>
+                Amend
+              </button>
+              <button class="context-menu-item" @click=${this.handleRewordCommit} title="Change the commit message">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="17" y1="10" x2="3" y2="10"></line>
+                  <line x1="21" y1="6" x2="3" y2="6"></line>
+                  <line x1="21" y1="14" x2="3" y2="14"></line>
+                  <line x1="17" y1="18" x2="3" y2="18"></line>
+                </svg>
+                Reword
+              </button>
+              <div class="context-menu-divider"></div>
+              <button class="context-menu-item" @click=${this.handleFixupCommit} title="Create fixup commit for this commit (requires staged changes)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                Fixup into this
+              </button>
+              <button class="context-menu-item" @click=${this.handleSquashCommit} title="Create squash commit for this commit (requires staged changes)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="9" y1="3" x2="9" y2="21"></line>
+                  <line x1="15" y1="3" x2="15" y2="21"></line>
+                </svg>
+                Squash into this
+              </button>
+              <div class="context-menu-divider"></div>
               <button class="context-menu-item" @click=${this.handleCherryPick}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M8 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2z"/>
@@ -1584,6 +2220,105 @@ export class AppShell extends LitElement {
           `
         : ''}
 
+      ${this.refContextMenu.visible
+        ? html`
+            <div
+              class="context-menu"
+              style="left: ${this.refContextMenu.x}px; top: ${this.refContextMenu.y}px;"
+              @click=${(e: Event) => e.stopPropagation()}
+            >
+              <div class="context-menu-header">
+                <span class="context-menu-oid">${this.refContextMenu.refType === 'tag' ? 'Tag' : this.refContextMenu.refType === 'remoteBranch' ? 'Remote' : 'Branch'}</span>
+                <span class="context-menu-summary">${this.refContextMenu.refName}</span>
+              </div>
+              <div class="context-menu-divider"></div>
+              ${this.refContextMenu.refType === 'localBranch'
+                ? html`
+                    <button class="context-menu-item" @click=${this.handleRefCheckout}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                      Checkout
+                    </button>
+                    <button class="context-menu-item" @click=${this.handleRefMerge}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="18" cy="18" r="3"></circle>
+                        <circle cx="6" cy="6" r="3"></circle>
+                        <path d="M6 21V9a9 9 0 0 0 9 9"></path>
+                      </svg>
+                      Merge into current branch
+                    </button>
+                    <button class="context-menu-item" @click=${this.handleRefRebase}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="6" y1="3" x2="6" y2="15"></line>
+                        <circle cx="18" cy="6" r="3"></circle>
+                        <circle cx="6" cy="18" r="3"></circle>
+                        <path d="M18 9a9 9 0 0 1-9 9"></path>
+                      </svg>
+                      Rebase current branch onto this
+                    </button>
+                    <div class="context-menu-divider"></div>
+                    <button class="context-menu-item danger" @click=${this.handleRefDeleteBranch}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                      </svg>
+                      Delete branch
+                    </button>
+                  `
+                : this.refContextMenu.refType === 'remoteBranch'
+                  ? html`
+                      <button class="context-menu-item" @click=${this.handleRefCheckout}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                        Checkout
+                      </button>
+                      <button class="context-menu-item" @click=${this.handleRefMerge}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <circle cx="18" cy="18" r="3"></circle>
+                          <circle cx="6" cy="6" r="3"></circle>
+                          <path d="M6 21V9a9 9 0 0 0 9 9"></path>
+                        </svg>
+                        Merge into current branch
+                      </button>
+                      <button class="context-menu-item" @click=${this.handleRefRebase}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <line x1="6" y1="3" x2="6" y2="15"></line>
+                          <circle cx="18" cy="6" r="3"></circle>
+                          <circle cx="6" cy="18" r="3"></circle>
+                          <path d="M18 9a9 9 0 0 1-9 9"></path>
+                        </svg>
+                        Rebase current branch onto this
+                      </button>
+                    `
+                  : html`
+                      <button class="context-menu-item" @click=${this.handleRefCheckout}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                        Checkout tag
+                      </button>
+                      <button class="context-menu-item" @click=${this.handleRefPushTag}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <line x1="12" y1="19" x2="12" y2="5"></line>
+                          <polyline points="5 12 12 5 19 12"></polyline>
+                        </svg>
+                        Push tag to remote
+                      </button>
+                      <div class="context-menu-divider"></div>
+                      <button class="context-menu-item danger" @click=${this.handleRefDeleteTag}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <polyline points="3 6 5 6 21 6"></polyline>
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                        Delete tag
+                      </button>
+                    `}
+            </div>
+          `
+        : ''}
+
       <lv-command-palette
         ?open=${this.showCommandPalette}
         .commands=${this.getPaletteCommands()}
@@ -1624,6 +2359,19 @@ export class AppShell extends LitElement {
           @close=${() => { this.showClean = false; }}
           @files-cleaned=${() => this.handleRefresh()}
         ></lv-clean-dialog>
+      ` : ''}
+
+      ${this.activeRepository && this.showRepositoryHealth ? html`
+        <lv-modal
+          title="Repository Health"
+          ?open=${this.showRepositoryHealth}
+          @close=${() => { this.showRepositoryHealth = false; }}
+        >
+          <lv-repository-health-dialog
+            .repositoryPath=${this.activeRepository.repository.path}
+            @close=${() => { this.showRepositoryHealth = false; }}
+          ></lv-repository-health-dialog>
+        </lv-modal>
       ` : ''}
 
       ${this.activeRepository ? html`
@@ -1753,9 +2501,19 @@ export class AppShell extends LitElement {
           .repositoryPath=${this.activeRepository.repository.path}
           @branch-created=${() => this.handleRefresh()}
         ></lv-create-branch-dialog>
+        <lv-cherry-pick-dialog
+          .repositoryPath=${this.activeRepository.repository.path}
+          .currentBranch=${this.activeRepository.currentBranch?.shorthand ?? 'HEAD'}
+          @cherry-pick-complete=${this.handleCherryPickComplete}
+          @cherry-pick-conflict=${this.handleCherryPickConflict}
+        ></lv-cherry-pick-dialog>
       ` : ''}
 
       <lv-toast-container></lv-toast-container>
+      <lv-progress-indicator
+        .operations=${this.progressOperations}
+        @cancel-operation=${this.handleCancelOperation}
+      ></lv-progress-indicator>
     `;
   }
 }

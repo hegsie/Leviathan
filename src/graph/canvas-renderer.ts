@@ -60,6 +60,12 @@ export interface RenderTheme {
     remoteBranchText: string;
     tag: string;
     tagText: string;
+    /** Annotated tag background (brighter than lightweight) */
+    annotatedTag: string;
+    annotatedTagText: string;
+    /** Version tag (semver) background - special highlight */
+    versionTag: string;
+    versionTagText: string;
     head: string;
     headText: string;
   };
@@ -136,6 +142,12 @@ export function getThemeFromCSS(): RenderTheme {
       remoteBranchText: getCSSVar('--ref-remote-text', '#90caf9'),
       tag: getCSSVar('--ref-tag-bg', '#5c4020'),
       tagText: getCSSVar('--ref-tag-text', '#ffe082'),
+      // Annotated tags: brighter, more vibrant orange
+      annotatedTag: getCSSVar('--ref-tag-annotated-bg', '#7a5525'),
+      annotatedTagText: getCSSVar('--ref-tag-annotated-text', '#ffd54f'),
+      // Version tags (semver): special purple highlight
+      versionTag: getCSSVar('--ref-tag-version-bg', '#4a3060'),
+      versionTagText: getCSSVar('--ref-tag-version-text', '#ce93d8'),
       head: getCSSVar('--ref-head-bg', '#5c3020'),
       headText: getCSSVar('--ref-head-text', '#ffab91'),
     },
@@ -172,6 +184,10 @@ const DEFAULT_THEME: RenderTheme = {
     remoteBranchText: '#90caf9',
     tag: '#5c4020',
     tagText: '#ffe082',
+    annotatedTag: '#7a5525',
+    annotatedTagText: '#ffd54f',
+    versionTag: '#4a3060',
+    versionTagText: '#ce93d8',
     head: '#5c3020',
     headText: '#ffab91',
   },
@@ -305,6 +321,10 @@ export class CanvasRenderer {
     label: string;
     fullName: string;
     refType: string;
+    /** For tags: whether the tag is annotated */
+    isAnnotated?: boolean;
+    /** For tags: the tag message */
+    tagMessage?: string;
   }> = [];
 
   // Overflow indicator hitboxes for showing hidden labels
@@ -1180,7 +1200,7 @@ export class CanvasRenderer {
             if (hasIcon) {
               ctx.strokeStyle = textColor;
               ctx.fillStyle = textColor;
-              this.drawRefIcon(ref.refType, currentX + smallLabelPadding, labelY, smallIconSize);
+              this.drawRefIcon(ref.refType, currentX + smallLabelPadding, labelY, smallIconSize, ref.isAnnotated);
               textStartX = currentX + smallLabelPadding + smallIconSize + 3;
             }
 
@@ -1191,7 +1211,7 @@ export class CanvasRenderer {
             ctx.textBaseline = 'middle';
             ctx.fillText(displayLabel, textStartX, labelY);
 
-            // Store hitbox
+            // Store hitbox (include tag metadata for tooltips)
             this.refLabelHitboxes.push({
               x: currentX,
               y: labelY - smallLabelHeight / 2,
@@ -1200,6 +1220,8 @@ export class CanvasRenderer {
               label: ref.shorthand,
               fullName: ref.name,
               refType: ref.refType,
+              isAnnotated: ref.isAnnotated,
+              tagMessage: ref.tagMessage,
             });
 
             currentX += actualPillWidth;
@@ -1296,8 +1318,9 @@ export class CanvasRenderer {
   /**
    * Draw an icon for a ref type - matches sidebar branch icons exactly
    * SVG viewBox is 0 0 24 24, scaled to iconSize
+   * @param isAnnotated For tags: whether the tag is annotated (filled) or lightweight (hollow)
    */
-  private drawRefIcon(refType: RefType, x: number, y: number, size: number): void {
+  private drawRefIcon(refType: RefType, x: number, y: number, size: number, isAnnotated?: boolean): void {
     const { ctx } = this;
     const s = size / 24;  // Scale factor from SVG viewBox (24x24) to icon size
     const top = y - size / 2;  // Top of icon area
@@ -1384,7 +1407,8 @@ export class CanvasRenderer {
         break;
 
       case 'tag': {
-        // Tag icon - pentagon shape with hole
+        // Tag icon - pentagon shape
+        // Annotated tags are filled, lightweight tags are hollow
         const cx = left + size / 2;
         const cy = y;
         const ts = size / 11;  // Tag-specific scale
@@ -1396,11 +1420,25 @@ export class CanvasRenderer {
         ctx.lineTo(cx - 4 * ts, cy + 1 * ts);
         ctx.lineTo(cx - 4 * ts, cy - 4 * ts);
         ctx.closePath();
-        ctx.stroke();
-        // Small hole in tag
-        ctx.beginPath();
-        ctx.arc(cx, cy - 2 * ts, 1.5 * ts, 0, Math.PI * 2);
-        ctx.stroke();
+
+        if (isAnnotated) {
+          // Filled tag for annotated tags
+          ctx.fill();
+          // Draw hole in contrasting color
+          ctx.save();
+          ctx.globalCompositeOperation = 'destination-out';
+          ctx.beginPath();
+          ctx.arc(cx, cy - 2 * ts, 1.5 * ts, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else {
+          // Hollow tag for lightweight tags
+          ctx.stroke();
+          // Small hole in tag
+          ctx.beginPath();
+          ctx.arc(cx, cy - 2 * ts, 1.5 * ts, 0, Math.PI * 2);
+          ctx.stroke();
+        }
         break;
       }
 
@@ -1475,11 +1513,31 @@ export class CanvasRenderer {
           bgColor: theme.refColors.remoteBranch,
           textColor: theme.refColors.remoteBranchText,
         };
-      case 'tag':
+      case 'tag': {
+        // Check if this is a version tag (semver pattern: v1.0.0, 1.0.0, etc.)
+        // Match semver-like version tags (e.g., v1.2.3, 1.0.0-beta.1, 2.0.0+build.123)
+        // Requires at least one alphanumeric after - or + to prevent matching "1.2.3-" or "1.2.3+"
+        const isVersionTag = /^v?\d+\.\d+(\.\d+)?(-[a-zA-Z0-9][a-zA-Z0-9.]*)?(\+[a-zA-Z0-9][a-zA-Z0-9.]*)?$/.test(ref.shorthand);
+
+        if (isVersionTag) {
+          // Version tags get special purple highlighting
+          return {
+            bgColor: theme.refColors.versionTag,
+            textColor: theme.refColors.versionTagText,
+          };
+        } else if (ref.isAnnotated) {
+          // Annotated tags are brighter/more vibrant
+          return {
+            bgColor: theme.refColors.annotatedTag,
+            textColor: theme.refColors.annotatedTagText,
+          };
+        }
+        // Lightweight tags use default tag color
         return {
           bgColor: theme.refColors.tag,
           textColor: theme.refColors.tagText,
         };
+      }
       default:
         return {
           bgColor: theme.refColors.localBranch,
@@ -1677,7 +1735,13 @@ export class CanvasRenderer {
    * @param y Y coordinate relative to canvas
    * @returns Label info if hovering over ref label, null otherwise
    */
-  getRefLabelAtPoint(x: number, y: number): { label: string; fullName: string; refType: string } | null {
+  getRefLabelAtPoint(x: number, y: number): {
+    label: string;
+    fullName: string;
+    refType: string;
+    isAnnotated?: boolean;
+    tagMessage?: string;
+  } | null {
     for (const hitbox of this.refLabelHitboxes) {
       if (x >= hitbox.x && x <= hitbox.x + hitbox.width &&
           y >= hitbox.y && y <= hitbox.y + hitbox.height) {
@@ -1685,6 +1749,8 @@ export class CanvasRenderer {
           label: hitbox.label,
           fullName: hitbox.fullName,
           refType: hitbox.refType,
+          isAnnotated: hitbox.isAnnotated,
+          tagMessage: hitbox.tagMessage,
         };
       }
     }
