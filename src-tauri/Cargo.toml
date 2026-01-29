@@ -1,6 +1,6 @@
 [package]
 name = "leviathan"
-version = "0.2.55"
+version = "0.2.56"
 description = "A fully-featured, open-source, cross-platform Git GUI client"
 authors = ["Leviathan Contributors"]
 edition = "2021"
