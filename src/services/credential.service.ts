@@ -74,6 +74,10 @@ async function migrateOldVaultIfNeeded(dataDir: string, newVaultPath: string): P
   }
 }
 
+// Legacy hardcoded password used before machine-specific derivation was added.
+// Kept as a fallback so existing vaults created with the old password can still be opened.
+const LEGACY_VAULT_PASSWORD = 'leviathan-secure-vault-2024';
+
 /**
  * Initialize the Stronghold vault
  */
@@ -99,10 +103,18 @@ async function ensureInitialized(): Promise<Client> {
 
       log.debug('Initializing vault at:', vaultPath);
 
-      // Get machine-specific password
+      // Try machine-specific password first, fall back to legacy password
+      // so existing vaults created before the security fix still work.
       const vaultPassword = await getVaultPassword();
 
-      strongholdInstance = await Stronghold.load(vaultPath, vaultPassword);
+      try {
+        strongholdInstance = await Stronghold.load(vaultPath, vaultPassword);
+      } catch {
+        log.warn(
+          'Failed to open vault with machine-specific password, trying legacy password'
+        );
+        strongholdInstance = await Stronghold.load(vaultPath, LEGACY_VAULT_PASSWORD);
+      }
 
       // Try to load existing client or create new one
       try {
@@ -114,7 +126,7 @@ async function ensureInitialized(): Promise<Client> {
         log.debug('Created new client');
       }
     } catch (error) {
-      log.error(' Failed to initialize:', error);
+      log.error('Failed to initialize:', error);
       throw error;
     }
   })();
