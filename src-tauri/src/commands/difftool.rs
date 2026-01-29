@@ -357,23 +357,46 @@ mod tests {
     async fn test_launch_diff_tool_no_tool_configured() {
         let repo = TestRepo::with_initial_commit();
 
+        // Configure a non-interactive mock diff tool to prevent git from
+        // falling back to an interactive tool (e.g. vim) which blocks CI
+        run_git_config(
+            Some(Path::new(&repo.path_str())),
+            &["diff.tool", "mock"],
+        )
+        .unwrap();
+        run_git_config(
+            Some(Path::new(&repo.path_str())),
+            &["difftool.mock.cmd", "true"],
+        )
+        .unwrap();
+
         // Create a modified file
         repo.create_file("test.txt", "initial content");
         repo.stage_file("test.txt");
         repo.create_commit("Add test file", &[]);
         repo.create_file("test.txt", "modified content");
 
-        // Launch diff tool without configuration
-        // This may fail or use default tool depending on system
         let result = launch_diff_tool(repo.path_str(), "test.txt".to_string(), None, None).await;
-        // We're just testing that the function runs without panic
-        // The actual success depends on whether a diff tool is available
         assert!(result.is_ok());
+        assert!(result.unwrap().success);
     }
 
     #[tokio::test]
     async fn test_launch_diff_tool_nonexistent_file() {
         let repo = TestRepo::with_initial_commit();
+
+        // Configure a non-interactive mock diff tool to prevent git from
+        // falling back to an interactive tool (e.g. vim) which blocks CI
+        run_git_config(
+            Some(Path::new(&repo.path_str())),
+            &["diff.tool", "mock"],
+        )
+        .unwrap();
+        run_git_config(
+            Some(Path::new(&repo.path_str())),
+            &["difftool.mock.cmd", "true"],
+        )
+        .unwrap();
 
         // Try to launch diff tool for a non-existent file
         let result =
