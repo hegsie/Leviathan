@@ -23,6 +23,12 @@ export type RepositoryState =
   | 'apply-mailbox'
   | 'apply-mailbox-or-rebase';
 
+export interface CloneFilterInfo {
+  isPartialClone: boolean;
+  filter: string | null;
+  promisorRemote: string | null;
+}
+
 export interface Commit {
   oid: string;
   shortId: string;
@@ -60,6 +66,24 @@ export interface AheadBehind {
   behind: number;
 }
 
+/** Detailed branch tracking information */
+export interface BranchTrackingInfo {
+  /** The local branch name */
+  localBranch: string;
+  /** The full upstream reference (e.g., "refs/remotes/origin/main") */
+  upstream: string | null;
+  /** Number of commits ahead of upstream */
+  ahead: number;
+  /** Number of commits behind upstream */
+  behind: number;
+  /** The remote name (e.g., "origin") */
+  remote: string | null;
+  /** The remote branch name (e.g., "main") */
+  remoteBranch: string | null;
+  /** Whether the upstream branch was deleted */
+  isGone: boolean;
+}
+
 export interface Remote {
   name: string;
   url: string;
@@ -72,6 +96,18 @@ export interface Tag {
   message: string | null;
   tagger: Signature | null;
   isAnnotated: boolean;
+}
+
+export interface TagDetails {
+  name: string;
+  oid: string;
+  targetOid: string;
+  isAnnotated: boolean;
+  message: string | null;
+  taggerName: string | null;
+  taggerEmail: string | null;
+  taggerDate: number | null;
+  isSigned: boolean;
 }
 
 export type RefType = 'localBranch' | 'remoteBranch' | 'tag';
@@ -92,6 +128,22 @@ export interface Stash {
   oid: string;
 }
 
+export interface StashFile {
+  path: string;
+  additions: number;
+  deletions: number;
+  status: string;
+}
+
+export interface StashShowResult {
+  index: number;
+  message: string;
+  files: StashFile[];
+  totalAdditions: number;
+  totalDeletions: number;
+  patch: string | null;
+}
+
 export interface RebaseCommit {
   oid: string;
   shortId: string;
@@ -100,6 +152,66 @@ export interface RebaseCommit {
 }
 
 export type RebaseAction = 'pick' | 'reword' | 'edit' | 'squash' | 'fixup' | 'drop';
+
+/**
+ * Represents the current state of an interactive rebase
+ */
+export interface RebaseState {
+  inProgress: boolean;
+  headName: string | null;
+  onto: string | null;
+  currentCommit: string | null;
+  doneCount: number;
+  totalCount: number;
+  hasConflicts: boolean;
+}
+
+/**
+ * Represents an entry in the rebase todo list
+ */
+export interface RebaseTodoEntry {
+  action: string;
+  commitOid: string;
+  commitShort: string;
+  message: string;
+}
+
+/**
+ * Represents the full rebase todo state
+ */
+export interface RebaseTodo {
+  entries: RebaseTodoEntry[];
+  done: RebaseTodoEntry[];
+}
+
+/**
+ * Result of a squash operation
+ */
+export interface SquashResult {
+  newOid: string;
+  squashedCount: number;
+  success: boolean;
+}
+
+/**
+ * Result of a drop commit operation
+ */
+export interface DropCommitResult {
+  success: boolean;
+  newTip: string;
+  hasConflicts: boolean;
+  droppedMessage: string;
+}
+
+/**
+ * Result of a commit reorder operation
+ */
+export interface ReorderResult {
+  success: boolean;
+  newTip: string;
+  reorderedCount: number;
+  hasConflicts: boolean;
+}
 
 export interface StatusEntry {
   path: string;
@@ -167,6 +279,34 @@ export type DiffLineOrigin =
   | 'hunk-header'
   | 'binary';
 
+/**
+ * Partial staging types
+ */
+export interface FileHunks {
+  filePath: string;
+  hunks: IndexedDiffHunk[];
+  totalAdditions: number;
+  totalDeletions: number;
+}
+
+export interface IndexedDiffHunk {
+  index: number;
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  header: string;
+  lines: HunkDiffLine[];
+  isStaged: boolean;
+}
+
+export interface HunkDiffLine {
+  lineType: string;
+  content: string;
+  oldLineNumber: number | null;
+  newLineNumber: number | null;
+}
+
 export interface CommitFileEntry {
   path: string;
   status: FileStatus;
@@ -191,6 +331,22 @@ export interface ReflogEntry {
   author: string;
 }
 
+export interface UndoAction {
+  actionType: string;
+  description: string;
+  timestamp: number;
+  beforeRef: string;
+  afterRef: string;
+  details: string | null;
+}
+
+export interface UndoHistory {
+  actions: UndoAction[];
+  currentIndex: number;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
 export interface BlameLine {
   lineNumber: number;
   content: string;
@@ -206,6 +362,7 @@ export interface BlameLine {
 export interface BlameResult {
   path: string;
   lines: BlameLine[];
+  totalLines: number;
 }
 
 export interface ConflictFile {
@@ -219,6 +376,52 @@ export interface ConflictEntry {
   oid: string;
   path: string;
   mode: number;
+}
+
+/**
+ * File with conflict markers detected in its content
+ */
+export interface ConflictMarkerFile {
+  /** File path relative to repository root */
+  path: string;
+  /** Number of conflict regions in the file */
+  conflictCount: number;
+  /** Details of each conflict marker region */
+  markers: ConflictMarker[];
+}
+
+/**
+ * A single conflict marker region in a file
+ */
+export interface ConflictMarker {
+  /** Line number where the conflict starts (<<<<<<< marker) */
+  startLine: number;
+  /** Line number of the separator (=======) */
+  separatorLine: number;
+  /** Line number where the conflict ends (>>>>>>> marker) */
+  endLine: number;
+  /** Content from our side (between <<<<<<< and =======) */
+  oursContent: string;
+  /** Content from their side (between ======= and >>>>>>>) */
+  theirsContent: string;
+  /** Content from base version if diff3 style (between ||||||| and =======) */
+  baseContent: string | null;
+}
+
+/**
+ * Detailed information about conflicts in a file including ref names
+ */
+export interface ConflictDetails {
+  /** File path relative to repository root */
+  filePath: string;
+  /** Name of our ref (current branch or HEAD) */
+  ourRef: string;
+  /** Name of their ref (incoming branch) */
+  theirRef: string;
+  /** Name of base ref if available */
+  baseRef: string | null;
+  /** Conflict markers found in the file */
+  markers: ConflictMarker[];
 }
 
 export interface Submodule {
@@ -235,3 +438,87 @@ export type SubmoduleStatus =
   | 'uninitialized'
   | 'modified'
   | 'untracked';
+
+/**
+ * Avatar info returned from the backend
+ */
+export interface AvatarInfo {
+  email: string;
+  gravatarUrl: string;
+  initials: string;
+  color: string;
+}
+
+/**
+ * Result of viewing or checking out a file at a specific commit
+ */
+export interface FileAtCommitResult {
+  filePath: string;
+  commitOid: string;
+  content: string;
+  isBinary: boolean;
+  size: number;
+}
+
+/**
+ * File encoding detection information
+ */
+export interface FileEncodingInfo {
+  /** Relative path of the file */
+  filePath: string;
+  /** Detected encoding name (e.g., "UTF-8", "UTF-16LE", "Shift_JIS") */
+  encoding: string;
+  /** Detection confidence from 0.0 to 1.0 */
+  confidence: number;
+  /** Whether the file has a byte order mark */
+  hasBom: boolean;
+  /** Line ending style: "LF", "CRLF", "CR", "Mixed", or "N/A" */
+  lineEnding: string;
+  /** Whether the file appears to be binary */
+  isBinary: boolean;
+}
+
+/**
+ * Result of a file encoding conversion
+ */
+export interface ConvertEncodingResult {
+  success: boolean;
+  sourceEncoding: string;
+  targetEncoding: string;
+  bytesWritten: number;
+}
+
+/**
+ * Sorted file status result with summary counts
+ */
+export interface SortedFileStatus {
+  files: SortedStatusEntry[];
+  totalCount: number;
+  stagedCount: number;
+  unstagedCount: number;
+  untrackedCount: number;
+  conflictedCount: number;
+}
+
+/**
+ * A status entry enriched with sorting-related metadata
+ */
+export interface SortedStatusEntry {
+  path: string;
+  filename: string;
+  directory: string;
+  extension: string | null;
+  status: string;
+  isStaged: boolean;
+  isConflicted: boolean;
+}
+
+/**
+ * Sort options for file tree sorting
+ */
+export type FileStatusSortBy = 'name' | 'status' | 'path' | 'extension';
+
+/**
+ * Sort direction
+ */
+export type SortDirection = 'asc' | 'desc';

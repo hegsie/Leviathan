@@ -4,7 +4,7 @@ use std::path::Path;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-use crate::models::{AheadBehind, Branch};
+use crate::models::{AheadBehind, Branch, BranchTrackingInfo};
 
 /// Default stale threshold in days
 const STALE_THRESHOLD_DAYS: i64 = 90;
@@ -172,18 +172,45 @@ pub async fn delete_branch(path: String, name: String, force: Option<bool>) -> R
 }
 
 /// Rename a branch
+///
+/// After renaming, if `update_tracking` is true (the default) and the branch
+/// had an upstream configured, the tracking reference is updated so the
+/// renamed branch keeps tracking the same remote branch.
 #[command]
-pub async fn rename_branch(path: String, old_name: String, new_name: String) -> Result<Branch> {
+pub async fn rename_branch(
+    path: String,
+    old_name: String,
+    new_name: String,
+    update_tracking: Option<bool>,
+) -> Result<Branch> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let mut branch = repo
         .find_branch(&old_name, git2::BranchType::Local)
         .map_err(|_| LeviathanError::BranchNotFound(old_name.clone()))?;
 
+    // Capture existing upstream info before rename
+    let upstream_name = branch
+        .upstream()
+        .ok()
+        .and_then(|u| u.name().ok().flatten().map(|n| n.to_string()));
+
     branch.rename(&new_name, false)?;
 
     // Get the renamed branch to return updated info
-    let renamed_branch = repo.find_branch(&new_name, git2::BranchType::Local)?;
+    let mut renamed_branch = repo.find_branch(&new_name, git2::BranchType::Local)?;
+
+    // Re-apply upstream tracking if requested (default: true)
+    let should_update = update_tracking.unwrap_or(true);
+    if should_update {
+        if let Some(ref up_name) = upstream_name {
+            // Re-set the upstream on the renamed branch
+            let _ = renamed_branch.set_upstream(Some(up_name));
+            // Re-fetch the branch after setting upstream
+            renamed_branch = repo.find_branch(&new_name, git2::BranchType::Local)?;
+        }
+    }
+
     let reference = renamed_branch.get();
     let target_oid = reference
         .target()
@@ -254,6 +281,209 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
         repo.set_head(branch.get().name().unwrap())?;
     } else {
         repo.set_head_detached(commit.id())?;
+    }
+
+    Ok(())
+}
+
+/// Set the upstream branch for a local branch
+#[command]
+pub async fn set_upstream_branch(
+    path: String,
+    branch: String,
+    upstream: String,
+) -> Result<BranchTrackingInfo> {
+    let path_clone = path.clone();
+    let branch_clone = branch.clone();
+
+    // Wrap git2 operations in a block so they're dropped before the await
+    {
+        let repo = git2::Repository::open(Path::new(&path))?;
+
+        let mut local_branch = repo
+            .find_branch(&branch, git2::BranchType::Local)
+            .map_err(|_| LeviathanError::BranchNotFound(branch.clone()))?;
+
+        // Parse the upstream reference (e.g., "origin/main" or "refs/remotes/origin/main")
+        let upstream_ref = if upstream.starts_with("refs/remotes/") {
+            upstream.clone()
+        } else {
+            format!("refs/remotes/{}", upstream)
+        };
+
+        // Check if the upstream reference exists
+        repo.find_reference(&upstream_ref).map_err(|_| {
+            LeviathanError::OperationFailed(format!("Upstream reference not found: {}", upstream))
+        })?;
+
+        // Set the upstream
+        local_branch.set_upstream(Some(&upstream))?;
+    }
+
+    // Return the updated tracking info
+    get_branch_tracking_info(path_clone, branch_clone).await
+}
+
+/// Remove the upstream tracking for a local branch
+#[command]
+pub async fn unset_upstream_branch(path: String, branch: String) -> Result<()> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let mut local_branch = repo
+        .find_branch(&branch, git2::BranchType::Local)
+        .map_err(|_| LeviathanError::BranchNotFound(branch.clone()))?;
+
+    // Remove the upstream
+    local_branch.set_upstream(None)?;
+
+    Ok(())
+}
+
+/// Get detailed tracking information for a branch
+#[command]
+pub async fn get_branch_tracking_info(path: String, branch: String) -> Result<BranchTrackingInfo> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let local_branch = repo
+        .find_branch(&branch, git2::BranchType::Local)
+        .map_err(|_| LeviathanError::BranchNotFound(branch.clone()))?;
+
+    let local_oid = local_branch
+        .get()
+        .target()
+        .ok_or_else(|| LeviathanError::OperationFailed("Branch has no target".to_string()))?;
+
+    // Try to get upstream info
+    let upstream_result = local_branch.upstream();
+
+    match upstream_result {
+        Ok(upstream_branch) => {
+            let upstream_name = upstream_branch
+                .name()?
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            // Parse remote and remote branch from upstream name (e.g., "origin/main")
+            let (remote, remote_branch) = if let Some((r, b)) = upstream_name.split_once('/') {
+                (Some(r.to_string()), Some(b.to_string()))
+            } else {
+                (None, Some(upstream_name.clone()))
+            };
+
+            // Calculate ahead/behind
+            let upstream_oid = upstream_branch.get().target();
+            let (ahead, behind) = if let Some(up_oid) = upstream_oid {
+                repo.graph_ahead_behind(local_oid, up_oid)
+                    .map(|(a, b)| (a as u32, b as u32))
+                    .unwrap_or((0, 0))
+            } else {
+                (0, 0)
+            };
+
+            Ok(BranchTrackingInfo {
+                local_branch: branch,
+                upstream: Some(format!("refs/remotes/{}", upstream_name)),
+                ahead,
+                behind,
+                remote,
+                remote_branch,
+                is_gone: false,
+            })
+        }
+        Err(e) => {
+            // Check if upstream is configured but the remote branch is gone
+            let config = repo.config()?;
+            let merge_key = format!("branch.{}.merge", branch);
+            let remote_key = format!("branch.{}.remote", branch);
+
+            let has_merge = config.get_string(&merge_key).is_ok();
+            let remote_name = config.get_string(&remote_key).ok();
+
+            if has_merge && remote_name.is_some() {
+                // Upstream is configured but branch is gone
+                let remote = remote_name;
+                let remote_branch = config
+                    .get_string(&merge_key)
+                    .ok()
+                    .map(|m| m.strip_prefix("refs/heads/").unwrap_or(&m).to_string());
+
+                Ok(BranchTrackingInfo {
+                    local_branch: branch,
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    remote,
+                    remote_branch,
+                    is_gone: true,
+                })
+            } else if e.code() == git2::ErrorCode::NotFound {
+                // No upstream configured
+                Ok(BranchTrackingInfo {
+                    local_branch: branch,
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    remote: None,
+                    remote_branch: None,
+                    is_gone: false,
+                })
+            } else {
+                Err(e.into())
+            }
+        }
+    }
+}
+
+/// Create an orphan branch (a branch with no parent commits)
+///
+/// Uses `git checkout --orphan <name>` to create a branch that has no history.
+/// This is useful for creating documentation branches, GitHub Pages branches, etc.
+/// If `checkout` is true (the default), the working directory is switched to the new branch.
+#[command]
+pub async fn create_orphan_branch(path: String, name: String, checkout: bool) -> Result<()> {
+    let mut args = vec!["checkout", "--orphan"];
+    let name_ref = name.as_str();
+    args.push(name_ref);
+
+    let output = crate::utils::create_command("git")
+        .current_dir(&path)
+        .args(&args)
+        .output()
+        .map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to run git checkout --orphan: {}", e))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LeviathanError::OperationFailed(format!(
+            "Git checkout --orphan failed: {}",
+            stderr
+        )));
+    }
+
+    // If checkout is false, switch back to the previous branch
+    if !checkout {
+        // We need to get back to the previous HEAD
+        // git checkout --orphan always switches to the new branch,
+        // so we use git checkout - to go back
+        let back_output = crate::utils::create_command("git")
+            .current_dir(&path)
+            .args(["checkout", "-"])
+            .output()
+            .map_err(|e| {
+                LeviathanError::OperationFailed(format!(
+                    "Failed to switch back to previous branch: {}",
+                    e
+                ))
+            })?;
+
+        if !back_output.status.success() {
+            let stderr = String::from_utf8_lossy(&back_output.stderr);
+            return Err(LeviathanError::OperationFailed(format!(
+                "Failed to switch back to previous branch: {}",
+                stderr
+            )));
+        }
     }
 
     Ok(())
@@ -397,6 +627,7 @@ mod tests {
             repo.path_str(),
             "old-name".to_string(),
             "new-name".to_string(),
+            None,
         )
         .await;
 
@@ -417,9 +648,46 @@ mod tests {
             repo.path_str(),
             "nonexistent".to_string(),
             "new-name".to_string(),
+            None,
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rename_branch_with_update_tracking_false() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("old-name");
+
+        let result = rename_branch(
+            repo.path_str(),
+            "old-name".to_string(),
+            "new-name".to_string(),
+            Some(false),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let branch = result.unwrap();
+        assert_eq!(branch.name, "new-name");
+    }
+
+    #[tokio::test]
+    async fn test_rename_branch_with_update_tracking_true() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("old-name");
+
+        let result = rename_branch(
+            repo.path_str(),
+            "old-name".to_string(),
+            "new-name".to_string(),
+            Some(true),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let branch = result.unwrap();
+        assert_eq!(branch.name, "new-name");
     }
 
     #[tokio::test]
@@ -481,5 +749,99 @@ mod tests {
         let branch = result.unwrap();
         assert_eq!(branch.name, "feature/my-feature");
         assert_eq!(branch.shorthand, "feature/my-feature");
+    }
+
+    #[tokio::test]
+    async fn test_get_branch_tracking_info_no_upstream() {
+        let repo = TestRepo::with_initial_commit();
+        let current = repo.current_branch();
+
+        let result = get_branch_tracking_info(repo.path_str(), current.clone()).await;
+        assert!(result.is_ok());
+
+        let info = result.unwrap();
+        assert_eq!(info.local_branch, current);
+        assert!(info.upstream.is_none());
+        assert_eq!(info.ahead, 0);
+        assert_eq!(info.behind, 0);
+        assert!(info.remote.is_none());
+        assert!(info.remote_branch.is_none());
+        assert!(!info.is_gone);
+    }
+
+    #[tokio::test]
+    async fn test_get_branch_tracking_info_branch_not_found() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = get_branch_tracking_info(repo.path_str(), "nonexistent".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_set_upstream_branch_not_found() {
+        let repo = TestRepo::with_initial_commit();
+        let current = repo.current_branch();
+
+        // Try to set upstream to a nonexistent remote branch
+        let result = set_upstream_branch(repo.path_str(), current, "origin/main".to_string()).await;
+
+        // Should fail because the upstream ref doesn't exist
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_unset_upstream_branch_no_upstream() {
+        let repo = TestRepo::with_initial_commit();
+        let current = repo.current_branch();
+
+        // Unsetting upstream when none is set should succeed (no-op)
+        let result = unset_upstream_branch(repo.path_str(), current).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unset_upstream_branch_not_found() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = unset_upstream_branch(repo.path_str(), "nonexistent".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_set_upstream_branch_local_branch_not_found() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = set_upstream_branch(
+            repo.path_str(),
+            "nonexistent".to_string(),
+            "origin/main".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_orphan_branch_with_checkout() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = create_orphan_branch(repo.path_str(), "orphan-branch".to_string(), true).await;
+        assert!(result.is_ok());
+
+        // The current branch should now be the orphan branch
+        assert_eq!(repo.current_branch(), "orphan-branch");
+    }
+
+    #[tokio::test]
+    async fn test_create_orphan_branch_without_checkout() {
+        let repo = TestRepo::with_initial_commit();
+        let original_branch = repo.current_branch();
+
+        let result =
+            create_orphan_branch(repo.path_str(), "orphan-no-checkout".to_string(), false).await;
+        assert!(result.is_ok());
+
+        // Should be back on the original branch
+        assert_eq!(repo.current_branch(), original_branch);
     }
 }

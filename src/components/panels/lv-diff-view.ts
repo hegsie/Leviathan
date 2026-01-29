@@ -14,6 +14,104 @@ import './lv-image-diff.ts';
 
 type DiffViewMode = 'unified' | 'split';
 
+interface DiffSegment {
+  text: string;
+  changed: boolean;
+}
+
+interface WordDiffResult {
+  oldSegments: DiffSegment[];
+  newSegments: DiffSegment[];
+}
+
+/**
+ * Compute word-level diff between two lines.
+ * Splits lines into word tokens and uses an LCS algorithm to identify changed words.
+ */
+function computeWordDiff(oldLine: string, newLine: string): WordDiffResult {
+  const tokenize = (line: string): string[] => {
+    // Split on word boundaries: whitespace sequences and punctuation are separate tokens
+    const tokens: string[] = [];
+    const regex = /(\s+|[^\s\w]|[\w]+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(line)) !== null) {
+      tokens.push(match[0]);
+    }
+    return tokens;
+  };
+
+  const oldTokens = tokenize(oldLine);
+  const newTokens = tokenize(newLine);
+
+  // Build LCS table
+  const m = oldTokens.length;
+  const n = newTokens.length;
+
+  // Optimization: if either side is empty, everything on the other side is changed
+  if (m === 0) {
+    return {
+      oldSegments: [],
+      newSegments: newTokens.length > 0 ? [{ text: newLine, changed: true }] : [],
+    };
+  }
+  if (n === 0) {
+    return {
+      oldSegments: oldTokens.length > 0 ? [{ text: oldLine, changed: true }] : [],
+      newSegments: [],
+    };
+  }
+
+  // Use a 2D table for LCS (kept simple for typical line lengths)
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (oldTokens[i - 1] === newTokens[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  // Backtrack to find which tokens are in the LCS
+  const oldInLCS = new Array<boolean>(m).fill(false);
+  const newInLCS = new Array<boolean>(n).fill(false);
+  let i = m;
+  let j = n;
+  while (i > 0 && j > 0) {
+    if (oldTokens[i - 1] === newTokens[j - 1]) {
+      oldInLCS[i - 1] = true;
+      newInLCS[j - 1] = true;
+      i--;
+      j--;
+    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+
+  // Build segments by merging consecutive tokens with same changed status
+  const buildSegments = (tokens: string[], inLCS: boolean[]): DiffSegment[] => {
+    const segments: DiffSegment[] = [];
+    for (let k = 0; k < tokens.length; k++) {
+      const changed = !inLCS[k];
+      if (segments.length > 0 && segments[segments.length - 1].changed === changed) {
+        segments[segments.length - 1].text += tokens[k];
+      } else {
+        segments.push({ text: tokens[k], changed });
+      }
+    }
+    return segments;
+  };
+
+  return {
+    oldSegments: buildSegments(oldTokens, oldInLCS),
+    newSegments: buildSegments(newTokens, newInLCS),
+  };
+}
+
 interface SplitLine {
   left: DiffLine | null;
   right: DiffLine | null;
@@ -692,6 +790,38 @@ export class LvDiffView extends LitElement {
         background: var(--color-border);
         margin: var(--spacing-xs) 0;
       }
+
+      /* Word wrap mode */
+      .diff-content.word-wrap .line-content,
+      .diff-content.word-wrap .split-line-content {
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .diff-content.word-wrap .line,
+      .diff-content.word-wrap .hunk-header {
+        min-width: 0;
+      }
+
+      .split-container.word-wrap .split-line-content {
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .split-container.word-wrap .split-line {
+        min-width: 0;
+      }
+
+      /* Word-level diff highlighting */
+      .word-changed-del {
+        background: var(--color-diff-del-word-bg, rgba(248, 81, 73, 0.4));
+        border-radius: 2px;
+      }
+
+      .word-changed-add {
+        background: var(--color-diff-add-word-bg, rgba(63, 185, 80, 0.4));
+        border-radius: 2px;
+      }
     `,
   ];
 
@@ -703,6 +833,7 @@ export class LvDiffView extends LitElement {
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private viewMode: DiffViewMode = 'unified';
+  @state() private wordWrap: boolean = false;
   @state() private editMode = false;
   @state() private editContent = '';
   @state() private originalContent = '';
@@ -722,6 +853,11 @@ export class LvDiffView extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     document.addEventListener('click', this.handleDocumentClick);
+    // Restore word wrap preference from localStorage
+    const savedWordWrap = localStorage.getItem('leviathan-diff-word-wrap');
+    if (savedWordWrap !== null) {
+      this.wordWrap = savedWordWrap === 'true';
+    }
   }
 
   disconnectedCallback(): void {
@@ -744,6 +880,8 @@ export class LvDiffView extends LitElement {
     this.loading = true;
     this.error = null;
     this.diff = null;
+    this.hunkLinePairsCache = new WeakMap();
+    this.wordDiffCache = new WeakMap();
 
     try {
       // Initialize highlighter and detect language
@@ -779,6 +917,8 @@ export class LvDiffView extends LitElement {
     this.loading = true;
     this.error = null;
     this.diff = null;
+    this.hunkLinePairsCache = new WeakMap();
+    this.wordDiffCache = new WeakMap();
 
     try {
       // Initialize highlighter and detect language
@@ -808,6 +948,11 @@ export class LvDiffView extends LitElement {
 
   private setViewMode(mode: DiffViewMode): void {
     this.viewMode = mode;
+  }
+
+  private toggleWordWrap(): void {
+    this.wordWrap = !this.wordWrap;
+    localStorage.setItem('leviathan-diff-word-wrap', String(this.wordWrap));
   }
 
   /**
@@ -1301,6 +1446,72 @@ export class LvDiffView extends LitElement {
     await this.handleUnstageHunk(hunk, new Event('click'));
   }
 
+  /**
+   * Build a map of paired deletion/addition lines within each hunk for word-level diffing.
+   * Pairs consecutive deletion blocks with following addition blocks.
+   * Returns a Map from DiffLine to its paired DiffLine.
+   */
+  private buildLinePairs(hunk: DiffHunk): Map<DiffLine, DiffLine> {
+    const pairs = new Map<DiffLine, DiffLine>();
+    const lines = hunk.lines;
+    let i = 0;
+
+    while (i < lines.length) {
+      // Collect consecutive deletions
+      const deletions: DiffLine[] = [];
+      while (i < lines.length && lines[i].origin === 'deletion') {
+        deletions.push(lines[i]);
+        i++;
+      }
+      // Collect consecutive additions
+      const additions: DiffLine[] = [];
+      while (i < lines.length && lines[i].origin === 'addition') {
+        additions.push(lines[i]);
+        i++;
+      }
+      // Pair them up (min of both lengths)
+      const pairCount = Math.min(deletions.length, additions.length);
+      for (let p = 0; p < pairCount; p++) {
+        pairs.set(deletions[p], additions[p]);
+        pairs.set(additions[p], deletions[p]);
+      }
+      // If we didn't consume anything (context line), skip it
+      if (deletions.length === 0 && additions.length === 0) {
+        i++;
+      }
+    }
+
+    return pairs;
+  }
+
+  /**
+   * Cache of line pairs per hunk to avoid recomputation on every render.
+   */
+  private hunkLinePairsCache = new WeakMap<DiffHunk, Map<DiffLine, DiffLine>>();
+
+  private getLinePairs(hunk: DiffHunk): Map<DiffLine, DiffLine> {
+    let pairs = this.hunkLinePairsCache.get(hunk);
+    if (!pairs) {
+      pairs = this.buildLinePairs(hunk);
+      this.hunkLinePairsCache.set(hunk, pairs);
+    }
+    return pairs;
+  }
+
+  /**
+   * Word diff result cache to avoid recomputation for the same line pair.
+   */
+  private wordDiffCache = new WeakMap<DiffLine, WordDiffResult>();
+
+  private getWordDiff(delLine: DiffLine, addLine: DiffLine): WordDiffResult {
+    let result = this.wordDiffCache.get(delLine);
+    if (!result) {
+      result = computeWordDiff(delLine.content, addLine.content);
+      this.wordDiffCache.set(delLine, result);
+    }
+    return result;
+  }
+
   private renderHighlightedContent(content: string): TemplateResult {
     const tokens = highlightLineSync(content, this.language);
     return html`${tokens.map(
@@ -1308,9 +1519,43 @@ export class LvDiffView extends LitElement {
     )}`;
   }
 
+  /**
+   * Render line content with word-level diff highlighting.
+   * Segments marked as changed get a highlighted background.
+   */
+  private renderWordDiffContent(segments: DiffSegment[], cssClass: string): TemplateResult {
+    // We cannot easily combine syntax highlighting with word diff spans,
+    // so we use plain text with word-diff highlighting when a pair is available.
+    return html`${segments.map(
+      (seg) =>
+        seg.changed
+          ? html`<span class="${cssClass}">${seg.text}</span>`
+          : html`<span>${seg.text}</span>`
+    )}`;
+  }
+
   private renderLine(line: DiffLine, hunk: DiffHunk) {
     const lineClass = this.getLineClass(line.origin);
     const originChar = this.getOriginChar(line.origin);
+
+    // Check if this line has a word-diff pair
+    const pairs = this.getLinePairs(hunk);
+    const pairedLine = pairs.get(line);
+    let contentHtml: TemplateResult;
+
+    if (pairedLine && (line.origin === 'deletion' || line.origin === 'addition')) {
+      const delLine = line.origin === 'deletion' ? line : pairedLine;
+      const addLine = line.origin === 'addition' ? line : pairedLine;
+      const wordDiff = this.getWordDiff(delLine, addLine);
+
+      if (line.origin === 'deletion') {
+        contentHtml = this.renderWordDiffContent(wordDiff.oldSegments, 'word-changed-del');
+      } else {
+        contentHtml = this.renderWordDiffContent(wordDiff.newSegments, 'word-changed-add');
+      }
+    } else {
+      contentHtml = this.renderHighlightedContent(line.content);
+    }
 
     return html`
       <div
@@ -1322,7 +1567,7 @@ export class LvDiffView extends LitElement {
           <span class="line-no new">${line.newLineNo ?? ''}</span>
         </div>
         <span class="line-origin">${originChar}</span>
-        <span class="line-content">${this.renderHighlightedContent(line.content)}</span>
+        <span class="line-content">${contentHtml}</span>
       </div>
     `;
   }
@@ -1413,7 +1658,7 @@ export class LvDiffView extends LitElement {
     return splitLines;
   }
 
-  private renderSplitLine(line: DiffLine | null, side: 'left' | 'right') {
+  private renderSplitLine(line: DiffLine | null, side: 'left' | 'right', pairedLine: DiffLine | null = null) {
     if (!line) {
       return html`
         <div class="split-line empty">
@@ -1437,10 +1682,26 @@ export class LvDiffView extends LitElement {
     if (line.origin === 'deletion') lineClass = 'deletion';
     else if (line.origin === 'addition') lineClass = 'addition';
 
+    // Word-level diff for paired deletion/addition in split view
+    let contentHtml: TemplateResult;
+    if (pairedLine && (line.origin === 'deletion' || line.origin === 'addition')) {
+      const delLine = line.origin === 'deletion' ? line : pairedLine;
+      const addLine = line.origin === 'addition' ? line : pairedLine;
+      const wordDiff = this.getWordDiff(delLine, addLine);
+
+      if (line.origin === 'deletion') {
+        contentHtml = this.renderWordDiffContent(wordDiff.oldSegments, 'word-changed-del');
+      } else {
+        contentHtml = this.renderWordDiffContent(wordDiff.newSegments, 'word-changed-add');
+      }
+    } else {
+      contentHtml = this.renderHighlightedContent(line.content);
+    }
+
     return html`
       <div class="split-line ${lineClass}">
         <span class="split-line-no">${lineNo ?? ''}</span>
-        <span class="split-line-content">${this.renderHighlightedContent(line.content)}</span>
+        <span class="split-line-content">${contentHtml}</span>
       </div>
     `;
   }
@@ -1451,14 +1712,21 @@ export class LvDiffView extends LitElement {
     const splitLines = this.convertToSplitLines(this.diff.hunks);
 
     return html`
-      <div class="split-container">
+      <div class="split-container ${this.wordWrap ? 'word-wrap' : ''}">
         <div class="split-pane">
           <div class="split-pane-header">Original</div>
-          ${splitLines.map((sl) => this.renderSplitLine(sl.left, 'left'))}
+          ${splitLines.map((sl) => {
+            // Determine if there's a word-diff pair: left is deletion, right is addition
+            const pairedLine = (sl.left?.origin === 'deletion' && sl.right?.origin === 'addition') ? sl.right : null;
+            return this.renderSplitLine(sl.left, 'left', pairedLine);
+          })}
         </div>
         <div class="split-pane">
           <div class="split-pane-header">Modified</div>
-          ${splitLines.map((sl) => this.renderSplitLine(sl.right, 'right'))}
+          ${splitLines.map((sl) => {
+            const pairedLine = (sl.right?.origin === 'addition' && sl.left?.origin === 'deletion') ? sl.left : null;
+            return this.renderSplitLine(sl.right, 'right', pairedLine);
+          })}
         </div>
       </div>
     `;
@@ -1468,7 +1736,7 @@ export class LvDiffView extends LitElement {
     if (!this.diff) return nothing;
 
     return html`
-      <div class="diff-content">
+      <div class="diff-content ${this.wordWrap ? 'word-wrap' : ''}">
         ${this.diff.hunks.length === 0
           ? html`<div class="empty">No changes in this file</div>`
           : this.diff.hunks.map((hunk, i) => this.renderHunk(hunk, i))}
@@ -1629,6 +1897,18 @@ export class LvDiffView extends LitElement {
                 </button>
               `
             : nothing}
+          <button
+            class="view-btn ${this.wordWrap ? 'active' : ''}"
+            @click=${this.toggleWordWrap}
+            title="Toggle word wrap"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="3" y1="6" x2="21" y2="6"></line>
+              <line x1="3" y1="12" x2="15" y2="12"></line>
+              <path d="M15 12a3 3 0 1 1 0 6H9"></path>
+              <polyline points="12 15 9 18 12 21"></polyline>
+            </svg>
+          </button>
           <button
             class="view-btn ${this.viewMode === 'unified' ? 'active' : ''}"
             @click=${() => this.setViewMode('unified')}

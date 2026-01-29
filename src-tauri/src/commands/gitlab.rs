@@ -908,3 +908,382 @@ pub async fn get_gitlab_labels(
 
     Ok(labels.into_iter().map(|l| l.name).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    #[test]
+    fn test_build_api_url() {
+        assert_eq!(
+            build_api_url("https://gitlab.com", "user"),
+            "https://gitlab.com/api/v4/user"
+        );
+        assert_eq!(
+            build_api_url("https://gitlab.com/", "user"),
+            "https://gitlab.com/api/v4/user"
+        );
+        assert_eq!(
+            build_api_url("https://gitlab.example.com", "projects/123"),
+            "https://gitlab.example.com/api/v4/projects/123"
+        );
+    }
+
+    #[test]
+    fn test_url_encode() {
+        assert_eq!(url_encode("user/repo"), "user%2Frepo");
+        assert_eq!(
+            url_encode("group/subgroup/project"),
+            "group%2Fsubgroup%2Fproject"
+        );
+        assert_eq!(url_encode("simple"), "simple");
+    }
+
+    #[test]
+    fn test_resolve_token_with_valid_token() {
+        let result = resolve_token(Some("valid_token".to_string()));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "valid_token");
+    }
+
+    #[test]
+    fn test_resolve_token_with_empty_token() {
+        let result = resolve_token(Some("".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_token_with_none() {
+        let result = resolve_token(None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_gitlab_url_https() {
+        let result = parse_gitlab_url("https://gitlab.com/user/repo.git");
+        assert!(result.is_some());
+        let (instance, path) = result.unwrap();
+        assert_eq!(instance, "https://gitlab.com");
+        assert_eq!(path, "user/repo");
+    }
+
+    #[test]
+    fn test_parse_gitlab_url_https_with_subgroups() {
+        let result = parse_gitlab_url("https://gitlab.com/group/subgroup/project.git");
+        assert!(result.is_some());
+        let (instance, path) = result.unwrap();
+        assert_eq!(instance, "https://gitlab.com");
+        assert_eq!(path, "group/subgroup/project");
+    }
+
+    #[test]
+    fn test_parse_gitlab_url_ssh() {
+        let result = parse_gitlab_url("git@gitlab.com:user/repo.git");
+        assert!(result.is_some());
+        let (instance, path) = result.unwrap();
+        assert_eq!(instance, "https://gitlab.com");
+        assert_eq!(path, "user/repo");
+    }
+
+    #[test]
+    fn test_parse_gitlab_url_ssh_with_subgroups() {
+        let result = parse_gitlab_url("git@gitlab.com:group/subgroup/project.git");
+        assert!(result.is_some());
+        let (instance, path) = result.unwrap();
+        assert_eq!(instance, "https://gitlab.com");
+        assert_eq!(path, "group/subgroup/project");
+    }
+
+    #[test]
+    fn test_parse_gitlab_url_non_gitlab() {
+        // Should return None for non-GitLab URLs
+        let result = parse_gitlab_url("https://github.com/user/repo.git");
+        assert!(result.is_none());
+
+        let result = parse_gitlab_url("git@github.com:user/repo.git");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_gitlab_url_custom_instance() {
+        let result = parse_gitlab_url("https://gitlab.example.com/user/repo.git");
+        assert!(result.is_some());
+        let (instance, path) = result.unwrap();
+        assert_eq!(instance, "https://gitlab.example.com");
+        assert_eq!(path, "user/repo");
+    }
+
+    #[tokio::test]
+    async fn test_detect_gitlab_repo_no_gitlab_remote() {
+        let repo = TestRepo::with_initial_commit();
+        // Add a non-GitLab remote
+        repo.add_remote("origin", "https://github.com/user/repo.git");
+
+        let result = detect_gitlab_repo(repo.path_str()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_detect_gitlab_repo_with_gitlab_remote() {
+        let repo = TestRepo::with_initial_commit();
+        // Add a GitLab remote
+        repo.add_remote("origin", "https://gitlab.com/user/repo.git");
+
+        let result = detect_gitlab_repo(repo.path_str()).await;
+        assert!(result.is_ok());
+        let detected = result.unwrap();
+        assert!(detected.is_some());
+
+        let info = detected.unwrap();
+        assert_eq!(info.instance_url, "https://gitlab.com");
+        assert_eq!(info.project_path, "user/repo");
+        assert_eq!(info.remote_name, "origin");
+    }
+
+    #[tokio::test]
+    async fn test_detect_gitlab_repo_with_ssh_remote() {
+        let repo = TestRepo::with_initial_commit();
+        // Add a GitLab SSH remote
+        repo.add_remote("origin", "git@gitlab.com:user/repo.git");
+
+        let result = detect_gitlab_repo(repo.path_str()).await;
+        assert!(result.is_ok());
+        let detected = result.unwrap();
+        assert!(detected.is_some());
+
+        let info = detected.unwrap();
+        assert_eq!(info.instance_url, "https://gitlab.com");
+        assert_eq!(info.project_path, "user/repo");
+    }
+
+    #[tokio::test]
+    async fn test_check_gitlab_connection_no_token() {
+        let result = check_gitlab_connection("https://gitlab.com".to_string(), None).await;
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        assert!(!status.connected);
+        assert!(status.user.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_gitlab_connection_empty_token() {
+        let result =
+            check_gitlab_connection("https://gitlab.com".to_string(), Some("".to_string())).await;
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        assert!(!status.connected);
+    }
+
+    #[tokio::test]
+    async fn test_list_gitlab_merge_requests_no_token() {
+        let result = list_gitlab_merge_requests(
+            "https://gitlab.com".to_string(),
+            "user/repo".to_string(),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_gitlab_merge_request_no_token() {
+        let result = get_gitlab_merge_request(
+            "https://gitlab.com".to_string(),
+            "user/repo".to_string(),
+            1,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_gitlab_issues_no_token() {
+        let result = list_gitlab_issues(
+            "https://gitlab.com".to_string(),
+            "user/repo".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_gitlab_pipelines_no_token() {
+        let result = list_gitlab_pipelines(
+            "https://gitlab.com".to_string(),
+            "user/repo".to_string(),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_gitlab_labels_no_token() {
+        let result = get_gitlab_labels(
+            "https://gitlab.com".to_string(),
+            "user/repo".to_string(),
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gitlab_user_struct() {
+        let user = GitLabUser {
+            id: 123,
+            username: "testuser".to_string(),
+            name: "Test User".to_string(),
+            avatar_url: Some("https://gitlab.com/avatar.png".to_string()),
+            web_url: "https://gitlab.com/testuser".to_string(),
+        };
+
+        assert_eq!(user.id, 123);
+        assert_eq!(user.username, "testuser");
+        assert_eq!(user.name, "Test User");
+    }
+
+    #[test]
+    fn test_gitlab_connection_status_struct() {
+        let status = GitLabConnectionStatus {
+            connected: true,
+            user: Some(GitLabUser {
+                id: 1,
+                username: "test".to_string(),
+                name: "Test".to_string(),
+                avatar_url: None,
+                web_url: "https://gitlab.com/test".to_string(),
+            }),
+            instance_url: "https://gitlab.com".to_string(),
+        };
+
+        assert!(status.connected);
+        assert!(status.user.is_some());
+    }
+
+    #[test]
+    fn test_detected_gitlab_repo_struct() {
+        let repo_info = DetectedGitLabRepo {
+            instance_url: "https://gitlab.com".to_string(),
+            project_path: "user/repo".to_string(),
+            remote_name: "origin".to_string(),
+        };
+
+        assert_eq!(repo_info.instance_url, "https://gitlab.com");
+        assert_eq!(repo_info.project_path, "user/repo");
+        assert_eq!(repo_info.remote_name, "origin");
+    }
+
+    #[test]
+    fn test_create_merge_request_input_struct() {
+        let input = CreateMergeRequestInput {
+            title: "Test MR".to_string(),
+            description: Some("Description".to_string()),
+            source_branch: "feature".to_string(),
+            target_branch: "main".to_string(),
+            draft: Some(true),
+        };
+
+        assert_eq!(input.title, "Test MR");
+        assert_eq!(input.source_branch, "feature");
+        assert_eq!(input.target_branch, "main");
+        assert_eq!(input.draft, Some(true));
+    }
+
+    #[test]
+    fn test_create_gitlab_issue_input_struct() {
+        let input = CreateGitLabIssueInput {
+            title: "Test Issue".to_string(),
+            description: Some("Issue description".to_string()),
+            labels: Some(vec!["bug".to_string(), "urgent".to_string()]),
+        };
+
+        assert_eq!(input.title, "Test Issue");
+        assert!(input.description.is_some());
+        assert_eq!(input.labels.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_gitlab_merge_request_struct() {
+        let user = GitLabUser {
+            id: 1,
+            username: "author".to_string(),
+            name: "Author Name".to_string(),
+            avatar_url: None,
+            web_url: "https://gitlab.com/author".to_string(),
+        };
+
+        let mr = GitLabMergeRequest {
+            iid: 42,
+            title: "Test MR".to_string(),
+            description: Some("MR description".to_string()),
+            state: "opened".to_string(),
+            author: user,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            source_branch: "feature".to_string(),
+            target_branch: "main".to_string(),
+            draft: false,
+            web_url: "https://gitlab.com/user/repo/-/merge_requests/42".to_string(),
+            merge_status: "can_be_merged".to_string(),
+        };
+
+        assert_eq!(mr.iid, 42);
+        assert_eq!(mr.state, "opened");
+        assert!(!mr.draft);
+    }
+
+    #[test]
+    fn test_gitlab_issue_struct() {
+        let author = GitLabUser {
+            id: 1,
+            username: "author".to_string(),
+            name: "Author Name".to_string(),
+            avatar_url: None,
+            web_url: "https://gitlab.com/author".to_string(),
+        };
+
+        let issue = GitLabIssue {
+            iid: 10,
+            title: "Test Issue".to_string(),
+            description: Some("Issue description".to_string()),
+            state: "opened".to_string(),
+            author,
+            assignees: vec![],
+            labels: vec!["bug".to_string()],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            web_url: "https://gitlab.com/user/repo/-/issues/10".to_string(),
+        };
+
+        assert_eq!(issue.iid, 10);
+        assert_eq!(issue.labels.len(), 1);
+        assert!(issue.assignees.is_empty());
+    }
+
+    #[test]
+    fn test_gitlab_pipeline_struct() {
+        let pipeline = GitLabPipeline {
+            id: 1000,
+            iid: 50,
+            status: "success".to_string(),
+            source: "push".to_string(),
+            r#ref: "main".to_string(),
+            sha: "abc123".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T01:00:00Z".to_string(),
+            web_url: "https://gitlab.com/user/repo/-/pipelines/1000".to_string(),
+        };
+
+        assert_eq!(pipeline.id, 1000);
+        assert_eq!(pipeline.iid, 50);
+        assert_eq!(pipeline.status, "success");
+        assert_eq!(pipeline.r#ref, "main");
+    }
+}

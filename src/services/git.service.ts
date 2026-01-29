@@ -10,11 +10,22 @@ import type {
   Repository,
   Commit,
   Branch,
+  BranchTrackingInfo,
   Remote,
   Tag,
+  TagDetails,
   Stash,
+  StashShowResult,
   RebaseCommit,
+  RebaseState,
+  RebaseTodo,
+  RebaseTodoEntry,
+  SquashResult,
+  DropCommitResult,
+  ReorderResult,
   ConflictFile,
+  ConflictMarkerFile,
+  ConflictDetails,
   StatusEntry,
   DiffFile,
   RefsByCommit,
@@ -22,22 +33,43 @@ import type {
   CommitStats,
   BlameResult,
   ReflogEntry,
+  UndoAction,
+  UndoHistory,
   ImageVersions,
+  AvatarInfo,
+  FileHunks,
+  FileAtCommitResult,
+  FileEncodingInfo,
+  ConvertEncodingResult,
+  SortedFileStatus,
+  FileStatusSortBy,
+  SortDirection,
+  CloneFilterInfo,
 } from "../types/git.types.ts";
+import type { CommitGraphData } from "../types/graph.types.ts";
 import type {
   OpenRepositoryCommand,
   CloneRepositoryCommand,
   InitRepositoryCommand,
   CreateBranchCommand,
+  CreateOrphanBranchCommand,
   RenameBranchCommand,
   CheckoutCommand,
   CreateCommitCommand,
   GetCommitHistoryCommand,
+  AmendCommitCommand,
+  AmendResult,
+  EditCommitDateCommand,
   StageFilesCommand,
   UnstageFilesCommand,
   FetchCommand,
+  FetchAllRemotesCommand,
+  FetchAllResult,
+  RemoteFetchStatus,
   PullCommand,
   PushCommand,
+  PushToMultipleRemotesCommand,
+  MultiPushResult,
   MergeCommand,
   AbortMergeCommand,
   RebaseCommand,
@@ -46,6 +78,7 @@ import type {
   CherryPickCommand,
   ContinueCherryPickCommand,
   AbortCherryPickCommand,
+  CherryPickFromBranchCommand,
   RevertCommand,
   ContinueRevertCommand,
   AbortRevertCommand,
@@ -54,10 +87,25 @@ import type {
   ApplyStashCommand,
   DropStashCommand,
   PopStashCommand,
+  StashShowCommand,
   CreateTagCommand,
   DeleteTagCommand,
   PushTagCommand,
+  GetTagDetailsCommand,
+  EditTagMessageCommand,
+  DescribeOptions,
+  DescribeResult,
   GetDiffCommand,
+  GetDiffWithOptionsCommand,
+  GetAvatarUrlCommand,
+  GetAvatarUrlsCommand,
+  GetCommitGraphCommand,
+  KeyboardShortcutConfig,
+  GetKeyboardShortcutsCommand,
+  SetKeyboardShortcutCommand,
+  CheckoutFileFromCommitCommand,
+  CheckoutFileFromBranchCommand,
+  GetFileAtCommitCommand,
   CommandResult,
 } from "../types/api.types.ts";
 
@@ -104,6 +152,12 @@ export async function initRepository(
   return invokeCommand<Repository>("init_repository", args);
 }
 
+export async function getCloneFilterInfo(
+  path: string,
+): Promise<CommandResult<CloneFilterInfo>> {
+  return invokeCommand<CloneFilterInfo>("get_clone_filter_info", { path });
+}
+
 /**
  * Branch operations
  */
@@ -118,6 +172,16 @@ export async function createBranch(
   args: CreateBranchCommand,
 ): Promise<CommandResult<Branch>> {
   return invokeCommand<Branch>("create_branch", { path, ...args });
+}
+
+/**
+ * Create an orphan branch (a branch with no parent commits)
+ */
+export async function createOrphanBranch(
+  path: string,
+  args: CreateOrphanBranchCommand,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("create_orphan_branch", { path, ...args });
 }
 
 export async function deleteBranch(
@@ -140,6 +204,44 @@ export async function checkout(
   args: CheckoutCommand,
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>("checkout", { path, ...args });
+}
+
+/**
+ * Set the upstream branch for a local branch
+ */
+export async function setUpstreamBranch(
+  path: string,
+  branch: string,
+  upstream: string,
+): Promise<CommandResult<BranchTrackingInfo>> {
+  return invokeCommand<BranchTrackingInfo>("set_upstream_branch", {
+    path,
+    branch,
+    upstream,
+  });
+}
+
+/**
+ * Remove the upstream tracking for a local branch
+ */
+export async function unsetUpstreamBranch(
+  path: string,
+  branch: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("unset_upstream_branch", { path, branch });
+}
+
+/**
+ * Get detailed tracking information for a branch
+ */
+export async function getBranchTrackingInfo(
+  path: string,
+  branch: string,
+): Promise<CommandResult<BranchTrackingInfo>> {
+  return invokeCommand<BranchTrackingInfo>("get_branch_tracking_info", {
+    path,
+    branch,
+  });
 }
 
 /**
@@ -188,12 +290,96 @@ export async function createCommit(
 }
 
 /**
+ * Amend the HEAD commit
+ * @param path Repository path
+ * @param args Options for amending (message, resetAuthor, and/or signAmend)
+ */
+export async function amendCommit(
+  path: string,
+  args?: AmendCommitCommand,
+): Promise<CommandResult<AmendResult>> {
+  return invokeCommand<AmendResult>("amend_commit", {
+    path,
+    message: args?.message,
+    resetAuthor: args?.resetAuthor,
+    signAmend: args?.signAmend,
+  });
+}
+
+/**
+ * Get the full commit message for a commit
+ * @param path Repository path
+ * @param oid Commit OID
+ */
+export async function getCommitMessage(
+  path: string,
+  oid: string,
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>("get_commit_message", { path, oid });
+}
+
+/**
+ * Edit the author and/or committer date of an existing commit
+ * For HEAD commits, this recreates the commit with updated signatures.
+ * For non-HEAD commits, this uses interactive rebase with GIT_AUTHOR_DATE/GIT_COMMITTER_DATE.
+ * @param path Repository path
+ * @param args Options including oid and date(s) to set (ISO 8601 or unix timestamp)
+ */
+export async function editCommitDate(
+  path: string,
+  args: EditCommitDateCommand,
+): Promise<CommandResult<AmendResult>> {
+  return invokeCommand<AmendResult>("edit_commit_date", {
+    path,
+    oid: args.oid,
+    authorDate: args.authorDate,
+    committerDate: args.committerDate,
+  });
+}
+
+/**
+ * Reword a commit (change its message)
+ * For HEAD commits, this uses amend. For non-HEAD commits, this uses interactive rebase.
+ * @param path Repository path
+ * @param oid Commit OID to reword
+ * @param message New commit message
+ */
+export async function rewordCommit(
+  path: string,
+  oid: string,
+  message: string,
+): Promise<CommandResult<AmendResult>> {
+  return invokeCommand<AmendResult>("reword_commit", { path, oid, message });
+}
+
+/**
  * Staging operations
  */
 export async function getStatus(
   path: string,
 ): Promise<CommandResult<StatusEntry[]>> {
   return invokeCommand<StatusEntry[]>("get_status", { path });
+}
+
+/**
+ * Get sorted file status with enriched metadata for file tree display
+ * @param path Repository path
+ * @param sortBy Sort criteria: "name", "status", "path", or "extension"
+ * @param sortDirection Sort direction: "asc" or "desc" (default "asc")
+ * @param groupByDirectory Whether to group files by directory
+ */
+export async function getSortedFileStatus(
+  path: string,
+  sortBy: FileStatusSortBy,
+  sortDirection?: SortDirection,
+  groupByDirectory: boolean = false,
+): Promise<CommandResult<SortedFileStatus>> {
+  return invokeCommand<SortedFileStatus>("get_sorted_file_status", {
+    path,
+    sortBy,
+    sortDirection,
+    groupByDirectory,
+  });
 }
 
 export async function stageFiles(
@@ -239,6 +425,81 @@ export async function unstageHunk(
   patch: string,
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>("unstage_hunk", { repoPath, patch });
+}
+
+/**
+ * Get hunks for a file (staged or unstaged)
+ * @param repoPath Repository path
+ * @param filePath File path relative to repo root
+ * @param staged Whether to get staged (true) or unstaged (false) hunks
+ */
+export async function getFileHunks(
+  repoPath: string,
+  filePath: string,
+  staged: boolean,
+): Promise<CommandResult<FileHunks>> {
+  return invokeCommand<FileHunks>("get_file_hunks", {
+    path: repoPath,
+    filePath,
+    staged,
+  });
+}
+
+/**
+ * Stage a specific hunk by its index
+ * @param repoPath Repository path
+ * @param filePath File path relative to repo root
+ * @param hunkIndex Index of the hunk to stage
+ */
+export async function stageHunkByIndex(
+  repoPath: string,
+  filePath: string,
+  hunkIndex: number,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("stage_hunk_by_index", {
+    path: repoPath,
+    filePath,
+    hunkIndex,
+  });
+}
+
+/**
+ * Unstage a specific hunk by its index
+ * @param repoPath Repository path
+ * @param filePath File path relative to repo root
+ * @param hunkIndex Index of the hunk to unstage
+ */
+export async function unstageHunkByIndex(
+  repoPath: string,
+  filePath: string,
+  hunkIndex: number,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("unstage_hunk_by_index", {
+    path: repoPath,
+    filePath,
+    hunkIndex,
+  });
+}
+
+/**
+ * Stage specific lines from a diff
+ * @param repoPath Repository path
+ * @param filePath File path relative to repo root
+ * @param startLine Start line index (0-indexed in the diff output)
+ * @param endLine End line index (inclusive, 0-indexed in the diff output)
+ */
+export async function stageLines(
+  repoPath: string,
+  filePath: string,
+  startLine: number,
+  endLine: number,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("stage_lines", {
+    path: repoPath,
+    filePath,
+    startLine,
+    endLine,
+  });
 }
 
 /**
@@ -406,6 +667,93 @@ export async function push(
 }
 
 /**
+ * Push to multiple remotes at once
+ */
+export async function pushToMultipleRemotes(
+  args: PushToMultipleRemotesCommand & { silent?: boolean },
+): Promise<CommandResult<MultiPushResult>> {
+  // If no token is provided, try to find one for the repository
+  if (args && !args.token) {
+    const token = await getRepoToken(args.path);
+    if (token) {
+      args.token = token;
+    }
+  }
+
+  const result = await invokeCommand<MultiPushResult>(
+    "push_to_multiple_remotes",
+    args,
+  );
+  if (!args?.silent) {
+    if (result.success && result.data) {
+      const { totalSuccess, totalFailed } = result.data;
+      if (totalFailed === 0) {
+        showToast(
+          `Pushed to ${totalSuccess} remote(s) successfully`,
+          "success",
+        );
+      } else {
+        showToast(
+          `Pushed to ${totalSuccess} remote(s), ${totalFailed} failed`,
+          "warning",
+        );
+      }
+    } else {
+      showToast(
+        `Multi-push failed: ${result.error?.message ?? "Unknown error"}`,
+        "error",
+      );
+    }
+  }
+  return result;
+}
+
+/**
+ * Fetch from all remotes at once
+ */
+export async function fetchAllRemotes(
+  args: FetchAllRemotesCommand & { silent?: boolean },
+): Promise<CommandResult<FetchAllResult>> {
+  // If no token is provided, try to find one for the repository
+  if (args && !args.token) {
+    const token = await getRepoToken(args.path);
+    if (token) {
+      args.token = token;
+    }
+  }
+
+  const result = await invokeCommand<FetchAllResult>("fetch_all_remotes", args);
+  if (!args?.silent) {
+    if (result.success && result.data) {
+      const { totalFetched, totalFailed } = result.data;
+      if (totalFailed === 0) {
+        showToast(`Fetched from ${totalFetched} remote(s) successfully`, "success");
+      } else {
+        showToast(
+          `Fetched from ${totalFetched} remote(s), ${totalFailed} failed`,
+          "warning",
+        );
+      }
+    } else {
+      showToast(
+        `Fetch all failed: ${result.error?.message ?? "Unknown error"}`,
+        "error",
+      );
+    }
+  }
+  return result;
+}
+
+/**
+ * Get fetch status for all remotes
+ */
+export async function getFetchStatus(
+  path: string,
+): Promise<CommandResult<RemoteFetchStatus[]>> {
+  return invokeCommand<RemoteFetchStatus[]>("get_fetch_status", { path });
+}
+
+/**
  * Helper to get authentication token for a repository
  * Checks if it's a GitHub or Azure DevOps repo and retrieves corresponding token
  */
@@ -512,6 +860,34 @@ export async function executeInteractiveRebase(
 }
 
 /**
+ * Interactive rebase state management
+ */
+export async function getRebaseState(
+  path: string,
+): Promise<CommandResult<RebaseState>> {
+  return invokeCommand<RebaseState>("get_rebase_state", { path });
+}
+
+export async function getRebaseTodo(
+  path: string,
+): Promise<CommandResult<RebaseTodo>> {
+  return invokeCommand<RebaseTodo>("get_rebase_todo", { path });
+}
+
+export async function updateRebaseTodo(
+  path: string,
+  entries: RebaseTodoEntry[],
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("update_rebase_todo", { path, entries });
+}
+
+export async function skipRebaseCommit(
+  path: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("skip_rebase_commit", { path });
+}
+
+/**
  * Conflict resolution operations
  */
 export async function getConflicts(
@@ -536,6 +912,40 @@ export async function resolveConflict(
     path,
     file_path: filePath,
     content,
+  });
+}
+
+/**
+ * Detect conflict markers in files
+ *
+ * Scans for Git conflict markers (<<<<<<< ======= >>>>>>>) in working directory files.
+ * @param path Repository path
+ * @param filePath Optional specific file to scan. If not provided, scans all conflicted files.
+ */
+export async function detectConflictMarkers(
+  path: string,
+  filePath?: string,
+): Promise<CommandResult<ConflictMarkerFile[]>> {
+  return invokeCommand<ConflictMarkerFile[]>("detect_conflict_markers", {
+    path,
+    file_path: filePath,
+  });
+}
+
+/**
+ * Get detailed conflict information for a specific file
+ *
+ * Returns conflict details including ref names and marker positions
+ * @param path Repository path
+ * @param filePath Path to the conflicted file
+ */
+export async function getConflictDetails(
+  path: string,
+  filePath: string,
+): Promise<CommandResult<ConflictDetails>> {
+  return invokeCommand<ConflictDetails>("get_conflict_details", {
+    path,
+    file_path: filePath,
   });
 }
 
@@ -589,6 +999,82 @@ export async function reset(args: ResetCommand): Promise<CommandResult<void>> {
 }
 
 /**
+ * Squash operations
+ */
+
+/**
+ * Squash a range of commits into a single commit
+ * @param path - Repository path
+ * @param fromOid - Parent commit (exclusive - commits after this are squashed)
+ * @param toOid - Newest commit to squash (inclusive)
+ * @param message - New commit message for the squashed commit
+ */
+export async function squashCommits(
+  path: string,
+  fromOid: string,
+  toOid: string,
+  message: string,
+): Promise<CommandResult<SquashResult>> {
+  return invokeCommand<SquashResult>("squash_commits", {
+    path,
+    fromOid,
+    toOid,
+    message,
+  });
+}
+
+/**
+ * Fixup staged changes into a specific commit
+ * @param path - Repository path
+ * @param targetOid - The commit to amend changes into
+ * @param amendMessage - Optional new message for the commit (if not provided, keeps original)
+ */
+export async function fixupCommit(
+  path: string,
+  targetOid: string,
+  amendMessage?: string,
+): Promise<CommandResult<SquashResult>> {
+  return invokeCommand<SquashResult>("fixup_commit", {
+    path,
+    targetOid,
+    amendMessage,
+  });
+}
+
+/**
+ * Drop (remove) a commit from history
+ * @param path - Repository path
+ * @param commitOid - The OID of the commit to drop
+ */
+export async function dropCommit(
+  path: string,
+  commitOid: string,
+): Promise<CommandResult<DropCommitResult>> {
+  return invokeCommand<DropCommitResult>("drop_commit", {
+    path,
+    commitOid,
+  });
+}
+
+/**
+ * Reorder commits by replaying them in a new order (drag-and-drop reordering)
+ * @param path - Repository path
+ * @param baseCommit - Parent of the oldest commit to reorder (exclusive base)
+ * @param commitOrder - New order of commit OIDs from oldest to newest
+ */
+export async function reorderCommits(
+  path: string,
+  baseCommit: string,
+  commitOrder: string[],
+): Promise<CommandResult<ReorderResult>> {
+  return invokeCommand<ReorderResult>("reorder_commits", {
+    path,
+    baseCommit,
+    commitOrder,
+  });
+}
+
+/**
  * Stash operations
  */
 export async function getStashes(
@@ -621,6 +1107,12 @@ export async function popStash(
   return invokeCommand<void>("pop_stash", args);
 }
 
+export async function stashShow(
+  args: StashShowCommand,
+): Promise<CommandResult<StashShowResult>> {
+  return invokeCommand<StashShowResult>("stash_show", args);
+}
+
 /**
  * Tag operations
  */
@@ -646,6 +1138,50 @@ export async function pushTag(
   return invokeCommand<void>("push_tag", args);
 }
 
+export async function getTagDetails(
+  args: GetTagDetailsCommand,
+): Promise<CommandResult<TagDetails>> {
+  return invokeCommand<TagDetails>("get_tag_details", args);
+}
+
+export async function editTagMessage(
+  args: EditTagMessageCommand,
+): Promise<CommandResult<TagDetails>> {
+  return invokeCommand<TagDetails>("edit_tag_message", args);
+}
+
+/**
+ * Describe operations
+ */
+
+/**
+ * Describe a commit using tags
+ *
+ * Returns the most recent tag reachable from a commit, with additional
+ * information about commits since the tag and the commit hash.
+ *
+ * @param path - Repository path
+ * @param options - Describe options
+ * @returns Describe result with tag info, commits ahead, and commit hash
+ */
+export async function describeCommit(
+  path: string,
+  options?: DescribeOptions,
+): Promise<CommandResult<DescribeResult>> {
+  return invokeCommand<DescribeResult>("describe", {
+    path,
+    commitish: options?.commitish,
+    tags: options?.tags,
+    all: options?.all,
+    long: options?.long,
+    abbrev: options?.abbrev,
+    matchPattern: options?.matchPattern,
+    excludePattern: options?.excludePattern,
+    firstParent: options?.firstParent,
+    dirty: options?.dirty,
+  });
+}
+
 /**
  * Diff operations
  */
@@ -653,6 +1189,19 @@ export async function getDiff(
   args?: GetDiffCommand,
 ): Promise<CommandResult<DiffFile[]>> {
   return invokeCommand<DiffFile[]>("get_diff", args);
+}
+
+/**
+ * Get diff with advanced options including whitespace handling,
+ * custom context lines, and diff algorithm selection.
+ *
+ * @param options - Advanced diff options
+ * @returns Array of diff files with hunks
+ */
+export async function getDiffWithOptions(
+  options: GetDiffWithOptionsCommand,
+): Promise<CommandResult<DiffFile[]>> {
+  return invokeCommand<DiffFile[]>("get_diff_with_options", options);
 }
 
 export async function getFileDiff(
@@ -705,16 +1254,26 @@ export async function getCommitsStats(
 
 /**
  * Get blame information for a file
+ *
+ * @param repoPath - Repository path
+ * @param filePath - Path to the file to blame
+ * @param commitOid - Optional commit to blame at (default: HEAD)
+ * @param startLine - Optional start line for range blame (1-indexed)
+ * @param endLine - Optional end line for range blame (1-indexed, inclusive)
  */
 export async function getFileBlame(
   repoPath: string,
   filePath: string,
   commitOid?: string,
+  startLine?: number,
+  endLine?: number,
 ): Promise<CommandResult<BlameResult>> {
   return invokeCommand<BlameResult>("get_file_blame", {
     path: repoPath,
     filePath,
     commitOid,
+    startLine,
+    endLine,
   });
 }
 
@@ -762,6 +1321,50 @@ export async function getRefsByCommit(
 }
 
 /**
+ * Shortlog operations - contributor commit summaries
+ */
+export interface ShortlogOptions {
+  range?: string;
+  all?: boolean;
+  numbered?: boolean;
+  summary?: boolean;
+  email?: boolean;
+  group?: "author" | "committer";
+}
+
+export interface ShortlogEntry {
+  name: string;
+  email: string | null;
+  count: number;
+  commits: string[];
+}
+
+export interface ShortlogResult {
+  entries: ShortlogEntry[];
+  totalCommits: number;
+  totalContributors: number;
+}
+
+/**
+ * Get shortlog - contributor commit summaries
+ * Similar to `git shortlog`
+ */
+export async function getShortlog(
+  path: string,
+  options?: ShortlogOptions,
+): Promise<CommandResult<ShortlogResult>> {
+  return invokeCommand<ShortlogResult>("shortlog", {
+    path,
+    range: options?.range,
+    all: options?.all,
+    numbered: options?.numbered,
+    summary: options?.summary,
+    email: options?.email,
+    group: options?.group,
+  });
+}
+
+/**
  * Reflog operations
  */
 export async function getReflog(
@@ -781,6 +1384,38 @@ export async function resetToReflog(
     reflogIndex,
     mode,
   });
+}
+
+/**
+ * Undo/redo operations
+ */
+export async function getUndoHistory(
+  repoPath: string,
+  maxCount?: number,
+): Promise<CommandResult<UndoHistory>> {
+  return invokeCommand<UndoHistory>("get_undo_history", {
+    path: repoPath,
+    maxCount,
+  });
+}
+
+export async function undoLastAction(
+  repoPath: string,
+): Promise<CommandResult<UndoAction>> {
+  return invokeCommand<UndoAction>("undo_last_action", { path: repoPath });
+}
+
+export async function redoLastAction(
+  repoPath: string,
+): Promise<CommandResult<UndoAction>> {
+  return invokeCommand<UndoAction>("redo_last_action", { path: repoPath });
+}
+
+export async function recordAction(
+  repoPath: string,
+  action: UndoAction,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("record_action", { path: repoPath, action });
 }
 
 /**
@@ -1288,6 +1923,31 @@ export async function getCommitsSignatures(
   );
 }
 
+/**
+ * Signing status for a repository - indicates if signing is configured and available
+ */
+export interface SigningStatus {
+  /** Whether commit signing is enabled (commit.gpgsign = true) */
+  gpgSignEnabled: boolean;
+  /** The configured signing key (user.signingkey) */
+  signingKey: string | null;
+  /** The configured GPG program (gpg.program) */
+  gpgProgram: string | null;
+  /** Whether signing is possible (GPG available and key configured) */
+  canSign: boolean;
+}
+
+/**
+ * Get signing status for a repository
+ * @param repoPath Repository path
+ * @returns SigningStatus indicating if signing is enabled and possible
+ */
+export async function getSigningStatus(
+  repoPath: string,
+): Promise<CommandResult<SigningStatus>> {
+  return invokeCommand<SigningStatus>("get_signing_status", { path: repoPath });
+}
+
 // ============================================================================
 // SSH Key Management
 // ============================================================================
@@ -1472,6 +2132,72 @@ export async function getCommonSettings(
   path: string,
 ): Promise<CommandResult<ConfigEntry[]>> {
   return invokeCommand<ConfigEntry[]>("get_common_settings", { path });
+}
+
+// ============================================================================
+// Line Ending & Encoding Configuration
+// ============================================================================
+
+export interface LineEndingConfig {
+  coreAutocrlf: string | null;
+  coreEol: string | null;
+  coreSafecrlf: string | null;
+}
+
+export interface GitConfig {
+  key: string;
+  value: string;
+  scope: string;
+}
+
+export async function getLineEndingConfig(
+  path: string,
+): Promise<CommandResult<LineEndingConfig>> {
+  return invokeCommand<LineEndingConfig>("get_line_ending_config", { path });
+}
+
+export async function setLineEndingConfig(
+  path: string,
+  autocrlf?: string | null,
+  eol?: string | null,
+  safecrlf?: string | null,
+): Promise<CommandResult<LineEndingConfig>> {
+  return invokeCommand<LineEndingConfig>("set_line_ending_config", {
+    path,
+    autocrlf,
+    eol,
+    safecrlf,
+  });
+}
+
+export async function getGitConfig(
+  path: string,
+  key: string,
+): Promise<CommandResult<string | null>> {
+  return invokeCommand<string | null>("get_git_config", { path, key });
+}
+
+export async function setGitConfig(
+  path: string,
+  key: string,
+  value: string,
+  global?: boolean,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("set_git_config", { path, key, value, global });
+}
+
+export async function getAllGitConfig(
+  path: string,
+): Promise<CommandResult<GitConfig[]>> {
+  return invokeCommand<GitConfig[]>("get_all_git_config", { path });
+}
+
+export async function unsetGitConfig(
+  path: string,
+  key: string,
+  global?: boolean,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("unset_git_config", { path, key, global });
 }
 
 // ============================================================================
@@ -3001,6 +3727,86 @@ export async function getConventionalTypes(): Promise<
 }
 
 // ============================================================================
+// PR/MR Templates
+// ============================================================================
+
+/** A detected pull request / merge request template */
+export interface PrTemplate {
+  /** Display name derived from the file name */
+  name: string;
+  /** Relative path to the template from the repo root */
+  path: string;
+  /** Whether this is the default template */
+  isDefault: boolean;
+}
+
+/**
+ * Detect PR/MR templates in a repository.
+ * Searches well-known GitHub and GitLab template locations.
+ */
+export async function getPrTemplates(
+  repoPath: string,
+): Promise<CommandResult<PrTemplate[]>> {
+  return invokeCommand<PrTemplate[]>("get_pr_templates", {
+    path: repoPath,
+  });
+}
+
+/**
+ * Read the content of a specific PR/MR template.
+ */
+export async function getPrTemplateContent(
+  repoPath: string,
+  templatePath: string,
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>("get_pr_template_content", {
+    path: repoPath,
+    templatePath,
+  });
+}
+
+// ============================================================================
+// Issue Templates
+// ============================================================================
+
+/** A detected issue template */
+export interface IssueTemplate {
+  /** Display name derived from the file name */
+  name: string;
+  /** Relative path to the template from the repo root */
+  path: string;
+  /** Whether this is the default template */
+  isDefault: boolean;
+  /** Optional description extracted from YAML front matter */
+  description: string | null;
+}
+
+/**
+ * Detect issue templates in a repository.
+ * Searches well-known GitHub and GitLab template locations.
+ */
+export async function getIssueTemplates(
+  repoPath: string,
+): Promise<CommandResult<IssueTemplate[]>> {
+  return invokeCommand<IssueTemplate[]>("get_issue_templates", {
+    path: repoPath,
+  });
+}
+
+/**
+ * Read the content of a specific issue template.
+ */
+export async function getIssueTemplateContent(
+  repoPath: string,
+  templatePath: string,
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>("get_issue_template_content", {
+    path: repoPath,
+    templatePath,
+  });
+}
+
+// ============================================================================
 // Auto-fetch
 // ============================================================================
 
@@ -3376,4 +4182,2191 @@ export async function detectRepositoryIntegration(
   }
 
   return null;
+}
+
+/**
+ * Git Flow operations
+ */
+export interface GitFlowConfig {
+  initialized: boolean;
+  masterBranch: string;
+  developBranch: string;
+  featurePrefix: string;
+  releasePrefix: string;
+  hotfixPrefix: string;
+  supportPrefix: string;
+  versionTagPrefix: string;
+}
+
+export async function getGitFlowConfig(
+  repoPath: string,
+): Promise<CommandResult<GitFlowConfig>> {
+  return invokeCommand<GitFlowConfig>("get_gitflow_config", { path: repoPath });
+}
+
+export async function initGitFlow(
+  repoPath: string,
+  config?: Partial<GitFlowConfig>,
+): Promise<CommandResult<GitFlowConfig>> {
+  return invokeCommand<GitFlowConfig>("init_gitflow", {
+    path: repoPath,
+    masterBranch: config?.masterBranch,
+    developBranch: config?.developBranch,
+    featurePrefix: config?.featurePrefix,
+    releasePrefix: config?.releasePrefix,
+    hotfixPrefix: config?.hotfixPrefix,
+    supportPrefix: config?.supportPrefix,
+    versionTagPrefix: config?.versionTagPrefix,
+  });
+}
+
+export async function gitFlowStartFeature(
+  repoPath: string,
+  name: string,
+): Promise<CommandResult<Branch>> {
+  return invokeCommand<Branch>("gitflow_start_feature", { path: repoPath, name });
+}
+
+export async function gitFlowFinishFeature(
+  repoPath: string,
+  name: string,
+  deleteBranch?: boolean,
+  squash?: boolean,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("gitflow_finish_feature", {
+    path: repoPath,
+    name,
+    deleteBranch,
+    squash,
+  });
+}
+
+export async function gitFlowStartRelease(
+  repoPath: string,
+  version: string,
+): Promise<CommandResult<Branch>> {
+  return invokeCommand<Branch>("gitflow_start_release", { path: repoPath, version });
+}
+
+export async function gitFlowFinishRelease(
+  repoPath: string,
+  version: string,
+  tagMessage?: string,
+  deleteBranch?: boolean,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("gitflow_finish_release", {
+    path: repoPath,
+    version,
+    tagMessage,
+    deleteBranch,
+  });
+}
+
+export async function gitFlowStartHotfix(
+  repoPath: string,
+  version: string,
+): Promise<CommandResult<Branch>> {
+  return invokeCommand<Branch>("gitflow_start_hotfix", { path: repoPath, version });
+}
+
+export async function gitFlowFinishHotfix(
+  repoPath: string,
+  version: string,
+  tagMessage?: string,
+  deleteBranch?: boolean,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("gitflow_finish_hotfix", {
+    path: repoPath,
+    version,
+    tagMessage,
+    deleteBranch,
+  });
+}
+
+/**
+ * Patch operations
+ */
+export async function createPatch(
+  repoPath: string,
+  commitOids: string[],
+  outputPath: string,
+): Promise<CommandResult<string[]>> {
+  return invokeCommand<string[]>("create_patch", {
+    path: repoPath,
+    commitOids,
+    outputPath,
+  });
+}
+
+export async function applyPatch(
+  repoPath: string,
+  patchPath: string,
+  checkOnly?: boolean,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("apply_patch", {
+    path: repoPath,
+    patchPath,
+    checkOnly,
+  });
+}
+
+export async function applyPatchToIndex(
+  repoPath: string,
+  patchPath: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("apply_patch_to_index", {
+    path: repoPath,
+    patchPath,
+  });
+}
+
+/**
+ * Archive operations
+ */
+export async function createArchive(
+  repoPath: string,
+  outputPath: string,
+  treeRef?: string,
+  format?: string,
+  prefix?: string,
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>("create_archive", {
+    path: repoPath,
+    outputPath,
+    treeRef,
+    format,
+    prefix,
+  });
+}
+
+export async function getArchiveFiles(
+  repoPath: string,
+  treeRef?: string,
+): Promise<CommandResult<string[]>> {
+  return invokeCommand<string[]>("get_archive_files", {
+    path: repoPath,
+    treeRef,
+  });
+}
+
+/**
+ * Git Notes operations
+ */
+export interface GitNote {
+  commitOid: string;
+  message: string;
+  notesRef: string;
+}
+
+export async function getNote(
+  repoPath: string,
+  commitOid: string,
+  notesRef?: string,
+): Promise<CommandResult<GitNote | null>> {
+  return invokeCommand<GitNote | null>("get_note", {
+    path: repoPath,
+    commitOid,
+    notesRef,
+  });
+}
+
+export async function getNotes(
+  repoPath: string,
+  notesRef?: string,
+): Promise<CommandResult<GitNote[]>> {
+  return invokeCommand<GitNote[]>("get_notes", {
+    path: repoPath,
+    notesRef,
+  });
+}
+
+export async function setNote(
+  repoPath: string,
+  commitOid: string,
+  message: string,
+  notesRef?: string,
+  force?: boolean,
+): Promise<CommandResult<GitNote>> {
+  return invokeCommand<GitNote>("set_note", {
+    path: repoPath,
+    commitOid,
+    message,
+    notesRef,
+    force,
+  });
+}
+
+export async function removeNote(
+  repoPath: string,
+  commitOid: string,
+  notesRef?: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("remove_note", {
+    path: repoPath,
+    commitOid,
+    notesRef,
+  });
+}
+
+export async function getNotesRefs(
+  repoPath: string,
+): Promise<CommandResult<string[]>> {
+  return invokeCommand<string[]>("get_notes_refs", {
+    path: repoPath,
+  });
+}
+
+/**
+ * Gitignore management
+ */
+export interface GitignoreEntry {
+  pattern: string;
+  lineNumber: number;
+  isComment: boolean;
+  isNegation: boolean;
+  isEmpty: boolean;
+}
+
+export interface GitignoreTemplate {
+  name: string;
+  patterns: string[];
+}
+
+export async function getGitignore(
+  repoPath: string,
+): Promise<CommandResult<GitignoreEntry[]>> {
+  return invokeCommand<GitignoreEntry[]>("get_gitignore", { path: repoPath });
+}
+
+export async function addToGitignore(
+  repoPath: string,
+  patterns: string[],
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("add_to_gitignore", { path: repoPath, patterns });
+}
+
+export async function removeFromGitignore(
+  repoPath: string,
+  pattern: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("remove_from_gitignore", { path: repoPath, pattern });
+}
+
+export async function isIgnored(
+  repoPath: string,
+  filePath: string,
+): Promise<CommandResult<boolean>> {
+  return invokeCommand<boolean>("is_ignored", { path: repoPath, filePath });
+}
+
+export async function getGitignoreTemplates(): Promise<
+  CommandResult<GitignoreTemplate[]>
+> {
+  return invokeCommand<GitignoreTemplate[]>("get_gitignore_templates", {});
+}
+
+export interface IgnoreCheckResult {
+  path: string;
+  isIgnored: boolean;
+}
+
+export interface IgnoreCheckVerboseResult {
+  path: string;
+  isIgnored: boolean;
+  /** Which .gitignore file contains the matching rule */
+  sourceFile: string | null;
+  /** Line number in the .gitignore file */
+  sourceLine: number | null;
+  /** The matching pattern */
+  pattern: string | null;
+  /** Whether the matching pattern is negated (! prefix) */
+  isNegated: boolean;
+}
+
+export async function checkIgnore(
+  repoPath: string,
+  filePaths: string[],
+): Promise<CommandResult<IgnoreCheckResult[]>> {
+  return invokeCommand<IgnoreCheckResult[]>("check_ignore", {
+    path: repoPath,
+    filePaths,
+  });
+}
+
+export async function checkIgnoreVerbose(
+  repoPath: string,
+  filePaths: string[],
+): Promise<CommandResult<IgnoreCheckVerboseResult[]>> {
+  return invokeCommand<IgnoreCheckVerboseResult[]>("check_ignore_verbose", {
+    path: repoPath,
+    filePaths,
+  });
+}
+
+/**
+ * Gitattributes management
+ */
+export type AttributeValue =
+  | { type: "set" }
+  | { type: "unset" }
+  | { type: "value"; value: string }
+  | { type: "unspecified" };
+
+export interface AttributeEntry {
+  name: string;
+  value: AttributeValue;
+}
+
+export interface GitAttribute {
+  pattern: string;
+  attributes: AttributeEntry[];
+  lineNumber: number;
+  rawLine: string;
+}
+
+export interface CommonAttribute {
+  name: string;
+  description: string;
+  example: string;
+}
+
+export async function getGitattributes(
+  repoPath: string,
+): Promise<CommandResult<GitAttribute[]>> {
+  return invokeCommand<GitAttribute[]>("get_gitattributes", { path: repoPath });
+}
+
+export async function addGitattribute(
+  repoPath: string,
+  pattern: string,
+  attributes: string,
+): Promise<CommandResult<GitAttribute[]>> {
+  return invokeCommand<GitAttribute[]>("add_gitattribute", {
+    path: repoPath,
+    pattern,
+    attributes,
+  });
+}
+
+export async function removeGitattribute(
+  repoPath: string,
+  lineNumber: number,
+): Promise<CommandResult<GitAttribute[]>> {
+  return invokeCommand<GitAttribute[]>("remove_gitattribute", {
+    path: repoPath,
+    lineNumber,
+  });
+}
+
+export async function updateGitattribute(
+  repoPath: string,
+  lineNumber: number,
+  pattern: string,
+  attributes: string,
+): Promise<CommandResult<GitAttribute[]>> {
+  return invokeCommand<GitAttribute[]>("update_gitattribute", {
+    path: repoPath,
+    lineNumber,
+    pattern,
+    attributes,
+  });
+}
+
+export async function getCommonAttributes(): Promise<
+  CommandResult<CommonAttribute[]>
+> {
+  return invokeCommand<CommonAttribute[]>("get_common_attributes", {});
+}
+
+/**
+ * Git Hooks management
+ */
+export interface GitHook {
+  name: string;
+  path: string;
+  exists: boolean;
+  enabled: boolean;
+  content: string | null;
+  description: string;
+}
+
+export async function getHooks(
+  repoPath: string,
+): Promise<CommandResult<GitHook[]>> {
+  return invokeCommand<GitHook[]>("get_hooks", { path: repoPath });
+}
+
+export async function getHook(
+  repoPath: string,
+  name: string,
+): Promise<CommandResult<GitHook>> {
+  return invokeCommand<GitHook>("get_hook", { path: repoPath, name });
+}
+
+export async function saveHook(
+  repoPath: string,
+  name: string,
+  content: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("save_hook", { path: repoPath, name, content });
+}
+
+export async function deleteHook(
+  repoPath: string,
+  name: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("delete_hook", { path: repoPath, name });
+}
+
+export async function toggleHook(
+  repoPath: string,
+  name: string,
+  enabled: boolean,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("toggle_hook", { path: repoPath, name, enabled });
+}
+
+/**
+ * Terminal integration
+ */
+export async function openTerminal(
+  repoPath: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("open_terminal", { path: repoPath });
+}
+
+export async function openFileManager(
+  repoPath: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("open_file_manager", { path: repoPath });
+}
+
+export async function openInEditor(
+  filePath: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("open_in_editor", { filePath });
+}
+
+/**
+ * File operations
+ */
+
+/** Result of file open/reveal operations */
+export interface OpenResult {
+  success: boolean;
+  message?: string;
+}
+
+/** Editor configuration from git config */
+export interface EditorConfig {
+  editor?: string;
+  visual?: string;
+}
+
+/**
+ * Reveal a file or folder in the system file manager
+ * This will select/highlight the file in the file manager
+ * @param path Absolute path to the file or folder
+ */
+export async function revealInFileManager(
+  path: string,
+): Promise<CommandResult<OpenResult>> {
+  return invokeCommand<OpenResult>("reveal_in_file_manager", { path });
+}
+
+/**
+ * Open a file with the system's default application
+ * @param path Absolute path to the file
+ */
+export async function openInDefaultApp(
+  path: string,
+): Promise<CommandResult<OpenResult>> {
+  return invokeCommand<OpenResult>("open_in_default_app", { path });
+}
+
+/**
+ * Open a file in the configured editor
+ * Uses git's core.editor config, falling back to VISUAL/EDITOR env vars
+ * @param repoPath Repository path (for local config lookup)
+ * @param filePath File path (absolute or relative to repo)
+ * @param line Optional line number to open at
+ */
+export async function openInConfiguredEditor(
+  repoPath: string,
+  filePath: string,
+  line?: number,
+): Promise<CommandResult<OpenResult>> {
+  return invokeCommand<OpenResult>("open_in_configured_editor", {
+    path: repoPath,
+    filePath,
+    line,
+  });
+}
+
+/**
+ * Get the configured editor settings
+ * @param repoPath Repository path
+ * @param global If true, only return global config; otherwise prefer local
+ */
+export async function getEditorConfig(
+  repoPath: string,
+  global: boolean = false,
+): Promise<CommandResult<EditorConfig>> {
+  return invokeCommand<EditorConfig>("get_editor_config", {
+    path: repoPath,
+    global,
+  });
+}
+
+/**
+ * Set the configured editor
+ * @param repoPath Repository path
+ * @param editor Editor command (e.g., "code --wait", "vim")
+ * @param global If true, set in global config; otherwise set in local repo config
+ */
+export async function setEditorConfig(
+  repoPath: string,
+  editor: string,
+  global: boolean = false,
+): Promise<CommandResult<OpenResult>> {
+  return invokeCommand<OpenResult>("set_editor_config", {
+    path: repoPath,
+    editor,
+    global,
+  });
+}
+
+/**
+ * Repository statistics
+ */
+export interface ContributorStats {
+  name: string;
+  email: string;
+  commitCount: number;
+  firstCommit: number;
+  latestCommit: number;
+  linesAdded: number;
+  linesDeleted: number;
+}
+
+export interface MonthActivity {
+  year: number;
+  month: number;
+  commitCount: number;
+}
+
+export interface DayOfWeekActivity {
+  day: string;
+  dayIndex: number;
+  commitCount: number;
+}
+
+export interface HourActivity {
+  hour: number;
+  commitCount: number;
+}
+
+export interface RepoStats {
+  totalCommits: number;
+  totalBranches: number;
+  totalTags: number;
+  totalContributors: number;
+  firstCommitDate: number | null;
+  latestCommitDate: number | null;
+  contributors: ContributorStats[];
+  activityByMonth: MonthActivity[];
+  activityByDayOfWeek: DayOfWeekActivity[];
+  activityByHour: HourActivity[];
+  filesCount: number;
+  totalLinesAdded: number;
+  totalLinesDeleted: number;
+}
+
+export async function getRepoStats(
+  repoPath: string,
+  maxCommits?: number,
+): Promise<CommandResult<RepoStats>> {
+  return invokeCommand<RepoStats>("get_repo_stats", {
+    path: repoPath,
+    maxCommits,
+  });
+}
+
+export async function getContributorStats(
+  repoPath: string,
+  maxCommits?: number,
+): Promise<CommandResult<ContributorStats[]>> {
+  return invokeCommand<ContributorStats[]>("get_contributor_stats", {
+    path: repoPath,
+    maxCommits,
+  });
+}
+
+/**
+ * Enhanced repository statistics for dashboard
+ */
+export interface EnhancedMonthActivity {
+  year: number;
+  month: number;
+  commits: number;
+  authors: number;
+}
+
+export interface WeekdayActivity {
+  day: string;
+  commits: number;
+}
+
+export interface EnhancedHourActivity {
+  hour: number;
+  commits: number;
+}
+
+export interface EnhancedContributorStats {
+  name: string;
+  email: string;
+  commits: number;
+  linesAdded: number;
+  linesDeleted: number;
+  firstCommit: number;
+  lastCommit: number;
+}
+
+export interface FileTypeStats {
+  extension: string;
+  fileCount: number;
+  totalLines: number;
+}
+
+export interface RepoStatistics {
+  // Basics
+  totalCommits: number;
+  totalBranches: number;
+  totalTags: number;
+  totalContributors: number;
+  totalFiles: number;
+  repoSizeBytes: number;
+
+  // First/Last commits
+  firstCommitDate: number | null;
+  lastCommitDate: number | null;
+  repoAgeDays: number;
+
+  // Activity breakdown (if includeActivity)
+  activityByMonth: EnhancedMonthActivity[] | null;
+  activityByWeekday: WeekdayActivity[] | null;
+  activityByHour: EnhancedHourActivity[] | null;
+
+  // Contributor breakdown (if includeContributors)
+  topContributors: EnhancedContributorStats[] | null;
+
+  // File type breakdown (if includeFileTypes)
+  fileTypes: FileTypeStats[] | null;
+
+  // Code stats
+  totalLinesAdded: number;
+  totalLinesDeleted: number;
+}
+
+export interface GetRepoStatisticsOptions {
+  includeActivity?: boolean;
+  includeContributors?: boolean;
+  includeFileTypes?: boolean;
+  since?: string; // ISO 8601 date
+  until?: string; // ISO 8601 date
+}
+
+export async function getRepoStatistics(
+  repoPath: string,
+  options?: GetRepoStatisticsOptions,
+): Promise<CommandResult<RepoStatistics>> {
+  return invokeCommand<RepoStatistics>("get_repo_statistics", {
+    path: repoPath,
+    includeActivity: options?.includeActivity ?? false,
+    includeContributors: options?.includeContributors ?? false,
+    includeFileTypes: options?.includeFileTypes ?? false,
+    since: options?.since,
+    until: options?.until,
+  });
+}
+
+/**
+ * Search / Grep operations
+ */
+export interface SearchResult {
+  filePath: string;
+  lineNumber: number;
+  lineContent: string;
+  matchStart: number;
+  matchEnd: number;
+}
+
+export interface SearchFileResult {
+  filePath: string;
+  matches: SearchResult[];
+  matchCount: number;
+}
+
+export interface DiffSearchResult {
+  commitId: string;
+  author: string;
+  date: number;
+  message: string;
+  filePath: string;
+  lineContent: string;
+}
+
+export async function searchInFiles(
+  repoPath: string,
+  query: string,
+  caseSensitive?: boolean,
+  regex?: boolean,
+  filePattern?: string,
+  maxResults?: number,
+): Promise<CommandResult<SearchFileResult[]>> {
+  return invokeCommand<SearchFileResult[]>("search_in_files", {
+    path: repoPath,
+    query,
+    caseSensitive,
+    regex,
+    filePattern,
+    maxResults,
+  });
+}
+
+export async function searchInDiff(
+  repoPath: string,
+  query: string,
+  staged?: boolean,
+): Promise<CommandResult<SearchResult[]>> {
+  return invokeCommand<SearchResult[]>("search_in_diff", {
+    path: repoPath,
+    query,
+    staged,
+  });
+}
+
+export async function searchInCommits(
+  repoPath: string,
+  query: string,
+  maxCommits?: number,
+): Promise<CommandResult<DiffSearchResult[]>> {
+  return invokeCommand<DiffSearchResult[]>("search_in_commits", {
+    path: repoPath,
+    query,
+    maxCommits,
+  });
+}
+
+export async function searchInCommitMessages(
+  repoPath: string,
+  query: string,
+  maxCommits?: number,
+): Promise<CommandResult<DiffSearchResult[]>> {
+  return invokeCommand<DiffSearchResult[]>("search_in_commit_messages", {
+    path: repoPath,
+    query,
+    maxCommits,
+  });
+}
+
+/**
+ * A match location within a commit's changes
+ */
+export interface SearchMatch {
+  filePath: string;
+  lineNumber: number | null;
+  lineContent: string | null;
+}
+
+/**
+ * A commit returned from content/file search
+ */
+export interface SearchCommit {
+  oid: string;
+  shortOid: string;
+  message: string;
+  authorName: string;
+  authorDate: number;
+  matches: SearchMatch[];
+}
+
+/**
+ * Search for commits that changed specific content (git log -G or -S)
+ *
+ * This is useful for finding when a specific string or pattern was added,
+ * removed, or modified.
+ *
+ * @param repoPath - Repository path
+ * @param searchText - Text to search for in changes
+ * @param regex - Treat searchText as a regex pattern (uses git log -G)
+ * @param ignoreCase - Case insensitive search
+ * @param maxCount - Limit number of results
+ */
+export async function searchCommitsByContent(
+  repoPath: string,
+  searchText: string,
+  regex?: boolean,
+  ignoreCase?: boolean,
+  maxCount?: number,
+): Promise<CommandResult<SearchCommit[]>> {
+  return invokeCommand<SearchCommit[]>("search_commits_by_content", {
+    path: repoPath,
+    searchText,
+    regex,
+    ignoreCase,
+    maxCount,
+  });
+}
+
+/**
+ * Search for commits that touched files matching a pattern
+ *
+ * This is useful for finding all commits that modified files matching
+ * a glob pattern (e.g., "*.rs", "src/*.ts").
+ *
+ * @param repoPath - Repository path
+ * @param filePattern - Glob pattern to match files (e.g., "*.rs")
+ * @param maxCount - Limit number of results
+ */
+export async function searchCommitsByFile(
+  repoPath: string,
+  filePattern: string,
+  maxCount?: number,
+): Promise<CommandResult<SearchCommit[]>> {
+  return invokeCommand<SearchCommit[]>("search_commits_by_file", {
+    path: repoPath,
+    filePattern,
+    maxCount,
+  });
+}
+
+/**
+ * Sparse checkout
+ */
+export interface SparseCheckoutConfig {
+  enabled: boolean;
+  coneMode: boolean;
+  patterns: string[];
+}
+
+export async function getSparseCheckoutConfig(
+  repoPath: string,
+): Promise<CommandResult<SparseCheckoutConfig>> {
+  return invokeCommand<SparseCheckoutConfig>("get_sparse_checkout_config", {
+    path: repoPath,
+  });
+}
+
+export async function enableSparseCheckout(
+  repoPath: string,
+  coneMode: boolean,
+): Promise<CommandResult<SparseCheckoutConfig>> {
+  return invokeCommand<SparseCheckoutConfig>("enable_sparse_checkout", {
+    path: repoPath,
+    coneMode,
+  });
+}
+
+export async function disableSparseCheckout(
+  repoPath: string,
+): Promise<CommandResult<SparseCheckoutConfig>> {
+  return invokeCommand<SparseCheckoutConfig>("disable_sparse_checkout", {
+    path: repoPath,
+  });
+}
+
+export async function setSparseCheckoutPatterns(
+  repoPath: string,
+  patterns: string[],
+): Promise<CommandResult<SparseCheckoutConfig>> {
+  return invokeCommand<SparseCheckoutConfig>("set_sparse_checkout_patterns", {
+    path: repoPath,
+    patterns,
+  });
+}
+
+export async function addSparseCheckoutPatterns(
+  repoPath: string,
+  patterns: string[],
+): Promise<CommandResult<SparseCheckoutConfig>> {
+  return invokeCommand<SparseCheckoutConfig>("add_sparse_checkout_patterns", {
+    path: repoPath,
+    patterns,
+  });
+}
+
+// ============================================================================
+// Commit Signature Verification
+// ============================================================================
+
+/**
+ * Signature verification status
+ */
+export type SignatureStatus = "good" | "bad" | "unknown" | "unsigned" | "error";
+
+/**
+ * Detailed commit signature information
+ */
+export interface CommitSignatureInfo {
+  commitId: string;
+  isSigned: boolean;
+  signatureStatus: SignatureStatus;
+  signerName: string | null;
+  signerEmail: string | null;
+  keyId: string | null;
+  signatureType: string | null; // "gpg", "ssh", "x509"
+}
+
+/**
+ * Repository signing configuration
+ */
+export interface SigningConfig {
+  signingEnabled: boolean;
+  signingKey: string | null;
+  signingFormat: string | null; // "gpg", "ssh", "x509"
+}
+
+/**
+ * Verify the signature of a single commit
+ */
+export async function verifyCommitSignature(
+  repoPath: string,
+  commitId: string,
+): Promise<CommandResult<CommitSignatureInfo>> {
+  return invokeCommand<CommitSignatureInfo>("verify_commit_signature", {
+    path: repoPath,
+    commitId,
+  });
+}
+
+/**
+ * Verify signatures for multiple commits in a batch
+ */
+export async function getCommitsSignatureInfo(
+  repoPath: string,
+  commitIds: string[],
+): Promise<CommandResult<CommitSignatureInfo[]>> {
+  return invokeCommand<CommitSignatureInfo[]>("get_commits_signature_info", {
+    path: repoPath,
+    commitIds,
+  });
+}
+
+/**
+ * Get the signing configuration for a repository
+ */
+export async function getSigningConfig(
+  repoPath: string,
+): Promise<CommandResult<SigningConfig>> {
+  return invokeCommand<SigningConfig>("get_signing_config", {
+    path: repoPath,
+  });
+}
+
+/**
+ * Avatar operations
+ */
+
+/**
+ * Get avatar info for a single email address
+ */
+export async function getAvatarUrl(
+  args: GetAvatarUrlCommand,
+): Promise<CommandResult<AvatarInfo>> {
+  return invokeCommand<AvatarInfo>("get_avatar_url", args);
+}
+
+/**
+ * Get avatar info for multiple email addresses (batch)
+ */
+export async function getAvatarUrls(
+  args: GetAvatarUrlsCommand,
+): Promise<CommandResult<AvatarInfo[]>> {
+  return invokeCommand<AvatarInfo[]>("get_avatar_urls", args);
+}
+
+/**
+ * Bookmark operations
+ */
+
+/**
+ * Repository bookmark
+ */
+export interface RepoBookmark {
+  path: string;
+  name: string;
+  group: string | null;
+  pinned: boolean;
+  lastOpened: number;
+  color: string | null;
+}
+
+/**
+ * Get all bookmarks
+ */
+export async function getBookmarks(): Promise<CommandResult<RepoBookmark[]>> {
+  return invokeCommand<RepoBookmark[]>("get_bookmarks", {});
+}
+
+/**
+ * Add a new bookmark
+ */
+export async function addBookmark(
+  path: string,
+  name: string,
+  group?: string | null,
+  pinned?: boolean,
+  color?: string | null,
+): Promise<CommandResult<RepoBookmark[]>> {
+  return invokeCommand<RepoBookmark[]>("add_bookmark", {
+    path,
+    name,
+    group: group ?? null,
+    pinned: pinned ?? false,
+    color: color ?? null,
+  });
+}
+
+/**
+ * Remove a bookmark
+ */
+export async function removeBookmark(
+  path: string,
+): Promise<CommandResult<RepoBookmark[]>> {
+  return invokeCommand<RepoBookmark[]>("remove_bookmark", { path });
+}
+
+/**
+ * Update an existing bookmark
+ */
+export async function updateBookmark(
+  bookmark: RepoBookmark,
+): Promise<CommandResult<RepoBookmark[]>> {
+  return invokeCommand<RepoBookmark[]>("update_bookmark", { bookmark });
+}
+
+/**
+ * Get recently opened repositories
+ */
+export async function getRecentRepos(): Promise<CommandResult<RepoBookmark[]>> {
+  return invokeCommand<RepoBookmark[]>("get_recent_repos", {});
+}
+
+/**
+ * Record that a repository was opened
+ */
+export async function recordRepoOpened(
+  path: string,
+  name: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("record_repo_opened", { path, name });
+}
+
+/**
+ * Branch Protection Rules
+ */
+
+/**
+ * A local branch protection rule
+ */
+export interface BranchRule {
+  /** Branch name or glob pattern (e.g., "main", "release/*") */
+  pattern: string;
+  /** Prevent the branch from being deleted */
+  preventDeletion: boolean;
+  /** Prevent force-pushing to the branch */
+  preventForcePush: boolean;
+  /** Require changes to go through a pull request */
+  requirePullRequest: boolean;
+  /** Prevent direct commits/pushes to the branch */
+  preventDirectPush: boolean;
+}
+
+/**
+ * Get all branch protection rules for a repository
+ *
+ * @param path - Repository path
+ * @returns List of branch protection rules
+ */
+export async function getBranchRules(
+  path: string,
+): Promise<CommandResult<BranchRule[]>> {
+  return invokeCommand<BranchRule[]>("get_branch_rules", { path });
+}
+
+/**
+ * Set (add or update) a branch protection rule
+ *
+ * @param path - Repository path
+ * @param rule - The branch rule to set
+ * @returns Updated list of all branch rules
+ */
+export async function setBranchRule(
+  path: string,
+  rule: BranchRule,
+): Promise<CommandResult<BranchRule[]>> {
+  return invokeCommand<BranchRule[]>("set_branch_rule", { path, rule });
+}
+
+/**
+ * Delete a branch protection rule by pattern
+ *
+ * @param path - Repository path
+ * @param pattern - The branch pattern to remove the rule for
+ * @returns Updated list of all branch rules
+ */
+export async function deleteBranchRule(
+  path: string,
+  pattern: string,
+): Promise<CommandResult<BranchRule[]>> {
+  return invokeCommand<BranchRule[]>("delete_branch_rule", { path, pattern });
+}
+
+/**
+ * Custom Actions
+ */
+
+/**
+ * A user-defined custom action
+ */
+export interface CustomAction {
+  id: string;
+  name: string;
+  command: string;
+  arguments: string | null;
+  workingDirectory: string | null;
+  shortcut: string | null;
+  showInToolbar: boolean;
+  openInTerminal: boolean;
+  confirmBeforeRun: boolean;
+}
+
+/**
+ * Result of executing a custom action
+ */
+export interface ActionResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  success: boolean;
+}
+
+/**
+ * Get all custom actions for a repository
+ */
+export async function getCustomActions(
+  path: string,
+): Promise<CommandResult<CustomAction[]>> {
+  return invokeCommand<CustomAction[]>("get_custom_actions", { path });
+}
+
+/**
+ * Save a custom action
+ */
+export async function saveCustomAction(
+  path: string,
+  action: CustomAction,
+): Promise<CommandResult<CustomAction[]>> {
+  return invokeCommand<CustomAction[]>("save_custom_action", { path, action });
+}
+
+/**
+ * Delete a custom action
+ */
+export async function deleteCustomAction(
+  path: string,
+  actionId: string,
+): Promise<CommandResult<CustomAction[]>> {
+  return invokeCommand<CustomAction[]>("delete_custom_action", {
+    path,
+    actionId,
+  });
+}
+
+/**
+ * Run a custom action
+ */
+export async function runCustomAction(
+  path: string,
+  actionId: string,
+): Promise<CommandResult<ActionResult>> {
+  return invokeCommand<ActionResult>("run_custom_action", { path, actionId });
+}
+
+/**
+ * Cherry-pick a range of commits
+ */
+export async function cherryPickRange(
+  path: string,
+  commitOids: string[],
+): Promise<CommandResult<Commit[]>> {
+  return invokeCommand<Commit[]>("cherry_pick_range", { path, commitOids });
+}
+
+/**
+ * Cherry-pick commits from the tip of a branch by name
+ *
+ * Resolves the given branch name to its tip commit and cherry-picks
+ * the most recent `count` commits (default 1) onto the current branch.
+ */
+export async function cherryPickFromBranch(
+  args: CherryPickFromBranchCommand,
+): Promise<CommandResult<Commit[]>> {
+  return invokeCommand<Commit[]>("cherry_pick_from_branch", args);
+}
+
+/**
+ * Advanced Commit Search
+ */
+
+/**
+ * Filter criteria for searching commits
+ */
+export interface CommitFilter {
+  author?: string;
+  committer?: string;
+  message?: string;
+  afterDate?: string;
+  beforeDate?: string;
+  path?: string;
+  branch?: string;
+  minParents?: number;
+  maxParents?: number;
+  noMerges?: boolean;
+  firstParent?: boolean;
+}
+
+/**
+ * A commit returned from filtered search results
+ */
+export interface FilteredCommit {
+  oid: string;
+  shortOid: string;
+  message: string;
+  authorName: string;
+  authorEmail: string;
+  authorDate: number;
+  committerName: string;
+  committerDate: number;
+  parentCount: number;
+  isMerge: boolean;
+}
+
+/**
+ * Filter commits based on criteria
+ */
+export async function filterCommits(
+  path: string,
+  filter: CommitFilter,
+  maxCount?: number,
+): Promise<CommandResult<FilteredCommit[]>> {
+  return invokeCommand<FilteredCommit[]>("filter_commits", {
+    path,
+    filter,
+    maxCount: maxCount ?? 500,
+  });
+}
+
+/**
+ * Get commits that differ between two branches
+ */
+export async function getBranchDiffCommits(
+  path: string,
+  baseBranch: string,
+  compareBranch: string,
+  maxCount?: number,
+): Promise<CommandResult<FilteredCommit[]>> {
+  return invokeCommand<FilteredCommit[]>("get_branch_diff_commits", {
+    path,
+    baseBranch,
+    compareBranch,
+    maxCount: maxCount ?? 500,
+  });
+}
+
+/**
+ * Get commit history for a specific file
+ */
+export async function getFileLog(
+  path: string,
+  filePath: string,
+  follow?: boolean,
+  maxResults?: number,
+): Promise<CommandResult<FilteredCommit[]>> {
+  return invokeCommand<FilteredCommit[]>("get_file_log", {
+    path,
+    filePath,
+    follow: follow ?? true,
+    maxResults: maxResults ?? 100,
+  });
+}
+
+// ============================================================================
+// Git Bundle Operations
+// ============================================================================
+
+/**
+ * Reference in a bundle
+ */
+export interface BundleRef {
+  name: string;
+  oid: string;
+}
+
+/**
+ * Result of creating a bundle
+ */
+export interface BundleCreateResult {
+  bundlePath: string;
+  refsCount: number;
+  objectsCount: number;
+}
+
+/**
+ * Result of verifying a bundle
+ */
+export interface BundleVerifyResult {
+  isValid: boolean;
+  refs: BundleRef[];
+  requires: string[];
+  message: string | null;
+}
+
+/**
+ * Create a bundle file from repository refs
+ * @param repoPath Repository path
+ * @param bundlePath Output bundle file path
+ * @param refs Refs to include (branches, tags, HEAD, ranges)
+ * @param all Include all refs (--all flag)
+ */
+export async function bundleCreate(
+  repoPath: string,
+  bundlePath: string,
+  refs: string[],
+  all: boolean,
+): Promise<CommandResult<BundleCreateResult>> {
+  return invokeCommand<BundleCreateResult>("bundle_create", {
+    path: repoPath,
+    bundlePath,
+    refs,
+    all,
+  });
+}
+
+/**
+ * Verify a bundle file against a repository
+ * @param repoPath Repository path (for verification against)
+ * @param bundlePath Bundle file to verify
+ */
+export async function bundleVerify(
+  repoPath: string,
+  bundlePath: string,
+): Promise<CommandResult<BundleVerifyResult>> {
+  return invokeCommand<BundleVerifyResult>("bundle_verify", {
+    path: repoPath,
+    bundlePath,
+  });
+}
+
+/**
+ * List the refs (heads) contained in a bundle file
+ * @param bundlePath Bundle file path
+ */
+export async function bundleListHeads(
+  bundlePath: string,
+): Promise<CommandResult<BundleRef[]>> {
+  return invokeCommand<BundleRef[]>("bundle_list_heads", {
+    bundlePath,
+  });
+}
+
+/**
+ * Extract (unbundle) a bundle file into a repository
+ * @param repoPath Repository path
+ * @param bundlePath Bundle file to extract
+ * @returns The refs that were fetched from the bundle
+ */
+export async function bundleUnbundle(
+  repoPath: string,
+  bundlePath: string,
+): Promise<CommandResult<BundleRef[]>> {
+  return invokeCommand<BundleRef[]>("bundle_unbundle", {
+    path: repoPath,
+    bundlePath,
+  });
+}
+
+// ============================================================================
+// Branch Comparison
+// ============================================================================
+
+/**
+ * Options for branch comparison
+ */
+export interface BranchComparisonOptions {
+  /** Include list of commits ahead/behind */
+  includeCommits?: boolean;
+  /** Include list of changed files */
+  includeFiles?: boolean;
+}
+
+/**
+ * A commit in the comparison result
+ */
+export interface CompareCommit {
+  oid: string;
+  shortOid: string;
+  message: string;
+  authorName: string;
+  authorDate: number;
+}
+
+/**
+ * A changed file in the comparison result
+ */
+export interface ChangedFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  oldPath: string | null;
+}
+
+/**
+ * Result of comparing two branches/refs
+ */
+export interface BranchComparison {
+  baseRef: string;
+  compareRef: string;
+  ahead: number;
+  behind: number;
+  mergeBase: string;
+  commitsAhead: CompareCommit[] | null;
+  commitsBehind: CompareCommit[] | null;
+  filesChanged: ChangedFile[] | null;
+  totalAdditions: number;
+  totalDeletions: number;
+}
+
+/**
+ * Compare two branches or refs
+ * @param path Repository path
+ * @param base Base ref (branch/tag/commit)
+ * @param compare Comparison ref
+ * @param options Comparison options
+ * @returns Comparison result with ahead/behind counts, merge base, and optionally commits and files
+ */
+export async function compareBranches(
+  path: string,
+  base: string,
+  compare: string,
+  options?: BranchComparisonOptions,
+): Promise<CommandResult<BranchComparison>> {
+  return invokeCommand<BranchComparison>("compare_branches", {
+    path,
+    base,
+    compare,
+    includeCommits: options?.includeCommits ?? false,
+    includeFiles: options?.includeFiles ?? false,
+  });
+}
+
+// ============================================================================
+// External Diff Tool
+// ============================================================================
+
+/**
+ * Diff tool configuration
+ */
+export interface DiffToolConfig {
+  /** Name of the configured diff tool */
+  tool: string | null;
+  /** Custom command for the diff tool */
+  cmd: string | null;
+  /** Whether to prompt before launching the diff tool */
+  prompt: boolean;
+}
+
+/**
+ * Information about an available diff tool
+ */
+export interface AvailableDiffTool {
+  /** Tool identifier name */
+  name: string;
+  /** Command used to launch the tool */
+  command: string;
+  /** Whether the tool is available on the system */
+  available: boolean;
+}
+
+/**
+ * Result of launching a diff tool
+ */
+export interface DiffToolResult {
+  /** Whether the diff tool exited successfully */
+  success: boolean;
+  /** Output or error message from the diff tool */
+  message: string;
+}
+
+/**
+ * Get the current diff tool configuration
+ * @param path Repository path
+ * @param global Whether to read from global config instead of local
+ * @returns Diff tool configuration
+ */
+export async function getDiffToolConfig(
+  path: string,
+  global?: boolean,
+): Promise<CommandResult<DiffToolConfig>> {
+  return invokeCommand<DiffToolConfig>("get_diff_tool", {
+    path,
+    global,
+  });
+}
+
+/**
+ * Set the diff tool configuration
+ * @param path Repository path
+ * @param tool Tool name (e.g., "vscode", "meld", "kdiff3", "beyond")
+ * @param cmd Custom command (optional, if not using standard tool)
+ * @param global Whether to set in global config
+ */
+export async function setDiffTool(
+  path: string,
+  tool: string,
+  cmd?: string,
+  global?: boolean,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("set_diff_tool", {
+    path,
+    tool,
+    cmd,
+    global,
+  });
+}
+
+/**
+ * List available diff tools with their availability status
+ * @param path Repository path
+ * @returns List of available diff tools
+ */
+export async function listDiffTools(
+  path: string,
+): Promise<CommandResult<AvailableDiffTool[]>> {
+  return invokeCommand<AvailableDiffTool[]>("list_diff_tools", {
+    path,
+  });
+}
+
+/**
+ * Launch the external diff tool for a specific file
+ * @param path Repository path
+ * @param filePath File to diff (relative to repo root)
+ * @param staged If true, compare staged changes (index vs HEAD)
+ * @param commit If provided, compare against this commit
+ * @returns Result of launching the diff tool
+ */
+export async function launchDiffTool(
+  path: string,
+  filePath: string,
+  staged?: boolean,
+  commit?: string,
+): Promise<CommandResult<DiffToolResult>> {
+  return invokeCommand<DiffToolResult>("launch_diff_tool", {
+    path,
+    filePath,
+    staged,
+    commit,
+  });
+}
+
+// ============================================================================
+// Clipboard Operations
+// ============================================================================
+
+/**
+ * Result of a clipboard copy operation
+ */
+export interface CopyResult {
+  success: boolean;
+  text: string;
+}
+
+/**
+ * Format options for commit info
+ */
+export type CommitInfoFormat =
+  | "sha"
+  | "short_sha"
+  | "message"
+  | "full"
+  | "patch";
+
+/**
+ * Format options for file paths
+ */
+export type FilePathFormat = "relative" | "absolute" | "filename";
+
+/**
+ * Copy text to the system clipboard
+ * Uses the browser's clipboard API for better reliability
+ * @param text Text to copy
+ * @returns Result with the copied text
+ */
+export async function copyToClipboard(
+  text: string,
+): Promise<CommandResult<CopyResult>> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return {
+      success: true,
+      data: { success: true, text },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        code: "CLIPBOARD_ERROR",
+        message:
+          error instanceof Error ? error.message : "Failed to copy to clipboard",
+      },
+    };
+  }
+}
+
+/**
+ * Get formatted commit info for copying
+ * @param path Repository path
+ * @param oid Commit OID
+ * @param format Format type: "sha", "short_sha", "message", "full", "patch"
+ * @returns Formatted commit info
+ */
+export async function getCommitInfoForCopy(
+  path: string,
+  oid: string,
+  format: CommitInfoFormat,
+): Promise<CommandResult<CopyResult>> {
+  return invokeCommand<CopyResult>("get_commit_info_for_copy", {
+    path,
+    oid,
+    format,
+  });
+}
+
+/**
+ * Get file path in various formats for copying
+ * @param path Repository path
+ * @param filePath Relative file path within the repo
+ * @param format Format type: "relative", "absolute", "filename"
+ * @returns Formatted file path
+ */
+export async function getFilePathForCopy(
+  path: string,
+  filePath: string,
+  format: FilePathFormat,
+): Promise<CommandResult<CopyResult>> {
+  return invokeCommand<CopyResult>("get_file_path_for_copy", {
+    path,
+    filePath,
+    format,
+  });
+}
+
+/**
+ * Copy commit SHA to clipboard
+ * Convenience function that combines getCommitInfoForCopy and copyToClipboard
+ * @param path Repository path
+ * @param oid Commit OID
+ * @param short If true, copy short SHA (7 characters)
+ * @returns Result with the copied text
+ */
+export async function copyCommitSha(
+  path: string,
+  oid: string,
+  short?: boolean,
+): Promise<CommandResult<CopyResult>> {
+  const format: CommitInfoFormat = short ? "short_sha" : "sha";
+  const infoResult = await getCommitInfoForCopy(path, oid, format);
+
+  if (!infoResult.success || !infoResult.data) {
+    return infoResult;
+  }
+
+  return copyToClipboard(infoResult.data.text);
+}
+
+/**
+ * Copy commit message to clipboard
+ * @param path Repository path
+ * @param oid Commit OID
+ * @returns Result with the copied text
+ */
+export async function copyCommitMessage(
+  path: string,
+  oid: string,
+): Promise<CommandResult<CopyResult>> {
+  const infoResult = await getCommitInfoForCopy(path, oid, "message");
+
+  if (!infoResult.success || !infoResult.data) {
+    return infoResult;
+  }
+
+  return copyToClipboard(infoResult.data.text);
+}
+
+/**
+ * Copy commit as patch to clipboard
+ * @param path Repository path
+ * @param oid Commit OID
+ * @returns Result with the copied patch text
+ */
+export async function copyCommitPatch(
+  path: string,
+  oid: string,
+): Promise<CommandResult<CopyResult>> {
+  const infoResult = await getCommitInfoForCopy(path, oid, "patch");
+
+  if (!infoResult.success || !infoResult.data) {
+    return infoResult;
+  }
+
+  return copyToClipboard(infoResult.data.text);
+}
+
+/**
+ * Copy file path to clipboard
+ * @param repoPath Repository path
+ * @param filePath Relative file path within the repo
+ * @param format Format type: "relative", "absolute", "filename"
+ * @returns Result with the copied text
+ */
+export async function copyFilePath(
+  repoPath: string,
+  filePath: string,
+  format: FilePathFormat = "relative",
+): Promise<CommandResult<CopyResult>> {
+  const pathResult = await getFilePathForCopy(repoPath, filePath, format);
+
+  if (!pathResult.success || !pathResult.data) {
+    return pathResult;
+  }
+
+  return copyToClipboard(pathResult.data.text);
+}
+
+/**
+ * Repository maintenance operations
+ */
+
+/**
+ * Result of a garbage collection operation
+ */
+export interface GcResult {
+  /** Whether the operation completed successfully */
+  success: boolean;
+  /** Human-readable message about the operation */
+  message: string;
+  /** Number of objects before GC (if available) */
+  objectsBefore: number | null;
+  /** Number of objects after GC (if available) */
+  objectsAfter: number | null;
+}
+
+/**
+ * Result of a prune operation for remote tracking branches
+ */
+export interface PruneResult {
+  /** Whether the operation completed successfully */
+  success: boolean;
+  /** List of branches that were pruned */
+  branchesPruned: string[];
+}
+
+/**
+ * Result of a repository integrity check (fsck)
+ */
+export interface FsckResult {
+  /** Whether the repository is valid (no errors) */
+  isValid: boolean;
+  /** List of errors found */
+  errors: string[];
+  /** List of warnings found */
+  warnings: string[];
+}
+
+/**
+ * Information about repository size and storage
+ */
+export interface RepoSizeInfo {
+  /** Total size of the .git directory in bytes */
+  totalSizeBytes: number;
+  /** Size of object storage in bytes */
+  objectsSizeBytes: number;
+  /** Number of pack files */
+  packFilesCount: number;
+  /** Number of loose objects */
+  looseObjectsCount: number;
+}
+
+/**
+ * Run garbage collection on a repository
+ *
+ * This runs `git gc` to clean up unnecessary files and optimize the repository.
+ *
+ * @param repoPath Path to the repository
+ * @param aggressive Use aggressive gc mode (slower but more thorough)
+ * @param prune Prune objects older than this date (e.g., "2.weeks.ago")
+ * @returns Result of the garbage collection
+ */
+export async function runGarbageCollection(
+  repoPath: string,
+  aggressive: boolean = false,
+  prune?: string,
+): Promise<CommandResult<GcResult>> {
+  return invokeCommand<GcResult>("run_garbage_collection", {
+    path: repoPath,
+    aggressive,
+    prune,
+  });
+}
+
+/**
+ * Prune remote tracking branches that no longer exist on the remote
+ *
+ * This runs `git remote prune` to remove stale remote tracking branches.
+ *
+ * @param repoPath Path to the repository
+ * @param remote Specific remote to prune, or undefined for all remotes
+ * @returns Result with list of pruned branches
+ */
+export async function pruneRemoteTrackingBranches(
+  repoPath: string,
+  remote?: string,
+): Promise<CommandResult<PruneResult>> {
+  return invokeCommand<PruneResult>("prune_remote_tracking_branches", {
+    path: repoPath,
+    remote,
+  });
+}
+
+/**
+ * Verify repository integrity using fsck
+ *
+ * This runs `git fsck` to check the connectivity and validity of objects.
+ *
+ * @param repoPath Path to the repository
+ * @param full Perform a full check (slower but more thorough)
+ * @returns Result of the integrity check
+ */
+export async function verifyRepository(
+  repoPath: string,
+  full: boolean = false,
+): Promise<CommandResult<FsckResult>> {
+  return invokeCommand<FsckResult>("verify_repository", {
+    path: repoPath,
+    full,
+  });
+}
+
+/**
+ * Get repository size information
+ *
+ * Returns information about the repository's storage usage.
+ *
+ * @param repoPath Path to the repository
+ * @returns Size information for the repository
+ */
+export async function getRepoSizeInfo(
+  repoPath: string,
+): Promise<CommandResult<RepoSizeInfo>> {
+  return invokeCommand<RepoSizeInfo>("get_repo_size_info", {
+    path: repoPath,
+  });
+}
+
+/**
+ * Commit graph visualization
+ */
+
+/**
+ * Get commit graph data for visualization
+ *
+ * Returns graph nodes with lane assignments, edges, and ref annotations
+ * suitable for rendering a commit graph (GitKraken/SourceTree style).
+ *
+ * @param args Graph command options including path, maxCount, branch, and skip
+ * @returns Commit graph data with nodes, total commits count, and max lane
+ */
+export async function getCommitGraph(
+  args: GetCommitGraphCommand,
+): Promise<CommandResult<CommitGraphData>> {
+  return invokeCommand<CommitGraphData>("get_commit_graph", {
+    path: args.path,
+    maxCount: args.maxCount,
+    branch: args.branch,
+    skip: args.skip,
+  });
+}
+
+/**
+ * Keyboard Shortcuts operations
+ */
+
+/**
+ * Get all keyboard shortcuts (defaults merged with user customizations)
+ *
+ * @param args Optional path for repo-specific shortcuts (reserved for future use)
+ * @returns List of keyboard shortcuts with customization status
+ */
+export async function getKeyboardShortcuts(
+  args?: GetKeyboardShortcutsCommand,
+): Promise<CommandResult<KeyboardShortcutConfig[]>> {
+  return invokeCommand<KeyboardShortcutConfig[]>("get_keyboard_shortcuts", {
+    path: args?.path ?? null,
+  });
+}
+
+/**
+ * Set a keyboard shortcut for a specific action
+ *
+ * @param args Action name and new shortcut key combination
+ * @returns Updated list of all keyboard shortcuts
+ */
+export async function setKeyboardShortcut(
+  args: SetKeyboardShortcutCommand,
+): Promise<CommandResult<KeyboardShortcutConfig[]>> {
+  return invokeCommand<KeyboardShortcutConfig[]>("set_keyboard_shortcut", {
+    action: args.action,
+    shortcut: args.shortcut,
+  });
+}
+
+/**
+ * Reset all keyboard shortcuts to their default values
+ *
+ * @returns List of keyboard shortcuts after reset (all defaults)
+ */
+export async function resetKeyboardShortcuts(): Promise<
+  CommandResult<KeyboardShortcutConfig[]>
+> {
+  return invokeCommand<KeyboardShortcutConfig[]>("reset_keyboard_shortcuts");
+}
+
+/**
+ * Get default keyboard shortcuts (without any user customizations)
+ *
+ * @returns List of default keyboard shortcuts
+ */
+export async function getDefaultShortcuts(): Promise<
+  CommandResult<KeyboardShortcutConfig[]>
+> {
+  return invokeCommand<KeyboardShortcutConfig[]>("get_default_shortcuts");
+}
+
+/**
+ * Checkout file operations
+ */
+
+/**
+ * Checkout a file from a specific commit, restoring it in the working directory.
+ * This overwrites the file in the working directory and stages the change.
+ *
+ * @param path Repository path
+ * @param args.filePath File path relative to the repository root
+ * @param args.commit Commit OID or ref (e.g., "HEAD~1", tag name, branch name)
+ * @returns The file content and metadata at the specified commit
+ */
+export async function checkoutFileFromCommit(
+  path: string,
+  args: CheckoutFileFromCommitCommand,
+): Promise<CommandResult<FileAtCommitResult>> {
+  return invokeCommand<FileAtCommitResult>("checkout_file_from_commit", {
+    path,
+    filePath: args.filePath,
+    commit: args.commit,
+  });
+}
+
+/**
+ * Checkout a file from a specific branch, restoring it in the working directory.
+ * This resolves the branch to its tip commit and checks out the file from there.
+ *
+ * @param path Repository path
+ * @param args.filePath File path relative to the repository root
+ * @param args.branch Branch name (local or remote)
+ * @returns The file content and metadata at the branch tip
+ */
+export async function checkoutFileFromBranch(
+  path: string,
+  args: CheckoutFileFromBranchCommand,
+): Promise<CommandResult<FileAtCommitResult>> {
+  return invokeCommand<FileAtCommitResult>("checkout_file_from_branch", {
+    path,
+    filePath: args.filePath,
+    branch: args.branch,
+  });
+}
+
+/**
+ * View a file at a specific commit without modifying the working directory.
+ * This is a read-only operation for previewing file contents at a point in history.
+ *
+ * @param path Repository path
+ * @param args.filePath File path relative to the repository root
+ * @param args.commit Commit OID or ref (e.g., "HEAD~1", tag name, branch name)
+ * @returns The file content and metadata at the specified commit
+ */
+export async function getFileAtCommit(
+  path: string,
+  args: GetFileAtCommitCommand,
+): Promise<CommandResult<FileAtCommitResult>> {
+  return invokeCommand<FileAtCommitResult>("get_file_at_commit", {
+    path,
+    filePath: args.filePath,
+    commit: args.commit,
+  });
+}
+
+/**
+ * File encoding operations
+ */
+
+/**
+ * Detect the encoding of a file in the repository.
+ * Returns encoding name, confidence, BOM detection, line ending style, and binary status.
+ *
+ * @param path Repository path
+ * @param filePath File path relative to the repository root
+ * @returns Encoding information for the file
+ */
+export async function detectFileEncoding(
+  path: string,
+  filePath: string,
+): Promise<CommandResult<FileEncodingInfo>> {
+  return invokeCommand<FileEncodingInfo>("detect_file_encoding", {
+    path,
+    filePath,
+  });
+}
+
+/**
+ * Convert a file's encoding to a target encoding.
+ * The file is read with its detected encoding, decoded, and re-encoded to the target.
+ *
+ * @param path Repository path
+ * @param filePath File path relative to the repository root
+ * @param targetEncoding Target encoding name (e.g., "utf-8", "utf-16le", "shift_jis")
+ * @returns Conversion result with source/target encodings and bytes written
+ */
+export async function convertFileEncoding(
+  path: string,
+  filePath: string,
+  targetEncoding: string,
+): Promise<CommandResult<ConvertEncodingResult>> {
+  return invokeCommand<ConvertEncodingResult>("convert_file_encoding", {
+    path,
+    filePath,
+    targetEncoding,
+  });
+}
+
+// ── Commit Message Validation ──────────────────────────────────────
+
+/**
+ * Rules for validating commit messages
+ */
+export interface CommitMessageRules {
+  /** Maximum length of the subject line (e.g., 72) */
+  maxSubjectLength: number | null;
+  /** Maximum length of each body line (e.g., 100) */
+  maxBodyLineLength: number | null;
+  /** Require a blank line between subject and body */
+  requireBlankLineBeforeBody: boolean;
+  /** Require conventional commit format: type(scope): description */
+  requireConventionalFormat: boolean;
+  /** Allowed conventional commit types (e.g., feat, fix, chore) */
+  allowedTypes: string[];
+  /** Require a scope in conventional commits */
+  requireScope: boolean;
+  /** Require a body in the commit message */
+  requireBody: boolean;
+  /** Phrases that are not allowed in commit messages (e.g., "WIP", "TODO") */
+  forbiddenPhrases: string[];
+}
+
+/**
+ * A single validation error or warning
+ */
+export interface CommitValidationError {
+  /** The rule that was violated */
+  rule: string;
+  /** Human-readable description of the violation */
+  message: string;
+  /** The line number where the violation occurred (1-based), if applicable */
+  line: number | null;
+}
+
+/**
+ * Result of validating a commit message
+ */
+export interface CommitValidationResult {
+  /** Whether the message passes all rules */
+  isValid: boolean;
+  /** Errors that must be fixed */
+  errors: CommitValidationError[];
+  /** Warnings that are advisory */
+  warnings: CommitValidationError[];
+}
+
+/**
+ * Validate a commit message against the provided rules.
+ *
+ * @param message - The commit message to validate
+ * @param rules - The validation rules to apply
+ * @returns Validation result with errors and warnings
+ */
+export async function validateCommitMessage(
+  message: string,
+  rules: CommitMessageRules,
+): Promise<CommandResult<CommitValidationResult>> {
+  return invokeCommand<CommitValidationResult>("validate_commit_message", {
+    message,
+    rules,
+  });
+}
+
+/**
+ * Get the commit message rules for a repository.
+ * Returns null if no rules have been configured.
+ *
+ * @param path - Repository path
+ * @returns Commit message rules or null
+ */
+export async function getCommitMessageRules(
+  path: string,
+): Promise<CommandResult<CommitMessageRules | null>> {
+  return invokeCommand<CommitMessageRules | null>(
+    "get_commit_message_rules",
+    { path },
+  );
+}
+
+/**
+ * Set the commit message rules for a repository.
+ * Rules are stored in .git/leviathan/commit_rules.json.
+ *
+ * @param path - Repository path
+ * @param rules - The rules to set
+ * @returns The saved rules
+ */
+export async function setCommitMessageRules(
+  path: string,
+  rules: CommitMessageRules,
+): Promise<CommandResult<CommitMessageRules>> {
+  return invokeCommand<CommitMessageRules>("set_commit_message_rules", {
+    path,
+    rules,
+  });
 }

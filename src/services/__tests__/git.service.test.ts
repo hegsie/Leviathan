@@ -234,4 +234,82 @@ describe('git.service - Tauri command invocations', () => {
       limit: 50,
     });
   });
+
+  it('amendCommit calls amend_commit with message and resetAuthor', async () => {
+    const { amendCommit } = await import('../git.service.ts');
+    await amendCommit('/test/repo', { message: 'New message', resetAuthor: true });
+    expect(lastInvokedCommand).to.equal('amend_commit');
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+      message: 'New message',
+      resetAuthor: true,
+      signAmend: undefined,
+    });
+  });
+
+  it('amendCommit calls amend_commit with only message', async () => {
+    const { amendCommit } = await import('../git.service.ts');
+    await amendCommit('/test/repo', { message: 'Updated message' });
+    expect(lastInvokedCommand).to.equal('amend_commit');
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+      message: 'Updated message',
+      resetAuthor: undefined,
+      signAmend: undefined,
+    });
+  });
+
+  it('amendCommit calls amend_commit without args', async () => {
+    const { amendCommit } = await import('../git.service.ts');
+    await amendCommit('/test/repo');
+    expect(lastInvokedCommand).to.equal('amend_commit');
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+      message: undefined,
+      resetAuthor: undefined,
+      signAmend: undefined,
+    });
+  });
+
+  it('amendCommit calls amend_commit with signAmend', async () => {
+    const { amendCommit } = await import('../git.service.ts');
+    await amendCommit('/test/repo', { message: 'Signed amend', signAmend: true });
+    expect(lastInvokedCommand).to.equal('amend_commit');
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+      message: 'Signed amend',
+      resetAuthor: undefined,
+      signAmend: true,
+    });
+  });
+
+  it('getCommitMessage calls get_commit_message with path and oid', async () => {
+    const { getCommitMessage } = await import('../git.service.ts');
+    await getCommitMessage('/test/repo', 'abc123');
+    expect(lastInvokedCommand).to.equal('get_commit_message');
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+      oid: 'abc123',
+    });
+  });
+
+  it('rewordCommit calls reword_commit with path, oid, and message', async () => {
+    const { rewordCommit } = await import('../git.service.ts');
+    await rewordCommit('/test/repo', 'abc123', 'Reworded message');
+    expect(lastInvokedCommand).to.equal('reword_commit');
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+      oid: 'abc123',
+      message: 'Reworded message',
+    });
+  });
+
+  it('getSigningStatus calls get_signing_status with path', async () => {
+    const { getSigningStatus } = await import('../git.service.ts');
+    await getSigningStatus('/test/repo');
+    expect(lastInvokedCommand).to.equal('get_signing_status');
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+    });
+  });
 });

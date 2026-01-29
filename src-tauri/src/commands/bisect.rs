@@ -369,3 +369,221 @@ fn parse_culprit_from_output(output: &str) -> Option<CulpritCommit> {
         email,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    #[tokio::test]
+    async fn test_get_bisect_status_inactive() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_bisect_status(repo.path_str()).await;
+
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        assert!(!status.active);
+        assert!(status.current_commit.is_none());
+        assert!(status.bad_commit.is_none());
+        assert!(status.good_commit.is_none());
+        assert!(status.log.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_bisect_start_simple() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = bisect_start(repo.path_str(), None, None).await;
+
+        assert!(result.is_ok());
+        let step_result = result.unwrap();
+        assert!(step_result.status.active);
+        assert_eq!(step_result.message, "Bisect session started");
+        assert!(step_result.culprit.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_bisect_start_with_commits() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+
+        // Create a "bad" commit
+        repo.create_commit("Bad commit", &[("bad.txt", "bad content")]);
+        let bad_oid = repo.head_oid().to_string();
+
+        let result = bisect_start(
+            repo.path_str(),
+            Some(bad_oid.clone()),
+            Some(good_oid.clone()),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let step_result = result.unwrap();
+        assert!(step_result.status.active);
+    }
+
+    #[tokio::test]
+    async fn test_bisect_reset() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Start bisect session
+        bisect_start(repo.path_str(), None, None).await.unwrap();
+
+        // Verify it's active
+        let status = get_bisect_status(repo.path_str()).await.unwrap();
+        assert!(status.active);
+
+        // Reset bisect
+        let result = bisect_reset(repo.path_str()).await;
+
+        assert!(result.is_ok());
+        let step_result = result.unwrap();
+        assert!(!step_result.status.active);
+    }
+
+    #[tokio::test]
+    async fn test_bisect_good_and_bad() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+
+        // Create more commits for bisect to work with
+        repo.create_commit("Commit 2", &[("file2.txt", "content 2")]);
+        repo.create_commit("Commit 3", &[("file3.txt", "content 3")]);
+        repo.create_commit("Commit 4", &[("file4.txt", "content 4")]);
+        let bad_oid = repo.head_oid().to_string();
+
+        // Start bisect with bad and good commits
+        bisect_start(repo.path_str(), Some(bad_oid), Some(good_oid))
+            .await
+            .unwrap();
+
+        // Mark current as bad
+        let bad_result = bisect_bad(repo.path_str(), None).await;
+        assert!(bad_result.is_ok());
+
+        // Reset for cleanup
+        bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bisect_skip() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+
+        // Create more commits
+        repo.create_commit("Commit 2", &[("file2.txt", "content 2")]);
+        repo.create_commit("Commit 3", &[("file3.txt", "content 3")]);
+        let bad_oid = repo.head_oid().to_string();
+
+        // Start bisect
+        bisect_start(repo.path_str(), Some(bad_oid), Some(good_oid))
+            .await
+            .unwrap();
+
+        // Skip current commit
+        let skip_result = bisect_skip(repo.path_str(), None).await;
+        assert!(skip_result.is_ok());
+
+        // Reset for cleanup
+        bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bisect_full_session() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+
+        // Create several commits
+        repo.create_commit("Commit 2", &[("file2.txt", "content 2")]);
+        repo.create_commit("Bug introduced", &[("bug.txt", "bug")]);
+        repo.create_commit("Commit 4", &[("file4.txt", "content 4")]);
+        let bad_oid = repo.head_oid().to_string();
+
+        // Start bisect
+        let start_result = bisect_start(repo.path_str(), Some(bad_oid), Some(good_oid)).await;
+        assert!(start_result.is_ok());
+
+        // Get status - should be active
+        let status = get_bisect_status(repo.path_str()).await.unwrap();
+        assert!(status.active);
+        assert!(status.current_commit.is_some());
+
+        // Reset to clean up
+        let reset_result = bisect_reset(repo.path_str()).await;
+        assert!(reset_result.is_ok());
+        assert!(!reset_result.unwrap().status.active);
+    }
+
+    #[tokio::test]
+    async fn test_bisect_bad_with_specific_commit() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+
+        repo.create_commit("Commit 2", &[("file2.txt", "content 2")]);
+        let specific_oid = repo.head_oid().to_string();
+        repo.create_commit("Commit 3", &[("file3.txt", "content 3")]);
+
+        // Start bisect
+        bisect_start(repo.path_str(), None, None).await.unwrap();
+
+        // Mark specific commit as bad
+        let bad_result = bisect_bad(repo.path_str(), Some(specific_oid)).await;
+        assert!(bad_result.is_ok());
+
+        // Mark good commit
+        let good_result = bisect_good(repo.path_str(), Some(good_oid)).await;
+        assert!(good_result.is_ok());
+
+        // Reset for cleanup
+        bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    #[test]
+    fn test_parse_bisect_log_empty_repo() {
+        let repo = TestRepo::with_initial_commit();
+        let log = parse_bisect_log(&repo.path);
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn test_is_bisect_active_false() {
+        let repo = TestRepo::with_initial_commit();
+        assert!(!is_bisect_active(&repo.path));
+    }
+
+    #[test]
+    fn test_parse_culprit_from_output_valid() {
+        let output = r#"abc123def456 is the first bad commit
+commit abc123def456
+Author: Test User <test@example.com>
+Date:   Mon Jan 1 12:00:00 2024 +0000
+
+    Bug introduced here
+
+:100644 100644 abc123 def456 M  file.txt"#;
+
+        let culprit = parse_culprit_from_output(output);
+        assert!(culprit.is_some());
+
+        let culprit = culprit.unwrap();
+        assert_eq!(culprit.oid, "abc123def456");
+        assert_eq!(culprit.author, "Test User");
+        assert_eq!(culprit.email, "test@example.com");
+        assert_eq!(culprit.summary, "Bug introduced here");
+    }
+
+    #[test]
+    fn test_parse_culprit_from_output_empty() {
+        let output = "";
+        let culprit = parse_culprit_from_output(output);
+        assert!(culprit.is_none());
+    }
+
+    #[test]
+    fn test_parse_culprit_from_output_no_author() {
+        let output = "abc123def456 is the first bad commit\ncommit abc123def456";
+        let culprit = parse_culprit_from_output(output);
+        assert!(culprit.is_none());
+    }
+}

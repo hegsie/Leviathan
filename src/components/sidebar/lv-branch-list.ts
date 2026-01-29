@@ -11,6 +11,8 @@ import '../dialogs/lv-interactive-rebase-dialog.ts';
 import type { LvInteractiveRebaseDialog } from '../dialogs/lv-interactive-rebase-dialog.ts';
 import type { Branch } from '../../types/git.types.ts';
 
+type BranchSortMode = 'name' | 'date' | 'date-asc';
+
 interface BranchSubgroup {
   prefix: string | null;
   displayName: string;
@@ -339,6 +341,139 @@ export class LvBranchList extends LitElement {
         background: var(--color-warning-bg);
         color: var(--color-warning);
       }
+
+      /* Filter and sort controls */
+      .controls {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 2px 4px;
+        border-bottom: 1px solid var(--color-border);
+      }
+
+      .controls-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        padding: 0;
+      }
+
+      .controls-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .controls-btn.active {
+        color: var(--color-primary);
+        background: var(--color-primary-bg);
+      }
+
+      .controls-btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .filter-bar {
+        display: flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-bg-tertiary);
+      }
+
+      .filter-input {
+        flex: 1;
+        border: none;
+        background: transparent;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        outline: none;
+        padding: 2px 0;
+      }
+
+      .filter-input::placeholder {
+        color: var(--color-text-muted);
+      }
+
+      .filter-clear {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-muted);
+        cursor: pointer;
+        padding: 0;
+      }
+
+      .filter-clear:hover {
+        color: var(--color-text-primary);
+        background: var(--color-bg-hover);
+      }
+
+      .filter-clear svg {
+        width: 12px;
+        height: 12px;
+      }
+
+      .sort-menu {
+        position: absolute;
+        z-index: var(--z-dropdown, 100);
+        right: 4px;
+        top: 28px;
+        min-width: 140px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        padding: var(--spacing-xs) 0;
+      }
+
+      .sort-option {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .sort-option:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .sort-option.active {
+        color: var(--color-primary);
+      }
+
+      .sort-option svg {
+        width: 14px;
+        height: 14px;
+        color: var(--color-text-muted);
+      }
+
+      .sort-option.active svg {
+        color: var(--color-primary);
+      }
+
+      .branch-item.hidden-branch {
+        opacity: 0.4;
+      }
     `,
   ];
 
@@ -353,6 +488,11 @@ export class LvBranchList extends LitElement {
   @state() private draggingBranch: Branch | null = null;
   @state() private dropTargetBranch: Branch | null = null;
   @state() private dropAction: 'merge' | 'rebase' | null = null;
+  @state() private filterText = '';
+  @state() private sortMode: BranchSortMode = 'name';
+  @state() private showFilter = false;
+  @state() private hiddenBranches = new Set<string>();
+  @state() private showSortMenu = false;
 
   @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
   @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
@@ -527,6 +667,76 @@ export class LvBranchList extends LitElement {
 
   private handleCreateBranch(): void {
     this.createBranchDialog.open();
+  }
+
+  private handleFilterInput(e: InputEvent): void {
+    this.filterText = (e.target as HTMLInputElement).value;
+  }
+
+  private clearFilter(): void {
+    this.filterText = '';
+  }
+
+  private toggleFilter(): void {
+    this.showFilter = !this.showFilter;
+    if (!this.showFilter) {
+      this.filterText = '';
+    }
+  }
+
+  private toggleSortMenu(): void {
+    this.showSortMenu = !this.showSortMenu;
+  }
+
+  private setSortMode(mode: BranchSortMode): void {
+    this.sortMode = mode;
+    this.showSortMenu = false;
+    // Re-sort branches
+    this.loadBranches();
+  }
+
+  private toggleHideBranch(branchName: string): void {
+    if (this.hiddenBranches.has(branchName)) {
+      this.hiddenBranches.delete(branchName);
+    } else {
+      this.hiddenBranches.add(branchName);
+    }
+    this.requestUpdate();
+  }
+
+  private filterBranches(branches: Branch[]): Branch[] {
+    let filtered = branches;
+
+    // Apply text filter
+    if (this.filterText) {
+      const lower = this.filterText.toLowerCase();
+      filtered = filtered.filter(
+        (b) => b.name.toLowerCase().includes(lower) || b.shorthand.toLowerCase().includes(lower),
+      );
+    }
+
+    // Apply hide filter (still show but dimmed)
+    return filtered;
+  }
+
+  private sortBranches(branches: Branch[]): Branch[] {
+    return [...branches].sort((a, b) => {
+      // HEAD always first
+      if (a.isHead) return -1;
+      if (b.isHead) return 1;
+
+      switch (this.sortMode) {
+        case 'date':
+          // Newest first
+          return (b.lastCommitTimestamp ?? 0) - (a.lastCommitTimestamp ?? 0);
+        case 'date-asc':
+          // Oldest first
+          return (a.lastCommitTimestamp ?? 0) - (b.lastCommitTimestamp ?? 0);
+        case 'name':
+        default:
+          return a.name.localeCompare(b.name);
+      }
+    });
   }
 
   private async handleBranchCreated(): Promise<void> {
@@ -1030,11 +1240,16 @@ export class LvBranchList extends LitElement {
   }
 
   private renderLocalGroup(group: LocalBranchGroup) {
+    const filteredBranches = this.sortBranches(this.filterBranches(group.branches));
+
+    // Skip empty groups when filtering
+    if (filteredBranches.length === 0 && this.filterText) return nothing;
+
     // For ungrouped branches (no prefix), render them directly
     if (group.prefix === null) {
       return html`
         <ul class="branch-list">
-          ${group.branches.map((b) => this.renderBranchItem(b))}
+          ${filteredBranches.map((b) => this.renderBranchItem(b))}
         </ul>
       `;
     }
@@ -1051,11 +1266,11 @@ export class LvBranchList extends LitElement {
           </svg>
           ${this.renderPrefixIcon(group.prefix)}
           <span class="subgroup-name">${group.displayName}</span>
-          <span class="group-count">${group.branches.length}</span>
+          <span class="group-count">${filteredBranches.length}</span>
         </div>
         ${expanded ? html`
           <ul class="branch-list">
-            ${group.branches.map((b) => this.renderBranchItem(b, true, group.prefix))}
+            ${filteredBranches.map((b) => this.renderBranchItem(b, true, group.prefix))}
           </ul>
         ` : nothing}
       </div>
@@ -1063,11 +1278,16 @@ export class LvBranchList extends LitElement {
   }
 
   private renderRemoteSubgroup(remoteName: string, subgroup: BranchSubgroup) {
+    const filteredBranches = this.sortBranches(this.filterBranches(subgroup.branches));
+
+    // Skip empty groups when filtering
+    if (filteredBranches.length === 0 && this.filterText) return nothing;
+
     // For ungrouped branches (no prefix), render them directly
     if (subgroup.prefix === null) {
       return html`
         <ul class="branch-list">
-          ${subgroup.branches.map((b) => this.renderBranchItem(b))}
+          ${filteredBranches.map((b) => this.renderBranchItem(b))}
         </ul>
       `;
     }
@@ -1084,11 +1304,11 @@ export class LvBranchList extends LitElement {
           </svg>
           ${this.renderPrefixIcon(subgroup.prefix)}
           <span class="subgroup-name">${subgroup.displayName}</span>
-          <span class="group-count">${subgroup.branches.length}</span>
+          <span class="group-count">${filteredBranches.length}</span>
         </div>
         ${expanded ? html`
           <ul class="branch-list">
-            ${subgroup.branches.map((b) => this.renderBranchItem(b, true, subgroup.prefix))}
+            ${filteredBranches.map((b) => this.renderBranchItem(b, true, subgroup.prefix))}
           </ul>
         ` : nothing}
       </div>
@@ -1168,6 +1388,16 @@ export class LvBranchList extends LitElement {
           Create branch from here
         </button>
 
+        <button class="context-menu-item" @click=${() => { this.toggleHideBranch(branch.name); this.contextMenu = { ...this.contextMenu, visible: false }; }}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            ${this.hiddenBranches.has(branch.name)
+              ? html`<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>`
+              : html`<path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line>`
+            }
+          </svg>
+          ${this.hiddenBranches.has(branch.name) ? 'Show branch' : 'Hide branch'}
+        </button>
+
         ${!isHead ? html`
           <button class="context-menu-item" @click=${this.handleMergeBranch}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1217,6 +1447,96 @@ export class LvBranchList extends LitElement {
     `;
   }
 
+  private renderControls() {
+    return html`
+      <div class="controls" style="position: relative;">
+        <button
+          class="controls-btn ${this.showFilter ? 'active' : ''}"
+          title="Filter branches"
+          @click=${this.toggleFilter}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+        </button>
+        <button
+          class="controls-btn ${this.showSortMenu ? 'active' : ''}"
+          title="Sort branches"
+          @click=${this.toggleSortMenu}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="4" y1="6" x2="20" y2="6"></line>
+            <line x1="4" y1="12" x2="16" y2="12"></line>
+            <line x1="4" y1="18" x2="12" y2="18"></line>
+          </svg>
+        </button>
+        <div style="flex:1"></div>
+        <button
+          class="controls-btn"
+          title="Create branch"
+          @click=${this.handleCreateBranch}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+        </button>
+        ${this.showSortMenu ? html`
+          <div class="sort-menu" @click=${(e: Event) => e.stopPropagation()}>
+            <button class="sort-option ${this.sortMode === 'name' ? 'active' : ''}" @click=${() => this.setSortMode('name')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 6h7M4 12h5M4 18h3M17 6v12M14 18l3 3 3-3"></path>
+              </svg>
+              Name (A-Z)
+            </button>
+            <button class="sort-option ${this.sortMode === 'date' ? 'active' : ''}" @click=${() => this.setSortMode('date')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+              Date (Newest)
+            </button>
+            <button class="sort-option ${this.sortMode === 'date-asc' ? 'active' : ''}" @click=${() => this.setSortMode('date-asc')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+              Date (Oldest)
+            </button>
+          </div>
+        ` : nothing}
+      </div>
+      ${this.showFilter ? html`
+        <div class="filter-bar">
+          <svg style="width:14px;height:14px;color:var(--color-text-muted);margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input
+            class="filter-input"
+            type="text"
+            placeholder="Filter branches..."
+            .value=${this.filterText}
+            @input=${this.handleFilterInput}
+          />
+          ${this.filterText ? html`
+            <button class="filter-clear" @click=${this.clearFilter}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          ` : nothing}
+        </div>
+      ` : nothing}
+    `;
+  }
+
   render() {
     if (this.loading) {
       return html`<div class="loading">Loading branches...</div>`;
@@ -1227,6 +1547,8 @@ export class LvBranchList extends LitElement {
     }
 
     return html`
+      ${this.renderControls()}
+
       <lv-create-branch-dialog
         .repositoryPath=${this.repositoryPath}
         @branch-created=${this.handleBranchCreated}

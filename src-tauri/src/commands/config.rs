@@ -408,3 +408,294 @@ pub async fn get_common_settings(path: String) -> Result<Vec<ConfigEntry>> {
 
     Ok(settings)
 }
+
+/// Line ending configuration
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineEndingConfig {
+    /// core.autocrlf setting: "true", "false", "input"
+    pub core_autocrlf: Option<String>,
+    /// core.eol setting: "lf", "crlf", "native"
+    pub core_eol: Option<String>,
+    /// core.safecrlf setting: "true", "false", "warn"
+    pub core_safecrlf: Option<String>,
+}
+
+/// Git config entry with scope information
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitConfig {
+    pub key: String,
+    pub value: String,
+    pub scope: String,
+}
+
+/// Get line ending configuration for a repository
+#[command]
+pub async fn get_line_ending_config(path: String) -> Result<LineEndingConfig> {
+    let repo_path = Path::new(&path);
+
+    let core_autocrlf = run_git_config(Some(repo_path), &["--get", "core.autocrlf"])
+        .ok()
+        .filter(|s| !s.is_empty());
+    let core_eol = run_git_config(Some(repo_path), &["--get", "core.eol"])
+        .ok()
+        .filter(|s| !s.is_empty());
+    let core_safecrlf = run_git_config(Some(repo_path), &["--get", "core.safecrlf"])
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    Ok(LineEndingConfig {
+        core_autocrlf,
+        core_eol,
+        core_safecrlf,
+    })
+}
+
+/// Set line ending configuration for a repository
+#[command]
+pub async fn set_line_ending_config(
+    path: String,
+    autocrlf: Option<String>,
+    eol: Option<String>,
+    safecrlf: Option<String>,
+) -> Result<LineEndingConfig> {
+    let repo_path = Path::new(&path);
+
+    if let Some(ref val) = autocrlf {
+        run_git_config(Some(repo_path), &["core.autocrlf", val])?;
+    }
+    if let Some(ref val) = eol {
+        run_git_config(Some(repo_path), &["core.eol", val])?;
+    }
+    if let Some(ref val) = safecrlf {
+        run_git_config(Some(repo_path), &["core.safecrlf", val])?;
+    }
+
+    // Return the updated config
+    get_line_ending_config(path).await
+}
+
+/// Get a single git config value (generic)
+#[command]
+pub async fn get_git_config(path: String, key: String) -> Result<Option<String>> {
+    let repo_path = Path::new(&path);
+    let result = run_git_config(Some(repo_path), &["--get", &key])?;
+    if result.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(result))
+    }
+}
+
+/// Set a single git config value (generic)
+#[command]
+pub async fn set_git_config(
+    path: String,
+    key: String,
+    value: String,
+    global: Option<bool>,
+) -> Result<()> {
+    let repo_path = Path::new(&path);
+
+    if global.unwrap_or(false) {
+        run_git_config(Some(repo_path), &["--global", &key, &value])?;
+    } else {
+        run_git_config(Some(repo_path), &[&key, &value])?;
+    }
+
+    Ok(())
+}
+
+/// Get all git config entries with scope information
+#[command]
+pub async fn get_all_git_config(path: String) -> Result<Vec<GitConfig>> {
+    let repo_path = Path::new(&path);
+    let result = run_git_config(Some(repo_path), &["--list", "--show-scope"])?;
+
+    let entries: Vec<GitConfig> = result
+        .lines()
+        .filter_map(|line| {
+            // Format: "scope\tkey=value" or "scope key=value"
+            // git config --show-scope outputs: "local   key=value" (tab-separated)
+            let (scope, rest) = if let Some(idx) = line.find('\t') {
+                (&line[..idx], &line[idx + 1..])
+            } else {
+                // Fallback: try splitting on first space
+                let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                if parts.len() == 2 {
+                    (parts[0], parts[1])
+                } else {
+                    return None;
+                }
+            };
+
+            let kv_parts: Vec<&str> = rest.splitn(2, '=').collect();
+            if kv_parts.len() == 2 {
+                Some(GitConfig {
+                    key: kv_parts[0].to_string(),
+                    value: kv_parts[1].to_string(),
+                    scope: scope.trim().to_string(),
+                })
+            } else {
+                // Key with no value
+                Some(GitConfig {
+                    key: rest.to_string(),
+                    value: String::new(),
+                    scope: scope.trim().to_string(),
+                })
+            }
+        })
+        .collect();
+
+    Ok(entries)
+}
+
+/// Unset a git config value
+#[command]
+pub async fn unset_git_config(path: String, key: String, global: Option<bool>) -> Result<()> {
+    let repo_path = Path::new(&path);
+
+    if global.unwrap_or(false) {
+        let _ = run_git_config(Some(repo_path), &["--global", "--unset", &key]);
+    } else {
+        let _ = run_git_config(Some(repo_path), &["--unset", &key]);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    #[tokio::test]
+    async fn test_get_line_ending_config() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_line_ending_config(repo.path_str()).await;
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        // Fresh repo may not have these set
+        // Just verify we got a valid response
+        assert!(
+            config.core_autocrlf.is_none()
+                || config.core_autocrlf.as_deref() == Some("true")
+                || config.core_autocrlf.as_deref() == Some("false")
+                || config.core_autocrlf.as_deref() == Some("input")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_line_ending_config() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = set_line_ending_config(
+            repo.path_str(),
+            Some("input".to_string()),
+            Some("lf".to_string()),
+            Some("warn".to_string()),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let config = result.unwrap();
+        assert_eq!(config.core_autocrlf.as_deref(), Some("input"));
+        assert_eq!(config.core_eol.as_deref(), Some("lf"));
+        assert_eq!(config.core_safecrlf.as_deref(), Some("warn"));
+    }
+
+    #[tokio::test]
+    async fn test_set_line_ending_config_partial() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Only set autocrlf
+        let result =
+            set_line_ending_config(repo.path_str(), Some("true".to_string()), None, None).await;
+        assert!(result.is_ok());
+
+        let config = result.unwrap();
+        assert_eq!(config.core_autocrlf.as_deref(), Some("true"));
+    }
+
+    #[tokio::test]
+    async fn test_get_git_config() {
+        let repo = TestRepo::with_initial_commit();
+
+        // user.name should be set by TestRepo
+        let result = get_git_config(repo.path_str(), "user.name".to_string()).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some("Test User".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_git_config_missing_key() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = get_git_config(repo.path_str(), "nonexistent.key".to_string()).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_set_git_config() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = set_git_config(
+            repo.path_str(),
+            "test.key".to_string(),
+            "test-value".to_string(),
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+
+        // Verify it was set
+        let get_result = get_git_config(repo.path_str(), "test.key".to_string()).await;
+        assert!(get_result.is_ok());
+        assert_eq!(get_result.unwrap(), Some("test-value".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_all_git_config() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = get_all_git_config(repo.path_str()).await;
+        assert!(result.is_ok());
+        let entries = result.unwrap();
+        assert!(!entries.is_empty());
+        // Should contain user.name that was set during repo init
+        assert!(entries.iter().any(|e| e.key == "user.name"));
+    }
+
+    #[tokio::test]
+    async fn test_unset_git_config() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Set a value first
+        set_git_config(
+            repo.path_str(),
+            "test.toremove".to_string(),
+            "value".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Verify it exists
+        let val = get_git_config(repo.path_str(), "test.toremove".to_string())
+            .await
+            .unwrap();
+        assert_eq!(val, Some("value".to_string()));
+
+        // Unset it
+        let result = unset_git_config(repo.path_str(), "test.toremove".to_string(), None).await;
+        assert!(result.is_ok());
+
+        // Verify it's gone
+        let val2 = get_git_config(repo.path_str(), "test.toremove".to_string())
+            .await
+            .unwrap();
+        assert_eq!(val2, None);
+    }
+}

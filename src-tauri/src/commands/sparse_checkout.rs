@@ -1,0 +1,317 @@
+//! Sparse checkout command handlers
+//! Manage sparse checkout configuration via git CLI
+
+use std::process::Command;
+use tauri::command;
+
+use crate::error::{LeviathanError, Result};
+
+/// Sparse checkout configuration
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SparseCheckoutConfig {
+    pub enabled: bool,
+    pub cone_mode: bool,
+    pub patterns: Vec<String>,
+}
+
+/// Helper to run a git command and return stdout as a String
+fn run_git(path: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(LeviathanError::OperationFailed(format!(
+            "git {} failed: {}",
+            args.first().unwrap_or(&""),
+            stderr
+        )))
+    }
+}
+
+/// Helper to run a git command, tolerating non-zero exit codes (returns empty string)
+fn run_git_optional(path: &str, args: &[&str]) -> String {
+    Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Build the current sparse checkout config by querying git
+fn build_config(path: &str) -> SparseCheckoutConfig {
+    let sparse_val = run_git_optional(path, &["config", "--get", "core.sparseCheckout"]);
+    let enabled = sparse_val.eq_ignore_ascii_case("true");
+
+    let cone_val = run_git_optional(path, &["config", "--get", "core.sparseCheckoutCone"]);
+    let cone_mode = cone_val.eq_ignore_ascii_case("true");
+
+    let patterns = if enabled {
+        let list_output = run_git_optional(path, &["sparse-checkout", "list"]);
+        if list_output.is_empty() {
+            Vec::new()
+        } else {
+            list_output.lines().map(|l| l.to_string()).collect()
+        }
+    } else {
+        Vec::new()
+    };
+
+    SparseCheckoutConfig {
+        enabled,
+        cone_mode,
+        patterns,
+    }
+}
+
+/// Get the current sparse checkout configuration
+#[command]
+pub async fn get_sparse_checkout_config(path: String) -> Result<SparseCheckoutConfig> {
+    Ok(build_config(&path))
+}
+
+/// Enable sparse checkout
+#[command]
+pub async fn enable_sparse_checkout(path: String, cone_mode: bool) -> Result<SparseCheckoutConfig> {
+    let mut args = vec!["sparse-checkout", "init"];
+    if cone_mode {
+        args.push("--cone");
+    }
+    run_git(&path, &args)?;
+    Ok(build_config(&path))
+}
+
+/// Disable sparse checkout
+#[command]
+pub async fn disable_sparse_checkout(path: String) -> Result<SparseCheckoutConfig> {
+    run_git(&path, &["sparse-checkout", "disable"])?;
+    Ok(build_config(&path))
+}
+
+/// Set sparse checkout patterns (replaces existing patterns)
+#[command]
+pub async fn set_sparse_checkout_patterns(
+    path: String,
+    patterns: Vec<String>,
+) -> Result<SparseCheckoutConfig> {
+    if patterns.is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "At least one pattern is required".to_string(),
+        ));
+    }
+
+    let mut args: Vec<&str> = vec!["sparse-checkout", "set"];
+    for p in &patterns {
+        args.push(p.as_str());
+    }
+    run_git(&path, &args)?;
+    Ok(build_config(&path))
+}
+
+/// Add patterns to sparse checkout (keeps existing patterns)
+#[command]
+pub async fn add_sparse_checkout_patterns(
+    path: String,
+    patterns: Vec<String>,
+) -> Result<SparseCheckoutConfig> {
+    if patterns.is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "At least one pattern is required".to_string(),
+        ));
+    }
+
+    let mut args: Vec<&str> = vec!["sparse-checkout", "add"];
+    for p in &patterns {
+        args.push(p.as_str());
+    }
+    run_git(&path, &args)?;
+    Ok(build_config(&path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    /// Check if git supports sparse-checkout (requires git >= 2.25)
+    fn git_supports_sparse_checkout() -> bool {
+        Command::new("git")
+            .args(["sparse-checkout", "list"])
+            .arg("--help")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn test_get_sparse_checkout_config_default() {
+        let repo = TestRepo::with_initial_commit();
+        let result = get_sparse_checkout_config(repo.path_str()).await;
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(!config.enabled);
+        assert!(!config.cone_mode);
+        assert!(config.patterns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_enable_sparse_checkout_cone_mode() {
+        if !git_supports_sparse_checkout() {
+            eprintln!("Skipping: git sparse-checkout not supported");
+            return;
+        }
+
+        let repo = TestRepo::with_initial_commit();
+        let result = enable_sparse_checkout(repo.path_str(), true).await;
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(config.enabled);
+        assert!(config.cone_mode);
+    }
+
+    #[tokio::test]
+    async fn test_enable_sparse_checkout_no_cone() {
+        if !git_supports_sparse_checkout() {
+            eprintln!("Skipping: git sparse-checkout not supported");
+            return;
+        }
+
+        let repo = TestRepo::with_initial_commit();
+        let result = enable_sparse_checkout(repo.path_str(), false).await;
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_disable_sparse_checkout() {
+        if !git_supports_sparse_checkout() {
+            eprintln!("Skipping: git sparse-checkout not supported");
+            return;
+        }
+
+        let repo = TestRepo::with_initial_commit();
+
+        // Enable first
+        enable_sparse_checkout(repo.path_str(), true).await.unwrap();
+
+        // Now disable
+        let result = disable_sparse_checkout(repo.path_str()).await;
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(!config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_set_sparse_checkout_patterns() {
+        if !git_supports_sparse_checkout() {
+            eprintln!("Skipping: git sparse-checkout not supported");
+            return;
+        }
+
+        let repo = TestRepo::with_initial_commit();
+
+        // Create some directories and files for sparse checkout
+        repo.create_file("src/main.rs", "fn main() {}");
+        repo.create_file("docs/readme.md", "# Docs");
+        repo.create_file("tests/test.rs", "#[test] fn t() {}");
+        repo.create_commit(
+            "Add files",
+            &[
+                ("src/main.rs", "fn main() {}"),
+                ("docs/readme.md", "# Docs"),
+                ("tests/test.rs", "#[test] fn t() {}"),
+            ],
+        );
+
+        // Enable cone mode first
+        enable_sparse_checkout(repo.path_str(), true).await.unwrap();
+
+        // Set patterns
+        let result = set_sparse_checkout_patterns(
+            repo.path_str(),
+            vec!["src".to_string(), "docs".to_string()],
+        )
+        .await;
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(config.enabled);
+        assert!(!config.patterns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_set_sparse_checkout_patterns_empty() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = set_sparse_checkout_patterns(repo.path_str(), vec![]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_add_sparse_checkout_patterns() {
+        if !git_supports_sparse_checkout() {
+            eprintln!("Skipping: git sparse-checkout not supported");
+            return;
+        }
+
+        let repo = TestRepo::with_initial_commit();
+
+        repo.create_file("src/main.rs", "fn main() {}");
+        repo.create_file("docs/readme.md", "# Docs");
+        repo.create_file("tests/test.rs", "#[test] fn t() {}");
+        repo.create_commit(
+            "Add files",
+            &[
+                ("src/main.rs", "fn main() {}"),
+                ("docs/readme.md", "# Docs"),
+                ("tests/test.rs", "#[test] fn t() {}"),
+            ],
+        );
+
+        // Enable cone mode and set initial pattern
+        enable_sparse_checkout(repo.path_str(), true).await.unwrap();
+        set_sparse_checkout_patterns(repo.path_str(), vec!["src".to_string()])
+            .await
+            .unwrap();
+
+        // Add another pattern
+        let result = add_sparse_checkout_patterns(repo.path_str(), vec!["docs".to_string()]).await;
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_add_sparse_checkout_patterns_empty() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = add_sparse_checkout_patterns(repo.path_str(), vec![]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_build_config_helper() {
+        let repo = TestRepo::with_initial_commit();
+        let config = build_config(&repo.path_str());
+        assert!(!config.enabled);
+        assert!(!config.cone_mode);
+        assert!(config.patterns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_git_invalid_path() {
+        let result = run_git("/nonexistent/path/that/does/not/exist", &["status"]);
+        assert!(result.is_err());
+    }
+}

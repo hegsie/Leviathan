@@ -978,3 +978,478 @@ pub async fn list_bitbucket_pipelines(
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestRepo;
+
+    // ========================================================================
+    // parse_bitbucket_url Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_bitbucket_url_https() {
+        let result = parse_bitbucket_url("https://bitbucket.org/workspace/repo.git");
+        assert!(result.is_some());
+        let (workspace, repo_slug) = result.unwrap();
+        assert_eq!(workspace, "workspace");
+        assert_eq!(repo_slug, "repo");
+    }
+
+    #[test]
+    fn test_parse_bitbucket_url_https_no_git_suffix() {
+        let result = parse_bitbucket_url("https://bitbucket.org/workspace/repo");
+        assert!(result.is_some());
+        let (workspace, repo_slug) = result.unwrap();
+        assert_eq!(workspace, "workspace");
+        assert_eq!(repo_slug, "repo");
+    }
+
+    #[test]
+    fn test_parse_bitbucket_url_https_with_username() {
+        let result = parse_bitbucket_url("https://username@bitbucket.org/workspace/repo.git");
+        assert!(result.is_some());
+        let (workspace, repo_slug) = result.unwrap();
+        assert_eq!(workspace, "workspace");
+        assert_eq!(repo_slug, "repo");
+    }
+
+    #[test]
+    fn test_parse_bitbucket_url_ssh() {
+        let result = parse_bitbucket_url("git@bitbucket.org:workspace/repo.git");
+        assert!(result.is_some());
+        let (workspace, repo_slug) = result.unwrap();
+        assert_eq!(workspace, "workspace");
+        assert_eq!(repo_slug, "repo");
+    }
+
+    #[test]
+    fn test_parse_bitbucket_url_ssh_no_git_suffix() {
+        let result = parse_bitbucket_url("git@bitbucket.org:workspace/repo");
+        assert!(result.is_some());
+        let (workspace, repo_slug) = result.unwrap();
+        assert_eq!(workspace, "workspace");
+        assert_eq!(repo_slug, "repo");
+    }
+
+    #[test]
+    fn test_parse_bitbucket_url_not_bitbucket() {
+        let result = parse_bitbucket_url("https://github.com/owner/repo.git");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_bitbucket_url_gitlab() {
+        let result = parse_bitbucket_url("https://gitlab.com/owner/repo.git");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_bitbucket_url_invalid() {
+        let result = parse_bitbucket_url("not-a-valid-url");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_bitbucket_url_http() {
+        let result = parse_bitbucket_url("http://bitbucket.org/workspace/repo.git");
+        assert!(result.is_some());
+        let (workspace, repo_slug) = result.unwrap();
+        assert_eq!(workspace, "workspace");
+        assert_eq!(repo_slug, "repo");
+    }
+
+    // ========================================================================
+    // get_auth_header Tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_auth_header_basic() {
+        let header = get_auth_header("username", "password");
+        assert!(header.starts_with("Basic "));
+        // Verify it's valid base64
+        let encoded = header.strip_prefix("Basic ").unwrap();
+        let decoded = BASE64.decode(encoded).expect("Should be valid base64");
+        let decoded_str = String::from_utf8(decoded).expect("Should be valid UTF-8");
+        assert_eq!(decoded_str, "username:password");
+    }
+
+    #[test]
+    fn test_get_auth_header_special_characters() {
+        let header = get_auth_header("user@example.com", "p@ss:word!");
+        assert!(header.starts_with("Basic "));
+        let encoded = header.strip_prefix("Basic ").unwrap();
+        let decoded = BASE64.decode(encoded).expect("Should be valid base64");
+        let decoded_str = String::from_utf8(decoded).expect("Should be valid UTF-8");
+        assert_eq!(decoded_str, "user@example.com:p@ss:word!");
+    }
+
+    // ========================================================================
+    // get_auth_header_with_token Tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_auth_header_with_token_prefers_token() {
+        let result =
+            get_auth_header_with_token(Some("oauth_token"), Some("username"), Some("password"));
+        assert!(result.is_ok());
+        let header = result.unwrap();
+        assert_eq!(header, "Bearer oauth_token");
+    }
+
+    #[test]
+    fn test_get_auth_header_with_token_falls_back_to_basic() {
+        let result = get_auth_header_with_token(None, Some("username"), Some("password"));
+        assert!(result.is_ok());
+        let header = result.unwrap();
+        assert!(header.starts_with("Basic "));
+    }
+
+    #[test]
+    fn test_get_auth_header_with_token_empty_token_falls_back() {
+        let result = get_auth_header_with_token(Some(""), Some("username"), Some("password"));
+        assert!(result.is_ok());
+        let header = result.unwrap();
+        assert!(header.starts_with("Basic "));
+    }
+
+    #[test]
+    fn test_get_auth_header_with_token_no_credentials_errors() {
+        let result = get_auth_header_with_token(None, None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_auth_header_with_token_empty_credentials_errors() {
+        let result = get_auth_header_with_token(None, Some(""), Some(""));
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // BitbucketUser Tests
+    // ========================================================================
+
+    #[test]
+    fn test_bitbucket_user_serialization() {
+        let user = BitbucketUser {
+            uuid: "{12345}".to_string(),
+            username: "octocat".to_string(),
+            display_name: "The Octocat".to_string(),
+            avatar_url: Some("https://example.com/avatar.png".to_string()),
+        };
+
+        let json = serde_json::to_string(&user).expect("Failed to serialize");
+        assert!(json.contains("displayName") || json.contains("display_name"));
+        assert!(json.contains("avatarUrl") || json.contains("avatar_url"));
+    }
+
+    #[test]
+    fn test_bitbucket_user_without_avatar() {
+        let user = BitbucketUser {
+            uuid: "{12345}".to_string(),
+            username: "testuser".to_string(),
+            display_name: "Test User".to_string(),
+            avatar_url: None,
+        };
+
+        assert!(user.avatar_url.is_none());
+        let json = serde_json::to_string(&user).expect("Failed to serialize");
+        assert!(json.contains("null") || !json.contains("avatar"));
+    }
+
+    // ========================================================================
+    // BitbucketConnectionStatus Tests
+    // ========================================================================
+
+    #[test]
+    fn test_connection_status_connected() {
+        let status = BitbucketConnectionStatus {
+            connected: true,
+            user: Some(BitbucketUser {
+                uuid: "{12345}".to_string(),
+                username: "testuser".to_string(),
+                display_name: "Test User".to_string(),
+                avatar_url: None,
+            }),
+        };
+
+        assert!(status.connected);
+        assert!(status.user.is_some());
+    }
+
+    #[test]
+    fn test_connection_status_disconnected() {
+        let status = BitbucketConnectionStatus {
+            connected: false,
+            user: None,
+        };
+
+        assert!(!status.connected);
+        assert!(status.user.is_none());
+    }
+
+    // ========================================================================
+    // DetectedBitbucketRepo Tests
+    // ========================================================================
+
+    #[test]
+    fn test_detected_repo_structure() {
+        let repo = DetectedBitbucketRepo {
+            workspace: "myworkspace".to_string(),
+            repo_slug: "myrepo".to_string(),
+            remote_name: "origin".to_string(),
+        };
+
+        assert_eq!(repo.workspace, "myworkspace");
+        assert_eq!(repo.repo_slug, "myrepo");
+        assert_eq!(repo.remote_name, "origin");
+    }
+
+    #[test]
+    fn test_detected_repo_serialization() {
+        let repo = DetectedBitbucketRepo {
+            workspace: "workspace".to_string(),
+            repo_slug: "repo".to_string(),
+            remote_name: "upstream".to_string(),
+        };
+
+        let json = serde_json::to_string(&repo).expect("Failed to serialize");
+        assert!(json.contains("repoSlug") || json.contains("repo_slug"));
+        assert!(json.contains("remoteName") || json.contains("remote_name"));
+    }
+
+    // ========================================================================
+    // BitbucketPullRequest Tests
+    // ========================================================================
+
+    #[test]
+    fn test_pull_request_structure() {
+        let pr = BitbucketPullRequest {
+            id: 123,
+            title: "Fix bug".to_string(),
+            description: Some("This fixes the bug".to_string()),
+            state: "OPEN".to_string(),
+            author: BitbucketUser {
+                uuid: "{author}".to_string(),
+                username: "author".to_string(),
+                display_name: "Author".to_string(),
+                avatar_url: None,
+            },
+            created_on: "2024-01-01T00:00:00Z".to_string(),
+            source_branch: "feature".to_string(),
+            destination_branch: "main".to_string(),
+            url: "https://bitbucket.org/workspace/repo/pull-requests/123".to_string(),
+        };
+
+        assert_eq!(pr.id, 123);
+        assert_eq!(pr.state, "OPEN");
+        assert_eq!(pr.source_branch, "feature");
+        assert_eq!(pr.destination_branch, "main");
+    }
+
+    #[test]
+    fn test_pull_request_without_description() {
+        let pr = BitbucketPullRequest {
+            id: 456,
+            title: "Quick fix".to_string(),
+            description: None,
+            state: "MERGED".to_string(),
+            author: BitbucketUser {
+                uuid: "{author}".to_string(),
+                username: "author".to_string(),
+                display_name: "Author".to_string(),
+                avatar_url: None,
+            },
+            created_on: "2024-01-02T00:00:00Z".to_string(),
+            source_branch: "hotfix".to_string(),
+            destination_branch: "main".to_string(),
+            url: "https://bitbucket.org/workspace/repo/pull-requests/456".to_string(),
+        };
+
+        assert!(pr.description.is_none());
+        assert_eq!(pr.state, "MERGED");
+    }
+
+    // ========================================================================
+    // CreateBitbucketPullRequestInput Tests
+    // ========================================================================
+
+    #[test]
+    fn test_create_pr_input_full() {
+        let input = CreateBitbucketPullRequestInput {
+            title: "New Feature".to_string(),
+            description: Some("Adds new feature".to_string()),
+            source_branch: "feature/new".to_string(),
+            destination_branch: "main".to_string(),
+            close_source_branch: Some(true),
+        };
+
+        assert_eq!(input.title, "New Feature");
+        assert!(input.close_source_branch.unwrap());
+    }
+
+    #[test]
+    fn test_create_pr_input_minimal() {
+        let input = CreateBitbucketPullRequestInput {
+            title: "Minimal PR".to_string(),
+            description: None,
+            source_branch: "branch".to_string(),
+            destination_branch: "main".to_string(),
+            close_source_branch: None,
+        };
+
+        assert!(input.description.is_none());
+        assert!(input.close_source_branch.is_none());
+    }
+
+    // ========================================================================
+    // BitbucketIssue Tests
+    // ========================================================================
+
+    #[test]
+    fn test_issue_structure() {
+        let issue = BitbucketIssue {
+            id: 42,
+            title: "Bug report".to_string(),
+            content: Some("Description of the bug".to_string()),
+            state: "open".to_string(),
+            priority: "major".to_string(),
+            kind: "bug".to_string(),
+            reporter: Some(BitbucketUser {
+                uuid: "{reporter}".to_string(),
+                username: "reporter".to_string(),
+                display_name: "Reporter".to_string(),
+                avatar_url: None,
+            }),
+            assignee: None,
+            created_on: "2024-01-01T00:00:00Z".to_string(),
+            url: "https://bitbucket.org/workspace/repo/issues/42".to_string(),
+        };
+
+        assert_eq!(issue.id, 42);
+        assert_eq!(issue.kind, "bug");
+        assert_eq!(issue.priority, "major");
+        assert!(issue.assignee.is_none());
+    }
+
+    // ========================================================================
+    // BitbucketPipeline Tests
+    // ========================================================================
+
+    #[test]
+    fn test_pipeline_structure() {
+        let pipeline = BitbucketPipeline {
+            uuid: "{pipeline-uuid}".to_string(),
+            build_number: 100,
+            state_name: "COMPLETED".to_string(),
+            result_name: Some("SUCCESSFUL".to_string()),
+            target_branch: "main".to_string(),
+            created_on: "2024-01-01T00:00:00Z".to_string(),
+            completed_on: Some("2024-01-01T00:05:00Z".to_string()),
+            url: "https://bitbucket.org/workspace/repo/pipelines/100".to_string(),
+        };
+
+        assert_eq!(pipeline.build_number, 100);
+        assert_eq!(pipeline.state_name, "COMPLETED");
+        assert_eq!(pipeline.result_name, Some("SUCCESSFUL".to_string()));
+    }
+
+    #[test]
+    fn test_pipeline_in_progress() {
+        let pipeline = BitbucketPipeline {
+            uuid: "{pipeline-uuid}".to_string(),
+            build_number: 101,
+            state_name: "IN_PROGRESS".to_string(),
+            result_name: None,
+            target_branch: "feature".to_string(),
+            created_on: "2024-01-02T00:00:00Z".to_string(),
+            completed_on: None,
+            url: "https://bitbucket.org/workspace/repo/pipelines/101".to_string(),
+        };
+
+        assert_eq!(pipeline.state_name, "IN_PROGRESS");
+        assert!(pipeline.result_name.is_none());
+        assert!(pipeline.completed_on.is_none());
+    }
+
+    // ========================================================================
+    // detect_bitbucket_repo Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_detect_bitbucket_repo_no_remotes() {
+        let repo = TestRepo::with_initial_commit();
+        let result = detect_bitbucket_repo(repo.path_str()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_detect_bitbucket_repo_github_remote() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://github.com/owner/repo.git");
+
+        let result = detect_bitbucket_repo(repo.path_str()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // GitHub URL, not Bitbucket
+    }
+
+    #[tokio::test]
+    async fn test_detect_bitbucket_repo_with_bitbucket_remote() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://bitbucket.org/workspace/repo.git");
+
+        let result = detect_bitbucket_repo(repo.path_str()).await;
+        assert!(result.is_ok());
+        let detected = result.unwrap();
+        assert!(detected.is_some());
+        let detected = detected.unwrap();
+        assert_eq!(detected.workspace, "workspace");
+        assert_eq!(detected.repo_slug, "repo");
+        assert_eq!(detected.remote_name, "origin");
+    }
+
+    #[tokio::test]
+    async fn test_detect_bitbucket_repo_ssh_url() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "git@bitbucket.org:myworkspace/myrepo.git");
+
+        let result = detect_bitbucket_repo(repo.path_str()).await;
+        assert!(result.is_ok());
+        let detected = result.unwrap();
+        assert!(detected.is_some());
+        let detected = detected.unwrap();
+        assert_eq!(detected.workspace, "myworkspace");
+        assert_eq!(detected.repo_slug, "myrepo");
+    }
+
+    #[tokio::test]
+    async fn test_detect_bitbucket_repo_invalid_path() {
+        let result = detect_bitbucket_repo("/nonexistent/path".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Credential Stub Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_store_credentials_stub() {
+        let result = store_bitbucket_credentials("user".to_string(), "password".to_string()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_stub() {
+        let result = get_bitbucket_credentials().await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // Always returns None as stub
+    }
+
+    #[tokio::test]
+    async fn test_delete_credentials_stub() {
+        let result = delete_bitbucket_credentials().await;
+        assert!(result.is_ok());
+    }
+}

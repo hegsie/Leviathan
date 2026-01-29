@@ -179,6 +179,7 @@ export class LvCloneDialog extends LitElement {
   @state() private url = '';
   @state() private destination = '';
   @state() private repoName = '';
+  @state() private depth: number | null = null;
   @state() private isCloning = false;
   @state() private progress = 0;
   @state() private progressText = '';
@@ -209,6 +210,7 @@ export class LvCloneDialog extends LitElement {
     this.url = '';
     this.destination = '';
     this.repoName = '';
+    this.depth = null;
     this.isCloning = false;
     this.progress = 0;
     this.progressText = '';
@@ -226,6 +228,13 @@ export class LvCloneDialog extends LitElement {
   private handleDestinationChange(e: Event): void {
     const input = e.target as HTMLInputElement;
     this.destination = input.value;
+    this.error = '';
+  }
+
+  private handleDepthChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    const value = input.value.trim();
+    this.depth = value ? parseInt(value, 10) || null : null;
     this.error = '';
   }
 
@@ -306,6 +315,7 @@ export class LvCloneDialog extends LitElement {
       const result = await cloneRepository({
         url: this.url.trim(),
         path: fullPath,
+        ...(this.depth !== null ? { depth: this.depth } : {}),
       });
 
       if (result.success && result.data) {
@@ -390,6 +400,19 @@ export class LvCloneDialog extends LitElement {
             >
               Browse...
             </button>
+          </div>
+
+          <div class="field">
+            <label for="depth">Shallow clone depth (optional)</label>
+            <input
+              id="depth"
+              type="number"
+              min="1"
+              placeholder="Leave empty for full clone"
+              .value=${this.depth !== null ? String(this.depth) : ''}
+              @input=${this.handleDepthChange}
+              ?disabled=${this.isCloning}
+            />
           </div>
 
           ${this.fullPath
