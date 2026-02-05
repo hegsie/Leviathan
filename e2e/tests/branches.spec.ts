@@ -235,6 +235,185 @@ test.describe('Create Branch Dialog', () => {
   });
 });
 
+test.describe('Branch Checkout via Context Menu', () => {
+  let app: AppPage;
+  let leftPanel: LeftPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    leftPanel = new LeftPanelPage(page);
+    // Setup with multiple branches where main is HEAD
+    await setupOpenRepository(page, {
+      branches: [
+        {
+          name: 'refs/heads/main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: 'refs/remotes/origin/main',
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'refs/heads/develop',
+          shorthand: 'develop',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+        {
+          name: 'refs/heads/feature/checkout-test',
+          shorthand: 'feature/checkout-test',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'ghi789',
+          isStale: false,
+        },
+        {
+          name: 'refs/remotes/origin/main',
+          shorthand: 'origin/main',
+          isHead: false,
+          isRemote: true,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+      ],
+    });
+  });
+
+  test('should show Checkout option in context menu for non-HEAD branch', async ({ page }) => {
+    // Right-click on develop branch (not HEAD)
+    await leftPanel.openBranchContextMenu('develop');
+
+    // Checkout option should be visible for non-HEAD branch
+    const checkoutMenuItem = page.locator('.context-menu-item', { hasText: 'Checkout' });
+    await expect(checkoutMenuItem).toBeVisible();
+  });
+
+  test('should NOT show Checkout option for current HEAD branch', async ({ page }) => {
+    // Right-click on main branch (HEAD)
+    await leftPanel.openBranchContextMenu('main');
+
+    // Wait for context menu to appear
+    await page.locator('.context-menu').waitFor({ state: 'visible' });
+
+    // Checkout option should NOT be visible for HEAD branch
+    const checkoutMenuItem = page.locator('.context-menu-item', { hasText: 'Checkout' });
+    await expect(checkoutMenuItem).not.toBeVisible();
+  });
+
+  test('should close context menu after clicking Checkout', async ({ page }) => {
+    // Right-click on develop branch
+    await leftPanel.openBranchContextMenu('develop');
+
+    // Click the Checkout option
+    const checkoutMenuItem = page.locator('.context-menu-item', { hasText: 'Checkout' });
+    await checkoutMenuItem.waitFor({ state: 'visible' });
+    await checkoutMenuItem.click();
+
+    // Context menu should close after clicking
+    await expect(page.locator('.context-menu')).not.toBeVisible();
+  });
+
+  test('should invoke checkout command when clicking Checkout button', async ({ page }) => {
+    // Track invoked commands
+    const invokedCommands: { command: string; args: unknown }[] = [];
+
+    // Intercept Tauri invoke calls to track checkout command
+    await page.evaluate(() => {
+      const originalInvoke = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke;
+
+      (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
+      }).__INVOKED_COMMANDS__ = [];
+
+      (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
+        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
+          .__INVOKED_COMMANDS__.push({ command, args });
+        return originalInvoke(command, args);
+      };
+    });
+
+    // Right-click on develop branch
+    await leftPanel.openBranchContextMenu('develop');
+
+    // Click the Checkout option
+    const checkoutMenuItem = page.locator('.context-menu-item', { hasText: 'Checkout' });
+    await checkoutMenuItem.waitFor({ state: 'visible' });
+    await checkoutMenuItem.click();
+
+    // Wait a bit for the command to be invoked
+    await page.waitForTimeout(100);
+
+    // Check that checkout command was called with correct arguments
+    const commands = await page.evaluate(() => {
+      return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
+        .__INVOKED_COMMANDS__;
+    });
+
+    const checkoutCommand = commands.find(
+      (c: { command: string }) => c.command === 'checkout'
+    );
+    expect(checkoutCommand).toBeDefined();
+    expect((checkoutCommand?.args as { refName?: string })?.refName).toBe('refs/heads/develop');
+  });
+
+  test('should checkout feature branch via context menu', async ({ page }) => {
+    // Track invoked commands
+    await page.evaluate(() => {
+      const originalInvoke = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke;
+
+      (window as unknown as {
+        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
+      }).__INVOKED_COMMANDS__ = [];
+
+      (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
+        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
+          .__INVOKED_COMMANDS__.push({ command, args });
+        return originalInvoke(command, args);
+      };
+    });
+
+    // Right-click on feature branch
+    await leftPanel.openBranchContextMenu('feature/checkout-test');
+
+    // Click the Checkout option
+    const checkoutMenuItem = page.locator('.context-menu-item', { hasText: 'Checkout' });
+    await checkoutMenuItem.waitFor({ state: 'visible' });
+    await checkoutMenuItem.click();
+
+    // Wait for the command to be invoked
+    await page.waitForTimeout(100);
+
+    // Verify checkout was called with the feature branch name
+    const commands = await page.evaluate(() => {
+      return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
+        .__INVOKED_COMMANDS__;
+    });
+
+    const checkoutCommand = commands.find(
+      (c: { command: string }) => c.command === 'checkout'
+    );
+    expect(checkoutCommand).toBeDefined();
+    expect((checkoutCommand?.args as { refName?: string })?.refName).toBe(
+      'refs/heads/feature/checkout-test'
+    );
+  });
+});
+
 test.describe('Empty Repository Branches', () => {
   let app: AppPage;
   let leftPanel: LeftPanelPage;

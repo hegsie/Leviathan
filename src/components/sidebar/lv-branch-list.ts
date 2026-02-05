@@ -883,6 +883,9 @@ export class LvBranchList extends LitElement {
   private async handleCheckout(branch: Branch): Promise<void> {
     if (branch.isHead) return;
 
+    // Close context menu immediately
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
     const result = await gitService.checkout(this.repositoryPath, {
       refName: branch.isRemote ? branch.shorthand : branch.name
     });
