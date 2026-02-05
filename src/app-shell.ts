@@ -876,7 +876,7 @@ export class AppShell extends LitElement {
 
     const result = await gitService.checkout(
       this.activeRepository.repository.path,
-      { ref: refName }
+      { refName }
     );
 
     if (result.success) {
@@ -1338,7 +1338,7 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const branchName = e.detail.branchName;
-    const result = await gitService.checkout(this.activeRepository.repository.path, { ref: branchName });
+    const result = await gitService.checkout(this.activeRepository.repository.path, { refName: branchName });
 
     if (result.success) {
       this.handleRefresh();
@@ -1894,7 +1894,7 @@ export class AppShell extends LitElement {
 
   private async handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.checkout(this.activeRepository.repository.path, { ref: e.detail.branch });
+    await gitService.checkout(this.activeRepository.repository.path, { refName: e.detail.branch });
     this.handleRefresh();
   }
 

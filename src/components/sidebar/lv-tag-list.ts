@@ -209,7 +209,7 @@ export class LvTagList extends LitElement {
     this.contextMenu = { ...this.contextMenu, visible: false };
 
     const result = await gitService.checkout(this.repositoryPath, {
-      ref: tag.name,
+      refName: tag.name,
     });
 
     if (result.success) {

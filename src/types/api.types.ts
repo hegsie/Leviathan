@@ -61,7 +61,7 @@ export interface RenameBranchCommand {
 }
 
 export interface CheckoutCommand {
-  ref: string;
+  refName: string;
   force?: boolean;
 }
 

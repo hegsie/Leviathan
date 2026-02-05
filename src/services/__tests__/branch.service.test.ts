@@ -424,21 +424,21 @@ describe('git.service - Branch operations', () => {
   });
 
   describe('checkout', () => {
-    it('invokes checkout with ref', async () => {
+    it('invokes checkout with refName', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      const result = await checkout('/test/repo', { ref: 'feature-branch' });
+      const result = await checkout('/test/repo', { refName: 'feature-branch' });
       expect(lastInvokedCommand).to.equal('checkout');
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.path).to.equal('/test/repo');
-      expect(args.ref).to.equal('feature-branch');
+      expect(args.refName).to.equal('feature-branch');
       expect(result.success).to.be.true;
     });
 
     it('invokes checkout without force by default', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      await checkout('/test/repo', { ref: 'main' });
+      await checkout('/test/repo', { refName: 'main' });
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.force).to.be.undefined;
     });
@@ -446,7 +446,7 @@ describe('git.service - Branch operations', () => {
     it('invokes checkout with force option', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      await checkout('/test/repo', { ref: 'main', force: true });
+      await checkout('/test/repo', { refName: 'main', force: true });
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.force).to.be.true;
     });
@@ -454,24 +454,24 @@ describe('git.service - Branch operations', () => {
     it('can checkout a commit', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      await checkout('/test/repo', { ref: 'abc123def456' });
+      await checkout('/test/repo', { refName: 'abc123def456' });
       const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.ref).to.equal('abc123def456');
+      expect(args.refName).to.equal('abc123def456');
     });
 
     it('can checkout a tag', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      await checkout('/test/repo', { ref: 'v1.0.0' });
+      await checkout('/test/repo', { refName: 'v1.0.0' });
       const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.ref).to.equal('v1.0.0');
+      expect(args.refName).to.equal('v1.0.0');
     });
 
     it('handles local changes conflict error', async () => {
       mockInvoke = () =>
         Promise.reject({ code: 'LOCAL_CHANGES_CONFLICT', message: 'Local changes would be overwritten' });
 
-      const result = await checkout('/test/repo', { ref: 'feature' });
+      const result = await checkout('/test/repo', { refName: 'feature' });
       expect(result.success).to.be.false;
       expect(result.error?.code).to.equal('LOCAL_CHANGES_CONFLICT');
     });
@@ -480,7 +480,7 @@ describe('git.service - Branch operations', () => {
       mockInvoke = () =>
         Promise.reject({ code: 'REF_NOT_FOUND', message: 'Reference not found' });
 
-      const result = await checkout('/test/repo', { ref: 'nonexistent' });
+      const result = await checkout('/test/repo', { refName: 'nonexistent' });
       expect(result.success).to.be.false;
       expect(result.error?.code).to.equal('REF_NOT_FOUND');
     });

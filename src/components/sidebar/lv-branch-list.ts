@@ -884,7 +884,7 @@ export class LvBranchList extends LitElement {
     if (branch.isHead) return;
 
     const result = await gitService.checkout(this.repositoryPath, {
-      ref: branch.isRemote ? branch.shorthand : branch.name
+      refName: branch.isRemote ? branch.shorthand : branch.name
     });
 
     if (result.success) {
@@ -1330,7 +1330,7 @@ export class LvBranchList extends LitElement {
 
       // First checkout target branch
       const checkoutResult = await gitService.checkout(this.repositoryPath, {
-        ref: targetBranch.shorthand
+        refName: targetBranch.shorthand
       });
 
       if (!checkoutResult.success) {
