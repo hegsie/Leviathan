@@ -439,6 +439,163 @@ test.describe('Branch Checkout via Context Menu', () => {
   });
 });
 
+test.describe('Branch Context Menu - Remote Branch Checkout', () => {
+  let leftPanel: LeftPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+    // Setup with remote branches including nested prefixes (like copilot/feature-name)
+    await setupOpenRepository(page, {
+      branches: [
+        {
+          name: 'refs/heads/main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: 'refs/remotes/origin/main',
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'refs/remotes/origin/main',
+          shorthand: 'main',
+          isHead: false,
+          isRemote: true,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'refs/remotes/origin/feature/remote-feature',
+          shorthand: 'feature/remote-feature',
+          isHead: false,
+          isRemote: true,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+        {
+          name: 'refs/remotes/origin/copilot/ai-generated-branch',
+          shorthand: 'copilot/ai-generated-branch',
+          isHead: false,
+          isRemote: true,
+          upstream: null,
+          targetOid: 'ghi789',
+          isStale: false,
+        },
+      ],
+    });
+  });
+
+  test('should checkout remote branch with correct refName', async ({ page }) => {
+    // Track invoked commands
+    await page.evaluate(() => {
+      const originalInvoke = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke;
+
+      (window as unknown as {
+        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
+      }).__INVOKED_COMMANDS__ = [];
+
+      (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
+        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
+          .__INVOKED_COMMANDS__.push({ command, args });
+        return originalInvoke(command, args);
+      };
+    });
+
+    // Expand the origin remote group to see remote branches
+    await leftPanel.expandRemote('origin');
+
+    // Wait for the remote branch to become visible after expanding
+    const remoteBranch = leftPanel.getRemoteBranch('origin', 'feature/remote-feature');
+    await remoteBranch.waitFor({ state: 'visible', timeout: 5000 });
+
+    // Right-click on remote feature branch
+    await remoteBranch.click({ button: 'right' });
+
+    // Click the Checkout option
+    const checkoutMenuItem = page.locator('.context-menu-item', { hasText: 'Checkout' });
+    await checkoutMenuItem.waitFor({ state: 'visible' });
+    await checkoutMenuItem.click();
+
+    // Wait for the command to be invoked
+    await page.waitForTimeout(100);
+
+    // Verify checkout was called with the FULL remote reference (branch.name), not shorthand
+    // This is critical - using shorthand would fail for remote branches with prefixes
+    const commands = await page.evaluate(() => {
+      return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
+        .__INVOKED_COMMANDS__;
+    });
+
+    const checkoutCommand = commands.find(
+      (c: { command: string }) => c.command === 'checkout'
+    );
+    expect(checkoutCommand).toBeDefined();
+    // Should be the full remote reference (branch.name), not just the shorthand
+    expect((checkoutCommand?.args as { refName?: string })?.refName).toBe(
+      'refs/remotes/origin/feature/remote-feature'
+    );
+  });
+
+  test('should checkout remote branch with nested prefix (copilot/) correctly', async ({ page }) => {
+    // This test specifically catches the bug where copilot/branch-name was being passed
+    // instead of refs/remotes/origin/copilot/branch-name
+    await page.evaluate(() => {
+      const originalInvoke = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke;
+
+      (window as unknown as {
+        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
+      }).__INVOKED_COMMANDS__ = [];
+
+      (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
+        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
+          .__INVOKED_COMMANDS__.push({ command, args });
+        return originalInvoke(command, args);
+      };
+    });
+
+    // Expand the origin remote group
+    await leftPanel.expandRemote('origin');
+
+    // Wait for the remote branch to become visible after expanding
+    const remoteBranch = leftPanel.getRemoteBranch('origin', 'copilot/ai-generated-branch');
+    await remoteBranch.waitFor({ state: 'visible', timeout: 5000 });
+
+    // Right-click on the copilot remote branch
+    await remoteBranch.click({ button: 'right' });
+
+    // Click the Checkout option
+    const checkoutMenuItem = page.locator('.context-menu-item', { hasText: 'Checkout' });
+    await checkoutMenuItem.waitFor({ state: 'visible' });
+    await checkoutMenuItem.click();
+
+    await page.waitForTimeout(100);
+
+    const commands = await page.evaluate(() => {
+      return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
+        .__INVOKED_COMMANDS__;
+    });
+
+    const checkoutCommand = commands.find(
+      (c: { command: string }) => c.command === 'checkout'
+    );
+    expect(checkoutCommand).toBeDefined();
+    // CRITICAL: Must include 'refs/remotes/origin/' prefix, not just 'copilot/ai-generated-branch'
+    expect((checkoutCommand?.args as { refName?: string })?.refName).toBe(
+      'refs/remotes/origin/copilot/ai-generated-branch'
+    );
+  });
+});
+
 test.describe('Empty Repository Branches', () => {
   let app: AppPage;
   let leftPanel: LeftPanelPage;

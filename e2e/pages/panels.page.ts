@@ -76,6 +76,65 @@ export class LeftPanelPage {
   }
 
   /**
+   * Expand a remote group (e.g., 'origin')
+   */
+  async expandRemote(remoteName: string): Promise<void> {
+    // First, wait for the branch list to be visible
+    await this.branchList.waitFor({ state: 'visible' });
+
+    // Directly manipulate the component's expandedGroups state
+    await this.page.evaluate((name) => {
+      // The lv-branch-list may be nested within other shadow DOMs
+      function findElementInShadowDom(root: Document | ShadowRoot, selector: string): Element | null {
+        let result = root.querySelector(selector);
+        if (result) return result;
+
+        const elements = root.querySelectorAll('*');
+        for (const el of elements) {
+          if (el.shadowRoot) {
+            result = findElementInShadowDom(el.shadowRoot, selector);
+            if (result) return result;
+          }
+        }
+        return null;
+      }
+
+      // Find the branch list component
+      const branchList = findElementInShadowDom(document, 'lv-branch-list') as HTMLElement & {
+        expandedGroups: Set<string>;
+        requestUpdate: () => void;
+      };
+      if (!branchList) {
+        throw new Error('Could not find lv-branch-list');
+      }
+
+      // Add the remote group to expandedGroups
+      const groupId = `remote-${name}`;
+      if (!branchList.expandedGroups) {
+        branchList.expandedGroups = new Set();
+      }
+      branchList.expandedGroups.add(groupId);
+
+      // Trigger a re-render
+      branchList.requestUpdate();
+    }, remoteName);
+
+    // Wait for the component to re-render
+    await this.page.waitForTimeout(100);
+  }
+
+  /**
+   * Get a remote branch item by remote name and branch shorthand
+   * @param remoteName The remote name (e.g., 'origin')
+   * @param shorthand The branch shorthand without remote prefix (e.g., 'feature/my-branch')
+   */
+  getRemoteBranch(remoteName: string, shorthand: string): Locator {
+    // Remote branches are <li> elements with title="refs/remotes/${remoteName}/${shorthand}"
+    // The title attribute contains the full git reference (branch.name)
+    return this.branchList.locator(`li.branch-item[title="refs/remotes/${remoteName}/${shorthand}"]`);
+  }
+
+  /**
    * Click on a branch to checkout
    */
   async checkoutBranch(name: string): Promise<void> {

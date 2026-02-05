@@ -886,8 +886,11 @@ export class LvBranchList extends LitElement {
     // Close context menu immediately
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Use branch.name for both local and remote branches
+    // - For local branches: branch.name is the branch name (e.g., "main", "feature/my-branch")
+    // - For remote branches: branch.name is the full remote reference (e.g., "origin/feature/my-branch")
     const result = await gitService.checkout(this.repositoryPath, {
-      refName: branch.isRemote ? branch.shorthand : branch.name
+      refName: branch.name
     });
 
     if (result.success) {
