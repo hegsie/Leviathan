@@ -532,9 +532,10 @@ pub async fn get_machine_vault_password() -> Result<String> {
     }
 
     // Use username
-    let username = whoami::username();
-    if !username.trim().is_empty() {
-        components.push(username);
+    if let Ok(username) = whoami::username() {
+        if !username.trim().is_empty() {
+            components.push(username);
+        }
     }
 
     // Ensure we collected at least one machine-specific component
