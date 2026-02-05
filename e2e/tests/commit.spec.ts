@@ -170,3 +170,50 @@ test.describe('Commit Details Tab', () => {
     await expect(rightPanel.fileStatus).toBeVisible();
   });
 });
+
+test.describe('Commit - Event Propagation', () => {
+  let rightPanel: RightPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withStagedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: true, isConflicted: false },
+      ])
+    );
+
+    // Mock successful commit
+    await page.evaluate(() => {
+      const originalInvoke = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke;
+
+      (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
+        if (command === 'create_commit') {
+          return 'new-commit-sha-123';
+        }
+        return originalInvoke(command, args);
+      };
+    });
+  });
+
+  test('should dispatch repository-changed event after successful commit', async ({ page }) => {
+    const eventPromise = page.evaluate(() => {
+      return new Promise<boolean>((resolve) => {
+        document.addEventListener('repository-changed', () => {
+          resolve(true);
+        }, { once: true });
+        setTimeout(() => resolve(false), 3000);
+      });
+    });
+
+    await rightPanel.commitMessage.fill('test: add propagation test');
+    await rightPanel.commitButton.click();
+
+    const eventReceived = await eventPromise;
+    expect(eventReceived).toBe(true);
+  });
+});

@@ -299,6 +299,11 @@ export class LvStashList extends LitElement {
 
     if (result.success) {
       await this.loadStashes();
+      this.dispatchEvent(new CustomEvent('stash-dropped', {
+        detail: { stash },
+        bubbles: true,
+        composed: true,
+      }));
     } else {
       console.error('Failed to drop stash:', result.error);
     }

@@ -287,13 +287,14 @@ function createMockHandler(mocks: typeof defaultMockData) {
       // Diff commands
       case 'get_diff':
       case 'get_file_diff': {
-        const filePath = (args?.path as string) || 'src/main.ts';
+        // get_file_diff sends { path: repoPath, filePath, staged }
+        const filePathArg = (args?.filePath as string) || (args?.path as string) || 'src/main.ts';
         // Check if this is an image file
         const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp'];
-        const isImage = imageExtensions.some(ext => filePath.toLowerCase().endsWith(ext));
-        const imageType = isImage ? filePath.split('.').pop()?.toLowerCase() || 'png' : null;
+        const isImage = imageExtensions.some(ext => filePathArg.toLowerCase().endsWith(ext));
+        const imageType = isImage ? filePathArg.split('.').pop()?.toLowerCase() || 'png' : null;
         return {
-          path: filePath,
+          path: filePathArg,
           oldPath: null,
           status: 'modified',
           hunks: isImage ? [] : [
@@ -324,10 +325,11 @@ function createMockHandler(mocks: typeof defaultMockData) {
         const oldImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVQI12P4z8DwHwAFAAH/plkKSgAAAABJRU5ErkJggg==';
         // New image: 2x2 green pixels
         const newImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVQI12Ng+M/AAAADhAH/hc2rNAAAAABJRU5ErkJggg==';
-        const filePath = (args?.path as string) || 'image.png';
-        const imageType = filePath.split('.').pop()?.toLowerCase() || 'png';
+        // get_image_versions sends { path: repoPath, filePath, staged }
+        const imageFilePath = (args?.filePath as string) || (args?.path as string) || 'image.png';
+        const imageType = imageFilePath.split('.').pop()?.toLowerCase() || 'png';
         return {
-          path: filePath,
+          path: imageFilePath,
           oldData: oldImageBase64,
           newData: newImageBase64,
           oldSize: [2, 2] as [number, number],
@@ -453,13 +455,14 @@ export async function setupTauriMocks(
             return data.settings;
           case 'get_diff':
           case 'get_file_diff': {
-            const filePath = (args as { path?: string })?.path || 'src/main.ts';
+            // get_file_diff sends { path: repoPath, filePath, staged }
+            const filePathArg = (args as { filePath?: string; path?: string })?.filePath || (args as { path?: string })?.path || 'src/main.ts';
             // Check if this is an image file
             const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp'];
-            const isImage = imageExtensions.some(ext => filePath.toLowerCase().endsWith(ext));
-            const imageType = isImage ? filePath.split('.').pop()?.toLowerCase() || 'png' : null;
+            const isImage = imageExtensions.some(ext => filePathArg.toLowerCase().endsWith(ext));
+            const imageType = isImage ? filePathArg.split('.').pop()?.toLowerCase() || 'png' : null;
             return {
-              path: filePath,
+              path: filePathArg,
               oldPath: null,
               status: 'modified',
               hunks: [],
@@ -476,10 +479,11 @@ export async function setupTauriMocks(
             const oldImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVQI12P4z8DwHwAFAAH/plkKSgAAAABJRU5ErkJggg==';
             // New image: 2x2 green pixels
             const newImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVQI12Ng+M/AAAADhAH/hc2rNAAAAABJRU5ErkJggg==';
-            const filePath = (args as { path?: string })?.path || 'image.png';
-            const imageType = filePath.split('.').pop()?.toLowerCase() || 'png';
+            // get_image_versions sends { path: repoPath, filePath, staged }
+            const imageFilePath = (args as { filePath?: string; path?: string })?.filePath || (args as { path?: string })?.path || 'image.png';
+            const imageType = imageFilePath.split('.').pop()?.toLowerCase() || 'png';
             return {
-              path: filePath,
+              path: imageFilePath,
               oldData: oldImageBase64,
               newData: newImageBase64,
               oldSize: [2, 2] as [number, number],

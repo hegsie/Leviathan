@@ -412,6 +412,31 @@ test.describe('Branch Checkout via Context Menu', () => {
       'refs/heads/feature/checkout-test'
     );
   });
+
+  test('should dispatch repository-changed event after checkout', async ({ page }) => {
+    // Listen for repository-changed event
+    const eventPromise = page.evaluate(() => {
+      return new Promise<boolean>((resolve) => {
+        document.addEventListener('repository-changed', () => {
+          resolve(true);
+        }, { once: true });
+        // Timeout after 3 seconds
+        setTimeout(() => resolve(false), 3000);
+      });
+    });
+
+    // Right-click on feature branch
+    await leftPanel.openBranchContextMenu('feature/checkout-test');
+
+    // Click the Checkout option
+    const checkoutMenuItem = page.locator('.context-menu-item', { hasText: 'Checkout' });
+    await checkoutMenuItem.waitFor({ state: 'visible' });
+    await checkoutMenuItem.click();
+
+    // Verify repository-changed event was dispatched
+    const eventReceived = await eventPromise;
+    expect(eventReceived).toBe(true);
+  });
 });
 
 test.describe('Empty Repository Branches', () => {

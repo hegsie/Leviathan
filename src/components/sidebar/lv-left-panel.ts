@@ -177,7 +177,11 @@ export class LvLeftPanel extends LitElement {
           <span class="title">Branches</span>
         </header>
         <div class="section-content">
-          <lv-branch-list .repositoryPath=${this.repositoryPath}></lv-branch-list>
+          <lv-branch-list
+            .repositoryPath=${this.repositoryPath}
+            @branch-checkout=${this.handleBranchCheckout}
+            @branches-changed=${this.handleBranchesChanged}
+          ></lv-branch-list>
         </div>
       </section>
 
@@ -193,6 +197,7 @@ export class LvLeftPanel extends LitElement {
             <lv-stash-list
               .repositoryPath=${this.repositoryPath}
               @stash-applied=${this.handleStashApplied}
+              @stash-dropped=${this.handleStashDropped}
               @stash-count-changed=${this.handleStashCountChanged}
             ></lv-stash-list>
           </div>
@@ -203,6 +208,7 @@ export class LvLeftPanel extends LitElement {
           style="display: none;"
           .repositoryPath=${this.repositoryPath}
           @stash-applied=${this.handleStashApplied}
+          @stash-dropped=${this.handleStashDropped}
           @stash-count-changed=${this.handleStashCountChanged}
         ></lv-stash-list>
       `}
@@ -229,6 +235,7 @@ export class LvLeftPanel extends LitElement {
             <lv-tag-list
               .repositoryPath=${this.repositoryPath}
               @tags-changed=${this.handleTagsChanged}
+              @tag-checkout=${this.handleTagCheckout}
               @tag-count-changed=${this.handleTagCountChanged}
             ></lv-tag-list>
           </div>
@@ -237,6 +244,7 @@ export class LvLeftPanel extends LitElement {
             style="display: none;"
             .repositoryPath=${this.repositoryPath}
             @tags-changed=${this.handleTagsChanged}
+            @tag-checkout=${this.handleTagCheckout}
             @tag-count-changed=${this.handleTagCountChanged}
           ></lv-tag-list>
         `}
@@ -245,6 +253,24 @@ export class LvLeftPanel extends LitElement {
   }
 
   private handleStashApplied(): void {
+    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+  }
+
+  private handleStashDropped(): void {
+    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+  }
+
+  private handleTagCheckout(): void {
+    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+  }
+
+  private handleBranchCheckout(): void {
+    // Refresh repository state after branch checkout
+    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+  }
+
+  private handleBranchesChanged(): void {
+    // Refresh repository state after branches changed
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
   }
 
