@@ -276,10 +276,43 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
 
     repo.checkout_tree(&obj, Some(&mut checkout_opts))?;
 
-    // Try to set HEAD to branch, otherwise detach
+    // Try to set HEAD to local branch first
     if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
         repo.set_head(branch.get().name().unwrap())?;
+    } else if let Ok(remote_branch) = repo.find_branch(&ref_name, git2::BranchType::Remote) {
+        // Checking out a remote branch - create a local tracking branch
+        // Extract the branch name without the remote prefix (e.g., "origin/feature" -> "feature")
+        let remote_name = remote_branch.get().shorthand().unwrap_or(&ref_name);
+
+        // Find the remote name and branch name
+        // Remote branch shorthand is like "origin/feature"
+        if let Some(slash_pos) = remote_name.find('/') {
+            let local_name = &remote_name[slash_pos + 1..];
+
+            // Check if local branch already exists
+            if repo
+                .find_branch(local_name, git2::BranchType::Local)
+                .is_ok()
+            {
+                // Local branch exists, just check it out
+                let local_branch = repo.find_branch(local_name, git2::BranchType::Local)?;
+                repo.set_head(local_branch.get().name().unwrap())?;
+            } else {
+                // Create new local branch from the remote branch
+                let mut new_branch = repo.branch(local_name, &commit, false)?;
+
+                // Set upstream tracking
+                new_branch.set_upstream(Some(remote_name))?;
+
+                // Set HEAD to the new branch
+                repo.set_head(new_branch.get().name().unwrap())?;
+            }
+        } else {
+            // Couldn't parse remote name, detach HEAD
+            repo.set_head_detached(commit.id())?;
+        }
     } else {
+        // Not a branch (could be a commit SHA or tag), detach HEAD
         repo.set_head_detached(commit.id())?;
     }
 
