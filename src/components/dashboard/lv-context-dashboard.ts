@@ -138,19 +138,19 @@ export class LvContextDashboard extends LitElement {
         align-items: center;
         gap: var(--spacing-xs);
         padding: var(--spacing-xs) var(--spacing-sm);
-        border: 1px dashed var(--color-border);
+        border: 1px solid var(--color-accent);
         border-radius: var(--radius-sm);
-        background: transparent;
-        color: var(--color-text-secondary);
+        background: var(--color-accent-bg);
+        color: var(--color-accent);
         font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
         cursor: pointer;
         transition: all var(--transition-fast);
       }
 
       .configure-btn:hover {
-        border-color: var(--color-accent);
-        color: var(--color-accent);
-        background: var(--color-accent-bg);
+        background: var(--color-accent);
+        color: white;
       }
 
       /* Configure card for expanded view */
@@ -1000,6 +1000,22 @@ export class LvContextDashboard extends LitElement {
               ? `${INTEGRATION_TYPE_NAMES[relevantAccount.integrationType]} (@${relevantAccount.cachedUser.username})`
               : relevantAccount.name;
             const label = `${displayName}: ${status}`;
+
+            // Show a more prominent button when disconnected or unknown
+            if (status === 'disconnected' || status === 'unknown') {
+              return html`
+                <div class="compact-divider"></div>
+                <button
+                  class="configure-btn"
+                  @click=${() => this.openIntegrationDialog(relevantAccount.integrationType)}
+                  title="${label}. Click to reconnect."
+                >
+                  <span class="account-status-dot ${status}" aria-hidden="true" style="width: 6px; height: 6px;"></span>
+                  Reconnect ${INTEGRATION_TYPE_NAMES[relevantAccount.integrationType]}
+                </button>
+              `;
+            }
+
             return html`
               <div class="compact-divider"></div>
               <button
@@ -1020,9 +1036,13 @@ export class LvContextDashboard extends LitElement {
               <button
                 class="configure-btn"
                 @click=${() => this.openIntegrationDialog(provider)}
-                title="Configure ${INTEGRATION_TYPE_NAMES[provider]}"
+                title="Configure ${INTEGRATION_TYPE_NAMES[provider]} integration"
               >
-                Configure ${INTEGRATION_TYPE_NAMES[provider]}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+                </svg>
+                Connect ${INTEGRATION_TYPE_NAMES[provider]}
               </button>
             `;
           }
@@ -1182,13 +1202,13 @@ export class LvContextDashboard extends LitElement {
                     ${this.getProviderIcon(detectedProvider)}
                   </div>
                   <div class="configure-card-content">
-                    <div class="configure-card-title">${INTEGRATION_TYPE_NAMES[detectedProvider]} not configured</div>
+                    <div class="configure-card-title">${INTEGRATION_TYPE_NAMES[detectedProvider]} not connected</div>
                     <div class="configure-card-description">
-                      This repository uses ${INTEGRATION_TYPE_NAMES[detectedProvider]}. Configure an account to enable integration features.
+                      Connect your ${INTEGRATION_TYPE_NAMES[detectedProvider]} account to enable pull requests, pipelines, and more.
                     </div>
                   </div>
                   <button class="configure-card-btn" @click=${() => this.openIntegrationDialog(detectedProvider)}>
-                    Configure
+                    Connect
                   </button>
                 </div>
               `;
