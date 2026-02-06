@@ -509,8 +509,8 @@ This section contains specific features organized by category. Items here suppor
 
 **GitLab OAuth** (✅ implemented)
 - ✅ OAuth authentication for GitLab.com
-- Support for self-hosted GitLab instances (needs verification)
-- Custom OAuth application configuration (needs verification)
+- ✅ Support for self-hosted GitLab instances
+- ✅ Custom OAuth application configuration
 
 **Bitbucket OAuth**
 - Atlassian account authentication
