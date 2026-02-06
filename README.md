@@ -38,7 +38,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
 - **🆓 Free & Open Source**: MIT licensed, no account required, no subscription fees, no feature paywalls.
 - **🌐 Cross-Platform**: Native apps for macOS, Windows, and Linux with consistent UX.
 - **🚫 Offline-First**: Works perfectly without an internet connection. Network operations only when you explicitly push/pull/fetch.
-- **🤖 AI-Powered**: Local or cloud-based AI for commit message generation - choose from embedded local model (runs on your machine with GPU acceleration), Ollama, LM Studio, OpenAI, Anthropic, or GitHub Copilot
+- **🤖 AI-Powered**: Local or cloud-based AI for commit message generation - choose from embedded local model (runs on your machine with GPU acceleration), Ollama, LM Studio, OpenAI, Anthropic, or GitHub Copilot.
 - **🔧 Full-Featured**: Supports advanced Git operations like interactive rebase, cherry-pick, worktrees, submodules, and more.
 
 ### How is it Different?
@@ -613,7 +613,7 @@ A: Leviathan works with any Git remote (GitHub, GitLab, Bitbucket, Azure DevOps,
 A: Leviathan supports multiple AI providers. By default, it uses an embedded local LLM ([Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message)) that runs entirely on your machine. You can also configure local providers (Ollama, LM Studio) or cloud providers (OpenAI, Anthropic, GitHub Copilot). The AI analyzes your staged changes and generates [conventional commit messages](https://www.conventionalcommits.org/) (e.g., `feat:`, `fix:`, `docs:`). The embedded model (~2GB) downloads once on first use.
 
 **Q: Do I need an internet connection for AI features?**  
-A: Only for the initial ~2GB model download. After that, AI features work completely offline.
+A: It depends on which AI provider you use. The embedded model and local providers (Ollama, LM Studio) work completely offline after the initial model download (~2GB for embedded model). Cloud-based providers (OpenAI, Anthropic, GitHub Copilot) require an active internet connection.
 
 **Q: Can I use my own AI backend (Ollama, LM Studio)?**  
 A: Yes! Leviathan supports multiple AI providers including local providers (Ollama, LM Studio) and cloud-based providers (OpenAI, Anthropic, GitHub Copilot). The application auto-detects local providers and allows you to configure them in settings.
