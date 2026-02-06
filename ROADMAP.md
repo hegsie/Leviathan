@@ -121,17 +121,17 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 
 #### Conflict Resolution
 
-- **Built-in 3-way merge editor**
-  - Side-by-side conflict view with base/theirs/ours
-  - Inline explanations of conflict origin
-  - Smart conflict resolution suggestions
-  - Chunk-by-chunk resolution workflow
+- ✅ **Built-in 3-way merge editor**
+  - ✅ Side-by-side conflict view with base/theirs/ours
+  - ✅ Inline explanations of conflict origin
+  - Smart conflict resolution suggestions (planned)
+  - ✅ Chunk-by-chunk resolution workflow
 
 - **External merge tool integration**
-  - Configure Kdiff3, Beyond Compare, Meld, P4Merge
-  - Launch external tool from conflict view
-  - Auto-detect common merge tools
-  - Custom tool configuration
+  - Configure Kdiff3, Beyond Compare, Meld, P4Merge (planned)
+  - Launch external tool from conflict view (planned)
+  - Auto-detect common merge tools (planned)
+  - Custom tool configuration (planned)
 
 #### Multi-Repository Workflows
 
@@ -313,11 +313,11 @@ This section contains specific features organized by category. Items here suppor
 - Save directly from diff view
 
 #### Image Diff
-- Side-by-side image comparison
-- Onion skin overlay mode
-- Swipe comparison slider
-- Difference highlighting
-- Support for common formats (PNG, JPG, GIF, WebP)
+- ✅ Side-by-side image comparison
+- ✅ Onion skin overlay mode
+- ✅ Swipe comparison slider
+- ✅ Difference highlighting
+- ✅ Support for common formats (PNG, JPG, GIF, WebP)
 
 #### Notifications & Background Operations
 - Push/pull completion notifications
@@ -468,33 +468,33 @@ This section contains specific features organized by category. Items here suppor
 ### AI & Machine Learning Features
 
 #### Local AI Backends
-- Auto-detect Ollama running on `localhost:11434`
-- Support LM Studio on `localhost:1234/v1`
-- Configurable model selection in settings
-- Cache available models from `/api/tags`
-- User choice between embedded model and external backends
-- Fallback to embedded model if external unavailable
+- ✅ Auto-detect Ollama running on `localhost:11434`
+- ✅ Support LM Studio on `localhost:1234/v1`
+- ✅ Configurable model selection in settings
+- ✅ Cache available models from `/api/tags`
+- ✅ User choice between embedded model and external backends
+- ✅ Fallback to embedded model if external unavailable
 
 #### Cloud AI Providers
-- **Anthropic Claude** - API integration for commit messages, code review, PR descriptions
-- **GitHub Copilot** - Integration for code suggestions and explanations
-- **OpenAI** - GPT-4 and future models for AI-assisted features
-- **Google Gemini** - Gemini API support
-- API key management with secure storage (Tauri Stronghold)
-- Provider selection and priority in settings
-- Usage tracking and cost estimates per provider
-- Rate limiting and quota management
+- ✅ **Anthropic Claude** - API integration for commit messages
+- ✅ **GitHub Copilot** - Integration for commit message generation
+- ✅ **OpenAI** - GPT-4 and future models for AI-assisted features
+- **Google Gemini** - Gemini API support (planned)
+- ✅ API key management with secure storage
+- ✅ Provider selection and priority in settings
+- Usage tracking and cost estimates per provider (planned)
+- Rate limiting and quota management (planned)
 
 #### AI-Assisted Workflows
-- Generate commit messages from staged changes (✅ implemented with embedded model)
-- Code review suggestions with explanations
-- Automated commit message improvements (grammar, clarity, conventional format)
-- Smart branch naming based on issue or task
-- Pull request description generation from commits
-- Diff summarization for large changes
-- Conflict resolution suggestions with reasoning
-- Code explanation for complex diffs
-- Security vulnerability detection in changes
+- ✅ Generate commit messages from staged changes (implemented with multiple providers)
+- Code review suggestions with explanations (planned)
+- Automated commit message improvements (grammar, clarity, conventional format) (planned)
+- Smart branch naming based on issue or task (planned)
+- Pull request description generation from commits (planned)
+- Diff summarization for large changes (planned)
+- Conflict resolution suggestions with reasoning (planned)
+- Code explanation for complex diffs (planned)
+- Security vulnerability detection in changes (planned)
 
 ---
 
@@ -503,14 +503,14 @@ This section contains specific features organized by category. Items here suppor
 #### OAuth Authentication
 
 **GitHub OAuth** (✅ implemented)
-- Browser-based login via OAuth 2.0 with PKCE
-- Automatic token refresh
-- Scope management and permissions
+- ✅ Browser-based login via OAuth 2.0 with PKCE
+- ✅ Automatic token refresh
+- ✅ Scope management and permissions
 
-**GitLab OAuth**
-- OAuth authentication for GitLab.com
-- Support for self-hosted GitLab instances
-- Custom OAuth application configuration
+**GitLab OAuth** (✅ implemented)
+- ✅ OAuth authentication for GitLab.com
+- Support for self-hosted GitLab instances (needs verification)
+- Custom OAuth application configuration (needs verification)
 
 **Bitbucket OAuth**
 - Atlassian account authentication
