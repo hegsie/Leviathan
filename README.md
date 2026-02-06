@@ -38,7 +38,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
 - **🆓 Free & Open Source**: MIT licensed, no account required, no subscription fees, no feature paywalls.
 - **🌐 Cross-Platform**: Native apps for macOS, Windows, and Linux with consistent UX.
 - **🚫 Offline-First**: Works perfectly without an internet connection. Network operations only when you explicitly push/pull/fetch.
-- **🤖 AI-Powered**: Local LLM for commit message generation - runs entirely on your machine with GPU acceleration.
+- **🤖 AI-Powered**: Local or cloud-based AI for commit message generation - choose from embedded local model (runs on your machine with GPU acceleration), Ollama, LM Studio, OpenAI, Anthropic, or GitHub Copilot.
 - **🔧 Full-Featured**: Supports advanced Git operations like interactive rebase, cherry-pick, worktrees, submodules, and more.
 
 ### How is it Different?
@@ -49,11 +49,14 @@ Leviathan is built for developers who value **privacy, performance, and control*
 | No account required | ✅ | ✅ | ❌ (free tier limit) | ❌ |
 | Open source | ✅ | ✅ | ❌ | ❌ |
 | Local AI features | ✅ | ❌ | ✅ (cloud only) | ❌ |
+| Cloud AI providers | ✅ | ❌ | ✅ | ❌ |
 | Interactive rebase UI | ✅ | ❌ | ✅ | ✅ |
+| 3-way merge editor | ✅ | ❌ | ✅ | ✅ |
 | GPG signing | ✅ | ✅ | ✅ | ✅ |
 | Multiple integrations | ✅ (4+) | GitHub only | ✅ | ✅ |
 | Worktrees | ✅ | ❌ | ❌ | ❌ |
 | Git LFS | ✅ | ✅ | ✅ | ✅ |
+| Image diff viewer | ✅ | ❌ | ❌ | ❌ |
 
 ## Screenshots
 
@@ -96,7 +99,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
 - Merge with fast-forward, squash, and no-ff options
 - Rebase onto branches
 - Interactive rebase with action editor
-- 3-way merge conflict resolution editor
+- **3-Way Merge Conflict Editor** - Beyond Compare-style side-by-side conflict resolution
 - Abort/continue operations
 
 ### Cherry-pick & Revert
@@ -130,6 +133,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
 
 ### Diff & Blame
 - Diff viewer with syntax highlighting (Shiki)
+- **Image Diff Viewer** - compare images with 4 modes (side-by-side, onion-skin, swipe, difference)
 - Blame view with author attribution
 - Dark and light themes
 - Syntax highlighting theme options
@@ -153,12 +157,14 @@ Leviathan is built for developers who value **privacy, performance, and control*
 - **Issues** - view issues, create issues, filter by state/labels
 - **Commit Linking** - automatic issue reference detection (fixes #123, closes #456)
 - **Releases** - view releases, create releases with auto-generated notes
-- **Actions** - workflow run status, check runs for commits
+- **GitHub Actions** - workflow run status, check runs for commits
+- **OAuth Authentication** - secure authentication flow
 
 ### GitLab Integration
 - **Merge Requests** - view MRs, create MRs, status filtering
 - **Issues** - view issues, create issues, label filtering
 - **Pipelines** - view CI/CD pipeline status
+- **OAuth Authentication** - secure authentication flow
 
 ### Azure DevOps Integration
 - **Pull Requests** - view PRs, create PRs, PR status filtering
@@ -172,9 +178,12 @@ Leviathan is built for developers who value **privacy, performance, and control*
 
 ### AI-Powered Features
 - **Commit Message Generation** - generate conventional commit messages from staged diffs
-- **Embedded LLM** - uses [Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message) model (~2GB quantized)
-- **Offline-First** - model downloads once on first use, runs entirely locally
-- **GPU Acceleration** - Metal on macOS, CUDA on Windows/Linux (configurable via `LEVIATHAN_GPU_LAYERS`)
+- **Multiple AI Providers** - supports local (Ollama, LM Studio) and cloud-based (OpenAI, Anthropic, GitHub Copilot) providers
+- **Embedded LLM (Default)** - uses [Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message) model (~2GB quantized)
+- **Offline-First** - default embedded model and local providers work completely offline
+- **GPU Acceleration** - Metal on macOS, CUDA on Windows/Linux for embedded model (configurable via `LEVIATHAN_GPU_LAYERS`)
+- **Auto-Detection** - automatically discovers local LLM providers (Ollama, LM Studio)
+- **Provider Configuration** - test and configure AI providers with API key support
 - **Progress Feedback** - download progress and generation status in UI
 
 ### Unified Profiles
@@ -395,7 +404,7 @@ Leviathan uses a **multi-process architecture** powered by Tauri:
 - **System Git** (via shell) for complex operations (rebase, submodules) to avoid libgit2 limitations
 - **Zustand** for reactive state management on the frontend
 - **SQLite** for caching repository metadata and indexing
-- **Local LLM** (llama-cpp-2) for AI features, running entirely offline
+- **AI Providers** (llama-cpp-2) for embedded local LLM, with support for external providers (Ollama, LM Studio, OpenAI, Anthropic, GitHub Copilot)
 
 ### Development Workflow
 
@@ -461,7 +470,7 @@ For detailed OAuth setup instructions (for integration features), see [docs/oaut
 ### Additional Tools
 
 - **Git**: [libgit2](https://libgit2.org/) for core operations, system Git for advanced features
-- **AI Model**: [Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message) - quantized LLM (~2GB)
+- **AI Models**: [Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message) (default embedded model, ~2GB quantized), supports Ollama, LM Studio, OpenAI, Anthropic, GitHub Copilot
 - **Testing**: [Web Test Runner](https://modern-web.dev/docs/test-runner/overview/), [Playwright](https://playwright.dev/)
 - **Build**: [Vite](https://vitejs.dev/) for frontend, [Cargo](https://doc.rust-lang.org/cargo/) for backend
 - **CI/CD**: GitHub Actions for automated testing and releases
@@ -537,17 +546,17 @@ See [CLAUDE.md](CLAUDE.md) for detailed testing guidelines.
 See [ROADMAP.md](ROADMAP.md) for planned features including:
 
 - Inline file editing in diff view
-- Image diff comparison
-- Commit message templates
-- Git Flow workflow support
-- External AI backends (Ollama, LM Studio)
+- Advanced commit message templates
+- External merge tool integration
 - Code review suggestions
+- Multi-repository workspaces
+- Plugin/extension system
 
 ## Troubleshooting
 
 ### AI Commit Message Generation
 
-The AI feature uses an embedded LLM that runs locally on your machine. On first use, it downloads a ~2GB model file.
+Leviathan supports multiple AI providers for commit message generation. By default, it uses an embedded LLM that runs locally on your machine. On first use, it downloads a ~2GB model file. You can also configure local providers (Ollama, LM Studio) or cloud providers (OpenAI, Anthropic, GitHub Copilot) in Settings > AI Providers.
 
 **macOS GPU Issues**: If the app crashes when generating commit messages, you may need to adjust GPU settings:
 
@@ -601,13 +610,13 @@ A: Leviathan works with any Git remote (GitHub, GitLab, Bitbucket, Azure DevOps,
 ### AI Features
 
 **Q: How does the AI commit message generation work?**  
-A: Leviathan uses a local LLM ([Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message)) that runs entirely on your machine. It analyzes your staged changes and generates [conventional commit messages](https://www.conventionalcommits.org/) (e.g., `feat:`, `fix:`, `docs:`). The model (~2GB) downloads once on first use.
+A: Leviathan supports multiple AI providers. By default, it uses an embedded local LLM ([Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message)) that runs entirely on your machine. You can also configure local providers (Ollama, LM Studio) or cloud providers (OpenAI, Anthropic, GitHub Copilot). The AI analyzes your staged changes and generates [conventional commit messages](https://www.conventionalcommits.org/) (e.g., `feat:`, `fix:`, `docs:`). The embedded model (~2GB) downloads once on first use.
 
 **Q: Do I need an internet connection for AI features?**  
-A: Only for the initial ~2GB model download. After that, AI features work completely offline.
+A: It depends on which AI provider you use. The embedded model and local providers (Ollama, LM Studio) work completely offline after the initial model download (~2GB for embedded model). Cloud-based providers (OpenAI, Anthropic, GitHub Copilot) require an active internet connection.
 
 **Q: Can I use my own AI backend (Ollama, LM Studio)?**  
-A: Not yet, but it's on the [roadmap](ROADMAP.md). Currently, Leviathan uses an embedded local model.
+A: Yes! Leviathan supports multiple AI providers including local providers (Ollama, LM Studio) and cloud-based providers (OpenAI, Anthropic, GitHub Copilot). The application auto-detects local providers and allows you to configure them in settings.
 
 **Q: Why does AI generation crash on my Mac?**  
 A: This is a known issue with Metal GPU buffer allocation on some macOS configurations. See [Troubleshooting](#troubleshooting) for workarounds (CPU-only mode or reduced GPU layers).
