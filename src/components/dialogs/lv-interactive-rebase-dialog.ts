@@ -503,11 +503,19 @@ export class LvInteractiveRebaseDialog extends LitElement {
     );
   }
 
-  public async open(onto: string): Promise<void> {
+  public async open(onto: string, options?: { rewordCommitOid?: string }): Promise<void> {
     this.reset();
     this.onto = onto;
     this.modal.open = true;
     await this.loadCommits();
+
+    // Pre-select a commit for rewording if requested
+    if (options?.rewordCommitOid) {
+      const target = this.commits.find(c => c.oid === options.rewordCommitOid);
+      if (target) {
+        target.action = 'reword';
+      }
+    }
   }
 
   public close(): void {
