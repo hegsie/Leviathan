@@ -30,6 +30,7 @@ import {
 } from '../../services/git.service.ts';
 import type { Commit, RefsByCommit, RefInfo } from '../../types/git.types.ts';
 import type { GraphPullRequest } from '../../graph/virtual-scroll.ts';
+import { searchIndexService } from '../../services/search-index.service.ts';
 
 export interface CommitSelectedEvent {
   commit: Commit | null;
@@ -546,7 +547,8 @@ export class LvGraphCanvas extends LitElement {
       // If search is active, also fetch matching commits for highlighting
       this.matchedCommitOids.clear();
       if (hasSearch) {
-        const matchResult = await searchCommits(repoPath, {
+        // Try the search index first for faster results
+        const indexResults = await searchIndexService.search(repoPath, {
           query: this.searchFilter?.query || undefined,
           author: this.searchFilter?.author || undefined,
           dateFrom: this.searchFilter?.dateFrom
@@ -555,20 +557,42 @@ export class LvGraphCanvas extends LitElement {
           dateTo: this.searchFilter?.dateTo
             ? new Date(this.searchFilter.dateTo).getTime() / 1000
             : undefined,
-          filePath: this.searchFilter?.filePath || undefined,
-          branch: this.searchFilter?.branch || undefined,
           limit: this.commitCount,
         });
 
         // Abort if a newer load has started
         if (this.loadVersion !== currentVersion) return;
 
-        if (matchResult.success && matchResult.data) {
-          for (const commit of matchResult.data) {
+        if (indexResults) {
+          for (const commit of indexResults) {
             this.matchedCommitOids.add(commit.oid);
           }
-          log.debug(`Search matched ${this.matchedCommitOids.size} commits`);
+        } else {
+          // Fallback to direct search
+          const matchResult = await searchCommits(repoPath, {
+            query: this.searchFilter?.query || undefined,
+            author: this.searchFilter?.author || undefined,
+            dateFrom: this.searchFilter?.dateFrom
+              ? new Date(this.searchFilter.dateFrom).getTime() / 1000
+              : undefined,
+            dateTo: this.searchFilter?.dateTo
+              ? new Date(this.searchFilter.dateTo).getTime() / 1000
+              : undefined,
+            filePath: this.searchFilter?.filePath || undefined,
+            branch: this.searchFilter?.branch || undefined,
+            limit: this.commitCount,
+          });
+
+          // Abort if a newer load has started
+          if (this.loadVersion !== currentVersion) return;
+
+          if (matchResult.success && matchResult.data) {
+            for (const commit of matchResult.data) {
+              this.matchedCommitOids.add(commit.oid);
+            }
+          }
         }
+        log.debug(`Search matched ${this.matchedCommitOids.size} commits`);
       }
 
       // Convert commits to GraphCommit format for layout

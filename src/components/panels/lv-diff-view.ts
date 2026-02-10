@@ -12,6 +12,7 @@ import {
   type InlineDiffSegment,
 } from '../../utils/diff-utils.ts';
 import './lv-image-diff.ts';
+import { DiffVirtualScrollManager, DIFF_LINE_HEIGHT, type VisibleRange } from './diff-virtual-scroll.ts';
 
 type DiffViewMode = 'unified' | 'split';
 
@@ -138,6 +139,14 @@ interface DiffContextMenuState {
   y: number;
   line: DiffLine | null;
   hunk: DiffHunk | null;
+}
+
+interface FlatDiffItem {
+  type: 'hunk-header' | 'line';
+  hunkIndex: number;
+  lineIndex?: number;
+  line?: DiffLine;
+  header?: string;
 }
 
 /** Unique key for a line within the diff */
@@ -900,6 +909,38 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         background: var(--color-diff-add-word-bg, rgba(63, 185, 80, 0.4));
         border-radius: 2px;
       }
+
+      .large-diff-info {
+        padding: 8px 12px;
+        background: var(--color-bg-secondary, #1e1e2e);
+        color: var(--color-text-secondary);
+        font-size: 12px;
+        border-bottom: 1px solid var(--color-border);
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+
+      .large-diff-info .btn-link {
+        background: none;
+        border: none;
+        color: var(--color-primary);
+        cursor: pointer;
+        font-size: 12px;
+        padding: 0;
+        margin-left: var(--spacing-sm);
+        text-decoration: underline;
+      }
+
+      .large-diff-info .btn-link:hover {
+        filter: brightness(1.2);
+      }
+
+      .diff-virtualized-container {
+        overflow: auto;
+        height: 100%;
+        position: relative;
+      }
     `,
   ];
 
@@ -925,6 +966,10 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   @state() private currentHunkIndex = 0;
   @state() private hasDiffTool = false;
   @state() private launchingDiffTool = false;
+
+  private virtualScrollManager = new DiffVirtualScrollManager();
+  private flatLines: FlatDiffItem[] = [];
+  private diffScrollTop = 0;
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
@@ -971,6 +1016,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     super.disconnectedCallback();
     document.removeEventListener('click', this.handleDocumentClick);
     this.removeEventListener('keydown', this.handleKeydown);
+  }
+
+  willUpdate(changedProperties: Map<string, unknown>): void {
+    if (changedProperties.has('diff')) {
+      this.buildFlatLines();
+      this.diffScrollTop = 0;
+    }
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -1980,6 +2032,90 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     this.selectedLines = prevSelected;
   }
 
+  private buildFlatLines(): void {
+    if (!this.diff) {
+      this.flatLines = [];
+      return;
+    }
+    const items: FlatDiffItem[] = [];
+    this.diff.hunks.forEach((hunk, hunkIndex) => {
+      items.push({ type: 'hunk-header', hunkIndex, header: hunk.header });
+      hunk.lines.forEach((line, lineIndex) => {
+        items.push({ type: 'line', hunkIndex, lineIndex, line });
+      });
+    });
+    this.flatLines = items;
+    this.virtualScrollManager.setTotalLines(items.length);
+  }
+
+  private handleDiffScroll(e: Event): void {
+    const target = e.target as HTMLElement;
+    this.diffScrollTop = target.scrollTop;
+    this.requestUpdate();
+  }
+
+  private handleLoadFullDiff(): void {
+    // Re-fetch the diff without truncation limit
+    this.dispatchEvent(new CustomEvent('load-full-diff', {
+      bubbles: true,
+      composed: true,
+      detail: { path: this.diff?.path },
+    }));
+  }
+
+  private renderVirtualizedUnifiedView(): TemplateResult {
+    const contentHeight = this.virtualScrollManager.getContentHeight();
+    const range: VisibleRange = this.virtualScrollManager.getVisibleRange({
+      scrollTop: this.diffScrollTop,
+      clientHeight: 600,
+    });
+
+    const visibleItems = this.flatLines.slice(range.startLine, range.endLine + 1);
+    const offsetY = range.startLine * DIFF_LINE_HEIGHT;
+
+    return html`
+      <div class="diff-virtualized-container"
+           @scroll=${this.handleDiffScroll}>
+        ${this.flatLines.length > 10000 ? html`
+          <div class="large-diff-info">
+            Large diff (${this.flatLines.length.toLocaleString()} lines) -- virtualized for performance
+          </div>
+        ` : nothing}
+        <div style="height: ${contentHeight}px; position: relative;">
+          <div style="position: absolute; top: ${offsetY}px; left: 0; right: 0;">
+            ${visibleItems.map(item => {
+              if (item.type === 'hunk-header') {
+                return html`
+                  <div class="line" style="min-height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;">
+                    <div class="line-numbers">
+                      <span class="line-no old"></span>
+                      <span class="line-no new"></span>
+                    </div>
+                    <span class="line-origin"></span>
+                    <span class="line-content" style="color: var(--color-text-muted); font-style: italic;">${item.header}</span>
+                  </div>
+                `;
+              }
+              const line = item.line!;
+              const lineClass = this.getLineClass(line.origin);
+              const originChar = this.getOriginChar(line.origin);
+              return html`
+                <div class="line ${lineClass}" style="min-height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;">
+                  <div class="line-numbers">
+                    <span class="line-no old">${line.oldLineNo ?? ''}</span>
+                    <span class="line-no new">${line.newLineNo ?? ''}</span>
+                  </div>
+                  <span class="line-origin">${originChar}</span>
+                  <span class="line-content">${this.renderHighlightedContent(line.content)}</span>
+                </div>
+              `;
+            })}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   private renderLine(line: DiffLine, hunk: DiffHunk, hunkIndex: number, lineIndex: number) {
     const lineClass = this.getLineClass(line.origin);
     const originChar = this.getOriginChar(line.origin);
@@ -2343,6 +2479,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   private renderUnifiedView() {
     if (!this.diff) return nothing;
 
+    // Use virtualized rendering for very large diffs
+    if (this.virtualScrollManager.shouldVirtualize()) {
+      return this.renderVirtualizedUnifiedView();
+    }
+
     const isStaged = this.file?.isStaged ?? false;
 
     return html`
@@ -2677,6 +2818,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
             </div>
           `
         : nothing}
+      ${this.diff?.truncated ? html`
+        <div class="large-diff-info">
+          Showing first ${this.diff.hunks.reduce((sum, h) => sum + h.lines.length, 0).toLocaleString()} of ${this.diff.totalLines?.toLocaleString() ?? 'many'} lines
+          <button class="btn-link" @click=${this.handleLoadFullDiff}>Load full diff</button>
+        </div>
+      ` : nothing}
       ${this.viewMode === 'split' ? this.renderSplitView() : this.renderUnifiedView()}
       ${this.renderContextMenu()}
     `;

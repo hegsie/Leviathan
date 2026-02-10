@@ -4,6 +4,7 @@
  */
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 
 /**
  * Represents an ongoing operation with progress tracking.
@@ -149,6 +150,7 @@ class ProgressService {
   cancelOperation(id: string): void {
     this.cancelledOperations.add(id);
     this.removeOperation(id);
+    invoke('cancel_operation', { operationId: id }).catch(() => {});
   }
 
   /**

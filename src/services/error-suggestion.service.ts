@@ -84,6 +84,24 @@ export function getErrorSuggestion(
     };
   }
 
+  // Operation timeout
+  if (msg.includes('timed out') || msg.includes('operation_timeout')) {
+    return {
+      message: 'Operation timed out. You can increase the timeout in Settings > Behavior.',
+      action: {
+        label: 'Open Settings',
+        callback: () => window.dispatchEvent(new CustomEvent('open-settings')),
+      },
+    };
+  }
+
+  // Operation cancelled
+  if (msg.includes('operation_cancelled')) {
+    return {
+      message: 'Operation was cancelled.',
+    };
+  }
+
   // Repository lock
   if (msg.includes('lock') || msg.includes('locked')) {
     return {

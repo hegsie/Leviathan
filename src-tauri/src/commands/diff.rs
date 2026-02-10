@@ -179,6 +179,7 @@ pub async fn get_diff_with_options(
     ignore_whitespace: Option<String>,
     patience: Option<bool>,
     histogram: Option<bool>,
+    max_lines: Option<u32>,
 ) -> Result<Vec<DiffFile>> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
@@ -235,7 +236,11 @@ pub async fn get_diff_with_options(
         repo.diff_index_to_workdir(None, Some(&mut opts))?
     };
 
-    parse_diff(&diff)
+    let files = parse_diff(&diff)?;
+    Ok(files
+        .into_iter()
+        .map(|f| maybe_truncate_diff(f, max_lines))
+        .collect())
 }
 
 /// Get diff for a specific file
@@ -244,6 +249,7 @@ pub async fn get_file_diff(
     path: String,
     file_path: String,
     staged: Option<bool>,
+    max_lines: Option<u32>,
 ) -> Result<DiffFile> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
@@ -274,7 +280,7 @@ pub async fn get_file_diff(
     // pathspec should have filtered to just our file, but it may be empty
     // if case-sensitivity caused a mismatch
     if let Some(file) = files.into_iter().next() {
-        return Ok(file);
+        return Ok(maybe_truncate_diff(file, max_lines));
     }
 
     // Fallback: pathspec may have failed due to case sensitivity on Windows
@@ -295,7 +301,7 @@ pub async fn get_file_diff(
 
     // Try exact match first
     if let Some(file) = all_files.iter().find(|f| f.path == normalized_file_path) {
-        return Ok(file.clone());
+        return Ok(maybe_truncate_diff(file.clone(), max_lines));
     }
 
     // Try case-insensitive match
@@ -303,7 +309,7 @@ pub async fn get_file_diff(
         .iter()
         .find(|f| f.path.eq_ignore_ascii_case(&normalized_file_path))
     {
-        return Ok(file.clone());
+        return Ok(maybe_truncate_diff(file.clone(), max_lines));
     }
 
     // Try matching by filename only (handles path prefix mismatches)
@@ -315,7 +321,7 @@ pub async fn get_file_diff(
         .iter()
         .find(|f| f.path.ends_with(filename) || f.path.eq_ignore_ascii_case(filename))
     {
-        return Ok(file.clone());
+        return Ok(maybe_truncate_diff(file.clone(), max_lines));
     }
 
     // Try the opposite staging state as fallback
@@ -333,7 +339,7 @@ pub async fn get_file_diff(
             || f.path.eq_ignore_ascii_case(&normalized_file_path)
             || f.path.ends_with(filename)
     }) {
-        return Ok(file.clone());
+        return Ok(maybe_truncate_diff(file.clone(), max_lines));
     }
 
     // Log available files for debugging
@@ -371,7 +377,8 @@ pub async fn get_file_diff(
                     let status = entry.status();
                     if status.is_wt_new() || status.is_index_new() {
                         // It's a new/untracked file - generate diff from file content
-                        return generate_new_file_diff(&full_path, &normalized_file_path);
+                        return generate_new_file_diff(&full_path, &normalized_file_path)
+                            .map(|f| maybe_truncate_diff(f, max_lines));
                     }
                 }
             }
@@ -443,7 +450,38 @@ fn generate_new_file_diff(full_path: &Path, file_path: &str) -> Result<DiffFile>
         image_type,
         additions,
         deletions: 0,
+        truncated: None,
+        total_lines: None,
     })
+}
+
+fn maybe_truncate_diff(mut file: DiffFile, max_lines: Option<u32>) -> DiffFile {
+    let max_lines = match max_lines {
+        Some(m) if m > 0 => m as usize,
+        _ => return file,
+    };
+    let total: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
+    if total <= max_lines {
+        return file;
+    }
+    let mut remaining = max_lines;
+    let mut truncated_hunks = Vec::new();
+    for mut hunk in file.hunks.drain(..) {
+        if remaining == 0 {
+            break;
+        }
+        if hunk.lines.len() > remaining {
+            hunk.lines.truncate(remaining);
+            remaining = 0;
+        } else {
+            remaining -= hunk.lines.len();
+        }
+        truncated_hunks.push(hunk);
+    }
+    file.hunks = truncated_hunks;
+    file.truncated = Some(true);
+    file.total_lines = Some(total);
+    file
 }
 
 fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
@@ -490,6 +528,8 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
                 image_type,
                 additions: 0,
                 deletions: 0,
+                truncated: None,
+                total_lines: None,
             });
 
             files.last_mut().unwrap()
@@ -1058,7 +1098,8 @@ mod tests {
         // Modify the README
         repo.create_file("README.md", "Modified README content\nWith multiple lines");
 
-        let result = get_file_diff(repo.path_str(), "README.md".to_string(), Some(false)).await;
+        let result =
+            get_file_diff(repo.path_str(), "README.md".to_string(), Some(false), None).await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -1075,7 +1116,8 @@ mod tests {
         repo.create_file("staged.txt", "Staged content\nLine 2\nLine 3");
         repo.stage_file("staged.txt");
 
-        let result = get_file_diff(repo.path_str(), "staged.txt".to_string(), Some(true)).await;
+        let result =
+            get_file_diff(repo.path_str(), "staged.txt".to_string(), Some(true), None).await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -1092,7 +1134,7 @@ mod tests {
         // Modify the README with additions and deletions
         repo.create_file("README.md", "# Modified Repo\nNew line added");
 
-        let result = get_file_diff(repo.path_str(), "README.md".to_string(), None).await;
+        let result = get_file_diff(repo.path_str(), "README.md".to_string(), None, None).await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -1467,7 +1509,8 @@ mod tests {
         repo.create_file("config.json", r#"{"key": "value"}"#);
         repo.stage_file("config.json");
 
-        let result = get_file_diff(repo.path_str(), "config.json".to_string(), Some(true)).await;
+        let result =
+            get_file_diff(repo.path_str(), "config.json".to_string(), Some(true), None).await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -1500,7 +1543,7 @@ mod tests {
         // Create a modification with clear additions
         repo.create_file("README.md", "New line 1\nNew line 2\nNew line 3");
 
-        let result = get_file_diff(repo.path_str(), "README.md".to_string(), None).await;
+        let result = get_file_diff(repo.path_str(), "README.md".to_string(), None, None).await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -1532,6 +1575,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -1556,6 +1600,7 @@ mod tests {
             None,
             None,
             Some("all".to_string()),
+            None,
             None,
             None,
         )
@@ -1589,6 +1634,7 @@ mod tests {
             Some("change".to_string()),
             None,
             None,
+            None,
         )
         .await;
 
@@ -1611,6 +1657,7 @@ mod tests {
             None,
             None,
             Some("eol".to_string()),
+            None,
             None,
             None,
         )
@@ -1647,6 +1694,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -1663,6 +1711,7 @@ mod tests {
             None,
             None,
             Some(5),
+            None,
             None,
             None,
             None,
@@ -1695,6 +1744,7 @@ mod tests {
             None,
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -1720,6 +1770,7 @@ mod tests {
             None,
             None,
             Some(true),
+            None,
         )
         .await;
 
@@ -1742,6 +1793,7 @@ mod tests {
             repo.path_str(),
             Some("file2.txt".to_string()),
             Some(false),
+            None,
             None,
             None,
             None,
@@ -1775,6 +1827,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -1796,6 +1849,7 @@ mod tests {
             None,
             None,
             Some(commit_oid.to_string()),
+            None,
             None,
             None,
             None,
@@ -1828,6 +1882,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -1852,6 +1907,7 @@ mod tests {
             None,
             None,
             Some("none".to_string()),
+            None,
             None,
             None,
         )
@@ -1884,6 +1940,7 @@ mod tests {
             Some(2),
             Some("change".to_string()),
             Some(true),
+            None,
             None,
         )
         .await;

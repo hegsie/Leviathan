@@ -76,216 +76,239 @@ pub async fn clone_repository(
     depth: Option<u32>,
     filter: Option<String>,
     single_branch: Option<bool>,
+    timeout_secs: Option<u64>,
 ) -> Result<Repository> {
-    let dest_path = std::path::PathBuf::from(&path);
-    let url_clone = url.clone();
-    let bare = bare.unwrap_or(false);
-    let app_for_progress = app.clone();
-    let token_clone = token.clone();
+    let do_clone = async {
+        let dest_path = std::path::PathBuf::from(&path);
+        let url_clone = url.clone();
+        let bare = bare.unwrap_or(false);
+        let app_for_progress = app.clone();
+        let token_clone = token.clone();
 
-    // Use git CLI when features unsupported by git2 are requested
-    let single_branch = single_branch.unwrap_or(false);
-    let needs_cli = depth.is_some() || filter.is_some() || single_branch;
+        // Use git CLI when features unsupported by git2 are requested
+        let single_branch = single_branch.unwrap_or(false);
+        let needs_cli = depth.is_some() || filter.is_some() || single_branch;
 
-    if needs_cli {
-        // git2 doesn't support --depth, --filter, or --single-branch, so fall back to git CLI
-        let result = tokio::task::spawn_blocking(move || {
-            let mut cmd = std::process::Command::new("git");
-            cmd.arg("clone");
+        if needs_cli {
+            // git2 doesn't support --depth, --filter, or --single-branch, so fall back to git CLI
+            let result = tokio::task::spawn_blocking(move || {
+                let mut cmd = std::process::Command::new("git");
+                cmd.arg("clone");
 
-            if let Some(depth_val) = depth {
-                cmd.arg("--depth").arg(depth_val.to_string());
-            }
+                if let Some(depth_val) = depth {
+                    cmd.arg("--depth").arg(depth_val.to_string());
+                }
 
-            if let Some(ref filter_spec) = filter {
-                cmd.arg("--filter").arg(filter_spec);
-            }
+                if let Some(ref filter_spec) = filter {
+                    cmd.arg("--filter").arg(filter_spec);
+                }
 
-            if single_branch {
-                cmd.arg("--single-branch");
-            }
+                if single_branch {
+                    cmd.arg("--single-branch");
+                }
 
-            if bare {
-                cmd.arg("--bare");
-            }
+                if bare {
+                    cmd.arg("--bare");
+                }
 
-            if let Some(ref branch) = branch {
-                cmd.arg("--branch").arg(branch);
-            }
+                if let Some(ref branch) = branch {
+                    cmd.arg("--branch").arg(branch);
+                }
 
-            // If a token is provided, inject it into the URL for HTTPS authentication
-            let effective_url = if let Some(ref token) = token_clone {
-                if url_clone.starts_with("https://") {
-                    url_clone.replacen("https://", &format!("https://x-access-token:{}@", token), 1)
+                // If a token is provided, inject it into the URL for HTTPS authentication
+                let effective_url = if let Some(ref token) = token_clone {
+                    if url_clone.starts_with("https://") {
+                        url_clone.replacen(
+                            "https://",
+                            &format!("https://x-access-token:{}@", token),
+                            1,
+                        )
+                    } else {
+                        url_clone.clone()
+                    }
                 } else {
                     url_clone.clone()
-                }
-            } else {
-                url_clone.clone()
-            };
-
-            cmd.arg(&effective_url);
-            cmd.arg(&dest_path);
-
-            let output = cmd.output().map_err(|e| {
-                LeviathanError::Custom(format!("Failed to execute git command: {}", e))
-            })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(LeviathanError::Custom(format!(
-                    "git clone failed: {}",
-                    stderr.trim()
-                )));
-            }
-
-            git2::Repository::open(&dest_path)
-                .map_err(|e| LeviathanError::Custom(format!("Failed to open cloned repo: {}", e)))
-        })
-        .await
-        .map_err(|e| LeviathanError::Custom(format!("Clone task failed: {}", e)))?;
-
-        let repo = result?;
-        let path = Path::new(&path);
-
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Unknown".to_string());
-
-        let head_ref = repo
-            .head()
-            .ok()
-            .map(|h| h.shorthand().map(|s| s.to_string()).unwrap_or_default());
-
-        // Emit completion
-        let _ = app.emit(
-            "clone-progress",
-            CloneProgress {
-                stage: "Complete".to_string(),
-                received_objects: 0,
-                total_objects: 0,
-                indexed_objects: 0,
-                received_bytes: 0,
-                percent: 100,
-            },
-        );
-
-        Ok(Repository {
-            path: path.display().to_string(),
-            name,
-            is_valid: true,
-            is_bare: repo.is_bare(),
-            head_ref,
-            state: RepositoryState::from(repo.state()),
-        })
-    } else {
-        // Full clone: use git2 RepoBuilder with progress callbacks
-        let result = tokio::task::spawn_blocking(move || {
-            let mut builder = git2::build::RepoBuilder::new();
-
-            if bare {
-                builder.bare(true);
-            }
-
-            if let Some(ref branch) = branch {
-                builder.branch(branch);
-            }
-
-            // Set up fetch options with credentials and progress callbacks
-            let mut fetch_opts = git2::FetchOptions::new();
-
-            // Use CredentialsHelper to get callbacks with authentication support
-            let mut callbacks =
-                crate::services::CredentialsHelper::new_with_token(token_clone).get_callbacks();
-
-            // Track last emitted percent to avoid spamming events
-            let last_percent = Arc::new(AtomicUsize::new(0));
-            let last_percent_clone = Arc::clone(&last_percent);
-            let app_clone = app_for_progress;
-
-            callbacks.transfer_progress(move |stats| {
-                let total = stats.total_objects();
-                let received = stats.received_objects();
-                let indexed = stats.indexed_objects();
-
-                // Calculate percent (receiving is 0-80%, indexing is 80-100%)
-                let percent = if total == 0 {
-                    0
-                } else if received < total {
-                    // Receiving phase: 0-80%
-                    (received * 80 / total) as u8
-                } else {
-                    // Indexing phase: 80-100%
-                    80 + (indexed * 20 / total) as u8
                 };
 
-                // Only emit if percent changed
-                let prev = last_percent_clone.swap(percent as usize, Ordering::Relaxed);
-                if prev != percent as usize {
-                    let stage = if received < total {
-                        "Receiving objects"
-                    } else {
-                        "Indexing objects"
-                    };
+                cmd.arg(&effective_url);
+                cmd.arg(&dest_path);
 
-                    let progress = CloneProgress {
-                        stage: stage.to_string(),
-                        received_objects: received,
-                        total_objects: total,
-                        indexed_objects: indexed,
-                        received_bytes: stats.received_bytes(),
-                        percent,
-                    };
+                let output = cmd.output().map_err(|e| {
+                    LeviathanError::Custom(format!("Failed to execute git command: {}", e))
+                })?;
 
-                    let _ = app_clone.emit("clone-progress", progress);
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(LeviathanError::Custom(format!(
+                        "git clone failed: {}",
+                        stderr.trim()
+                    )));
                 }
 
-                true
-            });
+                git2::Repository::open(&dest_path).map_err(|e| {
+                    LeviathanError::Custom(format!("Failed to open cloned repo: {}", e))
+                })
+            })
+            .await
+            .map_err(|e| LeviathanError::Custom(format!("Clone task failed: {}", e)))?;
 
-            fetch_opts.remote_callbacks(callbacks);
-            builder.fetch_options(fetch_opts);
+            let repo = result?;
+            let path = Path::new(&path);
 
-            builder.clone(&url_clone, &dest_path)
-        })
-        .await
-        .map_err(|e| LeviathanError::Custom(format!("Clone task failed: {}", e)))?;
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
 
-        let repo = result?;
-        let path = Path::new(&path);
+            let head_ref = repo
+                .head()
+                .ok()
+                .map(|h| h.shorthand().map(|s| s.to_string()).unwrap_or_default());
 
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Unknown".to_string());
+            // Emit completion
+            let _ = app.emit(
+                "clone-progress",
+                CloneProgress {
+                    stage: "Complete".to_string(),
+                    received_objects: 0,
+                    total_objects: 0,
+                    indexed_objects: 0,
+                    received_bytes: 0,
+                    percent: 100,
+                },
+            );
 
-        let head_ref = repo
-            .head()
-            .ok()
-            .map(|h| h.shorthand().map(|s| s.to_string()).unwrap_or_default());
+            Ok(Repository {
+                path: path.display().to_string(),
+                name,
+                is_valid: true,
+                is_bare: repo.is_bare(),
+                head_ref,
+                state: RepositoryState::from(repo.state()),
+            })
+        } else {
+            // Full clone: use git2 RepoBuilder with progress callbacks
+            let result = tokio::task::spawn_blocking(move || {
+                let mut builder = git2::build::RepoBuilder::new();
 
-        // Emit completion
-        let _ = app.emit(
-            "clone-progress",
-            CloneProgress {
-                stage: "Complete".to_string(),
-                received_objects: 0,
-                total_objects: 0,
-                indexed_objects: 0,
-                received_bytes: 0,
-                percent: 100,
-            },
-        );
+                if bare {
+                    builder.bare(true);
+                }
 
-        Ok(Repository {
-            path: path.display().to_string(),
-            name,
-            is_valid: true,
-            is_bare: repo.is_bare(),
-            head_ref,
-            state: RepositoryState::from(repo.state()),
-        })
+                if let Some(ref branch) = branch {
+                    builder.branch(branch);
+                }
+
+                // Set up fetch options with credentials and progress callbacks
+                let mut fetch_opts = git2::FetchOptions::new();
+
+                // Use CredentialsHelper to get callbacks with authentication support
+                let mut callbacks =
+                    crate::services::CredentialsHelper::new_with_token(token_clone).get_callbacks();
+
+                // Track last emitted percent to avoid spamming events
+                let last_percent = Arc::new(AtomicUsize::new(0));
+                let last_percent_clone = Arc::clone(&last_percent);
+                let app_clone = app_for_progress;
+
+                callbacks.transfer_progress(move |stats| {
+                    let total = stats.total_objects();
+                    let received = stats.received_objects();
+                    let indexed = stats.indexed_objects();
+
+                    // Calculate percent (receiving is 0-80%, indexing is 80-100%)
+                    let percent = if total == 0 {
+                        0
+                    } else if received < total {
+                        // Receiving phase: 0-80%
+                        (received * 80 / total) as u8
+                    } else {
+                        // Indexing phase: 80-100%
+                        80 + (indexed * 20 / total) as u8
+                    };
+
+                    // Only emit if percent changed
+                    let prev = last_percent_clone.swap(percent as usize, Ordering::Relaxed);
+                    if prev != percent as usize {
+                        let stage = if received < total {
+                            "Receiving objects"
+                        } else {
+                            "Indexing objects"
+                        };
+
+                        let progress = CloneProgress {
+                            stage: stage.to_string(),
+                            received_objects: received,
+                            total_objects: total,
+                            indexed_objects: indexed,
+                            received_bytes: stats.received_bytes(),
+                            percent,
+                        };
+
+                        let _ = app_clone.emit("clone-progress", progress);
+                    }
+
+                    true
+                });
+
+                fetch_opts.remote_callbacks(callbacks);
+                builder.fetch_options(fetch_opts);
+
+                builder.clone(&url_clone, &dest_path)
+            })
+            .await
+            .map_err(|e| LeviathanError::Custom(format!("Clone task failed: {}", e)))?;
+
+            let repo = result?;
+            let path = Path::new(&path);
+
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let head_ref = repo
+                .head()
+                .ok()
+                .map(|h| h.shorthand().map(|s| s.to_string()).unwrap_or_default());
+
+            // Emit completion
+            let _ = app.emit(
+                "clone-progress",
+                CloneProgress {
+                    stage: "Complete".to_string(),
+                    received_objects: 0,
+                    total_objects: 0,
+                    indexed_objects: 0,
+                    received_bytes: 0,
+                    percent: 100,
+                },
+            );
+
+            Ok(Repository {
+                path: path.display().to_string(),
+                name,
+                is_valid: true,
+                is_bare: repo.is_bare(),
+                head_ref,
+                state: RepositoryState::from(repo.state()),
+            })
+        }
+    };
+
+    if let Some(secs) = timeout_secs {
+        if secs > 0 {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), do_clone).await {
+                Ok(result) => result,
+                Err(_) => Err(LeviathanError::OperationTimeout(
+                    "Clone operation timed out".to_string(),
+                )),
+            }
+        } else {
+            do_clone.await
+        }
+    } else {
+        do_clone.await
     }
 }
 

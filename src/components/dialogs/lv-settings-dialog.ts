@@ -305,6 +305,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private confirmBeforeDiscard = true;
   @state() private autoStashOnCheckout = false;
   @state() private staleBranchDays = 90;
+  @state() private networkOperationTimeout = 300;
 
   // AI settings
   @state() private aiProviders: AiProviderInfo[] = [];
@@ -428,6 +429,7 @@ export class LvSettingsDialog extends LitElement {
     this.confirmBeforeDiscard = settings.confirmBeforeDiscard;
     this.autoStashOnCheckout = settings.autoStashOnCheckout;
     this.staleBranchDays = settings.staleBranchDays;
+    this.networkOperationTimeout = settings.networkOperationTimeout;
   }
 
   private handleThemeChange(e: Event): void {
@@ -564,6 +566,13 @@ export class LvSettingsDialog extends LitElement {
     const value = Math.max(0, parseInt(input.value, 10) || 0);
     this.staleBranchDays = value;
     settingsStore.getState().setStaleBranchDays(value);
+  }
+
+  private handleNetworkOperationTimeoutChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    const value = Math.max(0, parseInt(input.value, 10) || 0);
+    this.networkOperationTimeout = value;
+    settingsStore.getState().setNetworkOperationTimeout(value);
   }
 
   private handleToggle(setting: string, e: Event): void {
@@ -839,6 +848,20 @@ export class LvSettingsDialog extends LitElement {
               min="0"
               .value=${String(this.staleBranchDays)}
               @change=${this.handleStaleBranchDaysChange}
+              style="width: 80px;"
+            />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Network Operation Timeout</span>
+              <span class="setting-description">Seconds before fetch/pull/push operations time out (0 to disable)</span>
+            </div>
+            <input
+              type="number"
+              min="0"
+              .value=${String(this.networkOperationTimeout)}
+              @change=${this.handleNetworkOperationTimeoutChange}
               style="width: 80px;"
             />
           </div>

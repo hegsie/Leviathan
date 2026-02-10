@@ -5,6 +5,8 @@
 
 pub mod ai;
 pub mod autofetch_service;
+pub mod cancellation;
+pub mod commit_index;
 pub mod credentials_service;
 pub mod git_service;
 pub mod loopback_server;
@@ -14,6 +16,7 @@ pub mod watcher_service;
 
 pub use ai::{create_ai_state, AiState};
 pub use autofetch_service::{create_autofetch_state, AutoFetchState};
+pub use cancellation::CancellationRegistry;
 pub use credentials_service::CredentialsHelper;
 pub use git_service::GitService;
 pub use update_service::{create_update_state, UpdateState};

@@ -8,6 +8,7 @@ use crate::models::{
     FetchAllResult, MultiPushResult, Remote, RemoteFetchResult, RemoteFetchStatus,
     RemoteOperationResult, RemotePushResult,
 };
+use crate::services::cancellation::CancellationRegistry;
 use crate::services::credentials_service;
 use crate::utils::create_command;
 
@@ -144,45 +145,65 @@ pub async fn fetch(
     remote: Option<String>,
     prune: Option<bool>,
     token: Option<String>,
+    timeout_secs: Option<u64>,
+    _operation_id: Option<String>,
 ) -> Result<()> {
-    let repo = git2::Repository::open(Path::new(&path))?;
+    let do_fetch = async {
+        let repo = git2::Repository::open(Path::new(&path))?;
 
-    let remote_name = remote.as_deref().unwrap_or("origin");
-    let mut git_remote = repo
-        .find_remote(remote_name)
-        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
+        let remote_name = remote.as_deref().unwrap_or("origin");
+        let mut git_remote = repo
+            .find_remote(remote_name)
+            .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let mut fetch_opts = credentials_service::get_fetch_options(token);
+        let mut fetch_opts = credentials_service::get_fetch_options(token);
 
-    if prune.unwrap_or(false) {
-        fetch_opts.prune(git2::FetchPrune::On);
+        if prune.unwrap_or(false) {
+            fetch_opts.prune(git2::FetchPrune::On);
+        }
+
+        let refspecs: Vec<String> = git_remote
+            .fetch_refspecs()?
+            .iter()
+            .filter_map(|s| s.map(|s| s.to_string()))
+            .collect();
+
+        let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
+
+        git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
+
+        // Emit success event
+        let _ = app_handle.emit(
+            "remote-operation-completed",
+            RemoteOperationResult {
+                operation: "fetch".to_string(),
+                remote: remote_name.to_string(),
+                success: true,
+                message: "Fetch completed successfully".to_string(),
+            },
+        );
+
+        Ok(())
+    };
+
+    if let Some(secs) = timeout_secs {
+        if secs > 0 {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), do_fetch).await {
+                Ok(result) => result,
+                Err(_) => Err(LeviathanError::OperationTimeout(
+                    "Fetch operation timed out".to_string(),
+                )),
+            }
+        } else {
+            do_fetch.await
+        }
+    } else {
+        do_fetch.await
     }
-
-    let refspecs: Vec<String> = git_remote
-        .fetch_refspecs()?
-        .iter()
-        .filter_map(|s| s.map(|s| s.to_string()))
-        .collect();
-
-    let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
-
-    git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
-
-    // Emit success event
-    let _ = app_handle.emit(
-        "remote-operation-completed",
-        RemoteOperationResult {
-            operation: "fetch".to_string(),
-            remote: remote_name.to_string(),
-            success: true,
-            message: "Fetch completed successfully".to_string(),
-        },
-    );
-
-    Ok(())
 }
 
 /// Pull from remote
+#[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn pull(
     app_handle: AppHandle,
@@ -191,100 +212,120 @@ pub async fn pull(
     branch: Option<String>,
     rebase: Option<bool>,
     token: Option<String>,
+    timeout_secs: Option<u64>,
+    _operation_id: Option<String>,
 ) -> Result<()> {
-    let repo = git2::Repository::open(Path::new(&path))?;
+    let do_pull = async {
+        let repo = git2::Repository::open(Path::new(&path))?;
 
-    let remote_name = remote.as_deref().unwrap_or("origin");
+        let remote_name = remote.as_deref().unwrap_or("origin");
 
-    // First fetch (without emitting separate event)
-    fetch_internal(&path, remote_name, false, token)?;
+        // First fetch (without emitting separate event)
+        fetch_internal(&path, remote_name, false, token)?;
 
-    // Get the branch to merge
-    let branch_name = if let Some(ref b) = branch {
-        b.clone()
-    } else {
-        let head = repo.head()?;
-        head.shorthand().unwrap_or("main").to_string()
-    };
-
-    let remote_ref = format!("{}/{}", remote_name, branch_name);
-    let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
-    let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
-
-    let message: String;
-
-    if rebase.unwrap_or(false) {
-        // Rebase onto remote
-        let head = repo.head()?;
-        let head_commit = repo.reference_to_annotated_commit(&head)?;
-
-        let mut rebase_obj = repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
-
-        let mut commit_count = 0;
-        while let Some(op) = rebase_obj.next() {
-            let _op = op?;
-            let signature = repo.signature()?;
-            rebase_obj.commit(None, &signature, None)?;
-            commit_count += 1;
-        }
-
-        rebase_obj.finish(Some(&repo.signature()?))?;
-        message = format!("Rebased {} commit(s)", commit_count);
-    } else {
-        // Merge
-        let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
-
-        if analysis.is_up_to_date() {
-            message = "Already up to date".to_string();
-        } else if analysis.is_fast_forward() {
-            // Fast-forward
-            let refname = format!("refs/heads/{}", branch_name);
-            let mut reference = repo.find_reference(&refname)?;
-            reference.set_target(fetch_commit.id(), "Fast-forward")?;
-            repo.set_head(&refname)?;
-            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-            message = "Fast-forward merge completed".to_string();
+        // Get the branch to merge
+        let branch_name = if let Some(ref b) = branch {
+            b.clone()
         } else {
-            // Normal merge
-            repo.merge(&[&fetch_commit], None, None)?;
+            let head = repo.head()?;
+            head.shorthand().unwrap_or("main").to_string()
+        };
 
-            if repo.index()?.has_conflicts() {
-                return Err(LeviathanError::MergeConflict);
+        let remote_ref = format!("{}/{}", remote_name, branch_name);
+        let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
+        let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
+
+        let message: String;
+
+        if rebase.unwrap_or(false) {
+            // Rebase onto remote
+            let head = repo.head()?;
+            let head_commit = repo.reference_to_annotated_commit(&head)?;
+
+            let mut rebase_obj =
+                repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
+
+            let mut commit_count = 0;
+            while let Some(op) = rebase_obj.next() {
+                let _op = op?;
+                let signature = repo.signature()?;
+                rebase_obj.commit(None, &signature, None)?;
+                commit_count += 1;
             }
 
-            // Create merge commit
-            let signature = repo.signature()?;
-            let head = repo.head()?.peel_to_commit()?;
-            let remote_commit = repo.find_commit(fetch_commit.id())?;
-            let tree_oid = repo.index()?.write_tree()?;
-            let tree = repo.find_tree(tree_oid)?;
+            rebase_obj.finish(Some(&repo.signature()?))?;
+            message = format!("Rebased {} commit(s)", commit_count);
+        } else {
+            // Merge
+            let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
 
-            repo.commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                &format!("Merge {} into {}", remote_ref, branch_name),
-                &tree,
-                &[&head, &remote_commit],
-            )?;
+            if analysis.is_up_to_date() {
+                message = "Already up to date".to_string();
+            } else if analysis.is_fast_forward() {
+                // Fast-forward
+                let refname = format!("refs/heads/{}", branch_name);
+                let mut reference = repo.find_reference(&refname)?;
+                reference.set_target(fetch_commit.id(), "Fast-forward")?;
+                repo.set_head(&refname)?;
+                repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+                message = "Fast-forward merge completed".to_string();
+            } else {
+                // Normal merge
+                repo.merge(&[&fetch_commit], None, None)?;
 
-            repo.cleanup_state()?;
-            message = "Merge completed".to_string();
+                if repo.index()?.has_conflicts() {
+                    return Err(LeviathanError::MergeConflict);
+                }
+
+                // Create merge commit
+                let signature = repo.signature()?;
+                let head = repo.head()?.peel_to_commit()?;
+                let remote_commit = repo.find_commit(fetch_commit.id())?;
+                let tree_oid = repo.index()?.write_tree()?;
+                let tree = repo.find_tree(tree_oid)?;
+
+                repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    &format!("Merge {} into {}", remote_ref, branch_name),
+                    &tree,
+                    &[&head, &remote_commit],
+                )?;
+
+                repo.cleanup_state()?;
+                message = "Merge completed".to_string();
+            }
         }
+
+        // Emit success event
+        let _ = app_handle.emit(
+            "remote-operation-completed",
+            RemoteOperationResult {
+                operation: "pull".to_string(),
+                remote: remote_name.to_string(),
+                success: true,
+                message,
+            },
+        );
+
+        Ok(())
+    };
+
+    if let Some(secs) = timeout_secs {
+        if secs > 0 {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), do_pull).await {
+                Ok(result) => result,
+                Err(_) => Err(LeviathanError::OperationTimeout(
+                    "Pull operation timed out".to_string(),
+                )),
+            }
+        } else {
+            do_pull.await
+        }
+    } else {
+        do_pull.await
     }
-
-    // Emit success event
-    let _ = app_handle.emit(
-        "remote-operation-completed",
-        RemoteOperationResult {
-            operation: "pull".to_string(),
-            remote: remote_name.to_string(),
-            success: true,
-            message,
-        },
-    );
-
-    Ok(())
 }
 
 /// Internal fetch without event emission (used by pull)
@@ -327,88 +368,107 @@ pub async fn push(
     push_tags: Option<bool>,
     set_upstream: Option<bool>,
     token: Option<String>,
+    timeout_secs: Option<u64>,
+    _operation_id: Option<String>,
 ) -> Result<()> {
-    let repo = git2::Repository::open(Path::new(&path))?;
+    let do_push = async {
+        let repo = git2::Repository::open(Path::new(&path))?;
 
-    let remote_name = remote.as_deref().unwrap_or("origin");
+        let remote_name = remote.as_deref().unwrap_or("origin");
 
-    // Validate remote exists
-    repo.find_remote(remote_name)
-        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
-
-    let branch_name = if let Some(ref b) = branch {
-        b.clone()
-    } else {
-        let head = repo.head()?;
-        head.shorthand().unwrap_or("main").to_string()
-    };
-
-    let use_force_with_lease = force_with_lease.unwrap_or(false);
-    let use_push_tags = push_tags.unwrap_or(false);
-
-    // force_with_lease requires git CLI since git2 doesn't support it natively.
-    // We also use git CLI when push_tags is requested, since git2 would require
-    // building separate refspecs for each tag.
-    if use_force_with_lease || use_push_tags {
-        push_via_cli(
-            &path,
-            remote_name,
-            &branch_name,
-            force.unwrap_or(false),
-            use_force_with_lease,
-            use_push_tags,
-            set_upstream.unwrap_or(false),
-            token,
-        )?;
-    } else {
-        // Use git2 for standard push (existing behavior)
-        let mut git_remote = repo
-            .find_remote(remote_name)
+        // Validate remote exists
+        repo.find_remote(remote_name)
             .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-        let mut push_opts = credentials_service::get_push_options(token);
-
-        let refspec = if force.unwrap_or(false) {
-            format!("+refs/heads/{}:refs/heads/{}", branch_name, branch_name)
+        let branch_name = if let Some(ref b) = branch {
+            b.clone()
         } else {
-            format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name)
+            let head = repo.head()?;
+            head.shorthand().unwrap_or("main").to_string()
         };
 
-        git_remote.push(&[&refspec], Some(&mut push_opts))?;
+        let use_force_with_lease = force_with_lease.unwrap_or(false);
+        let use_push_tags = push_tags.unwrap_or(false);
 
-        // Set upstream if requested
-        if set_upstream.unwrap_or(false) {
-            let mut local_branch = repo.find_branch(&branch_name, git2::BranchType::Local)?;
-            let upstream_name = format!("{}/{}", remote_name, branch_name);
-            local_branch.set_upstream(Some(&upstream_name))?;
+        // force_with_lease requires git CLI since git2 doesn't support it natively.
+        // We also use git CLI when push_tags is requested, since git2 would require
+        // building separate refspecs for each tag.
+        if use_force_with_lease || use_push_tags {
+            push_via_cli(
+                &path,
+                remote_name,
+                &branch_name,
+                force.unwrap_or(false),
+                use_force_with_lease,
+                use_push_tags,
+                set_upstream.unwrap_or(false),
+                token,
+            )?;
+        } else {
+            // Use git2 for standard push (existing behavior)
+            let mut git_remote = repo
+                .find_remote(remote_name)
+                .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
+
+            let mut push_opts = credentials_service::get_push_options(token);
+
+            let refspec = if force.unwrap_or(false) {
+                format!("+refs/heads/{}:refs/heads/{}", branch_name, branch_name)
+            } else {
+                format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name)
+            };
+
+            git_remote.push(&[&refspec], Some(&mut push_opts))?;
+
+            // Set upstream if requested
+            if set_upstream.unwrap_or(false) {
+                let mut local_branch = repo.find_branch(&branch_name, git2::BranchType::Local)?;
+                let upstream_name = format!("{}/{}", remote_name, branch_name);
+                local_branch.set_upstream(Some(&upstream_name))?;
+            }
         }
-    }
 
-    // Emit success event
-    let mut message = format!("Pushed to {}/{}", remote_name, branch_name);
-    if use_force_with_lease {
-        message = format!(
-            "Force-pushed (with lease) to {}/{}",
-            remote_name, branch_name
+        // Emit success event
+        let mut message = format!("Pushed to {}/{}", remote_name, branch_name);
+        if use_force_with_lease {
+            message = format!(
+                "Force-pushed (with lease) to {}/{}",
+                remote_name, branch_name
+            );
+        } else if force.unwrap_or(false) {
+            message = format!("Force-pushed to {}/{}", remote_name, branch_name);
+        }
+        if use_push_tags {
+            message.push_str(" (including tags)");
+        }
+
+        let _ = app_handle.emit(
+            "remote-operation-completed",
+            RemoteOperationResult {
+                operation: "push".to_string(),
+                remote: remote_name.to_string(),
+                success: true,
+                message,
+            },
         );
-    } else if force.unwrap_or(false) {
-        message = format!("Force-pushed to {}/{}", remote_name, branch_name);
-    }
-    if use_push_tags {
-        message.push_str(" (including tags)");
-    }
 
-    let _ = app_handle.emit(
-        "remote-operation-completed",
-        RemoteOperationResult {
-            operation: "push".to_string(),
-            remote: remote_name.to_string(),
-            success: true,
-            message,
-        },
-    );
+        Ok(())
+    };
 
-    Ok(())
+    if let Some(secs) = timeout_secs {
+        if secs > 0 {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), do_push).await {
+                Ok(result) => result,
+                Err(_) => Err(LeviathanError::OperationTimeout(
+                    "Push operation timed out".to_string(),
+                )),
+            }
+        } else {
+            do_push.await
+        }
+    } else {
+        do_push.await
+    }
 }
 
 /// Push via git CLI (used for --force-with-lease and --tags which git2 doesn't support)
@@ -788,6 +848,15 @@ fn get_last_fetch_time(repo: &git2::Repository, _remote_name: &str) -> Option<i6
         }
     }
     None
+}
+
+/// Cancel an ongoing remote operation
+#[command]
+pub async fn cancel_operation(
+    registry: tauri::State<'_, CancellationRegistry>,
+    operation_id: String,
+) -> Result<bool> {
+    Ok(registry.cancel(&operation_id))
 }
 
 #[cfg(test)]

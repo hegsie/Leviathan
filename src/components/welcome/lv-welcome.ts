@@ -10,6 +10,7 @@ import { repositoryStore, type RecentRepository } from '../../stores/index.ts';
 import { openRepository } from '../../services/git.service.ts';
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { searchIndexService } from '../../services/search-index.service.ts';
 import { loggers } from '../../utils/logger.ts';
 
 const log = loggers.ui;
@@ -275,6 +276,8 @@ export class LvWelcome extends LitElement {
       const result = await openRepository({ path });
       if (result.success && result.data) {
         store.addRepository(result.data);
+        // Build search index in background (non-blocking)
+        searchIndexService.buildIndex(path);
       } else {
         store.setError(result.error?.message ?? 'Failed to open repository');
       }

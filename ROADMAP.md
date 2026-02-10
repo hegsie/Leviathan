@@ -85,11 +85,11 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 - **Large repository handling**
   - ✅ Virtual scrolling improvements
   - ✅ Lazy loading for commit history
-  - Background indexing for faster searches
-  - Memory optimization for huge diffs
+  - ✅ Background indexing for faster searches
+  - ✅ Memory optimization for huge diffs
 
 - **Robustness**
-  - Operation timeout handling
+  - ✅ Operation timeout handling
   - ✅ Conflict detection and recovery
   - ✅ Repository health checks
   - ✅ Automatic fsck and gc recommendations
@@ -423,10 +423,10 @@ This section contains specific features organized by category. Items here suppor
 #### Performance Optimization
 - Virtual scrolling for large lists (✅ implemented, ongoing refinement)
 - Lazy loading for commit history pagination (✅ implemented)
-- Background indexing for fast search
+- Background indexing for fast search (✅ implemented)
 - Caching strategies for frequent operations
 - Memory profiling and optimization
-- Incremental rendering for large diffs
+- Incremental rendering for large diffs (✅ implemented via virtual scrolling)
 
 ---
 

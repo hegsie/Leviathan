@@ -245,6 +245,8 @@ export interface DiffFile {
   imageType: string | null;
   additions: number;
   deletions: number;
+  truncated?: boolean;
+  totalLines?: number;
 }
 
 export interface ImageVersions {

@@ -16,7 +16,10 @@ use tauri::{Emitter, Manager};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use commands::watcher::WatcherState;
-use services::{create_ai_state, create_autofetch_state, create_update_state};
+use services::commit_index::SharedCommitIndex;
+use services::{
+    create_ai_state, create_autofetch_state, create_update_state, CancellationRegistry,
+};
 
 /// Derive a 32-byte key from password using argon2
 fn derive_stronghold_key(password: &str) -> [u8; 32] {
@@ -147,6 +150,8 @@ pub fn run() {
         .manage(WatcherState::default())
         .manage(create_autofetch_state())
         .manage(create_update_state())
+        .manage(CancellationRegistry::default())
+        .manage(SharedCommitIndex::default())
         .setup(|app| {
             // Initialize AI state with config directory
             let config_dir = app.path().app_config_dir().unwrap_or_default();
@@ -229,6 +234,7 @@ pub fn run() {
             commands::remote::pull,
             commands::remote::push,
             commands::remote::push_to_multiple_remotes,
+            commands::remote::cancel_operation,
             commands::merge::merge,
             commands::merge::abort_merge,
             commands::merge::rebase,
@@ -586,6 +592,10 @@ pub fn run() {
             commands::search::search_in_commit_messages,
             commands::search::search_commits_by_content,
             commands::search::search_commits_by_file,
+            // Search index (background indexing)
+            commands::search_index::build_search_index,
+            commands::search_index::search_index,
+            commands::search_index::refresh_search_index,
             // Sparse checkout
             commands::sparse_checkout::get_sparse_checkout_config,
             commands::sparse_checkout::enable_sparse_checkout,

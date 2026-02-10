@@ -70,6 +70,42 @@ describe('error-suggestion.service', () => {
       expect(result!.action).to.be.undefined;
     });
 
+    it('should return suggestion for operation timeout', () => {
+      const result = getErrorSuggestion('The operation timed out after 300 seconds');
+      expect(result).to.not.be.null;
+      expect(result!.message).to.include('timed out');
+      expect(result!.action).to.not.be.undefined;
+      expect(result!.action!.label).to.equal('Open Settings');
+    });
+
+    it('should return suggestion for operation_timeout code', () => {
+      const result = getErrorSuggestion('OPERATION_TIMEOUT: fetch exceeded timeout');
+      expect(result).to.not.be.null;
+      expect(result!.message).to.include('timed out');
+      expect(result!.action!.label).to.equal('Open Settings');
+    });
+
+    it('should return suggestion for cancelled operation', () => {
+      const result = getErrorSuggestion('OPERATION_CANCELLED');
+      expect(result).to.not.be.null;
+      expect(result!.message).to.include('cancelled');
+      expect(result!.action).to.be.undefined;
+    });
+
+    it('should dispatch open-settings event for timeout errors', () => {
+      const result = getErrorSuggestion('operation timed out');
+      expect(result).to.not.be.null;
+
+      let dispatched = false;
+      const handler = () => { dispatched = true; };
+      window.addEventListener('open-settings', handler);
+
+      result!.action!.callback();
+
+      expect(dispatched).to.be.true;
+      window.removeEventListener('open-settings', handler);
+    });
+
     it('should return null for unknown errors', () => {
       const result = getErrorSuggestion('some random error message');
       expect(result).to.be.null;

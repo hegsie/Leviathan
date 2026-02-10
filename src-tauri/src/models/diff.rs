@@ -16,6 +16,10 @@ pub struct DiffFile {
     pub image_type: Option<String>,
     pub additions: usize,
     pub deletions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_lines: Option<usize>,
 }
 
 /// Check if a file path is an image based on extension
