@@ -8,6 +8,7 @@ export interface SearchFilter {
   dateFrom: string;
   dateTo: string;
   filePath: string;
+  branch: string;
 }
 
 export interface FilterPreset {
@@ -254,6 +255,7 @@ export class LvSearchBar extends LitElement {
   @state() private dateFrom = '';
   @state() private dateTo = '';
   @state() private filePath = '';
+  @state() private branch = '';
   @state() private showFilters = false;
   @state() private presets: FilterPreset[] = [];
 
@@ -398,6 +400,7 @@ export class LvSearchBar extends LitElement {
       dateFrom: this.dateFrom,
       dateTo: this.dateTo,
       filePath: this.filePath,
+      branch: this.branch,
     };
 
     this.dispatchEvent(
