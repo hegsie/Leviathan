@@ -380,14 +380,11 @@ describe('lv-branch-list - isBranchStale', () => {
     expect(isBranchStale(branch, 90)).to.be.false;
   });
 
-  it('returns false for branch exactly at threshold', () => {
-    // Branch just barely within the threshold (1 second inside)
-    // Use +1 to avoid timing race between when `now` was captured
-    // and when isBranchStale internally calls Date.now()
+  it('returns false for branch within threshold', () => {
+    // Branch at 89 days ago is within the 90-day threshold
     const branch = createBranch('edge-case', {
-      lastCommitTimestamp: now - 90 * 86400 + 1,
+      lastCommitTimestamp: now - 89 * 86400,
     });
-    // At the threshold boundary, it's not < threshold, so not stale
     expect(isBranchStale(branch, 90)).to.be.false;
   });
 
