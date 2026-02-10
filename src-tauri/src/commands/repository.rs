@@ -344,6 +344,38 @@ pub async fn get_clone_filter_info(path: String) -> Result<CloneFilterInfo> {
     .map_err(|e| LeviathanError::Custom(format!("Task failed: {}", e)))?
 }
 
+/// List all tracked files in the repository
+#[command]
+pub async fn list_tracked_files(path: String) -> Result<Vec<String>> {
+    let path_clone = path.clone();
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path_clone)
+            .arg("ls-files")
+            .output()
+            .map_err(|e| {
+                LeviathanError::Custom(format!("Failed to execute git ls-files: {}", e))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(LeviathanError::Custom(format!(
+                "git ls-files failed: {}",
+                stderr.trim()
+            )));
+        }
+
+        let files = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(String::from)
+            .collect();
+        Ok(files)
+    })
+    .await
+    .map_err(|e| LeviathanError::Custom(format!("Task failed: {}", e)))?
+}
+
 /// Initialize a new repository
 #[command]
 pub async fn init_repository(path: String, bare: Option<bool>) -> Result<Repository> {

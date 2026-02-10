@@ -66,7 +66,7 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
   - Comprehensive keyboard navigation (already strong, refine coverage)
   - Customizable keyboard shortcut editor
   - Vim-style navigation improvements
-  - Quick switcher (files, branches, commits)
+  - Quick switcher (files, branches, commits) (✅ done)
 
 - **Visual themes**
   - Dark/light themes (✅ done)
@@ -84,7 +84,7 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 
 - **Large repository handling**
   - Virtual scrolling improvements (already implemented, refine)
-  - Lazy loading for commit history
+  - Lazy loading for commit history (✅ done)
   - Background indexing for faster searches
   - Memory optimization for huge diffs
 
@@ -422,7 +422,7 @@ This section contains specific features organized by category. Items here suppor
 
 #### Performance Optimization
 - Virtual scrolling for large lists (✅ implemented, ongoing refinement)
-- Lazy loading for commit history pagination
+- Lazy loading for commit history pagination (✅ implemented)
 - Background indexing for fast search
 - Caching strategies for frequent operations
 - Memory profiling and optimization

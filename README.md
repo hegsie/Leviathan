@@ -83,7 +83,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
 - File system watching for auto-refresh
 
 ### Commit Operations
-- Commit history with interactive graph visualization
+- Commit history with interactive graph visualization and infinite scroll
 - Create commits with staging support
 - Hunk-level staging/unstaging
 - Commit details view with file list
@@ -120,7 +120,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
 - Force push option
 
 ### Productivity Features
-- **Command Palette** (Cmd/Ctrl+P) - fuzzy finder for all actions
+- **Command Palette** (Cmd/Ctrl+P) - fuzzy finder for actions, branches, files, and commits
 - **File History** - view all commits that modified a file with rename following
 - **Commit Search** - search by message, author, SHA, file path, or date range
 - **Undo/Redo** - visual reflog browser for recovering previous states

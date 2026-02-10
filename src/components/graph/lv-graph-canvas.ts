@@ -278,6 +278,11 @@ export class LvGraphCanvas extends LitElement {
   @state() private tooltipAuthorName = '';
   @state() private tooltipAuthorEmail = '';
 
+  // Infinite scroll pagination
+  @state() private isLoadingMore = false;
+  @state() private hasMoreCommits = true;
+  private totalLoadedCommits = 0;
+
   // Column resize state
   @state() private refsColumnWidth = 130;
   @state() private statsColumnWidth = 80;
@@ -568,6 +573,8 @@ export class LvGraphCanvas extends LitElement {
 
       // Convert commits to GraphCommit format for layout
       this.commits = commitsResult.data.map(commitToGraphCommit);
+      this.totalLoadedCommits = commitsResult.data.length;
+      this.hasMoreCommits = commitsResult.data.length >= this.commitCount;
       this.processLayout();
       const searchInfo = hasSearch ? ` (${this.matchedCommitOids.size} matches highlighted)` : '';
       log.debug(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
@@ -575,6 +582,48 @@ export class LvGraphCanvas extends LitElement {
       this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
     } finally {
       this.isLoading = false;
+    }
+  }
+
+  private async loadMoreCommits(): Promise<void> {
+    if (this.isLoadingMore || !this.hasMoreCommits || !this.repositoryPath) return;
+    this.isLoadingMore = true;
+    const batchSize = 500;
+    const currentVersion = this.loadVersion;
+
+    try {
+      const result = await getCommitHistory({
+        path: this.repositoryPath,
+        limit: batchSize,
+        skip: this.totalLoadedCommits,
+        allBranches: true,
+      });
+
+      if (this.loadVersion !== currentVersion) return;
+      if (!result.success || !result.data?.length) {
+        this.hasMoreCommits = false;
+        return;
+      }
+
+      for (const commit of result.data) {
+        this.realCommits.set(commit.oid, commit);
+      }
+      this.commits = [...this.commits, ...result.data.map(commitToGraphCommit)];
+      this.totalLoadedCommits += result.data.length;
+      this.hasMoreCommits = result.data.length >= batchSize;
+      this.processLayout();
+    } finally {
+      this.isLoadingMore = false;
+    }
+  }
+
+  private checkLoadMore(): void {
+    if (!this.virtualScroll || !this.hasMoreCommits || this.isLoadingMore) return;
+    const contentSize = this.virtualScroll.getContentSize();
+    const scrollTop = this.scrollState?.getScroll().scrollTop ?? 0;
+    const viewportHeight = this.containerEl?.clientHeight ?? 0;
+    if (contentSize.height - (scrollTop + viewportHeight) < 500) {
+      this.loadMoreCommits();
     }
   }
 
@@ -906,6 +955,7 @@ export class LvGraphCanvas extends LitElement {
     // Mark renderer dirty so it actually redraws
     this.renderer?.markDirty();
     this.scheduleRender();
+    this.checkLoadMore();
   }
 
   private handleWheel(e: WheelEvent): void {
@@ -937,6 +987,7 @@ export class LvGraphCanvas extends LitElement {
     const scrollLeft = this.scrollEl.scrollLeft;
 
     this.scrollState.setScroll(scrollTop, scrollLeft);
+    this.checkLoadMore();
   }
 
   private isSyncingScroll = false;
@@ -1346,6 +1397,13 @@ export class LvGraphCanvas extends LitElement {
   }
 
   /**
+   * Public method to get all loaded commits (for command palette search)
+   */
+  public getLoadedCommits(): Commit[] {
+    return Array.from(this.realCommits.values());
+  }
+
+  /**
    * Public method to select and scroll to a commit by OID
    * Used by other components (like commit details panel) to navigate the graph
    */
@@ -1414,6 +1472,11 @@ export class LvGraphCanvas extends LitElement {
       this.selectByIndex(0);
     } else if (currentIndex < this.sortedNodesByRow.length - 1) {
       this.selectByIndex(currentIndex + 1);
+    }
+
+    // Load more when navigating near the end
+    if (currentIndex >= this.sortedNodesByRow.length - 5) {
+      this.checkLoadMore();
     }
   }
 
@@ -1721,6 +1784,15 @@ export class LvGraphCanvas extends LitElement {
                 <div class="loading-indicator">
                   <div class="spinner"></div>
                   <span>Loading stats...</span>
+                </div>
+              `
+            : ''}
+
+          ${this.isLoadingMore
+            ? html`
+                <div class="loading-indicator">
+                  <div class="spinner"></div>
+                  <span>Loading more commits...</span>
                 </div>
               `
             : ''}

@@ -164,6 +164,12 @@ export async function getCloneFilterInfo(
   return invokeCommand<CloneFilterInfo>("get_clone_filter_info", { path });
 }
 
+export async function listTrackedFiles(
+  path: string,
+): Promise<CommandResult<string[]>> {
+  return invokeCommand<string[]>("list_tracked_files", { path });
+}
+
 /**
  * Branch operations
  */

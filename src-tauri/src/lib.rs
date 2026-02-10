@@ -179,6 +179,7 @@ pub fn run() {
             commands::repository::init_repository,
             commands::repository::get_repository_info,
             commands::repository::get_clone_filter_info,
+            commands::repository::list_tracked_files,
             commands::branch::get_branches,
             commands::branch::create_branch,
             commands::branch::delete_branch,
