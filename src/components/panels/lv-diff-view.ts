@@ -528,6 +528,23 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         font-style: italic;
       }
 
+      .partial-staging-info {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-info-bg, rgba(56, 132, 255, 0.1));
+        border-bottom: 1px solid var(--color-info, #3884ff);
+        color: var(--color-info, #3884ff);
+        font-size: var(--font-size-xs);
+      }
+
+      .partial-staging-info svg {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+      }
+
       /* Edit mode styles */
       .edit-btn {
         padding: var(--spacing-xs) var(--spacing-sm);
@@ -889,6 +906,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   @property({ type: String }) repositoryPath: string = '';
   @property({ type: Object }) file: StatusEntry | null = null;
   @property({ type: Object }) commitFile: { commitOid: string; filePath: string } | null = null;
+  @property({ type: Boolean }) hasPartialStaging = false;
 
   @state() private diff: DiffFile | null = null;
   @state() private loading = false;
@@ -2617,6 +2635,18 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           </button>
         </div>
       </div>
+      ${this.hasPartialStaging && this.file && !this.file.isStaged
+        ? html`
+            <div class="partial-staging-info">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+              </svg>
+              This file has staged changes that will be included in the next commit.
+            </div>
+          `
+        : nothing}
       ${this.hasConflicts
         ? html`
             <div class="conflict-banner">

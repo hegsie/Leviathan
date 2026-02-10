@@ -56,6 +56,7 @@ import * as gitService from './services/git.service.ts';
 import * as updateService from './services/update.service.ts';
 import * as unifiedProfileService from './services/unified-profile.service.ts';
 import { showToast } from './services/notification.service.ts';
+import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
@@ -410,6 +411,7 @@ export class AppShell extends LitElement {
   @state() private showDiff = false;
   @state() private diffFile: StatusEntry | null = null;
   @state() private diffCommitFile: { commitOid: string; filePath: string } | null = null;
+  @state() private diffFilePartiallyStaged = false;
 
   // Blame view state
   @state() private showBlame = false;
@@ -616,6 +618,10 @@ export class AppShell extends LitElement {
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('contextmenu', this.handleContextMenu);
     window.addEventListener('repository-refresh', this.handleWindowRefresh);
+    window.addEventListener('trigger-pull', this.handleTriggerPull);
+    window.addEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
+    window.addEventListener('open-settings', this.handleOpenSettings);
+    window.addEventListener('trigger-abort', this.handleTriggerAbort);
     this.addEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
 
     // Load vim mode from keyboard service
@@ -687,6 +693,10 @@ export class AppShell extends LitElement {
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('contextmenu', this.handleContextMenu);
     window.removeEventListener('repository-refresh', this.handleWindowRefresh);
+    window.removeEventListener('trigger-pull', this.handleTriggerPull);
+    window.removeEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
+    window.removeEventListener('open-settings', this.handleOpenSettings);
+    window.removeEventListener('trigger-abort', this.handleTriggerAbort);
     this.removeEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
     gitService.cleanupRemoteOperationListeners();
     // Stop periodic token validation
@@ -883,7 +893,7 @@ export class AppShell extends LitElement {
       this.graphCanvas?.refresh?.();
     } else {
       log.error('Checkout failed:', result.error);
-      showToast(result.error?.message || 'Checkout failed', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Checkout failed');
     }
   }
 
@@ -906,7 +916,7 @@ export class AppShell extends LitElement {
       this.showConflictDialog = true;
     } else {
       log.error('Merge failed:', result.error);
-      showToast(result.error?.message || 'Merge failed', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Merge failed');
     }
   }
 
@@ -929,7 +939,7 @@ export class AppShell extends LitElement {
       this.showConflictDialog = true;
     } else {
       log.error('Rebase failed:', result.error);
-      showToast(result.error?.message || 'Rebase failed', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Rebase failed');
     }
   }
 
@@ -950,7 +960,7 @@ export class AppShell extends LitElement {
       showToast(`Deleted branch ${branchName}`, 'success');
     } else {
       log.error('Delete branch failed:', result.error);
-      showToast(result.error?.message || 'Delete branch failed', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Delete branch failed', { branchName });
     }
   }
 
@@ -989,7 +999,7 @@ export class AppShell extends LitElement {
       showToast(`Pushed tag ${tagName}`, 'success');
     } else {
       log.error('Push tag failed:', result.error);
-      showToast(result.error?.message || 'Push tag failed', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', { operation: 'push' });
     }
   }
 
@@ -1065,7 +1075,7 @@ export class AppShell extends LitElement {
       this.showConflictDialog = true;
     } else {
       log.error('Revert failed:', result.error);
-      showToast(result.error?.message || 'Revert failed', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Revert failed');
     }
   }
 
@@ -1105,6 +1115,33 @@ export class AppShell extends LitElement {
     }
   }
 
+  // Error suggestion action handlers
+  private handleTriggerPull = (): void => {
+    this.handlePull();
+  };
+
+  private handleForceDeleteBranch = (e: CustomEvent<{ branchName?: string }>): void => {
+    const branchName = e.detail?.branchName;
+    if (!branchName || !this.activeRepository) return;
+
+    gitService.deleteBranch(this.activeRepository.repository.path, branchName, true).then((result) => {
+      if (result.success) {
+        this.graphCanvas?.refresh?.();
+        showToast(`Force deleted branch ${branchName}`, 'success');
+      } else {
+        showToast(result.error?.message || 'Force delete failed', 'error');
+      }
+    });
+  };
+
+  private handleOpenSettings = (): void => {
+    this.showSettings = true;
+  };
+
+  private handleTriggerAbort = (): void => {
+    this.handleAbortOperation();
+  };
+
   private async handleResetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
@@ -1131,7 +1168,7 @@ export class AppShell extends LitElement {
       this.graphCanvas?.refresh?.();
     } else {
       log.error('Reset failed:', result.error);
-      showToast(result.error?.message || 'Reset failed', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Reset failed');
     }
   }
 
@@ -1185,7 +1222,7 @@ export class AppShell extends LitElement {
       this.graphCanvas?.refresh?.();
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
-      showToast(result.error?.message || 'Failed to create fixup commit', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Failed to create fixup commit');
     }
   }
 
@@ -1222,7 +1259,7 @@ export class AppShell extends LitElement {
       this.graphCanvas?.refresh?.();
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
-      showToast(result.error?.message || 'Failed to create squash commit', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Failed to create squash commit');
     }
   }
 
@@ -1344,7 +1381,7 @@ export class AppShell extends LitElement {
       this.handleRefresh();
     } else {
       log.error('Failed to checkout branch:', result.error);
-      showToast(result.error?.message || 'Failed to checkout branch', 'error');
+      showErrorWithSuggestion(result.error?.message || '', 'Failed to checkout branch');
     }
   }
 
@@ -1353,13 +1390,14 @@ export class AppShell extends LitElement {
     log.debug(`Copied ${e.detail.sha} to clipboard`);
   }
 
-  private handleFileSelected(e: CustomEvent<{ file: StatusEntry }>): void {
+  private handleFileSelected(e: CustomEvent<{ file: StatusEntry; isPartiallyStaged?: boolean }>): void {
     // Close blame if open
     this.showBlame = false;
     this.blameFile = null;
     this.blameCommitOid = null;
     // Working directory file selected - show diff
     this.diffFile = e.detail.file;
+    this.diffFilePartiallyStaged = e.detail.isPartiallyStaged ?? false;
     this.diffCommitFile = null;
     this.showDiff = true;
   }
@@ -2039,6 +2077,7 @@ export class AppShell extends LitElement {
                             .repositoryPath=${this.activeRepository.repository.path}
                             .file=${this.diffFile}
                             .commitFile=${this.diffCommitFile}
+                            .hasPartialStaging=${this.diffFilePartiallyStaged}
                           ></lv-diff-view>
                         </div>
                       </div>

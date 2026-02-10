@@ -1186,7 +1186,7 @@ export class LvFileStatus extends LitElement {
     // Dispatch event with selected files
     this.dispatchEvent(
       new CustomEvent("file-selected", {
-        detail: { file, selectedFiles: Array.from(this.selectedFiles) },
+        detail: { file, selectedFiles: Array.from(this.selectedFiles), isPartiallyStaged: this.isPartiallyStaged(file.path) },
         bubbles: true,
         composed: true,
       }),
@@ -1292,7 +1292,7 @@ export class LvFileStatus extends LitElement {
     this.contextMenu = { ...this.contextMenu, visible: false };
     this.dispatchEvent(
       new CustomEvent("file-selected", {
-        detail: { file },
+        detail: { file, isPartiallyStaged: this.isPartiallyStaged(file.path) },
         bubbles: true,
         composed: true,
       }),
@@ -1386,7 +1386,7 @@ export class LvFileStatus extends LitElement {
         <span class="file-name-container">
           <span class="file-name">${name}</span>
           ${dir ? html`<span class="file-dir">${dir}</span>` : nothing}
-          ${isPartial ? html`<span class="partial-badge">partial</span>` : nothing}
+          ${isPartial ? html`<span class="partial-badge" title="This file has both staged and unstaged changes">partial</span>` : nothing}
         </span>
         <div class="file-actions">
           ${staged

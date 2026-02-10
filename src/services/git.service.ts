@@ -5,6 +5,7 @@
 
 import { invokeCommand, listenToEvent } from "./tauri-api.ts";
 import { showToast } from "./notification.service.ts";
+import { showErrorWithSuggestion } from "./error-suggestion.service.ts";
 import { commitStatsCache, commitSignatureCache, createCacheKey } from "./cache.service.ts";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
@@ -4028,7 +4029,7 @@ export async function setupRemoteOperationListeners(): Promise<void> {
         }
       } else {
         // Error notifications
-        showToast(`${result.operation} failed: ${result.message}`, "error", 5000);
+        showErrorWithSuggestion(result.message, `${result.operation} failed`, { operation: result.operation });
       }
     },
   );
