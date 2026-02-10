@@ -43,6 +43,9 @@ export interface SettingsState {
   // Branch settings
   staleBranchDays: number; // Days without commits before a branch is considered stale (0 = disabled)
 
+  // Network settings
+  networkOperationTimeout: number; // Seconds before network operations time out (0 = disabled)
+
   // Recent repositories
   recentRepositories: string[];
   maxRecentRepositories: number;
@@ -67,6 +70,7 @@ export interface SettingsState {
   setOpenLastRepository: (open: boolean) => void;
   setAutoStashOnCheckout: (enabled: boolean) => void;
   setStaleBranchDays: (days: number) => void;
+  setNetworkOperationTimeout: (timeout: number) => void;
   addRecentRepository: (path: string) => void;
   removeRecentRepository: (path: string) => void;
   clearRecentRepositories: () => void;
@@ -93,6 +97,7 @@ const defaultSettings = {
   openLastRepository: true,
   autoStashOnCheckout: false,
   staleBranchDays: 90,
+  networkOperationTimeout: 300,
   recentRepositories: [] as string[],
   maxRecentRepositories: 10,
 };
@@ -151,6 +156,8 @@ export const settingsStore = createStore<SettingsState>()(
       setAutoStashOnCheckout: (autoStashOnCheckout) => set({ autoStashOnCheckout }),
 
       setStaleBranchDays: (staleBranchDays) => set({ staleBranchDays }),
+
+      setNetworkOperationTimeout: (networkOperationTimeout) => set({ networkOperationTimeout }),
 
       addRecentRepository: (path) => {
         const { recentRepositories, maxRecentRepositories } = get();

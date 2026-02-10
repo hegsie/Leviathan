@@ -180,6 +180,7 @@ export interface FetchCommand {
   remote?: string;
   prune?: boolean;
   token?: string;
+  timeoutSecs?: number;
 }
 
 export interface PullCommand {
@@ -188,6 +189,7 @@ export interface PullCommand {
   branch?: string;
   rebase?: boolean;
   token?: string;
+  timeoutSecs?: number;
 }
 
 export interface PushCommand {
@@ -199,6 +201,7 @@ export interface PushCommand {
   pushTags?: boolean;
   setUpstream?: boolean;
   token?: string;
+  timeoutSecs?: number;
 }
 
 export interface PushToMultipleRemotesCommand {

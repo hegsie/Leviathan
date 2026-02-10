@@ -46,6 +46,7 @@ pub mod remote;
 pub mod repository;
 pub mod rewrite;
 pub mod search;
+pub mod search_index;
 pub mod shortcuts;
 pub mod shortlog;
 pub mod signature;

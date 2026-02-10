@@ -7,6 +7,7 @@ import { invokeCommand, listenToEvent } from "./tauri-api.ts";
 import { showToast } from "./notification.service.ts";
 import { showErrorWithSuggestion } from "./error-suggestion.service.ts";
 import { commitStatsCache, commitSignatureCache, createCacheKey } from "./cache.service.ts";
+import { settingsStore } from "../stores/settings.store.ts";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Repository,
@@ -644,6 +645,12 @@ export async function fetch(
     }
   }
 
+  // Apply network operation timeout from settings
+  const timeoutSecs = settingsStore.getState().networkOperationTimeout;
+  if (args && timeoutSecs > 0) {
+    args.timeoutSecs = timeoutSecs;
+  }
+
   const result = await invokeCommand<void>("fetch", args);
   if (!args?.silent) {
     if (result.success) {
@@ -669,6 +676,12 @@ export async function pull(
     }
   }
 
+  // Apply network operation timeout from settings
+  const timeoutSecs = settingsStore.getState().networkOperationTimeout;
+  if (args && timeoutSecs > 0) {
+    args.timeoutSecs = timeoutSecs;
+  }
+
   const result = await invokeCommand<void>("pull", args);
   if (!args?.silent) {
     if (result.success) {
@@ -692,6 +705,12 @@ export async function push(
     if (token) {
       args.token = token;
     }
+  }
+
+  // Apply network operation timeout from settings
+  const timeoutSecs = settingsStore.getState().networkOperationTimeout;
+  if (args && timeoutSecs > 0) {
+    args.timeoutSecs = timeoutSecs;
   }
 
   const result = await invokeCommand<void>("push", args);

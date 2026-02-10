@@ -154,6 +154,11 @@ export const diffCache = new LRUCache<unknown>({
   ttl: 5 * 60 * 1000, // 5 minutes
 });
 
+export const searchResultCache = new LRUCache<unknown>({
+  maxSize: 50,
+  ttl: 2 * 60 * 1000, // 2 minutes
+});
+
 /**
  * Escape repository path for use in cache keys.
  * Colons are URL-encoded so they don't conflict with our key separator.
@@ -185,6 +190,7 @@ export function invalidateRepositoryCache(repoPath: string): void {
   commitSignatureCache.invalidatePrefix(prefix);
   fileContentCache.invalidatePrefix(prefix);
   diffCache.invalidatePrefix(prefix);
+  searchResultCache.invalidatePrefix(prefix);
 }
 
 /**
@@ -195,4 +201,5 @@ export function clearAllCaches(): void {
   commitSignatureCache.clear();
   fileContentCache.clear();
   diffCache.clear();
+  searchResultCache.clear();
 }

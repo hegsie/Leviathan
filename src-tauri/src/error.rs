@@ -74,6 +74,12 @@ pub enum LeviathanError {
 
     #[error("OAuth error: {0}")]
     OAuth(String),
+
+    #[error("Operation timed out: {0}")]
+    OperationTimeout(String),
+
+    #[error("Operation cancelled")]
+    OperationCancelled,
 }
 
 /// Serializable error response for IPC
@@ -110,6 +116,8 @@ impl From<LeviathanError> for ErrorResponse {
             LeviathanError::InvalidReference => "INVALID_REFERENCE",
             LeviathanError::Custom(_) => "CUSTOM_ERROR",
             LeviathanError::OAuth(_) => "OAUTH_ERROR",
+            LeviathanError::OperationTimeout(_) => "OPERATION_TIMEOUT",
+            LeviathanError::OperationCancelled => "OPERATION_CANCELLED",
         };
 
         ErrorResponse {
@@ -151,6 +159,8 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::InvalidReference => "INVALID_REFERENCE",
                 LeviathanError::Custom(_) => "CUSTOM_ERROR",
                 LeviathanError::OAuth(_) => "OAUTH_ERROR",
+                LeviathanError::OperationTimeout(_) => "OPERATION_TIMEOUT",
+                LeviathanError::OperationCancelled => "OPERATION_CANCELLED",
             }
             .to_string(),
             message: self.to_string(),
