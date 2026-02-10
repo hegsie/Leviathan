@@ -3,6 +3,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
+import { repositoryStore } from '../../stores/index.ts';
 import type { CommitTemplate, ConventionalType } from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
 
@@ -457,6 +458,10 @@ export class LvCommitPanel extends LitElement {
   @state() private selectedType: string = 'feat';
   @state() private scope: string = '';
 
+  // Template variable state
+  @state() private currentBranch: string = '';
+  private cachedAuthor: string = '';
+
   // Store original input before amend pre-population
   private originalSummary: string = '';
   private originalDescription: string = '';
@@ -478,6 +483,7 @@ export class LvCommitPanel extends LitElement {
   private readonly HISTORY_MAX_ENTRIES = 20;
 
   private boundHandleTriggerAmend = this.handleTriggerAmend.bind(this);
+  private unsubscribeStore?: () => void;
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -486,8 +492,16 @@ export class LvCommitPanel extends LitElement {
     await this.loadConventionalTypes();
     await this.loadGitTemplate();
     await this.checkAiAvailability();
+    await this.loadAuthorName();
     this._onDocumentClick = this._onDocumentClick.bind(this);
     document.addEventListener('click', this._onDocumentClick);
+
+    // Track current branch from store
+    const initialState = repositoryStore.getState();
+    this.currentBranch = initialState.getActiveRepository()?.currentBranch?.shorthand ?? '';
+    this.unsubscribeStore = repositoryStore.subscribe((state) => {
+      this.currentBranch = state.getActiveRepository()?.currentBranch?.shorthand ?? '';
+    });
 
     // Listen for trigger-amend events from context menu
     window.addEventListener('trigger-amend', this.boundHandleTriggerAmend);
@@ -497,6 +511,7 @@ export class LvCommitPanel extends LitElement {
     super.disconnectedCallback();
     document.removeEventListener('click', this._onDocumentClick);
     window.removeEventListener('trigger-amend', this.boundHandleTriggerAmend);
+    this.unsubscribeStore?.();
   }
 
   private _onDocumentClick(e: MouseEvent): void {
@@ -605,7 +620,8 @@ export class LvCommitPanel extends LitElement {
     const result = await gitService.getCommitTemplate(this.repositoryPath);
     if (result.success && result.data) {
       // Parse the template - first line is summary, rest is description
-      const lines = result.data.split('\n');
+      const expanded = this.expandTemplateVariables(result.data);
+      const lines = expanded.split('\n');
       const nonCommentLines = lines.filter(l => !l.startsWith('#'));
       if (nonCommentLines.length > 0) {
         this.summary = nonCommentLines[0].trim();
@@ -616,6 +632,28 @@ export class LvCommitPanel extends LitElement {
     }
   }
 
+  private async loadAuthorName(): Promise<void> {
+    if (!this.repositoryPath) return;
+    const result = await gitService.getUserIdentity(this.repositoryPath);
+    if (result.success && result.data?.name) {
+      this.cachedAuthor = result.data.name;
+    }
+  }
+
+  expandTemplateVariables(content: string): string {
+    const now = new Date();
+    const date = now.toISOString().slice(0, 10);
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const datetime = `${date} ${hours}:${minutes}`;
+
+    return content
+      .replace(/\$\{branch\}/g, this.currentBranch)
+      .replace(/\$\{date\}/g, date)
+      .replace(/\$\{datetime\}/g, datetime)
+      .replace(/\$\{author\}/g, this.cachedAuthor);
+  }
+
   private handleTemplateChange(e: Event): void {
     const select = e.target as HTMLSelectElement;
     this.selectedTemplateId = select.value;
@@ -623,8 +661,9 @@ export class LvCommitPanel extends LitElement {
     if (this.selectedTemplateId) {
       const template = this.templates.find(t => t.id === this.selectedTemplateId);
       if (template) {
-        // Parse template content - first line is summary, rest is description
-        const lines = template.content.split('\n');
+        // Parse template content with variable expansion - first line is summary, rest is description
+        const expanded = this.expandTemplateVariables(template.content);
+        const lines = expanded.split('\n');
         this.summary = lines[0] || '';
         this.description = lines.slice(1).join('\n').trim();
         this.conventionalMode = template.isConventional;
