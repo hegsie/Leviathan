@@ -905,6 +905,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   @state() private selectedLines: Set<LineKey> = new Set();
   @state() private lineSelectionMode = false;
   @state() private currentHunkIndex = 0;
+  @state() private hasDiffTool = false;
+  @state() private launchingDiffTool = false;
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
@@ -959,6 +961,54 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     }
     if (changedProperties.has('commitFile') && this.commitFile) {
       await this.loadCommitDiff();
+    }
+    if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+      await this.checkDiffToolAvailability();
+    }
+  }
+
+  private async checkDiffToolAvailability(): Promise<void> {
+    if (!this.repositoryPath) return;
+    try {
+      const result = await gitService.getDiffToolConfig(this.repositoryPath);
+      this.hasDiffTool = result.success && !!result.data?.tool;
+    } catch {
+      this.hasDiffTool = false;
+    }
+  }
+
+  private async handleOpenDiffTool(): Promise<void> {
+    if (!this.repositoryPath) return;
+
+    const filePath = this.commitFile?.filePath ?? this.file?.path;
+    if (!filePath) return;
+
+    this.launchingDiffTool = true;
+    try {
+      const result = await gitService.launchDiffTool(
+        this.repositoryPath,
+        filePath,
+        this.file?.isStaged,
+        this.commitFile?.commitOid,
+      );
+      if (result.success && result.data?.success) {
+        this.dispatchEvent(new CustomEvent('show-toast', {
+          bubbles: true, composed: true,
+          detail: { message: 'Diff tool completed', type: 'success' },
+        }));
+      } else {
+        this.dispatchEvent(new CustomEvent('show-toast', {
+          bubbles: true, composed: true,
+          detail: { message: result.data?.message ?? result.error?.message ?? 'Diff tool failed', type: 'error' },
+        }));
+      }
+    } catch {
+      this.dispatchEvent(new CustomEvent('show-toast', {
+        bubbles: true, composed: true,
+        detail: { message: 'Failed to launch diff tool', type: 'error' },
+      }));
+    } finally {
+      this.launchingDiffTool = false;
     }
   }
 
@@ -2468,6 +2518,20 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           </div>
         </div>
         <div class="view-controls">
+          ${this.hasDiffTool ? html`
+            <button
+              class="view-btn"
+              @click=${this.handleOpenDiffTool}
+              ?disabled=${this.launchingDiffTool}
+              title="Open in external diff tool"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+            </button>
+          ` : nothing}
           ${this.file && !this.commitFile ? html`
             <button
               class="view-btn ${this.lineSelectionMode ? 'active' : ''}"

@@ -4,6 +4,9 @@ import { settingsStore, getGraphColorSchemes, type Theme, type FontSize, type De
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
 import * as aiService from '../../services/ai.service.ts';
+import * as gitService from '../../services/git.service.ts';
+import type { MergeToolInfo, AvailableDiffTool } from '../../services/git.service.ts';
+import { repositoryStore } from '../../stores/repository.store.ts';
 import type { AiProviderInfo, AiProviderType } from '../../services/ai.service.ts';
 
 @customElement('lv-settings-dialog')
@@ -310,11 +313,21 @@ export class LvSettingsDialog extends LitElement {
   @state() private providerTestStatus: Record<string, 'untested' | 'success' | 'failed'> = {};
   @state() private apiKeyInputs: Record<string, string> = {};
 
+  // External tools settings
+  @state() private mergeToolName: string | null = null;
+  @state() private mergeToolCmd: string | null = null;
+  @state() private availableMergeTools: MergeToolInfo[] = [];
+  @state() private diffToolName: string | null = null;
+  @state() private diffToolCmd: string | null = null;
+  @state() private availableDiffTools: AvailableDiffTool[] = [];
+  @state() private loadingTools = false;
+
   connectedCallback(): void {
     super.connectedCallback();
     this.loadSettings();
     this.loadVersion();
     this.loadAiProviders();
+    this.loadExternalToolsConfig();
   }
 
   private async loadVersion(): Promise<void> {
@@ -443,6 +456,105 @@ export class LvSettingsDialog extends LitElement {
     const input = e.target as HTMLInputElement;
     this.defaultBranchName = input.value;
     settingsStore.getState().setDefaultBranchName(this.defaultBranchName);
+  }
+
+  private async loadExternalToolsConfig(): Promise<void> {
+    const repo = repositoryStore.getState().getActiveRepository();
+    if (!repo) return;
+
+    this.loadingTools = true;
+    try {
+      const path = repo.repository.path;
+      const [mergeConfig, diffConfig, mergeTools, diffTools] = await Promise.all([
+        gitService.getMergeToolConfig(path),
+        gitService.getDiffToolConfig(path),
+        gitService.getAvailableMergeTools(),
+        gitService.listDiffTools(path),
+      ]);
+
+      if (mergeConfig.success && mergeConfig.data) {
+        this.mergeToolName = mergeConfig.data.toolName;
+        this.mergeToolCmd = mergeConfig.data.toolCmd;
+      }
+      if (diffConfig.success && diffConfig.data) {
+        this.diffToolName = diffConfig.data.tool;
+        this.diffToolCmd = diffConfig.data.cmd;
+      }
+      if (mergeTools.success && mergeTools.data) {
+        this.availableMergeTools = mergeTools.data;
+      }
+      if (diffTools.success && diffTools.data) {
+        this.availableDiffTools = diffTools.data;
+      }
+    } catch (err) {
+      console.error('Failed to load external tools config:', err);
+    } finally {
+      this.loadingTools = false;
+    }
+  }
+
+  private async handleMergeToolChange(e: Event): Promise<void> {
+    const select = e.target as HTMLSelectElement;
+    const value = select.value;
+    const repo = repositoryStore.getState().getActiveRepository();
+    if (!repo) return;
+
+    if (value === '') {
+      this.mergeToolName = null;
+      this.mergeToolCmd = null;
+      return;
+    }
+
+    if (value === '__custom__') {
+      this.mergeToolName = '__custom__';
+      this.mergeToolCmd = '';
+      return;
+    }
+
+    this.mergeToolName = value;
+    this.mergeToolCmd = null;
+    await gitService.setMergeToolConfig(repo.repository.path, value);
+  }
+
+  private async handleMergeToolCmdChange(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement;
+    this.mergeToolCmd = input.value;
+    const repo = repositoryStore.getState().getActiveRepository();
+    if (!repo || !this.mergeToolCmd) return;
+
+    await gitService.setMergeToolConfig(repo.repository.path, 'custom', this.mergeToolCmd);
+  }
+
+  private async handleDiffToolChange(e: Event): Promise<void> {
+    const select = e.target as HTMLSelectElement;
+    const value = select.value;
+    const repo = repositoryStore.getState().getActiveRepository();
+    if (!repo) return;
+
+    if (value === '') {
+      this.diffToolName = null;
+      this.diffToolCmd = null;
+      return;
+    }
+
+    if (value === '__custom__') {
+      this.diffToolName = '__custom__';
+      this.diffToolCmd = '';
+      return;
+    }
+
+    this.diffToolName = value;
+    this.diffToolCmd = null;
+    await gitService.setDiffTool(repo.repository.path, value);
+  }
+
+  private async handleDiffToolCmdChange(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement;
+    this.diffToolCmd = input.value;
+    const repo = repositoryStore.getState().getActiveRepository();
+    if (!repo || !this.diffToolCmd) return;
+
+    await gitService.setDiffTool(repo.repository.path, 'custom', this.diffToolCmd);
   }
 
   private handleStaleBranchDaysChange(e: Event): void {
@@ -607,6 +719,89 @@ export class LvSettingsDialog extends LitElement {
             </div>
             ${this.renderToggle(this.wordWrap, 'wordWrap')}
           </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-title">External Tools</div>
+
+          ${repositoryStore.getState().getActiveRepository()
+            ? html`
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="setting-name">Merge Tool</span>
+                  <span class="setting-description">External tool for resolving merge conflicts</span>
+                </div>
+                <select
+                  .value=${this.mergeToolName ?? ''}
+                  @change=${this.handleMergeToolChange}
+                  ?disabled=${this.loadingTools}
+                >
+                  <option value="">None</option>
+                  ${this.availableMergeTools.map(tool => html`
+                    <option value=${tool.name}>${tool.displayName}</option>
+                  `)}
+                  <option value="__custom__">Custom...</option>
+                </select>
+              </div>
+
+              ${this.mergeToolName === '__custom__' ? html`
+                <div class="setting-row">
+                  <div class="setting-label">
+                    <span class="setting-name">Merge Tool Command</span>
+                    <span class="setting-description">Custom command to launch merge tool</span>
+                  </div>
+                  <input
+                    type="text"
+                    .value=${this.mergeToolCmd ?? ''}
+                    @change=${this.handleMergeToolCmdChange}
+                    placeholder="e.g., /usr/bin/meld $LOCAL $REMOTE $MERGED"
+                  />
+                </div>
+              ` : nothing}
+
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="setting-name">Diff Tool</span>
+                  <span class="setting-description">External tool for viewing diffs</span>
+                </div>
+                <select
+                  .value=${this.diffToolName ?? ''}
+                  @change=${this.handleDiffToolChange}
+                  ?disabled=${this.loadingTools}
+                >
+                  <option value="">None</option>
+                  ${this.availableDiffTools.map(tool => html`
+                    <option value=${tool.name}>
+                      ${tool.name}${tool.available ? ' (available)' : ''}
+                    </option>
+                  `)}
+                  <option value="__custom__">Custom...</option>
+                </select>
+              </div>
+
+              ${this.diffToolName === '__custom__' ? html`
+                <div class="setting-row">
+                  <div class="setting-label">
+                    <span class="setting-name">Diff Tool Command</span>
+                    <span class="setting-description">Custom command to launch diff tool</span>
+                  </div>
+                  <input
+                    type="text"
+                    .value=${this.diffToolCmd ?? ''}
+                    @change=${this.handleDiffToolCmdChange}
+                    placeholder="e.g., /usr/bin/meld $LOCAL $REMOTE"
+                  />
+                </div>
+              ` : nothing}
+            `
+            : html`
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="setting-description">Open a repository to configure external tools</span>
+                </div>
+              </div>
+            `
+          }
         </div>
 
         <div class="settings-section">

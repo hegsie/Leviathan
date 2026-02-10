@@ -5921,6 +5921,95 @@ export async function launchDiffTool(
 }
 
 // ============================================================================
+// External Merge Tool
+// ============================================================================
+
+/**
+ * Merge tool configuration
+ */
+export interface MergeToolConfig {
+  /** Name of the configured merge tool */
+  toolName: string | null;
+  /** Custom command for the merge tool */
+  toolCmd: string | null;
+}
+
+/**
+ * Information about a known merge tool
+ */
+export interface MergeToolInfo {
+  /** Tool identifier name */
+  name: string;
+  /** Human-readable display name */
+  displayName: string;
+}
+
+/**
+ * Result of launching a merge tool
+ */
+export interface MergeToolResult {
+  /** Whether the merge tool exited successfully */
+  success: boolean;
+  /** Output or error message from the merge tool */
+  message: string;
+}
+
+/**
+ * Get the current merge tool configuration
+ * @param path Repository path
+ * @returns Merge tool configuration
+ */
+export async function getMergeToolConfig(
+  path: string,
+): Promise<CommandResult<MergeToolConfig>> {
+  return invokeCommand<MergeToolConfig>("get_merge_tool_config", {
+    path,
+  });
+}
+
+/**
+ * Set the merge tool configuration
+ * @param path Repository path
+ * @param toolName Tool name (e.g., "kdiff3", "meld", "bc", "vscode")
+ * @param toolCmd Custom command (optional, if not using standard tool)
+ */
+export async function setMergeToolConfig(
+  path: string,
+  toolName: string,
+  toolCmd?: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("set_merge_tool_config", {
+    path,
+    toolName,
+    toolCmd,
+  });
+}
+
+/**
+ * Launch the configured merge tool for a specific file
+ * @param path Repository path
+ * @param filePath File to merge (relative to repo root)
+ * @returns Result of launching the merge tool
+ */
+export async function launchMergeTool(
+  path: string,
+  filePath: string,
+): Promise<CommandResult<MergeToolResult>> {
+  return invokeCommand<MergeToolResult>("launch_merge_tool", {
+    path,
+    filePath,
+  });
+}
+
+/**
+ * Get a list of commonly available merge tools
+ * @returns List of known merge tools
+ */
+export async function getAvailableMergeTools(): Promise<CommandResult<MergeToolInfo[]>> {
+  return invokeCommand<MergeToolInfo[]>("get_available_merge_tools", {});
+}
+
+// ============================================================================
 // Clipboard Operations
 // ============================================================================
 

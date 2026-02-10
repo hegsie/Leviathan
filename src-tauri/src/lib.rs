@@ -605,6 +605,11 @@ pub fn run() {
             commands::difftool::set_diff_tool,
             commands::difftool::list_diff_tools,
             commands::difftool::launch_diff_tool,
+            // External merge tool
+            commands::merge_tool::get_merge_tool_config,
+            commands::merge_tool::set_merge_tool_config,
+            commands::merge_tool::launch_merge_tool,
+            commands::merge_tool::get_available_merge_tools,
             // File operations (reveal, open in app/editor)
             commands::file::reveal_in_file_manager,
             commands::file::open_in_default_app,
