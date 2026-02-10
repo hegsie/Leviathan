@@ -1382,6 +1382,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(100),
         )
         .await;
@@ -1401,6 +1402,7 @@ mod tests {
         let result = search_commits(
             repo.path_str(),
             Some(short_sha.to_string()),
+            None,
             None,
             None,
             None,
@@ -1426,6 +1428,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(100),
         )
         .await;
@@ -1442,6 +1445,7 @@ mod tests {
         let result = search_commits(
             repo.path_str(),
             Some("nonexistent message xyz123".to_string()),
+            None,
             None,
             None,
             None,
