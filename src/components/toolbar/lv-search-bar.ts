@@ -8,6 +8,7 @@ export interface SearchFilter {
   dateFrom: string;
   dateTo: string;
   filePath: string;
+  branch: string;
 }
 
 @customElement('lv-search-bar')
@@ -191,6 +192,7 @@ export class LvSearchBar extends LitElement {
   @state() private dateFrom = '';
   @state() private dateTo = '';
   @state() private filePath = '';
+  @state() private branch = '';
   @state() private showFilters = false;
 
   @query('input[type="text"]') private inputEl!: HTMLInputElement;
@@ -221,6 +223,7 @@ export class LvSearchBar extends LitElement {
     this.dateFrom = '';
     this.dateTo = '';
     this.filePath = '';
+    this.branch = '';
     this.emitSearch();
     this.inputEl?.focus();
   }
@@ -245,6 +248,10 @@ export class LvSearchBar extends LitElement {
     this.filePath = (e.target as HTMLInputElement).value;
   }
 
+  private handleBranchChange(e: Event): void {
+    this.branch = (e.target as HTMLInputElement).value;
+  }
+
   private applyFilters(): void {
     this.showFilters = false;
     this.emitSearch();
@@ -255,6 +262,7 @@ export class LvSearchBar extends LitElement {
     this.dateFrom = '';
     this.dateTo = '';
     this.filePath = '';
+    this.branch = '';
     this.emitSearch();
   }
 
@@ -265,10 +273,11 @@ export class LvSearchBar extends LitElement {
       dateFrom: this.dateFrom,
       dateTo: this.dateTo,
       filePath: this.filePath,
+      branch: this.branch,
     };
 
     this.dispatchEvent(
-      new CustomEvent('search', {
+      new CustomEvent('search-change', {
         detail: filter,
         bubbles: true,
         composed: true,
@@ -277,7 +286,7 @@ export class LvSearchBar extends LitElement {
   }
 
   private hasActiveFilters(): boolean {
-    return !!(this.author || this.dateFrom || this.dateTo || this.filePath);
+    return !!(this.author || this.dateFrom || this.dateTo || this.filePath || this.branch);
   }
 
   render() {
@@ -366,6 +375,17 @@ export class LvSearchBar extends LitElement {
                     placeholder="*.ts, src/**, or file path"
                     .value=${this.filePath}
                     @input=${this.handleFilePathChange}
+                  />
+                </div>
+
+                <div class="filter-row">
+                  <span class="filter-label">Branch</span>
+                  <input
+                    type="text"
+                    class="filter-input"
+                    placeholder="Branch or ref name"
+                    .value=${this.branch}
+                    @input=${this.handleBranchChange}
                   />
                 </div>
 

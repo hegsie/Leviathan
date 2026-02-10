@@ -1020,6 +1020,7 @@ pub async fn reword_commit(path: String, oid: String, message: String) -> Result
 
 /// Search commits with filters
 #[command]
+#[allow(clippy::too_many_arguments)]
 pub async fn search_commits(
     path: String,
     query: Option<String>,
@@ -1027,6 +1028,7 @@ pub async fn search_commits(
     date_from: Option<i64>,
     date_to: Option<i64>,
     file_path: Option<String>,
+    branch: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<Commit>> {
     let repo = git2::Repository::open(Path::new(&path))?;
@@ -1034,10 +1036,20 @@ pub async fn search_commits(
     let mut revwalk = repo.revwalk()?;
     revwalk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
 
-    // Push all branch heads for complete search
-    for reference in repo.references()?.flatten() {
+    if let Some(ref branch_name) = branch {
+        // Push only the specified branch/ref
+        let reference = repo
+            .resolve_reference_from_short_name(branch_name)
+            .map_err(|_| crate::error::LeviathanError::BranchNotFound(branch_name.clone()))?;
         if let Some(oid) = reference.target() {
-            let _ = revwalk.push(oid);
+            revwalk.push(oid)?;
+        }
+    } else {
+        // Push all branch heads for complete search
+        for reference in repo.references()?.flatten() {
+            if let Some(oid) = reference.target() {
+                let _ = revwalk.push(oid);
+            }
         }
     }
 
@@ -1370,6 +1382,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(100),
         )
         .await;
@@ -1389,6 +1402,7 @@ mod tests {
         let result = search_commits(
             repo.path_str(),
             Some(short_sha.to_string()),
+            None,
             None,
             None,
             None,
@@ -1414,6 +1428,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(100),
         )
         .await;
@@ -1430,6 +1445,7 @@ mod tests {
         let result = search_commits(
             repo.path_str(),
             Some("nonexistent message xyz123".to_string()),
+            None,
             None,
             None,
             None,

@@ -301,6 +301,7 @@ export async function searchCommits(
     dateFrom?: number;
     dateTo?: number;
     filePath?: string;
+    branch?: string;
     limit?: number;
   },
 ): Promise<CommandResult<Commit[]>> {
@@ -311,6 +312,7 @@ export async function searchCommits(
     date_from: options.dateFrom,
     date_to: options.dateTo,
     file_path: options.filePath,
+    branch: options.branch,
     limit: options.limit,
   });
 }

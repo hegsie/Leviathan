@@ -38,6 +38,7 @@ export interface SettingsState {
   fetchOnFocus: boolean; // Fetch when window regains focus
   confirmBeforeDiscard: boolean;
   openLastRepository: boolean;
+  autoStashOnCheckout: boolean; // Automatically stash/pop when switching branches
 
   // Branch settings
   staleBranchDays: number; // Days without commits before a branch is considered stale (0 = disabled)
@@ -64,6 +65,7 @@ export interface SettingsState {
   setFetchOnFocus: (enabled: boolean) => void;
   setConfirmBeforeDiscard: (confirm: boolean) => void;
   setOpenLastRepository: (open: boolean) => void;
+  setAutoStashOnCheckout: (enabled: boolean) => void;
   setStaleBranchDays: (days: number) => void;
   addRecentRepository: (path: string) => void;
   removeRecentRepository: (path: string) => void;
@@ -89,6 +91,7 @@ const defaultSettings = {
   fetchOnFocus: false,
   confirmBeforeDiscard: true,
   openLastRepository: true,
+  autoStashOnCheckout: false,
   staleBranchDays: 90,
   recentRepositories: [] as string[],
   maxRecentRepositories: 10,
@@ -144,6 +147,8 @@ export const settingsStore = createStore<SettingsState>()(
       setConfirmBeforeDiscard: (confirmBeforeDiscard) => set({ confirmBeforeDiscard }),
 
       setOpenLastRepository: (openLastRepository) => set({ openLastRepository }),
+
+      setAutoStashOnCheckout: (autoStashOnCheckout) => set({ autoStashOnCheckout }),
 
       setStaleBranchDays: (staleBranchDays) => set({ staleBranchDays }),
 

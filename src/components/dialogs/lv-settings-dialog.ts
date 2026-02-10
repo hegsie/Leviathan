@@ -303,6 +303,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private showCommitSize = true;
   @state() private wordWrap = true;
   @state() private confirmBeforeDiscard = true;
+  @state() private autoStashOnCheckout = false;
   @state() private staleBranchDays = 90;
 
   // AI settings
@@ -425,6 +426,7 @@ export class LvSettingsDialog extends LitElement {
     this.showCommitSize = settings.showCommitSize;
     this.wordWrap = settings.wordWrap;
     this.confirmBeforeDiscard = settings.confirmBeforeDiscard;
+    this.autoStashOnCheckout = settings.autoStashOnCheckout;
     this.staleBranchDays = settings.staleBranchDays;
   }
 
@@ -585,6 +587,10 @@ export class LvSettingsDialog extends LitElement {
       case 'confirmBeforeDiscard':
         this.confirmBeforeDiscard = value;
         store.setConfirmBeforeDiscard(value);
+        break;
+      case 'autoStashOnCheckout':
+        this.autoStashOnCheckout = value;
+        store.setAutoStashOnCheckout(value);
         break;
     }
   }
@@ -813,6 +819,14 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-description">Ask for confirmation when discarding changes</span>
             </div>
             ${this.renderToggle(this.confirmBeforeDiscard, 'confirmBeforeDiscard')}
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Auto-Stash on Checkout</span>
+              <span class="setting-description">Automatically stash and re-apply changes when switching branches</span>
+            </div>
+            ${this.renderToggle(this.autoStashOnCheckout, 'autoStashOnCheckout')}
           </div>
 
           <div class="setting-row">
