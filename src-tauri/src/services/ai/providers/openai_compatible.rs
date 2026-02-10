@@ -220,6 +220,66 @@ impl AiProvider for OpenAiCompatibleProvider {
         // Parse the response
         parse_commit_message(&content)
     }
+
+    async fn generate_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model: Option<&str>,
+        max_tokens: Option<u32>,
+    ) -> Result<String, String> {
+        let model_name = model.unwrap_or(self.provider_type.default_model());
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user_prompt.to_string(),
+            },
+        ];
+
+        let request_body = ChatCompletionRequest {
+            model: model_name.to_string(),
+            messages,
+            max_tokens: max_tokens.unwrap_or(2048),
+            temperature: 0.2,
+        };
+
+        let mut request = self
+            .client
+            .post(self.chat_url())
+            .json(&request_body)
+            .timeout(std::time::Duration::from_secs(120));
+
+        if let Some(key) = &self.api_key {
+            request = request.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("Failed to connect: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("API error ({}): {}", status, body));
+        }
+
+        let result: ChatCompletionResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+        result
+            .choices
+            .first()
+            .map(|c| c.message.content.trim().to_string())
+            .ok_or_else(|| "No response from AI".to_string())
+    }
 }
 
 /// Parse raw AI response into structured commit message

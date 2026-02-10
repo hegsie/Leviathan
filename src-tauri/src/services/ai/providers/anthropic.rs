@@ -14,6 +14,8 @@ struct MessagesRequest {
     model: String,
     max_tokens: u32,
     messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
 }
 
 /// Message in the conversation
@@ -105,6 +107,7 @@ impl AiProvider for AnthropicProvider {
                 role: "user".to_string(),
                 content: format!("{}{}", COMMIT_MESSAGE_PROMPT, diff),
             }],
+            system: None,
         };
 
         let response = self
@@ -138,6 +141,61 @@ impl AiProvider for AnthropicProvider {
 
         // Parse the response
         parse_commit_message(&content)
+    }
+
+    async fn generate_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model: Option<&str>,
+        max_tokens: Option<u32>,
+    ) -> Result<String, String> {
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or("Anthropic API key not configured")?;
+
+        let model_name = model.unwrap_or(AiProviderType::Anthropic.default_model());
+
+        let request_body = MessagesRequest {
+            model: model_name.to_string(),
+            max_tokens: max_tokens.unwrap_or(2048),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: user_prompt.to_string(),
+            }],
+            system: Some(system_prompt.to_string()),
+        };
+
+        let response = self
+            .client
+            .post(self.messages_url())
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(&request_body)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| format!("Failed to connect to Anthropic: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Anthropic API error ({}): {}", status, body));
+        }
+
+        let result: MessagesResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Anthropic response: {}", e))?;
+
+        result
+            .content
+            .first()
+            .and_then(|c| c.text.clone())
+            .map(|t| t.trim().to_string())
+            .ok_or_else(|| "No response from Claude".to_string())
     }
 }
 

@@ -313,6 +313,7 @@ export class LvConflictResolutionDialog extends LitElement {
   @state() private showAbortConfirm = false;
   @state() private hasMergeTool = false;
   @state() private launchingExternalTool: string | null = null;
+  @state() private detectedMergeTool: string | null = null;
 
   @query('lv-merge-editor') private mergeEditor?: LvMergeEditor;
 
@@ -394,8 +395,19 @@ export class LvConflictResolutionDialog extends LitElement {
     try {
       const result = await gitService.getMergeToolConfig(this.repositoryPath);
       this.hasMergeTool = result.success && !!result.data?.toolName;
+
+      // If no tool configured, try auto-detecting one to show a hint
+      if (!this.hasMergeTool) {
+        const detectResult = await gitService.autoDetectMergeTool();
+        this.detectedMergeTool = detectResult.success && detectResult.data
+          ? detectResult.data.displayName
+          : null;
+      } else {
+        this.detectedMergeTool = null;
+      }
     } catch {
       this.hasMergeTool = false;
+      this.detectedMergeTool = null;
     }
   }
 
@@ -645,7 +657,14 @@ export class LvConflictResolutionDialog extends LitElement {
 
         <div class="content">
           <div class="file-list">
-            <div class="file-list-header">Conflicted Files (${this.totalCount})</div>
+            <div class="file-list-header">
+              Conflicted Files (${this.totalCount})
+              ${this.detectedMergeTool ? html`
+                <div style="font-size: 10px; text-transform: none; letter-spacing: normal; font-weight: normal; margin-top: 4px; color: var(--color-text-muted);">
+                  ${this.detectedMergeTool} detected. Configure in Settings for external editing.
+                </div>
+              ` : nothing}
+            </div>
             ${this.loading
               ? html`<div class="loading">Loading...</div>`
               : this.conflicts.map(

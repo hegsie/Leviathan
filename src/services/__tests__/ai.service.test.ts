@@ -3,10 +3,12 @@ import type {
   AiProviderType,
   AiProviderInfo,
   GeneratedCommitMessage,
+  ConflictResolutionSuggestion,
 } from '../ai.service.ts';
 import {
   getProviderDisplayName,
   providerRequiresApiKey,
+  suggestConflictResolution,
 } from '../ai.service.ts';
 
 // Mock Tauri API
@@ -50,6 +52,10 @@ const mockResults: Record<string, unknown> = {
       body: 'This commit adds a new feature that...',
     } as GeneratedCommitMessage,
   },
+  suggest_conflict_resolution: {
+    resolvedContent: 'merged content here',
+    explanation: 'Combined both changes preserving function signatures',
+  } as ConflictResolutionSuggestion,
 };
 
 const mockInvoke = (command: string, _args?: Record<string, unknown>): Promise<unknown> => {
@@ -266,5 +272,54 @@ describe('AI Provider Workflow', () => {
     localProviders.forEach((type) => {
       expect(providerRequiresApiKey(type)).to.be.false;
     });
+  });
+});
+
+describe('ConflictResolutionSuggestion', () => {
+  it('should have correct structure', () => {
+    const suggestion: ConflictResolutionSuggestion = {
+      resolvedContent: 'function merged() {}',
+      explanation: 'Combined both implementations',
+    };
+
+    expect(suggestion.resolvedContent).to.equal('function merged() {}');
+    expect(suggestion.explanation).to.equal('Combined both implementations');
+  });
+
+  it('should allow empty explanation', () => {
+    const suggestion: ConflictResolutionSuggestion = {
+      resolvedContent: 'some code',
+      explanation: '',
+    };
+
+    expect(suggestion.resolvedContent).to.equal('some code');
+    expect(suggestion.explanation).to.equal('');
+  });
+});
+
+describe('suggestConflictResolution', () => {
+  it('should invoke the command and return a suggestion', async () => {
+    const result = await suggestConflictResolution(
+      'src/test.ts',
+      'const a = 1;',
+      'const a = 2;',
+      'const a = 0;',
+    );
+
+    expect(result.success).to.be.true;
+    expect(result.data).to.not.be.undefined;
+    expect(result.data!.resolvedContent).to.equal('merged content here');
+    expect(result.data!.explanation).to.include('Combined both changes');
+  });
+
+  it('should handle optional parameters', async () => {
+    const result = await suggestConflictResolution(
+      'src/test.ts',
+      'const a = 1;',
+      'const a = 2;',
+    );
+
+    expect(result.success).to.be.true;
+    expect(result.data).to.not.be.undefined;
   });
 });

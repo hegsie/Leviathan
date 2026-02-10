@@ -523,6 +523,7 @@ pub fn run() {
             commands::ai::auto_detect_ai_providers,
             commands::ai::generate_commit_message,
             commands::ai::is_ai_available,
+            commands::ai::suggest_conflict_resolution,
             // OAuth authentication
             commands::oauth::oauth_get_authorize_url,
             commands::oauth::oauth_start_github_flow,
@@ -621,6 +622,7 @@ pub fn run() {
             commands::merge_tool::set_merge_tool_config,
             commands::merge_tool::launch_merge_tool,
             commands::merge_tool::get_available_merge_tools,
+            commands::merge_tool::auto_detect_merge_tool,
             // File operations (reveal, open in app/editor)
             commands::file::reveal_in_file_manager,
             commands::file::open_in_default_app,

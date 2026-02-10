@@ -3,7 +3,10 @@
 //! Provides commands for managing AI providers and generating commit messages.
 
 use crate::error::{LeviathanError, Result};
-use crate::services::ai::{AiProviderInfo, AiProviderType, AiState, GeneratedCommitMessage};
+use crate::services::ai::{
+    AiProviderInfo, AiProviderType, AiState, ConflictResolutionSuggestion, GeneratedCommitMessage,
+    CONFLICT_RESOLUTION_PROMPT, MAX_CONFLICT_CONTEXT_CHARS,
+};
 use tauri::{command, State};
 
 /// Get list of all AI providers with their status
@@ -121,6 +124,118 @@ pub async fn is_ai_available(state: State<'_, AiState>) -> Result<bool> {
     }
 
     Ok(false)
+}
+
+/// Suggest a conflict resolution using AI
+#[command]
+pub async fn suggest_conflict_resolution(
+    state: State<'_, AiState>,
+    file_path: String,
+    ours_content: String,
+    theirs_content: String,
+    base_content: Option<String>,
+    context_before: Option<String>,
+    context_after: Option<String>,
+) -> Result<ConflictResolutionSuggestion> {
+    let service = state.read().await;
+
+    // Build the user prompt with file context
+    let mut user_prompt = String::new();
+
+    // Add file path for language context
+    user_prompt.push_str(&format!("File: {}\n\n", file_path));
+
+    // Add surrounding context if available
+    if let Some(ref before) = context_before {
+        let truncated = truncate_content(before, MAX_CONFLICT_CONTEXT_CHARS / 4);
+        if !truncated.is_empty() {
+            user_prompt.push_str(&format!(
+                "Context before the conflict:\n```\n{}\n```\n\n",
+                truncated
+            ));
+        }
+    }
+
+    // Add base content if available
+    if let Some(ref base) = base_content {
+        let truncated = truncate_content(base, MAX_CONFLICT_CONTEXT_CHARS / 4);
+        if !truncated.is_empty() {
+            user_prompt.push_str(&format!(
+                "Base (common ancestor):\n```\n{}\n```\n\n",
+                truncated
+            ));
+        }
+    }
+
+    // Add ours and theirs
+    let ours_truncated = truncate_content(&ours_content, MAX_CONFLICT_CONTEXT_CHARS / 3);
+    let theirs_truncated = truncate_content(&theirs_content, MAX_CONFLICT_CONTEXT_CHARS / 3);
+
+    user_prompt.push_str(&format!(
+        "Ours (current branch):\n```\n{}\n```\n\n",
+        ours_truncated
+    ));
+    user_prompt.push_str(&format!(
+        "Theirs (incoming branch):\n```\n{}\n```\n",
+        theirs_truncated
+    ));
+
+    if let Some(ref after) = context_after {
+        let truncated = truncate_content(after, MAX_CONFLICT_CONTEXT_CHARS / 4);
+        if !truncated.is_empty() {
+            user_prompt.push_str(&format!(
+                "\nContext after the conflict:\n```\n{}\n```\n",
+                truncated
+            ));
+        }
+    }
+
+    let response = service
+        .generate_text(CONFLICT_RESOLUTION_PROMPT, &user_prompt, None)
+        .await
+        .map_err(LeviathanError::OperationFailed)?;
+
+    // Try to parse as JSON
+    parse_conflict_suggestion(&response)
+}
+
+/// Truncate content to a maximum character length at a line boundary
+fn truncate_content(content: &str, max_chars: usize) -> &str {
+    if content.len() <= max_chars {
+        return content;
+    }
+    // Find a newline before the max_chars boundary
+    match content[..max_chars].rfind('\n') {
+        Some(pos) => &content[..pos],
+        None => &content[..max_chars],
+    }
+}
+
+/// Parse the AI response into a ConflictResolutionSuggestion
+fn parse_conflict_suggestion(response: &str) -> Result<ConflictResolutionSuggestion> {
+    let trimmed = response.trim();
+
+    // Strip markdown code fences if present
+    let json_str = if trimmed.starts_with("```") {
+        let inner = trimmed
+            .strip_prefix("```json")
+            .or_else(|| trimmed.strip_prefix("```"))
+            .unwrap_or(trimmed);
+        inner.strip_suffix("```").unwrap_or(inner).trim()
+    } else {
+        trimmed
+    };
+
+    // Try JSON parse
+    if let Ok(suggestion) = serde_json::from_str::<ConflictResolutionSuggestion>(json_str) {
+        return Ok(suggestion);
+    }
+
+    // Fallback: treat entire response as resolved content
+    Ok(ConflictResolutionSuggestion {
+        resolved_content: trimmed.to_string(),
+        explanation: String::new(),
+    })
 }
 
 /// Get the staged diff as a string
@@ -329,6 +444,57 @@ mod tests {
 
         assert_eq!(msg.summary, "fix: typo in readme");
         assert!(msg.body.is_none());
+    }
+
+    // ========================================================================
+    // parse_conflict_suggestion Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_conflict_suggestion_valid_json() {
+        let response =
+            r#"{"resolvedContent": "merged code here", "explanation": "combined both changes"}"#;
+        let result = parse_conflict_suggestion(response);
+        assert!(result.is_ok());
+        let suggestion = result.unwrap();
+        assert_eq!(suggestion.resolved_content, "merged code here");
+        assert_eq!(suggestion.explanation, "combined both changes");
+    }
+
+    #[test]
+    fn test_parse_conflict_suggestion_json_with_code_fences() {
+        let response = "```json\n{\"resolvedContent\": \"code\", \"explanation\": \"merged\"}\n```";
+        let result = parse_conflict_suggestion(response);
+        assert!(result.is_ok());
+        let suggestion = result.unwrap();
+        assert_eq!(suggestion.resolved_content, "code");
+        assert_eq!(suggestion.explanation, "merged");
+    }
+
+    #[test]
+    fn test_parse_conflict_suggestion_fallback() {
+        let response = "some plain text response that is not JSON";
+        let result = parse_conflict_suggestion(response);
+        assert!(result.is_ok());
+        let suggestion = result.unwrap();
+        assert_eq!(
+            suggestion.resolved_content,
+            "some plain text response that is not JSON"
+        );
+        assert!(suggestion.explanation.is_empty());
+    }
+
+    #[test]
+    fn test_truncate_content_short() {
+        let content = "short";
+        assert_eq!(truncate_content(content, 100), "short");
+    }
+
+    #[test]
+    fn test_truncate_content_long() {
+        let content = "line1\nline2\nline3\nline4";
+        let truncated = truncate_content(content, 12);
+        assert_eq!(truncated, "line1\nline2");
     }
 
     #[test]
