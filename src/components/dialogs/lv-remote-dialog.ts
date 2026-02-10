@@ -8,6 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import type { Remote } from '../../types/git.types.ts';
 
 type DialogMode = 'list' | 'add' | 'edit' | 'rename';
@@ -224,6 +225,16 @@ export class LvRemoteDialog extends LitElement {
         color: var(--color-error);
       }
 
+      .action-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .action-btn:disabled:hover {
+        background: transparent;
+        color: var(--color-text-secondary);
+      }
+
       .action-btn svg {
         width: 14px;
         height: 14px;
@@ -369,6 +380,8 @@ export class LvRemoteDialog extends LitElement {
   @state() private formUrl = '';
   @state() private formPushUrl = '';
   @state() private saving = false;
+  @state() private fetchingRemote: string | null = null;
+  @state() private pruningRemote: string | null = null;
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     if (changedProps.has('open') && this.open) {
@@ -565,6 +578,53 @@ export class LvRemoteDialog extends LitElement {
     }
   }
 
+  private async handleFetchRemote(remote: Remote): Promise<void> {
+    this.fetchingRemote = remote.name;
+    try {
+      const result = await gitService.fetch({
+        path: this.repositoryPath,
+        remote: remote.name,
+        silent: true,
+      });
+      if (result.success) {
+        showToast(`Fetched from ${remote.name}`, 'success');
+        this.dispatchEvent(new CustomEvent('remotes-changed', { bubbles: true, composed: true }));
+      } else {
+        showToast(`Fetch failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`Fetch failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    } finally {
+      this.fetchingRemote = null;
+    }
+  }
+
+  private async handlePruneRemote(remote: Remote): Promise<void> {
+    this.pruningRemote = remote.name;
+    try {
+      const result = await gitService.pruneRemoteTrackingBranches(
+        this.repositoryPath,
+        remote.name,
+      );
+      if (result.success && result.data) {
+        const count = result.data.branchesPruned.length;
+        if (count === 0) {
+          showToast(`Nothing to prune from ${remote.name}`, 'info');
+        } else {
+          showToast(`Pruned ${count} stale tracking branch${count !== 1 ? 'es' : ''} from ${remote.name}`, 'success');
+          await this.loadRemotes();
+          this.dispatchEvent(new CustomEvent('remotes-changed', { bubbles: true, composed: true }));
+        }
+      } else {
+        showToast(`Prune failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`Prune failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    } finally {
+      this.pruningRemote = null;
+    }
+  }
+
   private async handleRemove(remote: Remote): Promise<void> {
     const confirmed = await showConfirm(
       'Remove Remote',
@@ -637,6 +697,32 @@ export class LvRemoteDialog extends LitElement {
               ` : nothing}
             </div>
             <div class="remote-actions">
+              <button
+                class="action-btn"
+                title="Fetch"
+                ?disabled=${this.fetchingRemote === remote.name}
+                @click=${() => this.handleFetchRemote(remote)}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="8 17 12 21 16 17"></polyline>
+                  <line x1="12" y1="12" x2="12" y2="21"></line>
+                  <path d="M20.88 18.09A5 5 0 0018 9h-1.26A8 8 0 103 16.29"></path>
+                </svg>
+              </button>
+              <button
+                class="action-btn"
+                title="Prune stale tracking branches"
+                ?disabled=${this.pruningRemote === remote.name}
+                @click=${() => this.handlePruneRemote(remote)}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="6" cy="6" r="3"></circle>
+                  <path d="M8.12 8.12L12 12"></path>
+                  <path d="M20 4L8.12 15.88"></path>
+                  <circle cx="6" cy="18" r="3"></circle>
+                  <path d="M14.8 14.8L20 20"></path>
+                </svg>
+              </button>
               <button
                 class="action-btn"
                 title="Edit URL"

@@ -1,6 +1,6 @@
 /**
  * Tag List Component
- * Displays and manages repository tags
+ * Displays and manages repository tags with filtering, sorting, and version grouping
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -11,6 +11,13 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import type { Tag } from '../../types/git.types.ts';
 import '../dialogs/lv-create-tag-dialog.ts';
 import type { LvCreateTagDialog } from '../dialogs/lv-create-tag-dialog.ts';
+
+type TagSortMode = 'name' | 'date' | 'date-asc';
+
+interface TagGroup {
+  name: string;
+  tags: Tag[];
+}
 
 interface ContextMenuState {
   visible: boolean;
@@ -129,6 +136,174 @@ export class LvTagList extends LitElement {
       .context-menu-item.danger svg {
         color: var(--color-error);
       }
+
+      /* Filter and sort controls */
+      .controls {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 2px 4px;
+        border-bottom: 1px solid var(--color-border);
+      }
+
+      .controls-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        padding: 0;
+      }
+
+      .controls-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .controls-btn.active {
+        color: var(--color-primary);
+        background: var(--color-primary-bg);
+      }
+
+      .controls-btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .filter-bar {
+        display: flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-bg-tertiary);
+      }
+
+      .filter-input {
+        flex: 1;
+        border: none;
+        background: transparent;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        outline: none;
+        padding: 2px 0;
+      }
+
+      .filter-input::placeholder {
+        color: var(--color-text-muted);
+      }
+
+      .filter-clear {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-muted);
+        cursor: pointer;
+        padding: 0;
+      }
+
+      .filter-clear:hover {
+        color: var(--color-text-primary);
+        background: var(--color-bg-hover);
+      }
+
+      .filter-clear svg {
+        width: 12px;
+        height: 12px;
+      }
+
+      .sort-menu {
+        position: absolute;
+        z-index: var(--z-dropdown, 100);
+        right: 4px;
+        top: 28px;
+        min-width: 140px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        padding: var(--spacing-xs) 0;
+      }
+
+      .sort-option {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: none;
+        background: none;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .sort-option:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .sort-option.active {
+        color: var(--color-primary);
+      }
+
+      .sort-option svg {
+        width: 14px;
+        height: 14px;
+        color: var(--color-text-muted);
+      }
+
+      .sort-option.active svg {
+        color: var(--color-primary);
+      }
+
+      /* Group headers */
+      .group-header {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        cursor: pointer;
+        user-select: none;
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+      }
+
+      .group-header:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .chevron {
+        width: 16px;
+        height: 16px;
+        transition: transform var(--transition-fast);
+      }
+
+      .chevron.expanded {
+        transform: rotate(90deg);
+      }
+
+      .group-name {
+        flex: 1;
+        font-weight: var(--font-weight-medium);
+      }
+
+      .group-count {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        background: var(--color-bg-tertiary);
+        padding: 1px 6px;
+        border-radius: var(--radius-full);
+      }
     `,
   ];
 
@@ -137,6 +312,11 @@ export class LvTagList extends LitElement {
   @state() private tags: Tag[] = [];
   @state() private loading = true;
   @state() private contextMenu: ContextMenuState = { visible: false, x: 0, y: 0, tag: null };
+  @state() private filterText = '';
+  @state() private sortMode: TagSortMode = 'name';
+  @state() private showFilter = false;
+  @state() private showSortMenu = false;
+  @state() private collapsedGroups = new Set<string>();
 
   @query('lv-create-tag-dialog') private createTagDialog!: LvCreateTagDialog;
 
@@ -154,6 +334,9 @@ export class LvTagList extends LitElement {
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+    if (this.showSortMenu) {
+      this.showSortMenu = false;
     }
   };
 
@@ -188,6 +371,72 @@ export class LvTagList extends LitElement {
     } finally {
       this.loading = false;
     }
+  }
+
+  private filterTags(tags: Tag[]): Tag[] {
+    if (!this.filterText) return tags;
+    const lower = this.filterText.toLowerCase();
+    return tags.filter((t) => t.name.toLowerCase().includes(lower));
+  }
+
+  private sortTags(tags: Tag[]): Tag[] {
+    return [...tags].sort((a, b) => {
+      switch (this.sortMode) {
+        case 'date': {
+          // Newest first; lightweight tags (no tagger) sort to end
+          const aTime = a.tagger?.timestamp ?? 0;
+          const bTime = b.tagger?.timestamp ?? 0;
+          if (aTime === 0 && bTime === 0) return a.name.localeCompare(b.name);
+          if (aTime === 0) return 1;
+          if (bTime === 0) return -1;
+          return bTime - aTime;
+        }
+        case 'date-asc': {
+          // Oldest first; lightweight tags (no tagger) sort to end
+          const aTime = a.tagger?.timestamp ?? 0;
+          const bTime = b.tagger?.timestamp ?? 0;
+          if (aTime === 0 && bTime === 0) return a.name.localeCompare(b.name);
+          if (aTime === 0) return 1;
+          if (bTime === 0) return -1;
+          return aTime - bTime;
+        }
+        case 'name':
+        default:
+          return a.name.localeCompare(b.name);
+      }
+    });
+  }
+
+  private groupTags(tags: Tag[]): TagGroup[] {
+    const versionRegex = /^v?(\d+)\./;
+    const groupMap = new Map<string, Tag[]>();
+
+    for (const tag of tags) {
+      const match = tag.name.match(versionRegex);
+      const key = match ? `v${match[1]}.x` : 'Other';
+      if (!groupMap.has(key)) {
+        groupMap.set(key, []);
+      }
+      groupMap.get(key)!.push(tag);
+    }
+
+    // If only one group, return flat (no headers needed)
+    if (groupMap.size <= 1) {
+      return [{ name: '', tags }];
+    }
+
+    // Sort groups: newest major version first, "Other" last
+    const groups = Array.from(groupMap.entries()).map(([name, tags]) => ({ name, tags }));
+    groups.sort((a, b) => {
+      if (a.name === 'Other') return 1;
+      if (b.name === 'Other') return -1;
+      // Extract version number for comparison
+      const aNum = parseInt(a.name.replace('v', ''));
+      const bNum = parseInt(b.name.replace('v', ''));
+      return bNum - aNum; // Newest first
+    });
+
+    return groups;
   }
 
   private handleContextMenu(e: MouseEvent, tag: Tag): void {
@@ -302,6 +551,40 @@ export class LvTagList extends LitElement {
     }
   }
 
+  private handleFilterInput(e: InputEvent): void {
+    this.filterText = (e.target as HTMLInputElement).value;
+  }
+
+  private clearFilter(): void {
+    this.filterText = '';
+  }
+
+  private toggleFilter(): void {
+    this.showFilter = !this.showFilter;
+    if (!this.showFilter) {
+      this.filterText = '';
+    }
+  }
+
+  private toggleSortMenu(e: Event): void {
+    e.stopPropagation();
+    this.showSortMenu = !this.showSortMenu;
+  }
+
+  private setSortMode(mode: TagSortMode): void {
+    this.sortMode = mode;
+    this.showSortMenu = false;
+  }
+
+  private toggleGroupCollapse(groupName: string): void {
+    if (this.collapsedGroups.has(groupName)) {
+      this.collapsedGroups.delete(groupName);
+    } else {
+      this.collapsedGroups.add(groupName);
+    }
+    this.requestUpdate();
+  }
+
   private renderContextMenu() {
     if (!this.contextMenu.visible || !this.contextMenu.tag) return nothing;
 
@@ -345,33 +628,153 @@ export class LvTagList extends LitElement {
     `;
   }
 
-  render() {
+  private renderTagItem(tag: Tag) {
     return html`
-      ${this.loading
-        ? html`<div class="loading">Loading tags...</div>`
-        : this.tags.length === 0
-          ? html`<div class="empty">No tags</div>`
-          : html`
+      <li
+        class="tag-item"
+        @click=${() => this.handleTagClick(tag)}
+        @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, tag)}
+        title="${tag.message || tag.name}"
+      >
+        <svg class="tag-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"></path>
+          <line x1="7" y1="7" x2="7.01" y2="7"></line>
+        </svg>
+        <div class="tag-info">
+          <div class="tag-name">${tag.name}</div>
+          <div class="tag-type">${tag.isAnnotated ? 'annotated' : 'lightweight'}</div>
+        </div>
+      </li>
+    `;
+  }
+
+  private renderControls() {
+    return html`
+      <div class="controls" style="position: relative;">
+        <button
+          class="controls-btn ${this.showFilter ? 'active' : ''}"
+          title="Filter tags"
+          @click=${this.toggleFilter}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+        </button>
+        <button
+          class="controls-btn ${this.showSortMenu ? 'active' : ''}"
+          title="Sort tags"
+          @click=${(e: Event) => this.toggleSortMenu(e)}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="4" y1="6" x2="20" y2="6"></line>
+            <line x1="4" y1="12" x2="16" y2="12"></line>
+            <line x1="4" y1="18" x2="12" y2="18"></line>
+          </svg>
+        </button>
+        ${this.showSortMenu ? html`
+          <div class="sort-menu" @click=${(e: Event) => e.stopPropagation()}>
+            <button class="sort-option ${this.sortMode === 'name' ? 'active' : ''}" @click=${() => this.setSortMode('name')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 6h7M4 12h5M4 18h3M17 6v12M14 18l3 3 3-3"></path>
+              </svg>
+              Name (A-Z)
+            </button>
+            <button class="sort-option ${this.sortMode === 'date' ? 'active' : ''}" @click=${() => this.setSortMode('date')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+              Date (Newest)
+            </button>
+            <button class="sort-option ${this.sortMode === 'date-asc' ? 'active' : ''}" @click=${() => this.setSortMode('date-asc')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+              Date (Oldest)
+            </button>
+          </div>
+        ` : nothing}
+      </div>
+      ${this.showFilter ? html`
+        <div class="filter-bar">
+          <svg style="width:14px;height:14px;color:var(--color-text-muted);margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input
+            class="filter-input"
+            type="text"
+            placeholder="Filter tags..."
+            .value=${this.filterText}
+            @input=${this.handleFilterInput}
+          />
+          ${this.filterText ? html`
+            <button class="filter-clear" @click=${this.clearFilter}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          ` : nothing}
+        </div>
+      ` : nothing}
+    `;
+  }
+
+  render() {
+    if (this.loading) {
+      return html`<div class="loading">Loading tags...</div>`;
+    }
+
+    if (this.tags.length === 0) {
+      return html`
+        ${this.renderControls()}
+        <div class="empty">No tags</div>
+        <lv-create-tag-dialog
+          .repositoryPath=${this.repositoryPath}
+          @tag-created=${this.handleTagCreated}
+        ></lv-create-tag-dialog>
+      `;
+    }
+
+    const filtered = this.filterTags(this.tags);
+    const sorted = this.sortTags(filtered);
+    const groups = this.groupTags(sorted);
+
+    return html`
+      ${this.renderControls()}
+
+      ${filtered.length === 0
+        ? html`<div class="empty">No matching tags</div>`
+        : groups.length === 1 && groups[0].name === ''
+          ? html`
               <ul class="tag-list">
-                ${this.tags.map((tag) => html`
-                  <li
-                    class="tag-item"
-                    @click=${() => this.handleTagClick(tag)}
-                    @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, tag)}
-                    title="${tag.message || tag.name}"
-                  >
-                    <svg class="tag-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"></path>
-                      <line x1="7" y1="7" x2="7.01" y2="7"></line>
-                    </svg>
-                    <div class="tag-info">
-                      <div class="tag-name">${tag.name}</div>
-                      <div class="tag-type">${tag.isAnnotated ? 'annotated' : 'lightweight'}</div>
-                    </div>
-                  </li>
-                `)}
+                ${groups[0].tags.map((tag) => this.renderTagItem(tag))}
               </ul>
-            `}
+            `
+          : groups.map((group) => {
+              const collapsed = this.collapsedGroups.has(group.name);
+              return html`
+                <div class="group-header" @click=${() => this.toggleGroupCollapse(group.name)}>
+                  <svg class="chevron ${collapsed ? '' : 'expanded'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="9 18 15 12 9 6"></polyline>
+                  </svg>
+                  <span class="group-name">${group.name}</span>
+                  <span class="group-count">${group.tags.length}</span>
+                </div>
+                ${!collapsed ? html`
+                  <ul class="tag-list">
+                    ${group.tags.map((tag) => this.renderTagItem(tag))}
+                  </ul>
+                ` : nothing}
+              `;
+            })}
 
       ${this.renderContextMenu()}
 

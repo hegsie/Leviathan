@@ -3,6 +3,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { dragDropService, type DragItem } from '../../services/drag-drop.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
 import { fuzzyScore } from '../../utils/fuzzy-search.ts';
@@ -1114,6 +1115,98 @@ export class LvBranchList extends LitElement {
     this.createBranchDialog.open(branch.shorthand);
   }
 
+  private async handleTrackRemoteBranch(): Promise<void> {
+    const branch = this.contextMenu.branch;
+    if (!branch || !branch.isRemote) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    const localName = branch.shorthand;
+    const remoteBranchRef = branch.name;
+
+    try {
+      const createResult = await gitService.createBranch(this.repositoryPath, {
+        name: localName,
+        startPoint: remoteBranchRef,
+        checkout: false,
+      });
+
+      if (!createResult.success) {
+        showToast(`Failed to create branch: ${createResult.error?.message ?? 'Unknown error'}`, 'error');
+        return;
+      }
+
+      const upstreamResult = await gitService.setUpstreamBranch(
+        this.repositoryPath,
+        localName,
+        remoteBranchRef,
+      );
+
+      if (upstreamResult.success) {
+        showToast(`Tracking ${remoteBranchRef} as ${localName}`, 'success');
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+      } else {
+        showToast(`Failed to set upstream: ${upstreamResult.error?.message ?? 'Unknown error'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`Failed to track branch: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    }
+  }
+
+  private async handleSetUpstream(): Promise<void> {
+    const branch = this.contextMenu.branch;
+    if (!branch || branch.isRemote) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    const defaultUpstream = branch.upstream ?? `origin/${branch.shorthand}`;
+    const upstream = prompt(`Set upstream for "${branch.shorthand}":`, defaultUpstream);
+    if (!upstream) return;
+
+    try {
+      const result = await gitService.setUpstreamBranch(
+        this.repositoryPath,
+        branch.name,
+        upstream.trim(),
+      );
+
+      if (result.success) {
+        showToast(`Upstream set to ${upstream.trim()}`, 'success');
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+      } else {
+        showToast(`Failed to set upstream: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`Failed to set upstream: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    }
+  }
+
+  private async handleUnsetUpstream(): Promise<void> {
+    const branch = this.contextMenu.branch;
+    if (!branch || branch.isRemote) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+
+    try {
+      const result = await gitService.unsetUpstreamBranch(
+        this.repositoryPath,
+        branch.name,
+      );
+
+      if (result.success) {
+        showToast(`Upstream removed for ${branch.shorthand}`, 'success');
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+      } else {
+        showToast(`Failed to unset upstream: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`Failed to unset upstream: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    }
+  }
+
   private renderBranchIcon(isHead: boolean) {
     if (isHead) {
       return html`
@@ -1547,6 +1640,18 @@ export class LvBranchList extends LitElement {
           Create branch from here
         </button>
 
+        ${!isLocal ? html`
+          <button class="context-menu-item" @click=${this.handleTrackRemoteBranch}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"></path>
+              <circle cx="8.5" cy="7" r="4"></circle>
+              <line x1="20" y1="8" x2="20" y2="14"></line>
+              <line x1="23" y1="11" x2="17" y2="11"></line>
+            </svg>
+            Track this branch
+          </button>
+        ` : ''}
+
         <button class="context-menu-item" @click=${() => { this.toggleHideBranch(branch.name); this.contextMenu = { ...this.contextMenu, visible: false }; }}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             ${this.hiddenBranches.has(branch.name)
@@ -1587,6 +1692,24 @@ export class LvBranchList extends LitElement {
         ` : ''}
 
         ${isLocal && !isHead ? html`
+          <div class="context-menu-divider"></div>
+          <button class="context-menu-item" @click=${this.handleSetUpstream}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="15 3 21 3 21 9"></polyline>
+              <line x1="21" y1="3" x2="14" y2="10"></line>
+              <path d="M10 14L3 21"></path>
+            </svg>
+            ${branch.upstream ? 'Change Upstream...' : 'Set Upstream...'}
+          </button>
+          ${branch.upstream ? html`
+            <button class="context-menu-item" @click=${this.handleUnsetUpstream}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+              Unset Upstream
+            </button>
+          ` : ''}
           <div class="context-menu-divider"></div>
           <button class="context-menu-item" @click=${this.handleRenameBranch}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
