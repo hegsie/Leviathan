@@ -28,7 +28,7 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 - **Staging refinements**
   - ✅ Line-level staging (stage/unstage individual lines within hunks)
   - ✅ Better visual feedback for partially staged files
-  - Preserve partial staging during file edits
+  - ✅ Preserve partial staging during file edits
 
 - **Commit operations**
   - ✅ Commit message templates with variables
@@ -63,36 +63,36 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 #### UX Polish
 
 - **Keyboard shortcuts**
-  - Comprehensive keyboard navigation (already strong, refine coverage)
-  - Customizable keyboard shortcut editor
-  - Vim-style navigation improvements
-  - Quick switcher (files, branches, commits) (✅ done)
+  - ✅ Comprehensive keyboard navigation
+  - ✅ Customizable keyboard shortcut editor
+  - ✅ Vim-style navigation
+  - ✅ Quick switcher (files, branches, commits)
 
 - **Visual themes**
   - Dark/light themes (✅ done)
   - Syntax highlighting themes (✅ done)
-  - Custom color schemes for graph and UI
-  - Compact/comfortable/spacious density settings
+  - ✅ Custom color schemes for graph and UI
+  - ✅ Compact/comfortable/spacious density settings
 
 - **Responsiveness & feedback**
-  - Clear progress indicators for long operations
-  - Cancellation support for fetch/clone/push
-  - Better error messages with suggested fixes
-  - Toast notifications for background operations
+  - ✅ Clear progress indicators for long operations
+  - ✅ Cancellation support for fetch/clone/push
+  - ✅ Better error messages with suggested fixes
+  - ✅ Toast notifications for background operations
 
 #### Performance & Reliability
 
 - **Large repository handling**
-  - Virtual scrolling improvements (already implemented, refine)
-  - Lazy loading for commit history (✅ done)
+  - ✅ Virtual scrolling improvements
+  - ✅ Lazy loading for commit history
   - Background indexing for faster searches
   - Memory optimization for huge diffs
 
 - **Robustness**
   - Operation timeout handling
-  - Conflict detection and recovery
-  - Repository health checks
-  - Automatic fsck and gc recommendations
+  - ✅ Conflict detection and recovery
+  - ✅ Repository health checks
+  - ✅ Automatic fsck and gc recommendations
 
 ---
 
