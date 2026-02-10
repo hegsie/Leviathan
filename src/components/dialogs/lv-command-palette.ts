@@ -7,12 +7,12 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { fuzzyScore, highlightMatch } from '../../utils/fuzzy-search.ts';
-import type { Branch } from '../../types/git.types.ts';
+import type { Branch, Commit } from '../../types/git.types.ts';
 
 export interface PaletteCommand {
   id: string;
   label: string;
-  category: 'action' | 'branch' | 'recent' | 'navigation';
+  category: 'action' | 'branch' | 'recent' | 'navigation' | 'file' | 'commit';
   icon?: string;
   shortcut?: string;
   action: () => void;
@@ -199,6 +199,8 @@ export class LvCommandPalette extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: Array }) commands: PaletteCommand[] = [];
   @property({ type: Array }) branches: Branch[] = [];
+  @property({ type: Array }) files: string[] = [];
+  @property({ type: Array }) commits: Commit[] = [];
 
   @state() private searchQuery = '';
   @state() private selectedIndex = 0;
@@ -222,7 +224,7 @@ export class LvCommandPalette extends LitElement {
         this.searchInput?.focus();
       });
     }
-    if (changedProps.has('commands') || changedProps.has('branches')) {
+    if (changedProps.has('commands') || changedProps.has('branches') || changedProps.has('files') || changedProps.has('commits')) {
       this.updateFilteredCommands();
     }
   }
@@ -256,31 +258,66 @@ export class LvCommandPalette extends LitElement {
       },
     }));
 
-    return [...this.commands, ...branchCommands];
+    const fileCommands: PaletteCommand[] = this.files.map(filePath => ({
+      id: `file:${filePath}`,
+      label: filePath,
+      category: 'file' as const,
+      icon: 'file',
+      action: () => {
+        this.dispatchEvent(new CustomEvent('open-file', {
+          detail: { path: filePath },
+          bubbles: true,
+          composed: true,
+        }));
+      },
+    }));
+
+    const commitCommands: PaletteCommand[] = this.commits.map(commit => ({
+      id: `commit:${commit.oid}`,
+      label: `${commit.shortId} ${commit.summary}`,
+      category: 'commit' as const,
+      icon: 'commit',
+      action: () => {
+        this.dispatchEvent(new CustomEvent('navigate-to-commit', {
+          detail: { oid: commit.oid },
+          bubbles: true,
+          composed: true,
+        }));
+      },
+    }));
+
+    return [...this.commands, ...branchCommands, ...fileCommands, ...commitCommands];
   }
 
   private updateFilteredCommands(): void {
     const allCommands = this.getAllCommands();
     const query = this.searchQuery.toLowerCase().trim();
+    const includeFileCommit = query.length >= 2;
 
     if (!query) {
-      // Show recent commands first, then all commands grouped by category
+      // Show recent commands first, then action/branch/navigation commands only
+      const baseCommands = allCommands.filter(c => c.category !== 'file' && c.category !== 'commit');
       const recent = this.recentCommands
-        .map(id => allCommands.find(c => c.id === id))
+        .map(id => baseCommands.find(c => c.id === id))
         .filter((c): c is PaletteCommand => c !== undefined)
         .map(c => ({ ...c, category: 'recent' as const }));
 
-      const others = allCommands.filter(c => !this.recentCommands.includes(c.id));
+      const others = baseCommands.filter(c => !this.recentCommands.includes(c.id));
       this.filteredCommands = [...recent, ...others];
     } else {
-      // Fuzzy filter
-      this.filteredCommands = allCommands
+      // Filter commands, excluding file/commit when query is too short
+      const searchable = includeFileCommit
+        ? allCommands
+        : allCommands.filter(c => c.category !== 'file' && c.category !== 'commit');
+
+      this.filteredCommands = searchable
         .map(cmd => ({
           cmd,
           score: fuzzyScore(cmd.label, query),
         }))
         .filter(({ score }) => score > 0)
         .sort((a, b) => b.score - a.score)
+        .slice(0, 50)
         .map(({ cmd }) => cmd);
     }
 
@@ -355,6 +392,11 @@ export class LvCommandPalette extends LitElement {
           <circle cx="18" cy="6" r="3"></circle>
           <circle cx="6" cy="18" r="3"></circle>
           <path d="M18 9a9 9 0 0 1-9 9"></path>
+        </svg>`;
+      case 'file':
+        return html`<svg class="command-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
         </svg>`;
       case 'commit':
         return html`<svg class="command-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -455,6 +497,8 @@ export class LvCommandPalette extends LitElement {
       case 'action': return 'Actions';
       case 'branch': return 'Branches';
       case 'navigation': return 'Navigation';
+      case 'file': return 'Files';
+      case 'commit': return 'Commits';
       default: return category;
     }
   }
@@ -512,7 +556,7 @@ export class LvCommandPalette extends LitElement {
           <input
             class="search-input"
             type="text"
-            placeholder="Search commands..."
+            placeholder="Search commands, files, commits..."
             .value=${this.searchQuery}
             @input=${this.handleInput}
             @keydown=${this.handleKeyDown}

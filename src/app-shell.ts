@@ -455,6 +455,7 @@ export class AppShell extends LitElement {
   // Command palette
   @state() private showCommandPalette = false;
   @state() private branches: Branch[] = [];
+  @state() private trackedFiles: string[] = [];
 
   // File history
   @state() private showFileHistory = false;
@@ -1541,11 +1542,18 @@ export class AppShell extends LitElement {
   }
 
   private async openCommandPalette(): Promise<void> {
-    // Fetch branches for quick switching
+    // Fetch branches and tracked files for quick switching
     if (this.activeRepository) {
-      const result = await gitService.getBranches(this.activeRepository.repository.path);
-      if (result.success && result.data) {
-        this.branches = result.data;
+      const path = this.activeRepository.repository.path;
+      const [branchResult, filesResult] = await Promise.all([
+        gitService.getBranches(path),
+        gitService.listTrackedFiles(path),
+      ]);
+      if (branchResult.success && branchResult.data) {
+        this.branches = branchResult.data;
+      }
+      if (filesResult.success && filesResult.data) {
+        this.trackedFiles = filesResult.data;
       }
     }
     this.showCommandPalette = true;
@@ -1951,6 +1959,15 @@ export class AppShell extends LitElement {
       log.error('Failed to checkout branch:', result.data?.message || result.error);
       showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Failed to checkout branch');
     }
+  }
+
+  private async handleOpenFileFromPalette(e: CustomEvent<{ path: string }>): Promise<void> {
+    if (!this.activeRepository) return;
+    await gitService.openInConfiguredEditor(this.activeRepository.repository.path, e.detail.path);
+  }
+
+  private handleNavigateToCommit(e: CustomEvent<{ oid: string }>): void {
+    this.graphCanvas?.selectCommit(e.detail.oid);
   }
 
   private handleShowFileHistory(e: CustomEvent<{ filePath: string }>): void {
@@ -2380,8 +2397,12 @@ export class AppShell extends LitElement {
         ?open=${this.showCommandPalette}
         .commands=${this.getPaletteCommands()}
         .branches=${this.branches}
+        .files=${this.trackedFiles}
+        .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
         @close=${() => { this.showCommandPalette = false; }}
         @checkout-branch=${this.handleCheckoutBranch}
+        @open-file=${this.handleOpenFileFromPalette}
+        @navigate-to-commit=${this.handleNavigateToCommit}
       ></lv-command-palette>
 
       ${this.activeRepository ? html`
