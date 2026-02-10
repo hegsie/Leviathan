@@ -38,6 +38,7 @@ import './components/dialogs/lv-migration-dialog.ts';
 import './components/dialogs/lv-create-tag-dialog.ts';
 import './components/dialogs/lv-create-branch-dialog.ts';
 import './components/dialogs/lv-cherry-pick-dialog.ts';
+import './components/dialogs/lv-interactive-rebase-dialog.ts';
 import './components/dialogs/lv-repository-health-dialog.ts';
 import './components/panels/lv-file-history.ts';
 import './components/common/lv-toast-container.ts';
@@ -49,6 +50,7 @@ import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-g
 import type { LvCreateTagDialog } from './components/dialogs/lv-create-tag-dialog.ts';
 import type { LvCreateBranchDialog } from './components/dialogs/lv-create-branch-dialog.ts';
 import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dialog.ts';
+import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interactive-rebase-dialog.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
@@ -531,6 +533,7 @@ export class AppShell extends LitElement {
   @query('lv-create-tag-dialog') private createTagDialog?: LvCreateTagDialog;
   @query('lv-create-branch-dialog') private createBranchDialog?: LvCreateBranchDialog;
   @query('lv-cherry-pick-dialog') private cherryPickDialog?: LvCherryPickDialog;
+  @query('#app-rebase-dialog') private interactiveRebaseDialog?: LvInteractiveRebaseDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -1254,17 +1257,10 @@ export class AppShell extends LitElement {
         detail: { commit },
       }));
     } else {
-      // For other commits, dispatch event to open interactive rebase dialog
-      // pre-configured for rewording this commit
-      this.dispatchEvent(new CustomEvent('open-interactive-rebase', {
-        bubbles: true,
-        composed: true,
-        detail: {
-          upstreamRef: `${commit.oid}^`,
-          mode: 'reword',
-          targetCommitOid: commit.oid,
-        },
-      }));
+      // For other commits, open interactive rebase dialog pre-configured for rewording
+      this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
+        rewordCommitOid: commit.oid,
+      });
     }
   }
 
@@ -2508,6 +2504,11 @@ export class AppShell extends LitElement {
           @cherry-pick-complete=${this.handleCherryPickComplete}
           @cherry-pick-conflict=${this.handleCherryPickConflict}
         ></lv-cherry-pick-dialog>
+        <lv-interactive-rebase-dialog
+          id="app-rebase-dialog"
+          .repositoryPath=${this.activeRepository.repository.path}
+          @rebase-complete=${() => this.handleRefresh()}
+        ></lv-interactive-rebase-dialog>
       ` : ''}
 
       <lv-toast-container></lv-toast-container>
