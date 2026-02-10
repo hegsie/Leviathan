@@ -379,6 +379,7 @@ pub async fn get_common_settings(path: String) -> Result<Vec<ConfigEntry>> {
         "fetch.prune",
         "merge.ff",
         "merge.conflictstyle",
+        "rebase.autoStash",
         "diff.colorMoved",
         "init.defaultBranch",
         "credential.helper",
