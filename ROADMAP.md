@@ -26,39 +26,39 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 #### Core Commit Workflow
 
 - **Staging refinements**
-  - Line-level staging (stage/unstage individual lines within hunks)
-  - Better visual feedback for partially staged files
+  - ✅ Line-level staging (stage/unstage individual lines within hunks)
+  - ✅ Better visual feedback for partially staged files
   - Preserve partial staging during file edits
 
 - **Commit operations**
-  - Commit message templates with variables
-  - Auto-populate from .gitmessage
-  - Conventional commits support
-  - Quick amend/reword/fixup/squash from history
+  - ✅ Commit message templates with variables
+  - ✅ Auto-populate from .gitmessage
+  - ✅ Conventional commits support
+  - ✅ Quick amend/reword/fixup/squash from history
 
 - **Auto-stashing**
-  - Auto-stash on checkout with conflicts
-  - Smart stash application after branch switch
-  - Stash conflict resolution
+  - ✅ Auto-stash on checkout with conflicts
+  - ✅ Smart stash application after branch switch
+  - ✅ Stash conflict resolution
 
 #### Repository Browsing & Navigation
 
 - **Branch management**
-  - Clearer branch list with grouping (local/remote/stale)
-  - Quick branch switching with fuzzy search
-  - Branch health indicators (ahead/behind, last commit date)
-  - Delete merged branches in bulk
+  - ✅ Clearer branch list with grouping (local/remote/stale)
+  - ✅ Quick branch switching with fuzzy search
+  - ✅ Branch health indicators (ahead/behind, last commit date)
+  - ✅ Delete merged branches in bulk
 
 - **Log view improvements**
-  - Search and filtering by author, message, date range, file path
-  - Save filter presets
-  - Performance for repositories with 100k+ commits
-  - Blame integration from log view
+  - ✅ Search and filtering by author, message, date range, file path
+  - ✅ Save filter presets
+  - ✅ Performance for repositories with 100k+ commits
+  - ✅ Blame integration from log view
 
 - **Tags & remotes**
-  - Better tag visualization in graph
-  - Remote management improvements
-  - Quick remote branch tracking setup
+  - ✅ Better tag visualization in graph
+  - ✅ Remote management improvements
+  - ✅ Quick remote branch tracking setup
 
 #### UX Polish
 
@@ -674,4 +674,4 @@ This roadmap is a living document and will be updated regularly based on:
 - Changes in the Git ecosystem and related tools
 - Security and performance considerations
 
-Last updated: 2026-01-24
+Last updated: 2026-02-10
