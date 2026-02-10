@@ -11,6 +11,12 @@ export interface SearchFilter {
   branch: string;
 }
 
+export interface FilterPreset {
+  id: string;
+  name: string;
+  filter: SearchFilter;
+}
+
 @customElement('lv-search-bar')
 export class LvSearchBar extends LitElement {
   static styles = [
@@ -180,8 +186,65 @@ export class LvSearchBar extends LitElement {
       .wrapper {
         position: relative;
       }
+
+      .preset-list {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--border-color);
+      }
+
+      .preset-list-title {
+        font-size: 11px;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
+      }
+
+      .preset-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+        color: var(--text-primary);
+      }
+
+      .preset-item:hover {
+        background: var(--hover-background);
+      }
+
+      .preset-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .preset-delete {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+        border-radius: 3px;
+        padding: 0;
+        flex-shrink: 0;
+      }
+
+      .preset-delete:hover {
+        background: var(--hover-background);
+        color: var(--text-primary);
+      }
     `,
   ];
+
+  private static readonly PRESETS_STORAGE_KEY = 'leviathan-search-filter-presets';
+  private static readonly PRESETS_MAX = 10;
 
   @property({ type: Boolean }) expanded = false;
   @property({ type: Number }) resultCount = 0;
@@ -194,11 +257,81 @@ export class LvSearchBar extends LitElement {
   @state() private filePath = '';
   @state() private branch = '';
   @state() private showFilters = false;
+  @state() private presets: FilterPreset[] = [];
 
   @query('input[type="text"]') private inputEl!: HTMLInputElement;
 
+  connectedCallback(): void {
+    super.connectedCallback();
+    this.loadPresets();
+  }
+
   focus(): void {
     this.inputEl?.focus();
+  }
+
+  private loadPresets(): void {
+    try {
+      const stored = localStorage.getItem(LvSearchBar.PRESETS_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          this.presets = parsed.slice(0, LvSearchBar.PRESETS_MAX);
+        }
+      }
+    } catch {
+      // localStorage unavailable or corrupt - silently ignore
+    }
+  }
+
+  private savePreset(name: string): void {
+    const preset: FilterPreset = {
+      id: `preset-${Date.now()}`,
+      name,
+      filter: {
+        query: this.query,
+        author: this.author,
+        dateFrom: this.dateFrom,
+        dateTo: this.dateTo,
+        filePath: this.filePath,
+        branch: this.branch,
+      },
+    };
+
+    const updated = [preset, ...this.presets].slice(0, LvSearchBar.PRESETS_MAX);
+    this.presets = updated;
+    try {
+      localStorage.setItem(LvSearchBar.PRESETS_STORAGE_KEY, JSON.stringify(updated));
+    } catch {
+      // localStorage quota exceeded or unavailable - silently ignore
+    }
+  }
+
+  private loadPreset(preset: FilterPreset): void {
+    this.query = preset.filter.query;
+    this.author = preset.filter.author;
+    this.dateFrom = preset.filter.dateFrom;
+    this.dateTo = preset.filter.dateTo;
+    this.filePath = preset.filter.filePath;
+    this.branch = preset.filter.branch;
+    this.emitSearch();
+  }
+
+  private deletePreset(id: string): void {
+    const updated = this.presets.filter((p) => p.id !== id);
+    this.presets = updated;
+    try {
+      localStorage.setItem(LvSearchBar.PRESETS_STORAGE_KEY, JSON.stringify(updated));
+    } catch {
+      // localStorage quota exceeded or unavailable - silently ignore
+    }
+  }
+
+  private handleSavePreset(): void {
+    const name = window.prompt('Preset name:');
+    if (name?.trim()) {
+      this.savePreset(name.trim());
+    }
   }
 
   private handleInput(e: Event): void {
@@ -391,8 +524,38 @@ export class LvSearchBar extends LitElement {
 
                 <div class="filter-actions">
                   <button @click=${this.clearFilters}>Clear Filters</button>
+                  <button @click=${this.handleSavePreset}>Save Preset</button>
                   <button class="primary" @click=${this.applyFilters}>Apply</button>
                 </div>
+                ${this.presets.length > 0
+                  ? html`
+                      <div class="preset-list">
+                        <div class="preset-list-title">Saved Presets</div>
+                        ${this.presets.map(
+                          (preset) => html`
+                            <div
+                              class="preset-item"
+                              @click=${() => this.loadPreset(preset)}
+                            >
+                              <span class="preset-name">${preset.name}</span>
+                              <button
+                                class="preset-delete"
+                                @click=${(e: Event) => {
+                                  e.stopPropagation();
+                                  this.deletePreset(preset.id);
+                                }}
+                                title="Delete preset"
+                              >
+                                <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor">
+                                  <path d="M6 4.586L1.707.293A1 1 0 00.293 1.707L4.586 6 .293 10.293a1 1 0 101.414 1.414L6 7.414l4.293 4.293a1 1 0 001.414-1.414L7.414 6l4.293-4.293A1 1 0 0010.293.293L6 4.586z"/>
+                                </svg>
+                              </button>
+                            </div>
+                          `
+                        )}
+                      </div>
+                    `
+                  : null}
               </div>
             `
           : null}
