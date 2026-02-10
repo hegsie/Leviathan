@@ -893,37 +893,28 @@ export class LvBranchList extends LitElement {
     // Close context menu immediately
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    const { autoStashOnCheckout } = settingsStore.getState();
-
     // Use branch.name for both local and remote branches
     // - For local branches: branch.name is the branch name (e.g., "main", "feature/my-branch")
     // - For remote branches: branch.name is the full remote reference (e.g., "origin/feature/my-branch")
-    if (autoStashOnCheckout) {
-      const result = await gitService.checkoutWithAutoStash(this.repositoryPath, branch.name);
-      if (result.success) {
-        await this.loadBranches();
-        this.dispatchEvent(new CustomEvent('branch-checkout', {
-          detail: { branch },
-          bubbles: true,
-          composed: true,
-        }));
-      } else {
-        console.error('Checkout with auto-stash failed:', result.error);
+    const result = await gitService.checkoutWithAutoStash(this.repositoryPath, branch.name);
+
+    if (result.success && result.data?.success) {
+      const data = result.data;
+      if (data.stashed && data.stashConflict) {
+        showToast(`Switched to ${branch.shorthand} — stash conflicts need resolution`, 'warning');
+      } else if (data.stashed && data.stashApplied) {
+        showToast(`Switched to ${branch.shorthand} (changes re-applied)`, 'info');
+      } else if (data.stashed && !data.stashApplied) {
+        showToast(data.message, 'warning');
       }
+      await this.loadBranches();
+      this.dispatchEvent(new CustomEvent('branch-checkout', {
+        detail: { branch },
+        bubbles: true,
+        composed: true,
+      }));
     } else {
-      const result = await gitService.checkout(this.repositoryPath, {
-        refName: branch.name
-      });
-      if (result.success) {
-        await this.loadBranches();
-        this.dispatchEvent(new CustomEvent('branch-checkout', {
-          detail: { branch },
-          bubbles: true,
-          composed: true,
-        }));
-      } else {
-        console.error('Checkout failed:', result.error);
-      }
+      console.error('Checkout failed:', result.data?.message || result.error);
     }
   }
 
@@ -1448,14 +1439,20 @@ export class LvBranchList extends LitElement {
       );
       if (!confirmed) return;
 
-      // First checkout target branch
-      const checkoutResult = await gitService.checkout(this.repositoryPath, {
-        refName: targetBranch.shorthand
-      });
+      // First checkout target branch (with auto-stash for uncommitted changes)
+      const checkoutResult = await gitService.checkoutWithAutoStash(this.repositoryPath, targetBranch.shorthand);
 
-      if (!checkoutResult.success) {
-        console.error('Checkout failed:', checkoutResult.error);
+      if (!checkoutResult.success || !checkoutResult.data?.success) {
+        console.error('Checkout failed:', checkoutResult.data?.message || checkoutResult.error);
         return;
+      }
+
+      if (checkoutResult.data.stashed && checkoutResult.data.stashConflict) {
+        showToast(`Switched to ${targetBranch.shorthand} — stash conflicts need resolution`, 'warning');
+      } else if (checkoutResult.data.stashed && checkoutResult.data.stashApplied) {
+        showToast(`Switched to ${targetBranch.shorthand} (changes re-applied)`, 'info');
+      } else if (checkoutResult.data.stashed && !checkoutResult.data.stashApplied) {
+        showToast(checkoutResult.data.message, 'warning');
       }
 
       // Then perform the action

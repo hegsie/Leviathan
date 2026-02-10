@@ -8,6 +8,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import type { Tag } from '../../types/git.types.ts';
 import '../dialogs/lv-create-tag-dialog.ts';
 import type { LvCreateTagDialog } from '../dialogs/lv-create-tag-dialog.ts';
@@ -457,18 +458,24 @@ export class LvTagList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    const result = await gitService.checkout(this.repositoryPath, {
-      refName: tag.name,
-    });
+    const result = await gitService.checkoutWithAutoStash(this.repositoryPath, tag.name);
 
-    if (result.success) {
+    if (result.success && result.data?.success) {
+      const data = result.data;
+      if (data.stashed && data.stashConflict) {
+        showToast(`Switched to ${tag.name} — stash conflicts need resolution`, 'warning');
+      } else if (data.stashed && data.stashApplied) {
+        showToast(`Switched to ${tag.name} (changes re-applied)`, 'info');
+      } else if (data.stashed && !data.stashApplied) {
+        showToast(data.message, 'warning');
+      }
       this.dispatchEvent(new CustomEvent('tag-checkout', {
         detail: { tag },
         bubbles: true,
         composed: true,
       }));
     } else {
-      console.error('Failed to checkout tag:', result.error);
+      console.error('Failed to checkout tag:', result.data?.message || result.error);
     }
   }
 

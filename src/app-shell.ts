@@ -887,16 +887,27 @@ export class AppShell extends LitElement {
     const refName = this.refContextMenu.refName;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
-    const result = await gitService.checkout(
+    const result = await gitService.checkoutWithAutoStash(
       this.activeRepository.repository.path,
-      { refName }
+      refName
     );
 
-    if (result.success) {
+    if (result.success && result.data?.success) {
+      this.handleAutoStashToast(result.data, refName);
       this.graphCanvas?.refresh?.();
     } else {
-      log.error('Checkout failed:', result.error);
-      showErrorWithSuggestion(result.error?.message || '', 'Checkout failed');
+      log.error('Checkout failed:', result.data?.message || result.error);
+      showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Checkout failed');
+    }
+  }
+
+  private handleAutoStashToast(data: gitService.CheckoutWithStashResult, refName: string): void {
+    if (data.stashed && data.stashConflict) {
+      showToast(`Switched to ${refName} — stash conflicts need resolution`, 'warning');
+    } else if (data.stashed && data.stashApplied) {
+      showToast(`Switched to ${refName} (changes re-applied)`, 'info');
+    } else if (data.stashed && !data.stashApplied) {
+      showToast(data.message, 'warning');
     }
   }
 
@@ -1371,13 +1382,14 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const branchName = e.detail.branchName;
-    const result = await gitService.checkout(this.activeRepository.repository.path, { refName: branchName });
+    const result = await gitService.checkoutWithAutoStash(this.activeRepository.repository.path, branchName);
 
-    if (result.success) {
+    if (result.success && result.data?.success) {
+      this.handleAutoStashToast(result.data, branchName);
       this.handleRefresh();
     } else {
-      log.error('Failed to checkout branch:', result.error);
-      showErrorWithSuggestion(result.error?.message || '', 'Failed to checkout branch');
+      log.error('Failed to checkout branch:', result.data?.message || result.error);
+      showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Failed to checkout branch');
     }
   }
 
@@ -1928,8 +1940,17 @@ export class AppShell extends LitElement {
 
   private async handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.checkout(this.activeRepository.repository.path, { refName: e.detail.branch });
-    this.handleRefresh();
+
+    const branch = e.detail.branch;
+    const result = await gitService.checkoutWithAutoStash(this.activeRepository.repository.path, branch);
+
+    if (result.success && result.data?.success) {
+      this.handleAutoStashToast(result.data, branch);
+      this.handleRefresh();
+    } else {
+      log.error('Failed to checkout branch:', result.data?.message || result.error);
+      showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Failed to checkout branch');
+    }
   }
 
   private handleShowFileHistory(e: CustomEvent<{ filePath: string }>): void {
