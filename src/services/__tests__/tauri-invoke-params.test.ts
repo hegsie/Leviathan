@@ -203,6 +203,61 @@ describe('Tauri Invoke Parameter Naming', () => {
     });
   });
 
+  describe('getMergeToolConfig command', () => {
+    it('should use camelCase for all parameters', async () => {
+      await gitService.getMergeToolConfig('/test/repo');
+
+      expect(invokeCalls.length).to.equal(1);
+      expect(invokeCalls[0].command).to.equal('get_merge_tool_config');
+
+      const snakeCaseKeys = getSnakeCaseKeys(invokeCalls[0].args);
+      expect(snakeCaseKeys).to.deep.equal(
+        [],
+        `Found snake_case parameters: ${snakeCaseKeys.join(', ')}`
+      );
+    });
+  });
+
+  describe('setMergeToolConfig command', () => {
+    it('should use camelCase for all parameters', async () => {
+      await gitService.setMergeToolConfig('/test/repo', 'kdiff3', '/usr/bin/kdiff3');
+
+      expect(invokeCalls.length).to.equal(1);
+      expect(invokeCalls[0].command).to.equal('set_merge_tool_config');
+
+      const snakeCaseKeys = getSnakeCaseKeys(invokeCalls[0].args);
+      expect(snakeCaseKeys).to.deep.equal(
+        [],
+        `Found snake_case parameters: ${snakeCaseKeys.join(', ')}`
+      );
+
+      // Verify specific parameters are camelCase
+      expect(invokeCalls[0].args).to.have.property('toolName');
+      expect(invokeCalls[0].args).to.have.property('toolCmd');
+      expect(invokeCalls[0].args).to.not.have.property('tool_name');
+      expect(invokeCalls[0].args).to.not.have.property('tool_cmd');
+    });
+  });
+
+  describe('launchMergeTool command', () => {
+    it('should use camelCase for all parameters', async () => {
+      await gitService.launchMergeTool('/test/repo', 'src/file.ts');
+
+      expect(invokeCalls.length).to.equal(1);
+      expect(invokeCalls[0].command).to.equal('launch_merge_tool');
+
+      const snakeCaseKeys = getSnakeCaseKeys(invokeCalls[0].args);
+      expect(snakeCaseKeys).to.deep.equal(
+        [],
+        `Found snake_case parameters: ${snakeCaseKeys.join(', ')}`
+      );
+
+      // Verify specific parameters are camelCase
+      expect(invokeCalls[0].args).to.have.property('filePath');
+      expect(invokeCalls[0].args).to.not.have.property('file_path');
+    });
+  });
+
   describe('All commands - generic snake_case check', () => {
     it('should never pass snake_case parameters to any Tauri command', async () => {
       // Call various commands to populate invokeCalls
@@ -212,6 +267,10 @@ describe('Tauri Invoke Parameter Naming', () => {
       await gitService.applyStash({ path: '/test', index: 0 });
       await gitService.cherryPick({ path: '/test', commitOid: 'abc' });
       await gitService.revert({ path: '/test', commitOid: 'abc' });
+      await gitService.getMergeToolConfig('/test');
+      await gitService.setMergeToolConfig('/test', 'kdiff3', '/usr/bin/kdiff3');
+      await gitService.launchMergeTool('/test', 'file.ts');
+      await gitService.getAvailableMergeTools();
 
       // Check all calls for snake_case
       const violations: string[] = [];

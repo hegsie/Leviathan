@@ -311,6 +311,8 @@ export class LvConflictResolutionDialog extends LitElement {
   @state() private loading = false;
   @state() private aborting = false;
   @state() private showAbortConfirm = false;
+  @state() private hasMergeTool = false;
+  @state() private launchingExternalTool: string | null = null;
 
   @query('lv-merge-editor') private mergeEditor?: LvMergeEditor;
 
@@ -382,6 +384,47 @@ export class LvConflictResolutionDialog extends LitElement {
       console.error('Failed to load conflicts:', err);
     } finally {
       this.loading = false;
+    }
+
+    await this.checkMergeToolAvailability();
+  }
+
+  private async checkMergeToolAvailability(): Promise<void> {
+    if (!this.repositoryPath) return;
+    try {
+      const result = await gitService.getMergeToolConfig(this.repositoryPath);
+      this.hasMergeTool = result.success && !!result.data?.toolName;
+    } catch {
+      this.hasMergeTool = false;
+    }
+  }
+
+  private async handleOpenExternalTool(conflictPath: string): Promise<void> {
+    if (!this.repositoryPath) return;
+
+    this.launchingExternalTool = conflictPath;
+    try {
+      const result = await gitService.launchMergeTool(this.repositoryPath, conflictPath);
+      if (result.success && result.data?.success) {
+        this.resolvedFiles = new Set([...this.resolvedFiles, conflictPath]);
+        this.requestUpdate();
+        this.dispatchEvent(new CustomEvent('show-toast', {
+          bubbles: true, composed: true,
+          detail: { message: 'Merge tool completed', type: 'success' },
+        }));
+      } else {
+        this.dispatchEvent(new CustomEvent('show-toast', {
+          bubbles: true, composed: true,
+          detail: { message: result.data?.message ?? result.error?.message ?? 'Merge tool failed', type: 'error' },
+        }));
+      }
+    } catch {
+      this.dispatchEvent(new CustomEvent('show-toast', {
+        bubbles: true, composed: true,
+        detail: { message: 'Failed to launch merge tool', type: 'error' },
+      }));
+    } finally {
+      this.launchingExternalTool = null;
     }
   }
 
@@ -619,6 +662,17 @@ export class LvConflictResolutionDialog extends LitElement {
                       <span class="file-name" title=${conflict.path}>
                         ${conflict.path.split('/').pop()}
                       </span>
+                      ${this.hasMergeTool && !this.resolvedFiles.has(conflict.path) ? html`
+                        <button
+                          class="btn btn-sm"
+                          style="margin-left: auto; padding: 2px 6px; font-size: 11px;"
+                          @click=${(e: Event) => { e.stopPropagation(); this.handleOpenExternalTool(conflict.path); }}
+                          ?disabled=${this.launchingExternalTool === conflict.path}
+                          title="Open in external merge tool"
+                        >
+                          ${this.launchingExternalTool === conflict.path ? '...' : 'External'}
+                        </button>
+                      ` : nothing}
                     </div>
                   `
                 )}

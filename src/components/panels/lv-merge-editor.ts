@@ -11,7 +11,7 @@
  * +-------------------------------------------------------+
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { codeStyles } from '../../styles/code-styles.ts';
@@ -436,6 +436,8 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   @state() private outputContent = '';
   @state() private loading = false;
   @state() private outputEditMode: 'visual' | 'raw' = 'visual';
+  @state() private launchingExternalTool = false;
+  @state() private hasMergeTool = false;
 
   /**
    * Maps output line index (within resolved segments) to resolution origin.
@@ -489,6 +491,47 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('conflictFile') && this.conflictFile) {
       await this.loadContents();
+    }
+    if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+      await this.checkMergeToolAvailability();
+    }
+  }
+
+  private async checkMergeToolAvailability(): Promise<void> {
+    if (!this.repositoryPath) return;
+    try {
+      const result = await gitService.getMergeToolConfig(this.repositoryPath);
+      this.hasMergeTool = result.success && !!result.data?.toolName;
+    } catch {
+      this.hasMergeTool = false;
+    }
+  }
+
+  private async handleOpenExternalMergeTool(): Promise<void> {
+    if (!this.repositoryPath || !this.conflictFile) return;
+
+    this.launchingExternalTool = true;
+    try {
+      const result = await gitService.launchMergeTool(this.repositoryPath, this.conflictFile.path);
+      if (result.success && result.data?.success) {
+        this.dispatchEvent(new CustomEvent('show-toast', {
+          bubbles: true, composed: true,
+          detail: { message: 'Merge tool completed', type: 'success' },
+        }));
+        await this.loadContents();
+      } else {
+        this.dispatchEvent(new CustomEvent('show-toast', {
+          bubbles: true, composed: true,
+          detail: { message: result.data?.message ?? result.error?.message ?? 'Merge tool failed', type: 'error' },
+        }));
+      }
+    } catch {
+      this.dispatchEvent(new CustomEvent('show-toast', {
+        bubbles: true, composed: true,
+        detail: { message: 'Failed to launch merge tool', type: 'error' },
+      }));
+    } finally {
+      this.launchingExternalTool = false;
     }
   }
 
@@ -957,6 +1000,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       <div class="toolbar">
         <span class="toolbar-title">${this.conflictFile.path}</span>
         <div class="toolbar-actions">
+          ${this.hasMergeTool ? html`
+            <button
+              class="btn"
+              @click=${this.handleOpenExternalMergeTool}
+              ?disabled=${this.launchingExternalTool}
+              title="Open in external merge tool"
+            >
+              ${this.launchingExternalTool ? 'Waiting for tool...' : 'External Tool'}
+            </button>
+          ` : nothing}
           <button class="btn" @click=${this.handleAcceptBase} title="Reset to common ancestor">
             Use Base
           </button>
