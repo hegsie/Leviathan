@@ -1935,6 +1935,7 @@ export class AppShell extends LitElement {
         @open-command-palette=${() => { this.showCommandPalette = true; }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
         @repository-refresh=${() => this.handleRefresh()}
+        @search-change=${this.handleSearchChange}
       ></lv-toolbar>
 
       ${this.activeRepository

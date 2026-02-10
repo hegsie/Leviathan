@@ -306,9 +306,9 @@ export class LvToolbar extends LitElement {
     }
   }
 
-  private handleSearchChange(e: CustomEvent<{ filter: SearchFilter }>): void {
+  private handleSearchChange(e: CustomEvent<SearchFilter>): void {
     this.dispatchEvent(new CustomEvent('search-change', {
-      detail: e.detail,
+      detail: { filter: e.detail },
       bubbles: true,
       composed: true,
     }));
@@ -318,7 +318,7 @@ export class LvToolbar extends LitElement {
     this.showSearch = false;
     // Clear search
     this.dispatchEvent(new CustomEvent('search-change', {
-      detail: { filter: { query: '', author: '', dateFrom: '', dateTo: '' } },
+      detail: { filter: { query: '', author: '', dateFrom: '', dateTo: '', filePath: '', branch: '' } },
       bubbles: true,
       composed: true,
     }));

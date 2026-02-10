@@ -231,6 +231,7 @@ describe('git.service - Tauri command invocations', () => {
       date_from: 1000,
       date_to: 2000,
       file_path: 'file.ts',
+      branch: undefined,
       limit: 50,
     });
   });

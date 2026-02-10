@@ -5,6 +5,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { dragDropService, type DragItem } from '../../services/drag-drop.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
+import { fuzzyScore } from '../../utils/fuzzy-search.ts';
 import '../dialogs/lv-create-branch-dialog.ts';
 import type { LvCreateBranchDialog } from '../dialogs/lv-create-branch-dialog.ts';
 import '../dialogs/lv-interactive-rebase-dialog.ts';
@@ -755,12 +756,17 @@ export class LvBranchList extends LitElement {
   private filterBranches(branches: Branch[]): Branch[] {
     let filtered = branches;
 
-    // Apply text filter
+    // Apply text filter with fuzzy matching
     if (this.filterText) {
-      const lower = this.filterText.toLowerCase();
-      filtered = filtered.filter(
-        (b) => b.name.toLowerCase().includes(lower) || b.shorthand.toLowerCase().includes(lower),
-      );
+      const query = this.filterText.toLowerCase();
+      filtered = filtered
+        .map((b) => ({
+          branch: b,
+          score: Math.max(fuzzyScore(b.name, query), fuzzyScore(b.shorthand, query)),
+        }))
+        .filter(({ score }) => score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map(({ branch }) => branch);
     }
 
     // Apply hide filter (still show but dimmed)
@@ -886,22 +892,37 @@ export class LvBranchList extends LitElement {
     // Close context menu immediately
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    const { autoStashOnCheckout } = settingsStore.getState();
+
     // Use branch.name for both local and remote branches
     // - For local branches: branch.name is the branch name (e.g., "main", "feature/my-branch")
     // - For remote branches: branch.name is the full remote reference (e.g., "origin/feature/my-branch")
-    const result = await gitService.checkout(this.repositoryPath, {
-      refName: branch.name
-    });
-
-    if (result.success) {
-      await this.loadBranches();
-      this.dispatchEvent(new CustomEvent('branch-checkout', {
-        detail: { branch },
-        bubbles: true,
-        composed: true,
-      }));
+    if (autoStashOnCheckout) {
+      const result = await gitService.checkoutWithAutoStash(this.repositoryPath, branch.name);
+      if (result.success) {
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branch-checkout', {
+          detail: { branch },
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Checkout with auto-stash failed:', result.error);
+      }
     } else {
-      console.error('Checkout failed:', result.error);
+      const result = await gitService.checkout(this.repositoryPath, {
+        refName: branch.name
+      });
+      if (result.success) {
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branch-checkout', {
+          detail: { branch },
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Checkout failed:', result.error);
+      }
     }
   }
 

@@ -259,7 +259,7 @@ export class LvGraphCanvas extends LitElement {
 
   @property({ type: Number }) commitCount = 1000;
   @property({ type: String }) repositoryPath = '';
-  @property({ type: Object }) searchFilter: { query: string; author: string; dateFrom: string; dateTo: string; filePath: string } | null = null;
+  @property({ type: Object }) searchFilter: { query: string; author: string; dateFrom: string; dateTo: string; filePath: string; branch: string } | null = null;
 
   @state() private layout: GraphLayout | null = null;
   @state() private selectedNode: LayoutNode | null = null; // Primary selection (for details panel)
@@ -473,7 +473,8 @@ export class LvGraphCanvas extends LitElement {
       this.searchFilter.author ||
       this.searchFilter.dateFrom ||
       this.searchFilter.dateTo ||
-      this.searchFilter.filePath
+      this.searchFilter.filePath ||
+      this.searchFilter.branch
     );
   }
 
@@ -550,6 +551,7 @@ export class LvGraphCanvas extends LitElement {
             ? new Date(this.searchFilter.dateTo).getTime() / 1000
             : undefined,
           filePath: this.searchFilter?.filePath || undefined,
+          branch: this.searchFilter?.branch || undefined,
           limit: this.commitCount,
         });
 
