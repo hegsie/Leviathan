@@ -27,6 +27,10 @@ pub struct MergeToolInfo {
     pub name: String,
     /// Human-readable display name
     pub display_name: String,
+    /// Command used to launch the tool
+    pub command: String,
+    /// Whether the tool is available on the system
+    pub available: bool,
 }
 
 /// Result of launching a merge tool
@@ -157,53 +161,103 @@ pub async fn launch_merge_tool(path: String, file_path: String) -> Result<MergeT
     }
 }
 
-/// Get a list of commonly available merge tools
+/// Check if a command is available on the system
+fn is_command_available(command: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let output = create_command("where").arg(command).output();
+        output.map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = create_command("which").arg(command).output();
+        output.map(|o| o.status.success()).unwrap_or(false)
+    }
+}
+
+/// Get a list of commonly available merge tools with availability status
 #[command]
 pub async fn get_available_merge_tools() -> Result<Vec<MergeToolInfo>> {
     let tools = vec![
-        MergeToolInfo {
-            name: "kdiff3".to_string(),
-            display_name: "KDiff3".to_string(),
-        },
-        MergeToolInfo {
-            name: "meld".to_string(),
-            display_name: "Meld".to_string(),
-        },
-        MergeToolInfo {
-            name: "bc".to_string(),
-            display_name: "Beyond Compare".to_string(),
-        },
-        MergeToolInfo {
-            name: "vimdiff".to_string(),
-            display_name: "Vimdiff".to_string(),
-        },
-        MergeToolInfo {
-            name: "opendiff".to_string(),
-            display_name: "FileMerge (macOS)".to_string(),
-        },
-        MergeToolInfo {
-            name: "p4merge".to_string(),
-            display_name: "P4Merge (Perforce)".to_string(),
-        },
-        MergeToolInfo {
-            name: "tortoisemerge".to_string(),
-            display_name: "TortoiseMerge".to_string(),
-        },
-        MergeToolInfo {
-            name: "winmerge".to_string(),
-            display_name: "WinMerge".to_string(),
-        },
-        MergeToolInfo {
-            name: "vscode".to_string(),
-            display_name: "Visual Studio Code".to_string(),
-        },
-        MergeToolInfo {
-            name: "smerge".to_string(),
-            display_name: "Sublime Merge".to_string(),
-        },
+        ("kdiff3", "KDiff3", "kdiff3", "kdiff3"),
+        (
+            "meld",
+            "Meld",
+            "meld $LOCAL $BASE $REMOTE -o $MERGED",
+            "meld",
+        ),
+        (
+            "bc",
+            "Beyond Compare",
+            "bcomp $LOCAL $REMOTE $BASE $MERGED",
+            "bcomp",
+        ),
+        (
+            "vimdiff",
+            "Vimdiff",
+            "vimdiff $LOCAL $BASE $REMOTE $MERGED",
+            "vimdiff",
+        ),
+        (
+            "opendiff",
+            "FileMerge (macOS)",
+            "opendiff $LOCAL $REMOTE -ancestor $BASE -merge $MERGED",
+            "opendiff",
+        ),
+        (
+            "p4merge",
+            "P4Merge (Perforce)",
+            "p4merge $BASE $LOCAL $REMOTE $MERGED",
+            "p4merge",
+        ),
+        (
+            "tortoisemerge",
+            "TortoiseMerge",
+            "TortoiseMerge /base:$BASE /theirs:$REMOTE /mine:$LOCAL /merged:$MERGED",
+            "TortoiseMerge",
+        ),
+        (
+            "winmerge",
+            "WinMerge",
+            "WinMergeU $LOCAL $REMOTE $MERGED",
+            "WinMergeU",
+        ),
+        (
+            "vscode",
+            "Visual Studio Code",
+            "code --wait --merge $LOCAL $REMOTE $BASE $MERGED",
+            "code",
+        ),
+        (
+            "smerge",
+            "Sublime Merge",
+            "smerge mergetool $BASE $LOCAL $REMOTE -o $MERGED",
+            "smerge",
+        ),
     ];
 
-    Ok(tools)
+    let result: Vec<MergeToolInfo> = tools
+        .into_iter()
+        .map(|(name, display_name, command, executable)| {
+            let available = is_command_available(executable);
+            MergeToolInfo {
+                name: name.to_string(),
+                display_name: display_name.to_string(),
+                command: command.to_string(),
+                available,
+            }
+        })
+        .collect();
+
+    Ok(result)
+}
+
+/// Auto-detect the first available merge tool on the system
+#[command]
+pub async fn auto_detect_merge_tool() -> Result<Option<MergeToolInfo>> {
+    let tools = get_available_merge_tools().await?;
+    Ok(tools.into_iter().find(|t| t.available))
 }
 
 #[cfg(test)]
@@ -263,5 +317,23 @@ mod tests {
         assert!(tools.iter().any(|t| t.name == "meld"));
         assert!(tools.iter().any(|t| t.name == "bc"));
         assert!(tools.iter().any(|t| t.name == "vimdiff"));
+        // Verify new fields exist
+        for tool in &tools {
+            assert!(!tool.command.is_empty());
+            // available is a bool, just verify it's accessible
+            let _ = tool.available;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_detect_merge_tool() {
+        let result = auto_detect_merge_tool().await;
+        assert!(result.is_ok());
+        // Result may or may not find a tool depending on the system
+        if let Some(tool) = result.unwrap() {
+            assert!(tool.available);
+            assert!(!tool.name.is_empty());
+            assert!(!tool.command.is_empty());
+        }
     }
 }

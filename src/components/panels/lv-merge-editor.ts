@@ -16,6 +16,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import * as aiService from '../../services/ai.service.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
 import { isWhitespaceOnlyChange, computeInlineWhitespaceDiff } from '../../utils/diff-utils.ts';
@@ -424,6 +425,30 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         color: var(--color-text-muted);
         margin-left: auto;
       }
+
+      .btn-ai {
+        background: rgba(168, 85, 247, 0.15);
+        border-color: #a855f7;
+        color: #a855f7;
+      }
+
+      .btn-ai:hover:not(:disabled) {
+        background: rgba(168, 85, 247, 0.25);
+      }
+
+      .btn-ai:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .ai-explanation {
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: rgba(168, 85, 247, 0.08);
+        border-left: 3px solid #a855f7;
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+        margin: var(--spacing-xs) 0;
+      }
     `,
   ];
 
@@ -438,6 +463,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   @state() private outputEditMode: 'visual' | 'raw' = 'visual';
   @state() private launchingExternalTool = false;
   @state() private hasMergeTool = false;
+  @state() private aiAvailable = false;
+  @state() private suggestingConflict: number | null = null;
+  @state() private suggestingAll = false;
+  @state() private conflictSuggestions: Map<number, { content: string; explanation: string }> = new Map();
 
   /**
    * Maps output line index (within resolved segments) to resolution origin.
@@ -494,6 +523,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
       await this.checkMergeToolAvailability();
+      this.aiAvailable = await aiService.isAiAvailable();
     }
   }
 
@@ -723,6 +753,135 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.computeLineOrigins();
   }
 
+  private async handleSuggestConflict(conflictIndex: number): Promise<void> {
+    if (!this.conflictFile || this.suggestingConflict !== null) return;
+
+    this.suggestingConflict = conflictIndex;
+    try {
+      const segments = this.parseOutputSegments();
+      let idx = 0;
+      let targetSegment: OutputSegment | null = null;
+
+      // Find the conflict segment by counting conflict indices
+      for (const segment of segments) {
+        if (segment.type === 'conflict') {
+          if (idx === conflictIndex) {
+            targetSegment = segment;
+            break;
+          }
+          idx++;
+        }
+      }
+
+      if (!targetSegment) return;
+
+      // Collect surrounding resolved context
+      const resolvedBefore: string[] = [];
+      const resolvedAfter: string[] = [];
+      let foundTarget = false;
+      let conflictCount = 0;
+
+      for (const segment of segments) {
+        if (segment.type === 'conflict') {
+          if (conflictCount === conflictIndex) {
+            foundTarget = true;
+          }
+          conflictCount++;
+        } else if (segment.type === 'resolved') {
+          if (!foundTarget) {
+            resolvedBefore.push(...segment.lines);
+          } else {
+            resolvedAfter.push(...segment.lines);
+          }
+        }
+      }
+
+      const result = await aiService.suggestConflictResolution(
+        this.conflictFile.path,
+        targetSegment.oursLines.join('\n'),
+        targetSegment.theirsLines.join('\n'),
+        this.baseContent || undefined,
+        resolvedBefore.slice(-20).join('\n') || undefined,
+        resolvedAfter.slice(0, 20).join('\n') || undefined,
+      );
+
+      if (result.success && result.data) {
+        // Apply the suggestion by resolving the conflict
+        this.applyAiSuggestion(conflictIndex, result.data.resolvedContent);
+
+        // Store the explanation
+        if (result.data.explanation) {
+          this.conflictSuggestions = new Map(this.conflictSuggestions);
+          this.conflictSuggestions.set(conflictIndex, {
+            content: result.data.resolvedContent,
+            explanation: result.data.explanation,
+          });
+        }
+      } else {
+        this.dispatchEvent(new CustomEvent('show-toast', {
+          bubbles: true, composed: true,
+          detail: { message: result.error?.message ?? 'AI suggestion failed', type: 'error' },
+        }));
+      }
+    } catch {
+      this.dispatchEvent(new CustomEvent('show-toast', {
+        bubbles: true, composed: true,
+        detail: { message: 'Failed to get AI suggestion', type: 'error' },
+      }));
+    } finally {
+      this.suggestingConflict = null;
+    }
+  }
+
+  private applyAiSuggestion(conflictIndex: number, resolvedContent: string): void {
+    const segments = this.parseOutputSegments();
+    const resultLines: string[] = [];
+    let conflictIdx = 0;
+
+    for (const segment of segments) {
+      if (segment.type === 'resolved') {
+        resultLines.push(...segment.lines);
+      } else {
+        if (conflictIdx === conflictIndex) {
+          resultLines.push(...resolvedContent.split('\n'));
+        } else {
+          resultLines.push(`<<<<<<< ${segment.oursLabel}`);
+          resultLines.push(...segment.oursLines);
+          resultLines.push('=======');
+          resultLines.push(...segment.theirsLines);
+          resultLines.push(`>>>>>>> ${segment.theirsLabel}`);
+        }
+        conflictIdx++;
+      }
+    }
+
+    this.outputContent = resultLines.join('\n');
+    this.computeLineOrigins();
+  }
+
+  private async handleAiResolveAll(): Promise<void> {
+    if (this.suggestingAll) return;
+
+    const segments = this.parseOutputSegments();
+    const conflictCount = segments.filter(s => s.type === 'conflict').length;
+    if (conflictCount === 0) return;
+
+    this.suggestingAll = true;
+    try {
+      // Resolve conflicts sequentially (index shifts after each resolution)
+      for (let i = 0; i < conflictCount; i++) {
+        // Always resolve index 0 since previous ones get resolved
+        const currentSegments = this.parseOutputSegments();
+        const remainingConflicts = currentSegments.filter(s => s.type === 'conflict').length;
+        if (remainingConflicts === 0) break;
+
+        await this.handleSuggestConflict(0);
+      }
+    } finally {
+      this.suggestingAll = false;
+    }
+  }
+
   private async handleMarkResolved(): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile) return;
 
@@ -825,10 +984,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const segments = this.parseOutputSegments();
     let lineNum = 1;
     let lineIdx = 0;
+    let conflictIdx = 0;
 
     return html`
       <div class="code-view">
-        ${segments.map((segment, segIdx) => {
+        ${segments.map((segment) => {
           if (segment.type === 'resolved') {
             return html`${segment.lines.map((line) => {
               const num = lineNum++;
@@ -855,20 +1015,32 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           // Advance lineNum past all conflict content lines
           lineNum = theirsEnd;
 
+          const currentConflictIdx = conflictIdx++;
+          const isSuggesting = this.suggestingConflict === currentConflictIdx;
+
           return html`
             <div class="code-conflict-block">
               <div class="code-conflict-header">
                 <span>Conflict</span>
                 <div class="code-conflict-header-actions">
-                  <button class="btn btn-ours conflict-pick-btn" @click=${() => this.resolveOutputConflict(segIdx, 'ours')}>
+                  <button class="btn btn-ours conflict-pick-btn" @click=${() => this.resolveOutputConflict(currentConflictIdx, 'ours')}>
                     Use Ours
                   </button>
-                  <button class="btn btn-theirs conflict-pick-btn" @click=${() => this.resolveOutputConflict(segIdx, 'theirs')}>
+                  <button class="btn btn-theirs conflict-pick-btn" @click=${() => this.resolveOutputConflict(currentConflictIdx, 'theirs')}>
                     Use Theirs
                   </button>
-                  <button class="btn btn-both conflict-pick-btn" @click=${() => this.resolveOutputConflict(segIdx, 'both')}>
+                  <button class="btn btn-both conflict-pick-btn" @click=${() => this.resolveOutputConflict(currentConflictIdx, 'both')}>
                     Use Both
                   </button>
+                  ${this.aiAvailable ? html`
+                    <button
+                      class="btn btn-ai conflict-pick-btn"
+                      @click=${() => this.handleSuggestConflict(currentConflictIdx)}
+                      ?disabled=${isSuggesting || this.suggestingAll}
+                    >
+                      ${isSuggesting ? 'AI...' : 'AI Suggest'}
+                    </button>
+                  ` : nothing}
                 </div>
               </div>
               <div class="code-conflict-side-ours">
@@ -893,6 +1065,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             </div>
           `;
         })}
+        ${this.conflictSuggestions.size > 0 ? html`
+          <div class="ai-explanation">
+            ${Array.from(this.conflictSuggestions.values())
+              .filter(s => s.explanation)
+              .map(s => html`<div>${s.explanation}</div>`)}
+          </div>
+        ` : nothing}
       </div>
     `;
   }
@@ -1019,6 +1198,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <button class="btn btn-theirs" @click=${this.handleAcceptTheirs} title="Use entire file from incoming branch">
             Use Theirs
           </button>
+          ${this.aiAvailable ? html`
+            <button
+              class="btn btn-ai"
+              @click=${this.handleAiResolveAll}
+              ?disabled=${this.suggestingAll || this.suggestingConflict !== null}
+              title="Use AI to resolve all remaining conflicts"
+            >
+              ${this.suggestingAll ? 'AI Resolving...' : 'AI Resolve All'}
+            </button>
+          ` : nothing}
           <button class="btn btn-primary" @click=${this.handleMarkResolved}>
             Mark Resolved
           </button>

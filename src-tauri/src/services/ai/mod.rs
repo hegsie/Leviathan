@@ -89,6 +89,14 @@ pub struct GeneratedCommitMessage {
     pub body: Option<String>,
 }
 
+/// AI-generated conflict resolution suggestion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictResolutionSuggestion {
+    pub resolved_content: String,
+    pub explanation: String,
+}
+
 /// Information about an AI provider
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,6 +132,15 @@ pub trait AiProvider: Send + Sync {
         diff: &str,
         model: Option<&str>,
     ) -> Result<GeneratedCommitMessage, String>;
+
+    /// Generate free-form text from a system prompt and user prompt
+    async fn generate_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model: Option<&str>,
+        max_tokens: Option<u32>,
+    ) -> Result<String, String>;
 }
 
 /// The commit message generation prompt
@@ -143,6 +160,22 @@ Diff:
 
 /// Maximum diff length to send to the AI provider
 pub const MAX_DIFF_CHARS: usize = 12000;
+
+/// Maximum conflict context length to send to the AI provider
+pub const MAX_CONFLICT_CONTEXT_CHARS: usize = 16000;
+
+/// System prompt for AI-powered conflict resolution
+pub const CONFLICT_RESOLUTION_PROMPT: &str = r#"You are a merge conflict resolution assistant. You will be given the "ours" (current branch) and "theirs" (incoming branch) versions of a conflicting code section, optionally with a common ancestor "base" version and surrounding context.
+
+Your task is to produce a single, correct, merged version that:
+1. Preserves the intent of both changes when possible
+2. Resolves any contradictions intelligently based on code context
+3. Maintains correct syntax, indentation, and style consistent with the file
+
+Respond with ONLY a JSON object (no markdown code fences) in this format:
+{"resolvedContent": "the merged code here", "explanation": "brief explanation of how you resolved the conflict"}
+
+Do NOT include conflict markers (<<<<<<, =======, >>>>>>>) in the resolved content."#;
 
 /// AI Service managing providers and configuration
 pub struct AiService {
@@ -388,6 +421,42 @@ impl AiService {
 
         provider
             .generate_commit_message(&truncated_diff, model)
+            .await
+    }
+
+    /// Generate free-form text using the active provider
+    pub async fn generate_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: Option<u32>,
+    ) -> Result<String, String> {
+        let provider_type = self
+            .config
+            .active_provider
+            .ok_or("No AI provider configured. Please select a provider in Settings.")?;
+
+        let provider = self
+            .providers
+            .get(&provider_type)
+            .ok_or_else(|| format!("Provider {:?} not found", provider_type))?;
+
+        if !provider.is_available().await {
+            return Err(format!(
+                "{} is not available. Please check that the service is running.",
+                provider.name()
+            ));
+        }
+
+        // Get the selected model for this provider
+        let model = self
+            .config
+            .providers
+            .get(&provider_type)
+            .and_then(|s| s.model.as_deref());
+
+        provider
+            .generate_text(system_prompt, user_prompt, model, max_tokens)
             .await
     }
 

@@ -5970,6 +5970,10 @@ export interface MergeToolInfo {
   name: string;
   /** Human-readable display name */
   displayName: string;
+  /** Command used to launch the tool */
+  command: string;
+  /** Whether the tool is available on the system */
+  available: boolean;
 }
 
 /**
@@ -6035,6 +6039,14 @@ export async function launchMergeTool(
  */
 export async function getAvailableMergeTools(): Promise<CommandResult<MergeToolInfo[]>> {
   return invokeCommand<MergeToolInfo[]>("get_available_merge_tools", {});
+}
+
+/**
+ * Auto-detect the first available merge tool on the system
+ * @returns The first available merge tool, or null if none found
+ */
+export async function autoDetectMergeTool(): Promise<CommandResult<MergeToolInfo | null>> {
+  return invokeCommand<MergeToolInfo | null>("auto_detect_merge_tool", {});
 }
 
 // ============================================================================

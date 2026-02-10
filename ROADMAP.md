@@ -124,14 +124,14 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 - ✅ **Built-in 3-way merge editor**
   - ✅ Side-by-side conflict view with base/theirs/ours
   - ✅ Inline explanations of conflict origin
-  - Smart conflict resolution suggestions (planned)
+  - ✅ Smart conflict resolution suggestions (AI-powered per-chunk and batch resolution)
   - ✅ Chunk-by-chunk resolution workflow
 
-- **External merge tool integration**
-  - Configure Kdiff3, Beyond Compare, Meld, P4Merge (planned)
-  - Launch external tool from conflict view (planned)
-  - Auto-detect common merge tools (planned)
-  - Custom tool configuration (planned)
+- ✅ **External merge tool integration**
+  - ✅ Configure Kdiff3, Beyond Compare, Meld, P4Merge
+  - ✅ Launch external tool from conflict view
+  - ✅ Auto-detect common merge tools (availability checking)
+  - ✅ Custom tool configuration
 
 #### Multi-Repository Workflows
 
@@ -492,7 +492,7 @@ This section contains specific features organized by category. Items here suppor
 - Smart branch naming based on issue or task (planned)
 - Pull request description generation from commits (planned)
 - Diff summarization for large changes (planned)
-- Conflict resolution suggestions with reasoning (planned)
+- ✅ Conflict resolution suggestions with reasoning
 - Code explanation for complex diffs (planned)
 - Security vulnerability detection in changes (planned)
 

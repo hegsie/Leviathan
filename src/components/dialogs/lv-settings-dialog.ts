@@ -753,7 +753,7 @@ export class LvSettingsDialog extends LitElement {
                 >
                   <option value="">None</option>
                   ${this.availableMergeTools.map(tool => html`
-                    <option value=${tool.name}>${tool.displayName}</option>
+                    <option value=${tool.name}>${tool.displayName}${tool.available ? ' (available)' : ''}</option>
                   `)}
                   <option value="__custom__">Custom...</option>
                 </select>

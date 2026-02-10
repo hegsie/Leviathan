@@ -34,6 +34,14 @@ export interface GeneratedCommitMessage {
 }
 
 /**
+ * AI-generated conflict resolution suggestion
+ */
+export interface ConflictResolutionSuggestion {
+  resolvedContent: string;
+  explanation: string;
+}
+
+/**
  * Get all AI providers with their status
  */
 export async function getAiProviders(): Promise<CommandResult<AiProviderInfo[]>> {
@@ -100,6 +108,27 @@ export async function generateCommitMessage(
 ): Promise<CommandResult<GeneratedCommitMessage>> {
   return invokeCommand<GeneratedCommitMessage>('generate_commit_message', {
     repoPath,
+  });
+}
+
+/**
+ * Suggest a conflict resolution using AI
+ */
+export async function suggestConflictResolution(
+  filePath: string,
+  oursContent: string,
+  theirsContent: string,
+  baseContent?: string,
+  contextBefore?: string,
+  contextAfter?: string,
+): Promise<CommandResult<ConflictResolutionSuggestion>> {
+  return invokeCommand<ConflictResolutionSuggestion>('suggest_conflict_resolution', {
+    filePath,
+    oursContent,
+    theirsContent,
+    baseContent: baseContent ?? null,
+    contextBefore: contextBefore ?? null,
+    contextAfter: contextAfter ?? null,
   });
 }
 

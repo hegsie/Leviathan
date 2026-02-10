@@ -150,6 +150,67 @@ impl AiProvider for GithubCopilotProvider {
         // Parse the response
         parse_commit_message(&content)
     }
+
+    async fn generate_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model: Option<&str>,
+        max_tokens: Option<u32>,
+    ) -> Result<String, String> {
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or("GitHub token not configured. Create a token at github.com/settings/tokens")?;
+
+        let model_name = model.unwrap_or(AiProviderType::GithubCopilot.default_model());
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user_prompt.to_string(),
+            },
+        ];
+
+        let request_body = ChatCompletionRequest {
+            model: model_name.to_string(),
+            messages,
+            max_tokens: max_tokens.unwrap_or(2048),
+            temperature: 0.2,
+        };
+
+        let response = self
+            .client
+            .post(self.chat_url())
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| format!("Failed to connect to GitHub Models: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("GitHub Models API error ({}): {}", status, body));
+        }
+
+        let result: ChatCompletionResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse GitHub Models response: {}", e))?;
+
+        result
+            .choices
+            .first()
+            .map(|c| c.message.content.trim().to_string())
+            .ok_or_else(|| "No response from GitHub Models".to_string())
+    }
 }
 
 /// Parse raw AI response into structured commit message

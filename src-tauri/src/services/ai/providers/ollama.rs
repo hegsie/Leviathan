@@ -139,6 +139,47 @@ impl AiProvider for OllamaProvider {
         let text = result.response.trim();
         parse_commit_message(text)
     }
+
+    async fn generate_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model: Option<&str>,
+        _max_tokens: Option<u32>,
+    ) -> Result<String, String> {
+        let model_name = model.unwrap_or(AiProviderType::Ollama.default_model());
+        let url = format!("{}/api/generate", self.endpoint);
+
+        let prompt = format!("{}\n\n{}", system_prompt, user_prompt);
+
+        let request = OllamaGenerateRequest {
+            model: model_name.to_string(),
+            prompt,
+            stream: false,
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| format!("Failed to connect to Ollama: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Ollama error ({}): {}", status, body));
+        }
+
+        let result: OllamaGenerateResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Ollama response: {}", e))?;
+
+        Ok(result.response.trim().to_string())
+    }
 }
 
 /// Parse raw AI response into structured commit message
