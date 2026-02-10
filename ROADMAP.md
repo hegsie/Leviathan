@@ -26,73 +26,73 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 #### Core Commit Workflow
 
 - **Staging refinements**
-  - Line-level staging (stage/unstage individual lines within hunks)
-  - Better visual feedback for partially staged files
-  - Preserve partial staging during file edits
+  - ✅ Line-level staging (stage/unstage individual lines within hunks)
+  - ✅ Better visual feedback for partially staged files
+  - ✅ Preserve partial staging during file edits
 
 - **Commit operations**
-  - Commit message templates with variables
-  - Auto-populate from .gitmessage
-  - Conventional commits support
-  - Quick amend/reword/fixup/squash from history
+  - ✅ Commit message templates with variables
+  - ✅ Auto-populate from .gitmessage
+  - ✅ Conventional commits support
+  - ✅ Quick amend/reword/fixup/squash from history
 
 - **Auto-stashing**
-  - Auto-stash on checkout with conflicts
-  - Smart stash application after branch switch
-  - Stash conflict resolution
+  - ✅ Auto-stash on checkout with conflicts
+  - ✅ Smart stash application after branch switch
+  - ✅ Stash conflict resolution
 
 #### Repository Browsing & Navigation
 
 - **Branch management**
-  - Clearer branch list with grouping (local/remote/stale)
-  - Quick branch switching with fuzzy search
-  - Branch health indicators (ahead/behind, last commit date)
-  - Delete merged branches in bulk
+  - ✅ Clearer branch list with grouping (local/remote/stale)
+  - ✅ Quick branch switching with fuzzy search
+  - ✅ Branch health indicators (ahead/behind, last commit date)
+  - ✅ Delete merged branches in bulk
 
 - **Log view improvements**
-  - Search and filtering by author, message, date range, file path
-  - Save filter presets
-  - Performance for repositories with 100k+ commits
-  - Blame integration from log view
+  - ✅ Search and filtering by author, message, date range, file path
+  - ✅ Save filter presets
+  - ✅ Performance for repositories with 100k+ commits
+  - ✅ Blame integration from log view
 
 - **Tags & remotes**
-  - Better tag visualization in graph
-  - Remote management improvements
-  - Quick remote branch tracking setup
+  - ✅ Better tag visualization in graph
+  - ✅ Remote management improvements
+  - ✅ Quick remote branch tracking setup
 
 #### UX Polish
 
 - **Keyboard shortcuts**
-  - Comprehensive keyboard navigation (already strong, refine coverage)
-  - Customizable keyboard shortcut editor
-  - Vim-style navigation improvements
-  - Quick switcher (files, branches, commits) (✅ done)
+  - ✅ Comprehensive keyboard navigation
+  - ✅ Customizable keyboard shortcut editor
+  - ✅ Vim-style navigation
+  - ✅ Quick switcher (files, branches, commits)
 
 - **Visual themes**
   - Dark/light themes (✅ done)
   - Syntax highlighting themes (✅ done)
-  - Custom color schemes for graph and UI
-  - Compact/comfortable/spacious density settings
+  - ✅ Custom color schemes for graph and UI
+  - ✅ Compact/comfortable/spacious density settings
 
 - **Responsiveness & feedback**
-  - Clear progress indicators for long operations
-  - Cancellation support for fetch/clone/push
-  - Better error messages with suggested fixes
-  - Toast notifications for background operations
+  - ✅ Clear progress indicators for long operations
+  - ✅ Cancellation support for fetch/clone/push
+  - ✅ Better error messages with suggested fixes
+  - ✅ Toast notifications for background operations
 
 #### Performance & Reliability
 
 - **Large repository handling**
-  - Virtual scrolling improvements (already implemented, refine)
-  - Lazy loading for commit history (✅ done)
+  - ✅ Virtual scrolling improvements
+  - ✅ Lazy loading for commit history
   - Background indexing for faster searches
   - Memory optimization for huge diffs
 
 - **Robustness**
   - Operation timeout handling
-  - Conflict detection and recovery
-  - Repository health checks
-  - Automatic fsck and gc recommendations
+  - ✅ Conflict detection and recovery
+  - ✅ Repository health checks
+  - ✅ Automatic fsck and gc recommendations
 
 ---
 
@@ -674,4 +674,4 @@ This roadmap is a living document and will be updated regularly based on:
 - Changes in the Git ecosystem and related tools
 - Security and performance considerations
 
-Last updated: 2026-01-24
+Last updated: 2026-02-10
