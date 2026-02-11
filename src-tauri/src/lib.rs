@@ -12,7 +12,9 @@ pub mod utils;
 #[cfg(test)]
 mod test_utils;
 
-use tauri::{Emitter, Manager};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tauri::{Emitter, Listener, Manager};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use commands::watcher::WatcherState;
@@ -166,6 +168,92 @@ pub fn run() {
                 } else {
                     tracing::warn!("Main window not found, skipping devtools");
                 }
+            }
+
+            // Set up system tray
+            let minimize_to_tray = Arc::new(AtomicBool::new(false));
+            let minimize_to_tray_clone = minimize_to_tray.clone();
+
+            // Listen for tray settings updates from the frontend
+            let minimize_to_tray_listener = minimize_to_tray.clone();
+            app.listen("update-tray-settings", move |event| {
+                if let Ok(settings) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                    if let Some(enabled) = settings.get("minimizeToTray").and_then(|v| v.as_bool())
+                    {
+                        minimize_to_tray_listener.store(enabled, Ordering::Relaxed);
+                        tracing::info!("Minimize to tray setting updated: {}", enabled);
+                    }
+                }
+            });
+
+            // Build the tray menu
+            use tauri::menu::{MenuBuilder, MenuItemBuilder};
+            use tauri::tray::TrayIconBuilder;
+
+            let show_hide =
+                MenuItemBuilder::with_id("show_hide", "Show/Hide Leviathan").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+
+            let menu = MenuBuilder::new(app)
+                .item(&show_hide)
+                .separator()
+                .item(&quit)
+                .build()?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().cloned().unwrap())
+                .menu(&menu)
+                .tooltip("Leviathan")
+                .on_menu_event(
+                    move |app: &tauri::AppHandle, event: tauri::menu::MenuEvent| match event
+                        .id()
+                        .as_ref()
+                    {
+                        "show_hide" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                if window.is_visible().unwrap_or(false) {
+                                    let _ = window.hide();
+                                } else {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    },
+                )
+                .on_tray_icon_event(
+                    |tray: &tauri::tray::TrayIcon, event: tauri::tray::TrayIconEvent| {
+                        if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                            if let Some(window) = tray.app_handle().get_webview_window("main") {
+                                if window.is_visible().unwrap_or(false) {
+                                    let _ = window.hide();
+                                } else {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                        }
+                    },
+                )
+                .build(app)?;
+
+            // Handle window close event - minimize to tray if enabled
+            if let Some(window) = app.get_webview_window("main") {
+                let minimize_flag = minimize_to_tray_clone;
+                let win_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        if minimize_flag.load(Ordering::Relaxed) {
+                            api.prevent_close();
+                            let _ = win_clone.hide();
+                            tracing::info!("Minimizing to tray instead of closing");
+                        }
+                    }
+                });
             }
 
             // Start auto-update checking (every 24 hours)

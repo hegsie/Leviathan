@@ -307,6 +307,14 @@ export class LvSettingsDialog extends LitElement {
   @state() private staleBranchDays = 90;
   @state() private networkOperationTimeout = 300;
 
+  // Network & sync settings
+  @state() private autoFetchInterval = 0;
+  @state() private fetchOnFocus = false;
+
+  // System tray settings
+  @state() private minimizeToTray = false;
+  @state() private showNativeNotifications = true;
+
   // AI settings
   @state() private aiProviders: AiProviderInfo[] = [];
   @state() private activeProvider: AiProviderType | null = null;
@@ -430,6 +438,10 @@ export class LvSettingsDialog extends LitElement {
     this.autoStashOnCheckout = settings.autoStashOnCheckout;
     this.staleBranchDays = settings.staleBranchDays;
     this.networkOperationTimeout = settings.networkOperationTimeout;
+    this.autoFetchInterval = settings.autoFetchInterval;
+    this.fetchOnFocus = settings.fetchOnFocus;
+    this.minimizeToTray = settings.minimizeToTray;
+    this.showNativeNotifications = settings.showNativeNotifications;
   }
 
   private handleThemeChange(e: Event): void {
@@ -575,6 +587,13 @@ export class LvSettingsDialog extends LitElement {
     settingsStore.getState().setNetworkOperationTimeout(value);
   }
 
+  private handleAutoFetchIntervalChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    const value = Math.max(0, parseInt(input.value, 10) || 0);
+    this.autoFetchInterval = value;
+    settingsStore.getState().setAutoFetchInterval(value);
+  }
+
   private handleToggle(setting: string, e: Event): void {
     const input = e.target as HTMLInputElement;
     const value = input.checked;
@@ -600,6 +619,18 @@ export class LvSettingsDialog extends LitElement {
       case 'autoStashOnCheckout':
         this.autoStashOnCheckout = value;
         store.setAutoStashOnCheckout(value);
+        break;
+      case 'fetchOnFocus':
+        this.fetchOnFocus = value;
+        store.setFetchOnFocus(value);
+        break;
+      case 'minimizeToTray':
+        this.minimizeToTray = value;
+        store.setMinimizeToTray(value);
+        break;
+      case 'showNativeNotifications':
+        this.showNativeNotifications = value;
+        store.setShowNativeNotifications(value);
         break;
     }
   }
@@ -820,6 +851,32 @@ export class LvSettingsDialog extends LitElement {
         </div>
 
         <div class="settings-section">
+          <div class="section-title">Network & Sync</div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Auto-Fetch Interval</span>
+              <span class="setting-description">Minutes between automatic fetches (0 to disable)</span>
+            </div>
+            <input
+              type="number"
+              min="0"
+              .value=${String(this.autoFetchInterval)}
+              @change=${this.handleAutoFetchIntervalChange}
+              style="width: 80px;"
+            />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Fetch on Window Focus</span>
+              <span class="setting-description">Automatically fetch when the app window regains focus</span>
+            </div>
+            ${this.renderToggle(this.fetchOnFocus, 'fetchOnFocus')}
+          </div>
+        </div>
+
+        <div class="settings-section">
           <div class="section-title">Behavior</div>
 
           <div class="setting-row">
@@ -864,6 +921,22 @@ export class LvSettingsDialog extends LitElement {
               @change=${this.handleNetworkOperationTimeoutChange}
               style="width: 80px;"
             />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Minimize to Tray</span>
+              <span class="setting-description">Minimize to system tray instead of closing</span>
+            </div>
+            ${this.renderToggle(this.minimizeToTray, 'minimizeToTray')}
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Native Notifications</span>
+              <span class="setting-description">Show system notifications for background events</span>
+            </div>
+            ${this.renderToggle(this.showNativeNotifications, 'showNativeNotifications')}
           </div>
         </div>
 

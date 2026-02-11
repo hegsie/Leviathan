@@ -74,6 +74,7 @@ describe('AI Service Types', () => {
       expect(getProviderDisplayName('openai')).to.equal('OpenAI');
       expect(getProviderDisplayName('anthropic')).to.equal('Anthropic Claude');
       expect(getProviderDisplayName('github_copilot')).to.equal('GitHub Models');
+      expect(getProviderDisplayName('google_gemini')).to.equal('Google Gemini');
     });
 
     it('should correctly identify API key requirements', () => {
@@ -82,6 +83,7 @@ describe('AI Service Types', () => {
       expect(providerRequiresApiKey('openai')).to.be.true;
       expect(providerRequiresApiKey('anthropic')).to.be.true;
       expect(providerRequiresApiKey('github_copilot')).to.be.true;
+      expect(providerRequiresApiKey('google_gemini')).to.be.true;
     });
   });
 
@@ -262,7 +264,7 @@ describe('AI Provider Workflow', () => {
   });
 
   it('should require API key for cloud providers', () => {
-    const cloudProviders: AiProviderType[] = ['openai', 'anthropic', 'github_copilot'];
+    const cloudProviders: AiProviderType[] = ['openai', 'anthropic', 'github_copilot', 'google_gemini'];
     const localProviders: AiProviderType[] = ['ollama', 'lm_studio'];
 
     cloudProviders.forEach((type) => {

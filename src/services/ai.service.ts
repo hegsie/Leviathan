@@ -9,7 +9,7 @@ import type { CommandResult } from '../types/api.types.ts';
 /**
  * AI provider types
  */
-export type AiProviderType = 'ollama' | 'lm_studio' | 'openai' | 'anthropic' | 'github_copilot';
+export type AiProviderType = 'ollama' | 'lm_studio' | 'openai' | 'anthropic' | 'github_copilot' | 'google_gemini';
 
 /**
  * AI provider information
@@ -155,6 +155,8 @@ export function getProviderDisplayName(providerType: AiProviderType): string {
       return 'Anthropic Claude';
     case 'github_copilot':
       return 'GitHub Models';
+    case 'google_gemini':
+      return 'Google Gemini';
   }
 }
 
@@ -162,5 +164,5 @@ export function getProviderDisplayName(providerType: AiProviderType): string {
  * Check if a provider requires an API key
  */
 export function providerRequiresApiKey(providerType: AiProviderType): boolean {
-  return providerType === 'openai' || providerType === 'anthropic' || providerType === 'github_copilot';
+  return providerType === 'openai' || providerType === 'anthropic' || providerType === 'github_copilot' || providerType === 'google_gemini';
 }
