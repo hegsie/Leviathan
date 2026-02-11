@@ -81,14 +81,28 @@ impl GeminiProvider {
         }
     }
 
-    /// Build the generateContent endpoint URL for a given model
+    /// Build the generateContent endpoint URL for a given model.
+    /// Enforces HTTPS to prevent cleartext transmission of the API key.
     fn generate_url(&self, model: &str) -> String {
         let base = self.endpoint.trim_end_matches('/');
+        // Enforce HTTPS to protect API key in query parameter
+        let base = if base.starts_with("http://") {
+            base.replacen("http://", "https://", 1)
+        } else {
+            base.to_string()
+        };
+        format!("{}/v1beta/models/{}:generateContent", base, model)
+    }
+
+    /// Build a POST request for a given model, attaching the API key
+    /// as a query parameter over HTTPS only.
+    fn build_request(&self, model: &str) -> reqwest::RequestBuilder {
+        let url = self.generate_url(model);
         let key = self.api_key.as_deref().unwrap_or("");
-        format!(
-            "{}/v1beta/models/{}:generateContent?key={}",
-            base, model, key
-        )
+        self.client
+            .post(url)
+            .query(&[("key", key)])
+            .header("content-type", "application/json")
     }
 }
 
@@ -131,9 +145,7 @@ impl AiProvider for GeminiProvider {
         };
 
         let response = self
-            .client
-            .post(self.generate_url(model_name))
-            .header("content-type", "application/json")
+            .build_request(model_name)
             .json(&request_body)
             .timeout(std::time::Duration::from_secs(60))
             .send()
@@ -191,9 +203,7 @@ impl AiProvider for GeminiProvider {
         };
 
         let response = self
-            .client
-            .post(self.generate_url(model_name))
-            .header("content-type", "application/json")
+            .build_request(model_name)
             .json(&request_body)
             .timeout(std::time::Duration::from_secs(120))
             .send()
@@ -316,5 +326,30 @@ mod tests {
     fn test_parse_commit_message_empty() {
         let result = parse_commit_message("");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_generate_url_enforces_https() {
+        let provider = GeminiProvider::new(
+            "http://generativelanguage.googleapis.com".to_string(),
+            Some("test-key".to_string()),
+        );
+        let url = provider.generate_url("gemini-2.0-flash");
+        assert!(url.starts_with("https://"));
+        assert!(url.contains("gemini-2.0-flash"));
+        // API key is not in the URL — it's added via .query() at request time
+        assert!(!url.contains("test-key"));
+    }
+
+    #[test]
+    fn test_generate_url_preserves_https() {
+        let provider = GeminiProvider::new(
+            "https://generativelanguage.googleapis.com".to_string(),
+            Some("my-key".to_string()),
+        );
+        let url = provider.generate_url("gemini-1.5-pro");
+        assert!(url.starts_with("https://"));
+        assert!(url.contains("gemini-1.5-pro"));
+        assert!(!url.contains("my-key"));
     }
 }
