@@ -35,6 +35,7 @@ import './components/dialogs/lv-bitbucket-dialog.ts';
 import './components/dialogs/lv-azure-devops-dialog.ts';
 import './components/dialogs/lv-profile-manager-dialog.ts';
 import './components/dialogs/lv-migration-dialog.ts';
+import './components/dialogs/lv-workspace-manager-dialog.ts';
 import './components/dialogs/lv-create-tag-dialog.ts';
 import './components/dialogs/lv-create-branch-dialog.ts';
 import './components/dialogs/lv-cherry-pick-dialog.ts';
@@ -58,6 +59,8 @@ import * as gitService from './services/git.service.ts';
 import * as updateService from './services/update.service.ts';
 import * as unifiedProfileService from './services/unified-profile.service.ts';
 import { settingsStore } from './stores/settings.store.ts';
+import { workspaceStore } from './stores/workspace.store.ts';
+import * as workspaceService from './services/workspace.service.ts';
 import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
@@ -525,6 +528,9 @@ export class AppShell extends LitElement {
   // Migration dialog
   @state() private showMigrationDialog = false;
 
+  // Workspace Manager dialog
+  @state() private showWorkspaceManager = false;
+
   // Panel dimensions
   @state() private leftPanelWidth = 220;
   @state() private rightPanelWidth = 350;
@@ -653,6 +659,9 @@ export class AppShell extends LitElement {
 
     // Restore previously open repositories
     this.restorePersistedRepositories();
+
+    // Load workspaces
+    this.loadWorkspaces();
 
     // Set up auto-fetch based on settings
     this.setupAutoFetch();
@@ -1868,6 +1877,13 @@ export class AppShell extends LitElement {
         shortcut: `${mod}Z`,
         action: this.requiresRepository(() => { this.showReflog = true; }),
       },
+      {
+        id: 'workspaces',
+        label: 'Manage workspaces',
+        category: 'action',
+        icon: 'folder',
+        action: () => { this.showWorkspaceManager = true; },
+      },
     ];
 
     return commands;
@@ -1903,6 +1919,13 @@ export class AppShell extends LitElement {
     const activeRepo = repositoryStore.getState().getActiveRepository();
     if (activeRepo) {
       this.checkRepositoryIntegration(activeRepo.repository.path);
+    }
+  }
+
+  private async loadWorkspaces(): Promise<void> {
+    const result = await workspaceService.getWorkspaces();
+    if (result.success && result.data) {
+      workspaceStore.getState().setWorkspaces(result.data);
     }
   }
 
@@ -2131,6 +2154,7 @@ export class AppShell extends LitElement {
         @open-shortcuts=${() => { this.showShortcuts = true; }}
         @open-command-palette=${() => { this.showCommandPalette = true; }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
+        @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
         @repository-refresh=${() => this.handleRefresh()}
         @search-change=${this.handleSearchChange}
       ></lv-toolbar>
@@ -2304,7 +2328,9 @@ export class AppShell extends LitElement {
                 : ''}
             </footer>
           `
-        : html`<lv-welcome></lv-welcome>`}
+        : html`<lv-welcome
+            @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
+          ></lv-welcome>`}
 
       ${this.showSettings
         ? html`
@@ -2700,6 +2726,11 @@ export class AppShell extends LitElement {
         @close=${() => { this.showMigrationDialog = false; }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
       ></lv-migration-dialog>
+
+      <lv-workspace-manager-dialog
+        ?open=${this.showWorkspaceManager}
+        @close=${() => { this.showWorkspaceManager = false; }}
+      ></lv-workspace-manager-dialog>
 
       ${this.activeRepository ? html`
         <lv-create-tag-dialog

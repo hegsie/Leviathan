@@ -528,3 +528,38 @@ export type FileStatusSortBy = 'name' | 'status' | 'path' | 'extension';
  * Sort direction
  */
 export type SortDirection = 'asc' | 'desc';
+
+/**
+ * A workspace grouping related repositories
+ */
+export interface Workspace {
+  id: string;
+  name: string;
+  description: string;
+  color: string;
+  repositories: WorkspaceRepository[];
+  createdAt: string;
+  lastOpened: string | null;
+}
+
+/**
+ * A repository within a workspace
+ */
+export interface WorkspaceRepository {
+  path: string;
+  name: string;
+}
+
+/**
+ * Status information for a repository within a workspace
+ */
+export interface WorkspaceRepoStatus {
+  path: string;
+  name: string;
+  exists: boolean;
+  isValidRepo: boolean;
+  changedFilesCount: number;
+  currentBranch: string | null;
+  ahead: number;
+  behind: number;
+}

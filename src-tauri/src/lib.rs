@@ -737,6 +737,15 @@ pub fn run() {
             commands::validation::validate_commit_message,
             commands::validation::get_commit_message_rules,
             commands::validation::set_commit_message_rules,
+            // Workspaces
+            commands::workspace::get_workspaces,
+            commands::workspace::get_workspace,
+            commands::workspace::save_workspace,
+            commands::workspace::delete_workspace,
+            commands::workspace::add_repository_to_workspace,
+            commands::workspace::remove_repository_from_workspace,
+            commands::workspace::update_workspace_last_opened,
+            commands::workspace::validate_workspace_repositories,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
