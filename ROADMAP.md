@@ -109,10 +109,10 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
   - ✅ Preview of rebase result before executing
 
 - **Branch graph enhancements**
-  - Filter graph by author, message, date, path
-  - Hide/show branches dynamically
-  - Export graph as image/SVG
-  - Graph performance for complex histories
+  - ✅ Filter graph by author, message, date, path
+  - ✅ Hide/show branches dynamically
+  - ✅ Export graph as image/SVG
+  - ✅ Graph performance for complex histories
 
 - **Branch cleanup automation**
   - One-click "delete merged branches"
@@ -321,7 +321,7 @@ This section contains specific features organized by category. Items here suppor
 
 #### Notifications & Background Operations
 - ✅ Push/pull completion notifications
-- Conflict alerts
+- ✅ Conflict alerts
 - ✅ Background operation status
 - ✅ System tray integration
 - ✅ Notification preferences per repository
@@ -674,4 +674,4 @@ This roadmap is a living document and will be updated regularly based on:
 - Changes in the Git ecosystem and related tools
 - Security and performance considerations
 
-Last updated: 2026-02-10
+Last updated: 2026-02-11

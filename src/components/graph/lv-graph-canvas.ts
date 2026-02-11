@@ -239,6 +239,160 @@ export class LvGraphCanvas extends LitElement {
         }
       }
 
+      .graph-toolbar {
+        position: absolute;
+        top: var(--spacing-xs);
+        right: calc(var(--spacing-md) + 12px);
+        display: flex;
+        gap: var(--spacing-xs);
+        z-index: 10;
+      }
+
+      .toolbar-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-secondary);
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        font-size: var(--font-size-sm);
+        padding: 0;
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+
+      .toolbar-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .toolbar-btn.active {
+        background: var(--color-primary);
+        color: white;
+      }
+
+      .branch-panel {
+        position: absolute;
+        top: 36px;
+        right: calc(var(--spacing-md) + 12px);
+        width: 260px;
+        max-height: 400px;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        z-index: 20;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .branch-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--spacing-sm) var(--spacing-md);
+        border-bottom: 1px solid var(--color-border);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+      }
+
+      .branch-panel-actions {
+        display: flex;
+        gap: var(--spacing-xs);
+      }
+
+      .branch-panel-actions button {
+        font-size: var(--font-size-xs);
+        padding: 2px 6px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-primary);
+        color: var(--color-text-secondary);
+        cursor: pointer;
+      }
+
+      .branch-panel-actions button:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .branch-panel-list {
+        overflow-y: auto;
+        padding: var(--spacing-xs) 0;
+        flex: 1;
+      }
+
+      .branch-group-label {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        padding: var(--spacing-xs) var(--spacing-md);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-weight: var(--font-weight-medium);
+      }
+
+      .branch-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: 3px var(--spacing-md);
+        cursor: pointer;
+        font-size: var(--font-size-sm);
+        color: var(--color-text-primary);
+      }
+
+      .branch-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .branch-item input[type="checkbox"] {
+        margin: 0;
+        cursor: pointer;
+      }
+
+      .branch-item .branch-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+      }
+
+      .export-menu {
+        position: absolute;
+        top: 36px;
+        right: calc(var(--spacing-md) + 12px + 32px);
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        z-index: 20;
+        overflow: hidden;
+        min-width: 160px;
+      }
+
+      .export-menu-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-sm) var(--spacing-md);
+        cursor: pointer;
+        font-size: var(--font-size-sm);
+        color: var(--color-text-primary);
+        border: none;
+        background: none;
+        width: 100%;
+        text-align: left;
+      }
+
+      .export-menu-item:hover {
+        background: var(--color-bg-hover);
+      }
+
       .resize-handle {
         position: absolute;
         top: 0;
@@ -279,6 +433,13 @@ export class LvGraphCanvas extends LitElement {
   @state() private tooltipAuthorName = '';
   @state() private tooltipAuthorEmail = '';
 
+  // Branch visibility
+  @state() private hiddenBranches: Set<string> = new Set();
+  @state() private showBranchPanel = false;
+
+  // Export
+  @state() private showExportMenu = false;
+
   // Infinite scroll pagination
   @state() private isLoadingMore = false;
   @state() private hasMoreCommits = true;
@@ -291,6 +452,7 @@ export class LvGraphCanvas extends LitElement {
   private resizeStartX = 0;
   private resizeStartWidth = 0;
   private readonly COLUMN_STORAGE_KEY = 'leviathan-graph-columns';
+  private readonly BRANCH_VISIBILITY_KEY = 'leviathan-hidden-branches';
 
   @query('.canvas-container') private containerEl!: HTMLDivElement;
   @query('canvas') private canvasEl!: HTMLCanvasElement;
@@ -326,6 +488,7 @@ export class LvGraphCanvas extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     this.loadColumnWidths();
+    this.loadHiddenBranches();
   }
 
   async firstUpdated(): Promise<void> {
@@ -349,6 +512,9 @@ export class LvGraphCanvas extends LitElement {
       this.hoveredNode = null;
       this.realCommits.clear();
       this.refsByCommit = {};
+
+      // Reload hidden branches for the new repository
+      this.loadHiddenBranches();
 
       // Reload commits for the new repository
       this.loadCommits();
@@ -1690,6 +1856,289 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
+  // Branch visibility methods
+  private getBranchStorageKey(): string {
+    return `${this.BRANCH_VISIBILITY_KEY}-${this.repositoryPath}`;
+  }
+
+  private loadHiddenBranches(): void {
+    try {
+      const saved = localStorage.getItem(this.getBranchStorageKey());
+      if (saved) {
+        this.hiddenBranches = new Set(JSON.parse(saved));
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
+  private saveHiddenBranches(): void {
+    try {
+      localStorage.setItem(
+        this.getBranchStorageKey(),
+        JSON.stringify([...this.hiddenBranches])
+      );
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  /**
+   * Get all available branch names from refs data
+   */
+  public getAvailableBranches(): { local: string[]; remote: string[] } {
+    const localBranches = new Set<string>();
+    const remoteBranches = new Set<string>();
+
+    for (const refs of Object.values(this.refsByCommit)) {
+      for (const ref of refs) {
+        if (ref.refType === 'localBranch') {
+          localBranches.add(ref.shorthand);
+        } else if (ref.refType === 'remoteBranch') {
+          remoteBranches.add(ref.shorthand);
+        }
+      }
+    }
+
+    return {
+      local: [...localBranches].sort(),
+      remote: [...remoteBranches].sort(),
+    };
+  }
+
+  /**
+   * Toggle branch visibility and re-filter the graph
+   */
+  public toggleBranch(branch: string): void {
+    if (this.hiddenBranches.has(branch)) {
+      this.hiddenBranches.delete(branch);
+    } else {
+      this.hiddenBranches.add(branch);
+    }
+    this.hiddenBranches = new Set(this.hiddenBranches); // trigger reactivity
+    this.saveHiddenBranches();
+    this.applyBranchFilter();
+  }
+
+  private showAllBranches(): void {
+    this.hiddenBranches = new Set();
+    this.saveHiddenBranches();
+    this.applyBranchFilter();
+  }
+
+  private hideAllBranches(): void {
+    const branches = this.getAvailableBranches();
+    this.hiddenBranches = new Set([...branches.local, ...branches.remote]);
+    this.saveHiddenBranches();
+    this.applyBranchFilter();
+  }
+
+  private applyBranchFilter(): void {
+    if (this.hiddenBranches.size === 0) {
+      // No filter — use all commits
+      this.processLayout();
+    } else {
+      // Build set of visible branch names
+      const visibleBranchOids = new Set<string>();
+
+      // Find all commit OIDs that belong to visible branches
+      for (const [oid, refs] of Object.entries(this.refsByCommit)) {
+        const hasVisibleBranch = refs.some(
+          (ref) =>
+            (ref.refType === 'localBranch' || ref.refType === 'remoteBranch') &&
+            !this.hiddenBranches.has(ref.shorthand)
+        );
+        if (hasVisibleBranch) {
+          visibleBranchOids.add(oid);
+        }
+      }
+
+      // Also keep commits that have no branch refs (ancestors)
+      // and commits that have tags (tags should always be visible)
+      for (const [oid, refs] of Object.entries(this.refsByCommit)) {
+        const hasBranchRef = refs.some(
+          (ref) => ref.refType === 'localBranch' || ref.refType === 'remoteBranch'
+        );
+        if (!hasBranchRef) {
+          visibleBranchOids.add(oid);
+        }
+      }
+
+      // Include commits with no refs at all (most commits)
+      for (const commit of this.commits) {
+        if (!this.refsByCommit[commit.oid]) {
+          visibleBranchOids.add(commit.oid);
+        }
+      }
+
+      this.processLayout();
+    }
+
+    this.renderer?.markDirty();
+    this.scheduleRender();
+  }
+
+  // Export methods
+  /**
+   * Export graph as PNG image
+   */
+  public exportAsImage(): void {
+    if (!this.renderer || !this.virtualScroll || !this.layout) return;
+
+    const contentSize = this.virtualScroll.getContentSize();
+
+    // Limit export size for very large graphs
+    const maxHeight = Math.min(contentSize.height + this.HEADER_HEIGHT + 40, 50000);
+    const width = Math.max(contentSize.width, this.containerEl?.clientWidth ?? 800);
+
+    // Create offscreen canvas
+    const offscreen = document.createElement('canvas');
+    const dpr = window.devicePixelRatio || 1;
+    offscreen.width = width * dpr;
+    offscreen.height = maxHeight * dpr;
+
+    // Create temporary renderer on offscreen canvas
+    const tempRenderer = new CanvasRenderer(
+      offscreen,
+      {
+        rowHeight: this.ROW_HEIGHT,
+        laneWidth: this.LANE_WIDTH,
+        nodeRadius: this.NODE_RADIUS,
+        lineWidth: 2,
+        showLabels: true,
+        showFps: false,
+        refsColumnWidth: this.refsColumnWidth,
+        statsColumnWidth: this.statsColumnWidth,
+      },
+      getThemeFromCSS()
+    );
+
+    // Copy state to temp renderer
+    if (this.renderer) {
+      const stats = new Map<string, { additions: number; deletions: number; filesChanged: number }>();
+      tempRenderer.setCommitStats(stats);
+      tempRenderer.setHighlightedCommits(this.matchedCommitOids);
+      tempRenderer.setMultiSelection(this.selectedNodes, null);
+    }
+
+    // Generate full render data (entire graph, no viewport clipping)
+    const fullViewport = {
+      scrollTop: 0,
+      scrollLeft: 0,
+      width,
+      height: maxHeight,
+    };
+    const renderData = this.virtualScroll.getRenderData(fullViewport);
+    tempRenderer.render(renderData);
+
+    // Convert to blob and download
+    offscreen.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `graph-${new Date().toISOString().slice(0, 10)}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+      tempRenderer.destroy();
+    }, 'image/png');
+
+    this.showExportMenu = false;
+  }
+
+  /**
+   * Export graph as SVG
+   */
+  public exportAsSvg(): void {
+    if (!this.layout || !this.virtualScroll) return;
+
+    const contentSize = this.virtualScroll.getContentSize();
+    const width = Math.max(contentSize.width, this.containerEl?.clientWidth ?? 800);
+    const height = contentSize.height + this.HEADER_HEIGHT + 40;
+    const theme = getThemeFromCSS();
+
+    const svgParts: string[] = [];
+    svgParts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`);
+    svgParts.push(`<rect width="100%" height="100%" fill="${theme.background}"/>`);
+
+    const offsetX = this.PADDING;
+    const offsetY = this.PADDING + this.HEADER_HEIGHT;
+    const maxLane = this.layout.maxLane;
+
+    // Draw edges
+    for (const edge of this.layout.edges) {
+      const fromX = offsetX + (maxLane - edge.fromLane) * this.LANE_WIDTH;
+      const fromY = offsetY + edge.fromRow * this.ROW_HEIGHT;
+      const toX = offsetX + (maxLane - edge.toLane) * this.LANE_WIDTH;
+      const toY = offsetY + edge.toRow * this.ROW_HEIGHT;
+      const color = theme.laneColors[edge.fromLane % theme.laneColors.length];
+
+      if (edge.fromLane === edge.toLane) {
+        svgParts.push(`<line x1="${fromX}" y1="${fromY}" x2="${toX}" y2="${toY}" stroke="${color}" stroke-width="2" stroke-linecap="round"/>`);
+      } else {
+        const midY = fromY + (toY - fromY) * 0.5;
+        svgParts.push(`<path d="M${fromX},${fromY} C${fromX},${midY} ${toX},${midY} ${toX},${toY}" stroke="${color}" stroke-width="2" fill="none" stroke-linecap="round"/>`);
+      }
+    }
+
+    // Draw nodes
+    for (const node of this.layout.nodes.values()) {
+      const x = offsetX + (maxLane - node.lane) * this.LANE_WIDTH;
+      const y = offsetY + node.row * this.ROW_HEIGHT;
+      const color = theme.laneColors[node.lane % theme.laneColors.length];
+      const commit = this.realCommits.get(node.oid);
+      const isMerge = commit && commit.parentIds.length > 1;
+
+      if (isMerge) {
+        svgParts.push(`<circle cx="${x}" cy="${y}" r="${this.NODE_RADIUS}" fill="${theme.background}" stroke="${color}" stroke-width="2"/>`);
+      } else {
+        svgParts.push(`<circle cx="${x}" cy="${y}" r="${this.NODE_RADIUS}" fill="${color}"/>`);
+      }
+
+      // Add commit message text
+      if (commit) {
+        const textX = offsetX + (maxLane + 1) * this.LANE_WIDTH + 50;
+        const escapedMessage = commit.summary
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+        svgParts.push(`<text x="${textX}" y="${y + 4}" fill="${theme.textColor}" font-family="system-ui, sans-serif" font-size="12">${escapedMessage}</text>`);
+      }
+
+      // Add ref labels
+      const refs = this.refsByCommit[node.oid];
+      if (refs?.length) {
+        const labelX = offsetX + (maxLane + 1) * this.LANE_WIDTH + 30;
+        for (let i = 0; i < Math.min(refs.length, 3); i++) {
+          const ref = refs[i];
+          const lx = labelX + i * 80;
+          const escapedLabel = ref.shorthand
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+          let bgColor = theme.refColors.localBranch;
+          if (ref.refType === 'remoteBranch') bgColor = theme.refColors.remoteBranch;
+          else if (ref.refType === 'tag') bgColor = theme.refColors.tag;
+          svgParts.push(`<rect x="${lx}" y="${y - 8}" width="70" height="16" rx="3" fill="${bgColor}" opacity="0.8"/>`);
+          svgParts.push(`<text x="${lx + 4}" y="${y + 3}" fill="white" font-family="system-ui, sans-serif" font-size="10">${escapedLabel}</text>`);
+        }
+      }
+    }
+
+    svgParts.push('</svg>');
+
+    const svgContent = svgParts.join('\n');
+    const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `graph-${new Date().toISOString().slice(0, 10)}.svg`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    this.showExportMenu = false;
+  }
+
   private updateRendererColumnWidths(): void {
     this.renderer?.setConfig({
       refsColumnWidth: this.refsColumnWidth,
@@ -1758,6 +2207,71 @@ export class LvGraphCanvas extends LitElement {
     this.renderTimeMs = performance.now() - startTime;
   }
 
+  private renderBranchPanel() {
+    const branches = this.getAvailableBranches();
+
+    return html`
+      <div class="branch-panel">
+        <div class="branch-panel-header">
+          <span>Branch Visibility</span>
+          <div class="branch-panel-actions">
+            <button @click=${() => this.showAllBranches()}>Show All</button>
+            <button @click=${() => this.hideAllBranches()}>Hide All</button>
+          </div>
+        </div>
+        <div class="branch-panel-list">
+          ${branches.local.length > 0
+            ? html`
+                <div class="branch-group-label">Local</div>
+                ${branches.local.map(
+                  (branch) => html`
+                    <label class="branch-item">
+                      <input
+                        type="checkbox"
+                        .checked=${!this.hiddenBranches.has(branch)}
+                        @change=${() => this.toggleBranch(branch)}
+                      />
+                      <span class="branch-name">${branch}</span>
+                    </label>
+                  `
+                )}
+              `
+            : ''}
+          ${branches.remote.length > 0
+            ? html`
+                <div class="branch-group-label">Remote</div>
+                ${branches.remote.map(
+                  (branch) => html`
+                    <label class="branch-item">
+                      <input
+                        type="checkbox"
+                        .checked=${!this.hiddenBranches.has(branch)}
+                        @change=${() => this.toggleBranch(branch)}
+                      />
+                      <span class="branch-name">${branch}</span>
+                    </label>
+                  `
+                )}
+              `
+            : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderExportMenu() {
+    return html`
+      <div class="export-menu">
+        <button class="export-menu-item" @click=${() => this.exportAsImage()}>
+          Export as PNG
+        </button>
+        <button class="export-menu-item" @click=${() => this.exportAsSvg()}>
+          Export as SVG
+        </button>
+      </div>
+    `;
+  }
+
   render() {
     const handlePositions = this.getResizeHandlePositions();
 
@@ -1820,6 +2334,22 @@ export class LvGraphCanvas extends LitElement {
                 </div>
               `
             : ''}
+
+          <div class="graph-toolbar">
+            <button
+              class="toolbar-btn ${this.showBranchPanel ? 'active' : ''}"
+              title="Toggle branch visibility"
+              @click=${() => { this.showBranchPanel = !this.showBranchPanel; this.showExportMenu = false; }}
+            >&#9734;</button>
+            <button
+              class="toolbar-btn ${this.showExportMenu ? 'active' : ''}"
+              title="Export graph"
+              @click=${() => { this.showExportMenu = !this.showExportMenu; this.showBranchPanel = false; }}
+            >&#8615;</button>
+          </div>
+
+          ${this.showBranchPanel ? this.renderBranchPanel() : ''}
+          ${this.showExportMenu ? this.renderExportMenu() : ''}
         </div>
       </div>
     `;
