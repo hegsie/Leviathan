@@ -283,6 +283,8 @@ pub fn run() {
             commands::branch::unset_upstream_branch,
             commands::branch::get_branch_tracking_info,
             commands::branch::create_orphan_branch,
+            // Branch cleanup
+            commands::branch_cleanup::get_cleanup_candidates,
             // Branch protection rules
             commands::branch_rules::get_branch_rules,
             commands::branch_rules::set_branch_rule,

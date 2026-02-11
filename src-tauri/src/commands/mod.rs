@@ -8,6 +8,7 @@ pub mod azure_devops;
 pub mod bisect;
 pub mod bitbucket;
 pub mod branch;
+pub mod branch_cleanup;
 pub mod branch_rules;
 pub mod bundle;
 pub mod checkout_file;

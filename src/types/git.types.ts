@@ -528,3 +528,17 @@ export type FileStatusSortBy = 'name' | 'status' | 'path' | 'extension';
  * Sort direction
  */
 export type SortDirection = 'asc' | 'desc';
+
+/**
+ * A branch that is a candidate for cleanup, returned by the backend.
+ * Uses graph_descendant_of for accurate merge detection.
+ */
+export interface CleanupCandidate {
+  name: string;
+  shorthand: string;
+  category: 'merged' | 'stale' | 'gone';
+  lastCommitTimestamp: number | null;
+  isProtected: boolean;
+  upstream: string | null;
+  aheadBehind: AheadBehind | null;
+}

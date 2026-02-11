@@ -554,12 +554,18 @@ export class LvBranchList extends LitElement {
     super.connectedCallback();
     await this.loadBranches();
     document.addEventListener('click', this.handleDocumentClick);
+    window.addEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('click', this.handleDocumentClick);
+    window.removeEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
   }
+
+  private handleExternalCleanupOpen = (): void => {
+    this.handleOpenCleanupDialog();
+  };
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
