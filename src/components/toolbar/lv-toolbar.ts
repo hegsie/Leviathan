@@ -391,6 +391,13 @@ export class LvToolbar extends LitElement {
     }));
   }
 
+  private handleOpenWorkspaceManager(): void {
+    this.dispatchEvent(new CustomEvent('open-workspace-manager', {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   private updateScrollButtons(): void {
     if (!this.tabsContainer) return;
     const { scrollLeft, scrollWidth, clientWidth } = this.tabsContainer;
@@ -462,6 +469,18 @@ export class LvToolbar extends LitElement {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="12" y1="5" x2="12" y2="19"></line>
             <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+        </button>
+        <button
+          class="menu-btn"
+          title="Workspaces"
+          @click=${this.handleOpenWorkspaceManager}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7"></rect>
+            <rect x="14" y="3" width="7" height="7"></rect>
+            <rect x="3" y="14" width="7" height="7"></rect>
+            <rect x="14" y="14" width="7" height="7"></rect>
           </svg>
         </button>
       </div>

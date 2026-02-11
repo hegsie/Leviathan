@@ -7,10 +7,13 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { repositoryStore, type RecentRepository } from '../../stores/index.ts';
+import { workspaceStore } from '../../stores/workspace.store.ts';
 import { openRepository } from '../../services/git.service.ts';
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
+import * as workspaceService from '../../services/workspace.service.ts';
+import type { Workspace } from '../../types/git.types.ts';
 import { loggers } from '../../utils/logger.ts';
 
 const log = loggers.ui;
@@ -228,31 +231,130 @@ export class LvWelcome extends LitElement {
         color: var(--color-text-muted);
         font-size: var(--font-size-sm);
       }
+
+      .workspace-section {
+        width: 100%;
+        max-width: 400px;
+        margin-bottom: var(--spacing-lg);
+      }
+
+      .workspace-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: var(--spacing-sm);
+        padding-bottom: var(--spacing-xs);
+        border-bottom: 1px solid var(--color-border);
+      }
+
+      .workspace-title {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .manage-btn {
+        font-size: var(--font-size-xs);
+        color: var(--color-primary);
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: var(--spacing-xs);
+      }
+
+      .manage-btn:hover {
+        text-decoration: underline;
+      }
+
+      .workspace-list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-xs);
+      }
+
+      .workspace-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-sm) var(--spacing-md);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-secondary);
+        border: 1px solid transparent;
+        cursor: pointer;
+        transition: all var(--transition-fast);
+        text-align: left;
+        width: 100%;
+      }
+
+      .workspace-item:hover {
+        background: var(--color-bg-hover);
+        border-color: var(--color-border);
+      }
+
+      .workspace-color-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .workspace-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .workspace-name {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+      }
+
+      .workspace-repo-count {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
     `,
   ];
 
   @state() private recentRepositories: RecentRepository[] = [];
+  @state() private workspaces: Workspace[] = [];
   @state() private isLoading = false;
 
   @query('lv-clone-dialog') private cloneDialog!: LvCloneDialog;
   @query('lv-init-dialog') private initDialog!: LvInitDialog;
 
-  private unsubscribe?: () => void;
+  private unsubscribeRepo?: () => void;
+  private unsubscribeWorkspace?: () => void;
 
   connectedCallback(): void {
     super.connectedCallback();
-    this.unsubscribe = repositoryStore.subscribe((state) => {
+    this.unsubscribeRepo = repositoryStore.subscribe((state) => {
       this.recentRepositories = state.recentRepositories;
       this.isLoading = state.isLoading;
+    });
+    this.unsubscribeWorkspace = workspaceStore.subscribe((state) => {
+      this.workspaces = this.sortWorkspaces(state.workspaces);
     });
     // Initialize from current state
     const state = repositoryStore.getState();
     this.recentRepositories = state.recentRepositories;
+    this.workspaces = this.sortWorkspaces(workspaceStore.getState().workspaces);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.unsubscribe?.();
+    this.unsubscribeRepo?.();
+    this.unsubscribeWorkspace?.();
+  }
+
+  private sortWorkspaces(workspaces: Workspace[]): Workspace[] {
+    return [...workspaces].sort((a, b) => {
+      const aTime = a.lastOpened ?? a.createdAt;
+      const bTime = b.lastOpened ?? b.createdAt;
+      return bTime.localeCompare(aTime);
+    });
   }
 
   private async handleOpen(): Promise<void> {
@@ -309,6 +411,29 @@ export class LvWelcome extends LitElement {
     repositoryStore.getState().clearRecentRepositories();
   }
 
+  private async handleWorkspaceClick(workspace: Workspace): Promise<void> {
+    const store = repositoryStore.getState();
+
+    for (const repo of workspace.repositories) {
+      const result = await openRepository({ path: repo.path });
+      if (result.success && result.data) {
+        store.addRepository(result.data);
+        searchIndexService.buildIndex(repo.path);
+      }
+    }
+
+    workspaceStore.getState().setActiveWorkspaceId(workspace.id);
+    await workspaceService.updateWorkspaceLastOpened(workspace.id);
+    showToast(`Opened workspace: ${workspace.name}`, 'success');
+  }
+
+  private handleManageWorkspaces(): void {
+    this.dispatchEvent(new CustomEvent('open-workspace-manager', {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   render() {
     return html`
       <lv-clone-dialog></lv-clone-dialog>
@@ -356,6 +481,39 @@ export class LvWelcome extends LitElement {
             <span>Init</span>
           </button>
         </div>
+
+        ${this.workspaces.length > 0
+          ? html`
+              <div class="workspace-section">
+                <div class="workspace-header">
+                  <span class="workspace-title">Workspaces</span>
+                  <button class="manage-btn" @click=${this.handleManageWorkspaces}>
+                    Manage
+                  </button>
+                </div>
+                <div class="workspace-list">
+                  ${this.workspaces.map(
+                    (ws) => html`
+                      <button
+                        class="workspace-item"
+                        @click=${() => this.handleWorkspaceClick(ws)}
+                        ?disabled=${this.isLoading || ws.repositories.length === 0}
+                      >
+                        <span
+                          class="workspace-color-dot"
+                          style="background: ${ws.color || '#4fc3f7'}"
+                        ></span>
+                        <div class="workspace-info">
+                          <div class="workspace-name">${ws.name}</div>
+                          <div class="workspace-repo-count">${ws.repositories.length} ${ws.repositories.length === 1 ? 'repository' : 'repositories'}</div>
+                        </div>
+                      </button>
+                    `,
+                  )}
+                </div>
+              </div>
+            `
+          : ''}
 
         ${this.recentRepositories.length > 0
           ? html`
