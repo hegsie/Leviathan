@@ -57,7 +57,7 @@ import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts'
 import * as gitService from './services/git.service.ts';
 import * as updateService from './services/update.service.ts';
 import * as unifiedProfileService from './services/unified-profile.service.ts';
-import { showToast } from './services/notification.service.ts';
+import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
@@ -930,6 +930,11 @@ export class AppShell extends LitElement {
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       this.conflictOperationType = 'merge';
       this.showConflictDialog = true;
+      notifyWarning(
+        'Merge Conflict',
+        `Conflicts detected while merging ${refName}. Please resolve conflicts to continue.`,
+        true
+      );
     } else {
       log.error('Merge failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Merge failed');
@@ -953,6 +958,11 @@ export class AppShell extends LitElement {
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       this.conflictOperationType = 'rebase';
       this.showConflictDialog = true;
+      notifyWarning(
+        'Rebase Conflict',
+        `Conflicts detected while rebasing onto ${refName}. Please resolve conflicts to continue.`,
+        true
+      );
     } else {
       log.error('Rebase failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Rebase failed');
@@ -1044,6 +1054,11 @@ export class AppShell extends LitElement {
     // Show conflict resolution dialog
     this.conflictOperationType = 'cherry-pick';
     this.showConflictDialog = true;
+    notifyWarning(
+      'Cherry-pick Conflict',
+      'Conflicts detected during cherry-pick. Please resolve conflicts to continue.',
+      true
+    );
     this.handleRefresh();
   }
 
@@ -1089,6 +1104,11 @@ export class AppShell extends LitElement {
       // Show conflict resolution dialog
       this.conflictOperationType = 'revert';
       this.showConflictDialog = true;
+      notifyWarning(
+        'Revert Conflict',
+        `Conflicts detected while reverting ${commit.oid.substring(0, 7)}. Please resolve conflicts to continue.`,
+        true
+      );
     } else {
       log.error('Revert failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Revert failed');
