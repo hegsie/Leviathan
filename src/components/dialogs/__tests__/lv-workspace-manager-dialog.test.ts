@@ -1,5 +1,5 @@
 import { expect } from '@open-wc/testing';
-import type { Workspace, WorkspaceRepoStatus } from '../../../types/git.types.ts';
+import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../../../types/git.types.ts';
 
 // Mock Tauri API
 const mockWorkspaces: Workspace[] = [
@@ -49,6 +49,38 @@ const mockStatuses: WorkspaceRepoStatus[] = [
   },
 ];
 
+const mockSearchResults: WorkspaceSearchResult[] = [
+  {
+    repoName: 'api-gateway',
+    repoPath: '/repos/api-gateway',
+    filePath: 'src/main.ts',
+    lineNumber: 42,
+    lineContent: 'const searchTerm = "hello";',
+    matchStart: 22,
+    matchEnd: 27,
+  },
+  {
+    repoName: 'api-gateway',
+    repoPath: '/repos/api-gateway',
+    filePath: 'src/utils.ts',
+    lineNumber: 10,
+    lineContent: 'function hello() {}',
+    matchStart: 9,
+    matchEnd: 14,
+  },
+  {
+    repoName: 'auth-service',
+    repoPath: '/repos/auth-service',
+    filePath: 'index.ts',
+    lineNumber: 1,
+    lineContent: '// hello world',
+    matchStart: 3,
+    matchEnd: 8,
+  },
+];
+
+const mockExportedJson = JSON.stringify(mockWorkspaces[0], null, 2);
+
 let lastInvokedCommand: string | null = null;
 let lastInvokedArgs: unknown = null;
 
@@ -80,6 +112,16 @@ const mockInvoke = (command: string, args?: unknown): Promise<unknown> => {
         isBare: false,
         headRef: 'main',
         state: 'clean',
+      });
+    case 'search_workspace':
+      return Promise.resolve(mockSearchResults);
+    case 'export_workspace':
+      return Promise.resolve(mockExportedJson);
+    case 'import_workspace':
+      return Promise.resolve({
+        ...mockWorkspaces[0],
+        id: 'ws-imported',
+        name: 'Imported Workspace',
       });
     default:
       return Promise.resolve(null);
@@ -220,6 +262,80 @@ describe('Workspace Manager Dialog Data', () => {
       for (const color of colors) {
         expect(color).to.match(/^#[0-9a-f]{6}$/);
       }
+    });
+  });
+
+  describe('Workspace search', () => {
+    it('search_workspace passes correct args', async () => {
+      await mockInvoke('search_workspace', {
+        workspaceId: 'ws-1',
+        query: 'hello',
+        caseSensitive: false,
+        regex: false,
+        maxResults: 200,
+      });
+      expect(lastInvokedCommand).to.equal('search_workspace');
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.workspaceId).to.equal('ws-1');
+      expect(args.query).to.equal('hello');
+      expect(args.caseSensitive).to.equal(false);
+    });
+
+    it('search results have correct structure', async () => {
+      const results = (await mockInvoke('search_workspace', {
+        workspaceId: 'ws-1',
+        query: 'hello',
+      })) as WorkspaceSearchResult[];
+
+      expect(results).to.have.lengthOf(3);
+
+      const first = results[0];
+      expect(first.repoName).to.equal('api-gateway');
+      expect(first.repoPath).to.equal('/repos/api-gateway');
+      expect(first.filePath).to.equal('src/main.ts');
+      expect(first.lineNumber).to.equal(42);
+      expect(first.lineContent).to.include('searchTerm');
+      expect(first.matchStart).to.be.a('number');
+      expect(first.matchEnd).to.be.a('number');
+    });
+
+    it('search results can be grouped by repo', () => {
+      const grouped = new Map<string, WorkspaceSearchResult[]>();
+      for (const r of mockSearchResults) {
+        if (!grouped.has(r.repoName)) {
+          grouped.set(r.repoName, []);
+        }
+        grouped.get(r.repoName)!.push(r);
+      }
+
+      expect(grouped.size).to.equal(2);
+      expect(grouped.get('api-gateway')!.length).to.equal(2);
+      expect(grouped.get('auth-service')!.length).to.equal(1);
+    });
+  });
+
+  describe('Workspace export/import', () => {
+    it('export_workspace returns JSON string', async () => {
+      const result = await mockInvoke('export_workspace', { workspaceId: 'ws-1' });
+      expect(lastInvokedCommand).to.equal('export_workspace');
+      expect(result).to.be.a('string');
+      const parsed = JSON.parse(result as string);
+      expect(parsed.id).to.equal('ws-1');
+      expect(parsed.name).to.equal('Backend');
+    });
+
+    it('import_workspace passes JSON data', async () => {
+      const jsonData = JSON.stringify(mockWorkspaces[0]);
+      const result = (await mockInvoke('import_workspace', { jsonData })) as Workspace;
+      expect(lastInvokedCommand).to.equal('import_workspace');
+      expect(result.id).to.equal('ws-imported');
+      expect(result.name).to.equal('Imported Workspace');
+    });
+
+    it('imported workspace gets new ID', async () => {
+      const jsonData = JSON.stringify(mockWorkspaces[0]);
+      const result = (await mockInvoke('import_workspace', { jsonData })) as Workspace;
+      expect(result.id).to.not.equal(mockWorkspaces[0].id);
     });
   });
 });

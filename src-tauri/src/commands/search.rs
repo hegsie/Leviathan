@@ -40,7 +40,7 @@ pub struct DiffSearchResult {
 }
 
 /// Find the byte offset of a query match within a line (case-sensitive or insensitive)
-fn find_match_position(line: &str, query: &str, case_sensitive: bool) -> (u32, u32) {
+pub(crate) fn find_match_position(line: &str, query: &str, case_sensitive: bool) -> (u32, u32) {
     if case_sensitive {
         if let Some(start) = line.find(query) {
             (start as u32, (start + query.len()) as u32)

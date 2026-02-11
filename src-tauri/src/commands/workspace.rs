@@ -3,14 +3,29 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use chrono::Utc;
 use git2::Repository;
 use tauri::command;
 use uuid::Uuid;
 
+use crate::commands::search::find_match_position;
 use crate::error::{LeviathanError, Result};
 use crate::models::{Workspace, WorkspaceRepoStatus, WorkspaceRepository, WorkspacesConfig};
+
+/// A single search match across workspace repositories
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSearchResult {
+    pub repo_name: String,
+    pub repo_path: String,
+    pub file_path: String,
+    pub line_number: u32,
+    pub line_content: String,
+    pub match_start: u32,
+    pub match_end: u32,
+}
 
 /// Get the path to the workspaces config file
 fn get_workspaces_path() -> Result<std::path::PathBuf> {
@@ -250,6 +265,138 @@ pub async fn validate_workspace_repositories(
     }
 
     Ok(statuses)
+}
+
+/// Search across all repositories in a workspace using git grep
+#[command]
+pub async fn search_workspace(
+    workspace_id: String,
+    query: String,
+    case_sensitive: Option<bool>,
+    regex: Option<bool>,
+    file_pattern: Option<String>,
+    max_results: Option<u32>,
+) -> Result<Vec<WorkspaceSearchResult>> {
+    let config = load_workspaces_config()?;
+    let workspace = config
+        .workspaces
+        .iter()
+        .find(|w| w.id == workspace_id)
+        .ok_or_else(|| LeviathanError::OperationFailed("Workspace not found".to_string()))?;
+
+    let case_sensitive = case_sensitive.unwrap_or(false);
+    let use_regex = regex.unwrap_or(false);
+    let max_results = max_results.unwrap_or(500);
+    let mut results: Vec<WorkspaceSearchResult> = Vec::new();
+
+    for repo_entry in &workspace.repositories {
+        if results.len() as u32 >= max_results {
+            break;
+        }
+
+        let repo_path = Path::new(&repo_entry.path);
+        if !repo_path.exists() {
+            continue;
+        }
+
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&repo_entry.path).arg("grep").arg("-n");
+
+        if !case_sensitive {
+            cmd.arg("-i");
+        }
+
+        if use_regex {
+            cmd.arg("-E");
+        }
+
+        cmd.arg("--").arg(&query);
+
+        if let Some(ref pattern) = file_pattern {
+            cmd.arg(pattern);
+        }
+
+        let output = match cmd.output() {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+
+        // git grep returns exit code 1 when no matches found (not an error)
+        if !output.status.success() && output.status.code() != Some(1) {
+            continue;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        for line in stdout.lines() {
+            if results.len() as u32 >= max_results {
+                break;
+            }
+
+            let parts: Vec<&str> = line.splitn(3, ':').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+
+            let file_path = parts[0].to_string();
+            let line_number: u32 = match parts[1].parse() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let line_content = parts[2].to_string();
+
+            let (match_start, match_end) =
+                find_match_position(&line_content, &query, case_sensitive);
+
+            results.push(WorkspaceSearchResult {
+                repo_name: repo_entry.name.clone(),
+                repo_path: repo_entry.path.clone(),
+                file_path,
+                line_number,
+                line_content,
+                match_start,
+                match_end,
+            });
+        }
+    }
+
+    Ok(results)
+}
+
+/// Export a workspace configuration as a JSON string
+#[command]
+pub async fn export_workspace(workspace_id: String) -> Result<String> {
+    let config = load_workspaces_config()?;
+    let workspace = config
+        .workspaces
+        .iter()
+        .find(|w| w.id == workspace_id)
+        .ok_or_else(|| LeviathanError::OperationFailed("Workspace not found".to_string()))?;
+
+    let json = serde_json::to_string_pretty(workspace).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to serialize workspace: {}", e))
+    })?;
+
+    Ok(json)
+}
+
+/// Import a workspace from a JSON string
+#[command]
+pub async fn import_workspace(json_data: String) -> Result<Workspace> {
+    let mut workspace: Workspace = serde_json::from_str(&json_data).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to parse workspace JSON: {}", e))
+    })?;
+
+    // Generate a new ID and creation timestamp
+    workspace.id = Uuid::new_v4().to_string();
+    workspace.created_at = Utc::now();
+    workspace.last_opened = None;
+
+    let mut config = load_workspaces_config()?;
+    config.workspaces.push(workspace.clone());
+    save_workspaces_config(&config)?;
+
+    Ok(workspace)
 }
 
 /// Compute ahead/behind counts for HEAD relative to its upstream tracking branch

@@ -36,6 +36,7 @@ import './components/dialogs/lv-azure-devops-dialog.ts';
 import './components/dialogs/lv-profile-manager-dialog.ts';
 import './components/dialogs/lv-migration-dialog.ts';
 import './components/dialogs/lv-workspace-manager-dialog.ts';
+import './components/dialogs/lv-hooks-dialog.ts';
 import './components/dialogs/lv-create-tag-dialog.ts';
 import './components/dialogs/lv-create-branch-dialog.ts';
 import './components/dialogs/lv-cherry-pick-dialog.ts';
@@ -530,6 +531,7 @@ export class AppShell extends LitElement {
 
   // Workspace Manager dialog
   @state() private showWorkspaceManager = false;
+  @state() private showHooksDialog = false;
 
   // Panel dimensions
   @state() private leftPanelWidth = 220;
@@ -1891,6 +1893,13 @@ export class AppShell extends LitElement {
         icon: 'folder',
         action: () => { this.showWorkspaceManager = true; },
       },
+      {
+        id: 'hooks',
+        label: 'Manage git hooks',
+        category: 'action',
+        icon: 'terminal',
+        action: this.requiresRepository(() => { this.showHooksDialog = true; }),
+      },
     ];
 
     return commands;
@@ -2738,6 +2747,14 @@ export class AppShell extends LitElement {
         ?open=${this.showWorkspaceManager}
         @close=${() => { this.showWorkspaceManager = false; }}
       ></lv-workspace-manager-dialog>
+
+      ${this.activeRepository ? html`
+        <lv-hooks-dialog
+          ?open=${this.showHooksDialog}
+          .repoPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showHooksDialog = false; }}
+        ></lv-hooks-dialog>
+      ` : ''}
 
       ${this.activeRepository ? html`
         <lv-create-tag-dialog

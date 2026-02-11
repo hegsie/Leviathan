@@ -142,10 +142,10 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
   - Batch operations (fetch all, pull all, status overview)
   - Workspace persistence and management dialog
 
-- **Workspace enhancements** (planned)
+- ✅ **Workspace enhancements**
   - Workspace-level search (find across all repos)
-  - Save/import/export workspace configurations
-  - Clone and setup entire project structures
+  - Import/export workspace configurations
+  - Clone and setup entire project structures (planned)
 
 #### Local Hooks & Automation
 
@@ -153,11 +153,11 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
   - Define per-repo custom commands
   - Execute scripts from the UI
 
-- **Git hooks UI** (planned)
+- ✅ **Git hooks UI**
   - Visual hook configuration (pre-commit, commit-msg, pre-push)
   - Hook templates (lint, format, test)
   - Enable/disable hooks per repository
-  - Hook execution logs and debugging
+  - Hook execution logs and debugging (planned)
 
 ---
 

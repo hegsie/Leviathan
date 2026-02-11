@@ -10,6 +10,109 @@ import { getHooks, getHook, saveHook, deleteHook, toggleHook } from '../../servi
 import type { GitHook } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 
+const HOOK_TEMPLATES: Record<string, string> = {
+  'pre-commit': `#!/bin/sh
+#
+# pre-commit hook: Run linting and formatting checks before committing.
+#
+
+# Run linter
+npm run lint --silent 2>/dev/null
+LINT_EXIT=$?
+
+if [ $LINT_EXIT -ne 0 ]; then
+  echo "Lint check failed. Please fix errors before committing."
+  exit 1
+fi
+
+# Run formatter check
+npm run format:check --silent 2>/dev/null
+FORMAT_EXIT=$?
+
+if [ $FORMAT_EXIT -ne 0 ]; then
+  echo "Formatting check failed. Run 'npm run format' to fix."
+  exit 1
+fi
+
+exit 0
+`,
+  'commit-msg': `#!/bin/sh
+#
+# commit-msg hook: Enforce conventional commit message format.
+# Format: type(scope): description
+#
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
+
+# Allow merge commits
+if echo "$COMMIT_MSG" | grep -qE "^Merge "; then
+  exit 0
+fi
+
+# Conventional commit pattern
+PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\\(.+\\))?: .{1,}"
+
+if ! echo "$COMMIT_MSG" | grep -qE "$PATTERN"; then
+  echo "Invalid commit message format."
+  echo "Expected: type(scope): description"
+  echo "Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+  exit 1
+fi
+
+exit 0
+`,
+  'pre-push': `#!/bin/sh
+#
+# pre-push hook: Run tests before pushing to remote.
+#
+
+echo "Running tests before push..."
+
+npm test --silent 2>/dev/null
+TEST_EXIT=$?
+
+if [ $TEST_EXIT -ne 0 ]; then
+  echo "Tests failed. Push aborted."
+  exit 1
+fi
+
+echo "All tests passed."
+exit 0
+`,
+  'prepare-commit-msg': `#!/bin/sh
+#
+# prepare-commit-msg hook: Prefix commit message with branch name.
+# Example: [feature/login] Your commit message
+#
+
+COMMIT_MSG_FILE="$1"
+COMMIT_SOURCE="$2"
+
+# Only modify if this is not a merge, amend, or squash
+if [ -n "$COMMIT_SOURCE" ]; then
+  exit 0
+fi
+
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+# Skip for main/master/develop branches
+case "$BRANCH" in
+  main|master|develop)
+    exit 0
+    ;;
+esac
+
+# Prepend branch name if not already present
+CURRENT_MSG=$(cat "$COMMIT_MSG_FILE")
+if ! echo "$CURRENT_MSG" | grep -q "^\\[$BRANCH\\]"; then
+  echo "[$BRANCH] $CURRENT_MSG" > "$COMMIT_MSG_FILE"
+fi
+
+exit 0
+`,
+};
+
 @customElement('lv-hooks-dialog')
 export class LvHooksDialog extends LitElement {
   static styles = [
@@ -568,6 +671,41 @@ export class LvHooksDialog extends LitElement {
         background: var(--color-warning);
         flex-shrink: 0;
       }
+
+      .template-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--spacing-xs) var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border-bottom: 1px solid var(--color-border);
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
+      .template-btn {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border: 1px solid var(--color-primary);
+        border-radius: var(--radius-md);
+        background: transparent;
+        color: var(--color-primary);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .template-btn:hover {
+        background: var(--color-primary);
+        color: white;
+      }
+
+      .template-btn svg {
+        width: 12px;
+        height: 12px;
+      }
     `,
   ];
 
@@ -813,6 +951,25 @@ export class LvHooksDialog extends LitElement {
     return hook.enabled ? 'exists-enabled' : 'exists-disabled';
   }
 
+  private hasTemplate(hookName: string): boolean {
+    return hookName in HOOK_TEMPLATES;
+  }
+
+  private handleUseTemplate(): void {
+    if (!this.selectedHook) return;
+
+    const template = HOOK_TEMPLATES[this.selectedHook.name];
+    if (!template) return;
+
+    if (this.editContent.trim() && this.editContent !== this.getDefaultHookContent(this.selectedHook.name)) {
+      const replace = window.confirm('Replace current content with template?');
+      if (!replace) return;
+    }
+
+    this.editContent = template;
+    this.hasUnsavedChanges = true;
+  }
+
   private getActiveHookCount(): number {
     return this.hooks.filter(h => h.exists && h.enabled).length;
   }
@@ -893,6 +1050,21 @@ export class LvHooksDialog extends LitElement {
           ` : nothing}
         </div>
       </div>
+      ${this.hasTemplate(hook.name) ? html`
+        <div class="template-bar">
+          <span>Template available for this hook</span>
+          <button class="template-btn" @click=${this.handleUseTemplate}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+              <polyline points="10 9 9 9 8 9"></polyline>
+            </svg>
+            Use template
+          </button>
+        </div>
+      ` : nothing}
       <div class="editor-content">
         <textarea
           class="editor-textarea"
