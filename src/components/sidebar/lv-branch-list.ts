@@ -11,6 +11,8 @@ import '../dialogs/lv-create-branch-dialog.ts';
 import type { LvCreateBranchDialog } from '../dialogs/lv-create-branch-dialog.ts';
 import '../dialogs/lv-interactive-rebase-dialog.ts';
 import type { LvInteractiveRebaseDialog } from '../dialogs/lv-interactive-rebase-dialog.ts';
+import '../dialogs/lv-branch-cleanup-dialog.ts';
+import type { LvBranchCleanupDialog } from '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { Branch } from '../../types/git.types.ts';
 
 type BranchSortMode = 'name' | 'date' | 'date-asc';
@@ -546,6 +548,7 @@ export class LvBranchList extends LitElement {
 
   @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
   @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
+  @query('lv-branch-cleanup-dialog') private branchCleanupDialog!: LvBranchCleanupDialog;
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -809,6 +812,32 @@ export class LvBranchList extends LitElement {
       b.aheadBehind &&
       b.aheadBehind.ahead === 0
     );
+  }
+
+  /**
+   * Find all local branches that are stale (older than staleBranchDays setting)
+   */
+  private getStaleBranches(): Branch[] {
+    const allLocal = this.localBranchGroups.flatMap(g => g.branches);
+    return allLocal.filter(b => !b.isHead && this.isBranchStale(b));
+  }
+
+  /**
+   * Open the branch cleanup dialog
+   */
+  private handleOpenCleanupDialog(): void {
+    this.branchCleanupDialog.open();
+  }
+
+  /**
+   * Handle cleanup completion by refreshing branches
+   */
+  private async handleCleanupComplete(): Promise<void> {
+    await this.loadBranches();
+    this.dispatchEvent(new CustomEvent('branches-changed', {
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   /**
@@ -1838,22 +1867,27 @@ export class LvBranchList extends LitElement {
         @rebase-complete=${this.handleRebaseComplete}
       ></lv-interactive-rebase-dialog>
 
+      <lv-branch-cleanup-dialog
+        .repositoryPath=${this.repositoryPath}
+        @cleanup-complete=${this.handleCleanupComplete}
+      ></lv-branch-cleanup-dialog>
+
       <!-- Local branches -->
       ${this.localBranchGroups.length > 0 ? html`
         <div class="local-header">
           <span class="local-header-title">Local Branches</span>
-          ${this.getMergedBranches().length > 0 ? html`
+          ${this.getMergedBranches().length + this.getStaleBranches().length > 0 ? html`
             <button
               class="cleanup-btn"
-              @click=${this.handleDeleteMergedBranches}
-              title="Delete branches that are merged into current branch"
+              @click=${this.handleOpenCleanupDialog}
+              title="Clean up merged, stale, and gone branches"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"></polyline>
                 <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
               </svg>
               Clean up
-              <span class="badge">${this.getMergedBranches().length}</span>
+              <span class="badge">${this.getMergedBranches().length + this.getStaleBranches().length}</span>
             </button>
           ` : nothing}
         </div>
