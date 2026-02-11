@@ -46,6 +46,10 @@ export interface SettingsState {
   // Network settings
   networkOperationTimeout: number; // Seconds before network operations time out (0 = disabled)
 
+  // System tray & notifications
+  minimizeToTray: boolean;
+  showNativeNotifications: boolean;
+
   // Recent repositories
   recentRepositories: string[];
   maxRecentRepositories: number;
@@ -71,6 +75,8 @@ export interface SettingsState {
   setAutoStashOnCheckout: (enabled: boolean) => void;
   setStaleBranchDays: (days: number) => void;
   setNetworkOperationTimeout: (timeout: number) => void;
+  setMinimizeToTray: (enabled: boolean) => void;
+  setShowNativeNotifications: (enabled: boolean) => void;
   addRecentRepository: (path: string) => void;
   removeRecentRepository: (path: string) => void;
   clearRecentRepositories: () => void;
@@ -98,6 +104,8 @@ const defaultSettings = {
   autoStashOnCheckout: false,
   staleBranchDays: 90,
   networkOperationTimeout: 300,
+  minimizeToTray: false,
+  showNativeNotifications: true,
   recentRepositories: [] as string[],
   maxRecentRepositories: 10,
 };
@@ -158,6 +166,10 @@ export const settingsStore = createStore<SettingsState>()(
       setStaleBranchDays: (staleBranchDays) => set({ staleBranchDays }),
 
       setNetworkOperationTimeout: (networkOperationTimeout) => set({ networkOperationTimeout }),
+
+      setMinimizeToTray: (minimizeToTray) => set({ minimizeToTray }),
+
+      setShowNativeNotifications: (showNativeNotifications) => set({ showNativeNotifications }),
 
       addRecentRepository: (path) => {
         const { recentRepositories, maxRecentRepositories } = get();

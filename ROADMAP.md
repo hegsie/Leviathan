@@ -102,11 +102,11 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 
 #### Advanced Branch & History Management
 
-- **Visual interactive rebase**
-  - Drag-and-drop reordering of commits
-  - Edit/squash/fixup/drop actions in UI
-  - Conflict resolution during rebase
-  - Preview of rebase result before executing
+- ✅ **Visual interactive rebase**
+  - ✅ Drag-and-drop reordering of commits
+  - ✅ Edit/squash/fixup/drop actions in UI
+  - ✅ Conflict resolution during rebase
+  - ✅ Preview of rebase result before executing
 
 - **Branch graph enhancements**
   - Filter graph by author, message, date, path
@@ -307,10 +307,10 @@ This section contains specific features organized by category. Items here suppor
 ### UI/UX Enhancements
 
 #### Inline Editing
-- Edit files directly in diff view
-- Quick fixes for conflicts  
-- Syntax-aware editing
-- Save directly from diff view
+- ✅ Edit files directly in diff view
+- ✅ Quick fixes for conflicts
+- ✅ Syntax-aware editing
+- ✅ Save directly from diff view
 
 #### Image Diff
 - ✅ Side-by-side image comparison
@@ -320,18 +320,18 @@ This section contains specific features organized by category. Items here suppor
 - ✅ Support for common formats (PNG, JPG, GIF, WebP)
 
 #### Notifications & Background Operations
-- Push/pull completion notifications
+- ✅ Push/pull completion notifications
 - Conflict alerts
-- Background operation status
-- System tray integration
-- Notification preferences per repository
+- ✅ Background operation status
+- ✅ System tray integration
+- ✅ Notification preferences per repository
 
 #### Auto-fetch
-- Configurable periodic fetch intervals
-- Fetch on window focus/activation
-- Remote change indicators in UI
-- Background sync with rate limiting
-- Pause/resume background fetch
+- ✅ Configurable periodic fetch intervals
+- ✅ Fetch on window focus/activation
+- ✅ Remote change indicators in UI
+- ✅ Background sync with rate limiting
+- ✅ Pause/resume background fetch
 
 ---
 
@@ -479,7 +479,7 @@ This section contains specific features organized by category. Items here suppor
 - ✅ **Anthropic Claude** - API integration for commit messages
 - ✅ **GitHub Copilot** - Integration for commit message generation
 - ✅ **OpenAI** - GPT-4 and future models for AI-assisted features
-- **Google Gemini** - Gemini API support (planned)
+- ✅ **Google Gemini** - Gemini API support
 - ✅ API key management with secure storage
 - ✅ Provider selection and priority in settings
 - Usage tracking and cost estimates per provider (planned)
