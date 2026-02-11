@@ -1382,12 +1382,12 @@ export class AppShell extends LitElement {
 
   private handleConflictResolved(): void {
     this.showConflictDialog = false;
-    this.graphCanvas?.refresh?.();
+    this.handleRefresh();
   }
 
   private handleConflictAborted(): void {
     this.showConflictDialog = false;
-    this.graphCanvas?.refresh?.();
+    this.handleRefresh();
   }
 
   private handleResizeStart(e: MouseEvent, type: 'left' | 'right'): void {

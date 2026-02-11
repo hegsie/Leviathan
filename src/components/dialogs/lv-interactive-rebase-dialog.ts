@@ -8,6 +8,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, property, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 import type { RebaseCommit, RebaseAction } from '../../types/git.types.ts';
@@ -842,13 +843,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
         this.close();
       } else {
         if (result.error?.code === 'REBASE_CONFLICT') {
-          // Dispatch event to trigger conflict resolution dialog
+          this.close();
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
             detail: { operationType: 'rebase' },
           }));
-          this.error = 'Rebase encountered conflicts. Please resolve them to continue.';
+          showToast('Rebase paused — resolve conflicts to continue', 'warning');
         } else {
           this.error = result.error?.message ?? 'Failed to execute rebase';
         }

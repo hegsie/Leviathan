@@ -108,7 +108,7 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
   - ✅ Conflict resolution during rebase
   - ✅ Preview of rebase result before executing
 
-- **Branch graph enhancements**
+- ✅ **Branch graph enhancements**
   - ✅ Filter graph by author, message, date, path
   - ✅ Hide/show branches dynamically
   - ✅ Export graph as image/SVG
