@@ -65,4 +65,5 @@ pub mod unified_profiles;
 pub mod update;
 pub mod validation;
 pub mod watcher;
+pub mod workspace;
 pub mod worktree;
