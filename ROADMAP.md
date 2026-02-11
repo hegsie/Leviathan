@@ -114,10 +114,10 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
   - ✅ Export graph as image/SVG
   - ✅ Graph performance for complex histories
 
-- **Branch cleanup automation**
-  - One-click "delete merged branches"
-  - Stale branch detection with configurable rules
-  - Safe delete with upstream tracking verification
+- ✅ **Branch cleanup automation**
+  - ✅ One-click "delete merged branches"
+  - ✅ Stale branch detection with configurable rules
+  - ✅ Safe delete with upstream tracking verification
 
 #### Conflict Resolution
 
