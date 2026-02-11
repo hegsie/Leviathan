@@ -57,11 +57,13 @@ import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts'
 import * as gitService from './services/git.service.ts';
 import * as updateService from './services/update.service.ts';
 import * as unifiedProfileService from './services/unified-profile.service.ts';
+import { settingsStore } from './stores/settings.store.ts';
+import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
-import type { UnlistenFn } from '@tauri-apps/api/event';
+import { emit, type UnlistenFn } from '@tauri-apps/api/event';
 
 /**
  * Main application shell component
@@ -421,6 +423,9 @@ export class AppShell extends LitElement {
   @state() private blameFile: string | null = null;
   @state() private blameCommitOid: string | null = null;
 
+  // Remote status (for auto-fetch ahead/behind indicators)
+  @state() private remoteStatus: { ahead: number; behind: number } | null = null;
+
   // Progress operations
   @state() private progressOperations: ProgressOperation[] = [];
   private progressUnsubscribe?: () => void;
@@ -544,6 +549,8 @@ export class AppShell extends LitElement {
   private updateUnlisteners: UnlistenFn[] = [];
   private shownIntegrationSuggestions: Set<string> = new Set();
   private isRestoringRepositories = false;
+  private autoFetchUnsubscribe?: () => void;
+  private focusHandler?: () => void;
 
   // Bound event handlers for cleanup
   private boundHandleMouseMove = this.handleResizeMove.bind(this);
@@ -647,6 +654,24 @@ export class AppShell extends LitElement {
     // Restore previously open repositories
     this.restorePersistedRepositories();
 
+    // Set up auto-fetch based on settings
+    this.setupAutoFetch();
+
+    // Set up window focus handler for fetch-on-focus
+    this.focusHandler = () => {
+      if (settingsStore.getState().fetchOnFocus && this.activeRepository) {
+        gitService.getRemoteStatus(this.activeRepository.repository.path).then((result) => {
+          if (result.success && result.data) {
+            this.remoteStatus = { ahead: result.data.ahead, behind: result.data.behind };
+          }
+        });
+      }
+    };
+    window.addEventListener('focus', this.focusHandler);
+
+    // Listen for auto-fetch events
+    this.setupAutoFetchListeners();
+
     // Set up update notification listeners
     this.setupUpdateListeners();
 
@@ -704,6 +729,11 @@ export class AppShell extends LitElement {
     window.removeEventListener('trigger-abort', this.handleTriggerAbort);
     this.removeEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
     gitService.cleanupRemoteOperationListeners();
+    // Clean up auto-fetch
+    this.autoFetchUnsubscribe?.();
+    if (this.focusHandler) {
+      window.removeEventListener('focus', this.focusHandler);
+    }
     // Stop periodic token validation
     unifiedProfileService.stopPeriodicTokenValidation();
     // Clean up update listeners
@@ -933,7 +963,7 @@ export class AppShell extends LitElement {
       notifyWarning(
         'Merge Conflict',
         `Conflicts detected while merging ${refName}. Please resolve conflicts to continue.`,
-        true
+        !settingsStore.getState().showNativeNotifications
       );
     } else {
       log.error('Merge failed:', result.error);
@@ -961,7 +991,7 @@ export class AppShell extends LitElement {
       notifyWarning(
         'Rebase Conflict',
         `Conflicts detected while rebasing onto ${refName}. Please resolve conflicts to continue.`,
-        true
+        !settingsStore.getState().showNativeNotifications
       );
     } else {
       log.error('Rebase failed:', result.error);
@@ -1057,7 +1087,7 @@ export class AppShell extends LitElement {
     notifyWarning(
       'Cherry-pick Conflict',
       'Conflicts detected during cherry-pick. Please resolve conflicts to continue.',
-      true
+      !settingsStore.getState().showNativeNotifications
     );
     this.handleRefresh();
   }
@@ -1107,7 +1137,7 @@ export class AppShell extends LitElement {
       notifyWarning(
         'Revert Conflict',
         `Conflicts detected while reverting ${commit.oid.substring(0, 7)}. Please resolve conflicts to continue.`,
-        true
+        !settingsStore.getState().showNativeNotifications
       );
     } else {
       log.error('Revert failed:', result.error);
@@ -1877,6 +1907,74 @@ export class AppShell extends LitElement {
   }
 
   /**
+   * Set up auto-fetch for open repositories based on settings
+   */
+  private setupAutoFetch(): void {
+    const settings = settingsStore.getState();
+
+    // Send initial tray settings to backend
+    emit('update-tray-settings', { minimizeToTray: settings.minimizeToTray });
+
+    // Subscribe to settings changes to start/stop auto-fetch and update tray
+    this.autoFetchUnsubscribe = settingsStore.subscribe((state) => {
+      const repos = repositoryStore.getState().getPersistedOpenRepos();
+      if (state.autoFetchInterval > 0) {
+        for (const repo of repos) {
+          gitService.startAutoFetch(repo.path, state.autoFetchInterval);
+        }
+      } else {
+        for (const repo of repos) {
+          gitService.stopAutoFetch(repo.path);
+        }
+      }
+      // Update tray settings
+      emit('update-tray-settings', { minimizeToTray: state.minimizeToTray });
+    });
+
+    // Start auto-fetch for any already-open repos if interval is set
+    if (settings.autoFetchInterval > 0) {
+      // Wait a bit for repos to be restored before starting auto-fetch
+      setTimeout(() => {
+        const repos = repositoryStore.getState().getPersistedOpenRepos();
+        for (const repo of repos) {
+          gitService.startAutoFetch(repo.path, settings.autoFetchInterval);
+        }
+      }, 3000);
+    }
+  }
+
+  /**
+   * Listen for auto-fetch completion and remote update events
+   */
+  private async setupAutoFetchListeners(): Promise<void> {
+    const unlistenFetch = await listenToEvent<{
+      repoPath: string;
+      success: boolean;
+      behind: number;
+      ahead: number;
+      message?: string;
+    }>('autofetch-completed', (event) => {
+      if (event.success) {
+        this.remoteStatus = { ahead: event.ahead, behind: event.behind };
+      }
+    });
+    this.updateUnlisteners.push(unlistenFetch);
+
+    const unlistenUpdates = await listenToEvent<{
+      repoPath: string;
+      behind: number;
+      ahead: number;
+    }>('remote-updates-available', (event) => {
+      showToast(
+        `Remote has ${event.behind} new commit${event.behind !== 1 ? 's' : ''} available`,
+        'info',
+        5000,
+      );
+    });
+    this.updateUnlisteners.push(unlistenUpdates);
+  }
+
+  /**
    * Load remotes for a repository and update the store
    */
   private async loadRepositoryRemotes(repoPath: string): Promise<void> {
@@ -2198,6 +2296,12 @@ export class AppShell extends LitElement {
 
             <footer class="status-bar">
               <span>${this.activeRepository.repository.path}</span>
+              ${this.remoteStatus && this.remoteStatus.ahead > 0
+                ? html`<span style="margin-left: 12px; color: var(--color-success, #4caf50);">&uarr;${this.remoteStatus.ahead}</span>`
+                : ''}
+              ${this.remoteStatus && this.remoteStatus.behind > 0
+                ? html`<span style="margin-left: ${this.remoteStatus.ahead > 0 ? '4' : '12'}px; color: var(--color-warning, #ff9800);">&darr;${this.remoteStatus.behind}</span>`
+                : ''}
             </footer>
           `
         : html`<lv-welcome></lv-welcome>`}

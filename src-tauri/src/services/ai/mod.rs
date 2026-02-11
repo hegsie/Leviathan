@@ -16,7 +16,8 @@ use tokio::sync::RwLock;
 
 pub use config::{AiConfig, ProviderSettings};
 pub use providers::{
-    AnthropicProvider, GithubCopilotProvider, OllamaProvider, OpenAiCompatibleProvider,
+    AnthropicProvider, GeminiProvider, GithubCopilotProvider, OllamaProvider,
+    OpenAiCompatibleProvider,
 };
 
 /// AI provider types supported by the system
@@ -28,6 +29,7 @@ pub enum AiProviderType {
     OpenAi,
     Anthropic,
     GithubCopilot,
+    GoogleGemini,
 }
 
 impl AiProviderType {
@@ -38,6 +40,7 @@ impl AiProviderType {
             AiProviderType::OpenAi => "OpenAI",
             AiProviderType::Anthropic => "Anthropic Claude",
             AiProviderType::GithubCopilot => "GitHub Models",
+            AiProviderType::GoogleGemini => "Google Gemini",
         }
     }
 
@@ -48,15 +51,17 @@ impl AiProviderType {
             AiProviderType::OpenAi => "https://api.openai.com/v1",
             AiProviderType::Anthropic => "https://api.anthropic.com",
             AiProviderType::GithubCopilot => "https://models.inference.ai.azure.com",
+            AiProviderType::GoogleGemini => "https://generativelanguage.googleapis.com",
         }
     }
 
     pub fn requires_api_key(&self) -> bool {
         match self {
             AiProviderType::Ollama | AiProviderType::LmStudio => false,
-            AiProviderType::OpenAi | AiProviderType::Anthropic | AiProviderType::GithubCopilot => {
-                true
-            }
+            AiProviderType::OpenAi
+            | AiProviderType::Anthropic
+            | AiProviderType::GithubCopilot
+            | AiProviderType::GoogleGemini => true,
         }
     }
 
@@ -67,6 +72,7 @@ impl AiProviderType {
             AiProviderType::OpenAi => "gpt-4o-mini",
             AiProviderType::Anthropic => "claude-sonnet-4-20250514",
             AiProviderType::GithubCopilot => "gpt-4o",
+            AiProviderType::GoogleGemini => "gemini-2.0-flash",
         }
     }
 
@@ -77,6 +83,7 @@ impl AiProviderType {
             AiProviderType::OpenAi,
             AiProviderType::Anthropic,
             AiProviderType::GithubCopilot,
+            AiProviderType::GoogleGemini,
         ]
     }
 }
@@ -285,6 +292,22 @@ impl AiService {
         );
         self.providers
             .insert(AiProviderType::GithubCopilot, Box::new(copilot));
+
+        // Google Gemini provider
+        let gemini_settings = self
+            .config
+            .providers
+            .get(&AiProviderType::GoogleGemini)
+            .cloned()
+            .unwrap_or_default();
+        let gemini = GeminiProvider::new(
+            gemini_settings
+                .endpoint
+                .unwrap_or_else(|| AiProviderType::GoogleGemini.default_endpoint().to_string()),
+            gemini_settings.api_key,
+        );
+        self.providers
+            .insert(AiProviderType::GoogleGemini, Box::new(gemini));
     }
 
     /// Get the current configuration
@@ -501,5 +524,6 @@ mod tests {
         assert!(!AiProviderType::LmStudio.requires_api_key());
         assert!(AiProviderType::OpenAi.requires_api_key());
         assert!(AiProviderType::Anthropic.requires_api_key());
+        assert!(AiProviderType::GoogleGemini.requires_api_key());
     }
 }
