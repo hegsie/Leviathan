@@ -48,6 +48,7 @@ import type {
   FileStatusSortBy,
   SortDirection,
   CloneFilterInfo,
+  CleanupCandidate,
 } from "../types/git.types.ts";
 import type { CommitGraphData } from "../types/graph.types.ts";
 import type {
@@ -203,6 +204,20 @@ export async function deleteBranch(
   force?: boolean,
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>("delete_branch", { path, name, force });
+}
+
+/**
+ * Get branches that are candidates for cleanup (merged, stale, gone).
+ * Uses server-side graph_descendant_of for accurate merge detection.
+ */
+export async function getCleanupCandidates(
+  path: string,
+  staleDays?: number,
+): Promise<CommandResult<CleanupCandidate[]>> {
+  return invokeCommand<CleanupCandidate[]>("get_cleanup_candidates", {
+    path,
+    staleDays,
+  });
 }
 
 export async function renameBranch(

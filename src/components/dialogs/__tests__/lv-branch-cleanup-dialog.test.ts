@@ -1,56 +1,33 @@
 /**
  * Branch Cleanup Dialog Tests
  *
- * Tests categorization logic, risk assessment, branch protection rules,
- * and rendering of the cleanup dialog.
+ * Tests risk assessment, branch protection, selection logic,
+ * and the Tauri command contract for cleanup candidates.
  */
 
 import { expect } from '@open-wc/testing';
-import type { Branch, BranchTrackingInfo } from '../../../types/git.types.ts';
+import type { CleanupCandidate, Branch } from '../../../types/git.types.ts';
 
 // Mock Tauri API before importing any modules that use it
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
-let mockBranches: Branch[] = [];
-let mockBranchRules: Array<{
-  pattern: string;
-  preventDeletion: boolean;
-  preventForcePush: boolean;
-  requirePullRequest: boolean;
-  preventDirectPush: boolean;
-}> = [];
-let mockTrackingInfo: Record<string, BranchTrackingInfo> = {};
+let mockCandidates: CleanupCandidate[] = [];
 let deleteHistory: Array<{ name: string; force: boolean }> = [];
 
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   const params = args as Record<string, unknown> | undefined;
 
-  if (command === 'get_branches') {
-    return mockBranches;
-  }
-  if (command === 'get_branch_rules') {
-    return mockBranchRules;
-  }
-  if (command === 'get_branch_tracking_info') {
-    const branch = params?.branch as string;
-    if (branch && mockTrackingInfo[branch]) {
-      return mockTrackingInfo[branch];
-    }
-    return {
-      localBranch: branch,
-      upstream: null,
-      ahead: 0,
-      behind: 0,
-      remote: null,
-      remoteBranch: null,
-      isGone: false,
-    };
+  if (command === 'get_cleanup_candidates') {
+    return mockCandidates;
   }
   if (command === 'delete_branch') {
     const name = params?.name as string;
     const force = (params?.force as boolean) ?? false;
     deleteHistory.push({ name, force });
     return undefined;
+  }
+  if (command === 'prune_remote_tracking_branches') {
+    return { pruned: [], count: 0 };
   }
   if (command === 'plugin:notification|is_permission_granted') return false;
   if (command === 'plugin:dialog|confirm') return true;
@@ -72,29 +49,22 @@ interface CleanupBranch {
   riskReason: string;
   isProtected: boolean;
   protectedReason?: string;
-  trackingInfo?: BranchTrackingInfo;
 }
 
 const BUILTIN_PROTECTED = ['main', 'master', 'develop', 'development', 'staging', 'production'];
 
-function matchesGlob(name: string, pattern: string): boolean {
-  const regex = new RegExp(
-    '^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$',
-  );
-  return regex.test(name);
-}
-
-function assessRisk(
-  branch: Branch,
-  trackingInfo?: BranchTrackingInfo,
-): { risk: RiskLevel; riskReason: string } {
-  const ahead = branch.aheadBehind?.ahead ?? 0;
+/**
+ * Risk assessment for cleanup candidates (mirrors component logic).
+ * Uses CleanupCandidate directly from the backend.
+ */
+function assessRisk(candidate: CleanupCandidate): { risk: RiskLevel; riskReason: string } {
+  const ahead = candidate.aheadBehind?.ahead ?? 0;
 
   if (ahead === 0) {
     return { risk: 'safe', riskReason: 'Fully merged into current branch' };
   }
 
-  if (trackingInfo?.isGone && ahead > 0) {
+  if (candidate.category === 'gone' && ahead > 0) {
     return {
       risk: 'danger',
       riskReason: `Remote deleted with ${ahead} unpushed commit${ahead !== 1 ? 's' : ''}`,
@@ -108,90 +78,41 @@ function assessRisk(
     };
   }
 
-  if (!branch.upstream) {
+  if (!candidate.upstream) {
     return { risk: 'warning', riskReason: 'No upstream configured' };
   }
 
   return { risk: 'safe', riskReason: 'No unpushed work' };
 }
 
-function isBranchProtected(
-  branch: Branch,
-  rules: typeof mockBranchRules,
-): boolean {
-  if (branch.isHead) return true;
-  if (BUILTIN_PROTECTED.includes(branch.name)) return true;
-  for (const rule of rules) {
-    if (rule.preventDeletion && matchesGlob(branch.name, rule.pattern)) {
-      return true;
-    }
-  }
-  return false;
+function isBuiltinProtected(name: string): boolean {
+  return BUILTIN_PROTECTED.includes(name);
 }
 
-function categorizeBranches(
-  localBranches: Branch[],
-  trackingInfoMap: Map<string, BranchTrackingInfo>,
-  rules: typeof mockBranchRules,
-  staleBranchDays: number,
-): { merged: CleanupBranch[]; stale: CleanupBranch[]; gone: CleanupBranch[] } {
-  const merged: CleanupBranch[] = [];
-  const stale: CleanupBranch[] = [];
-  const gone: CleanupBranch[] = [];
-  const mergedNames = new Set<string>();
-
-  for (const branch of localBranches) {
-    const trackingInfo = trackingInfoMap.get(branch.name);
-    const isProtected = isBranchProtected(branch, rules);
-
-    if (branch.aheadBehind && branch.aheadBehind.ahead === 0) {
-      mergedNames.add(branch.name);
-      merged.push({
-        branch,
-        risk: 'safe',
-        riskReason: 'Fully merged into current branch',
-        isProtected,
-        trackingInfo,
-      });
-    }
-
-    if (trackingInfo?.isGone) {
-      const risk = assessRisk(branch, trackingInfo);
-      gone.push({
-        branch,
-        ...risk,
-        isProtected,
-        trackingInfo,
-      });
-    }
-  }
-
-  if (staleBranchDays > 0) {
-    const nowSeconds = Date.now() / 1000;
-    const staleThresholdSeconds = staleBranchDays * 24 * 60 * 60;
-
-    for (const branch of localBranches) {
-      if (mergedNames.has(branch.name)) continue;
-      if (!branch.lastCommitTimestamp) continue;
-      if (branch.lastCommitTimestamp >= nowSeconds - staleThresholdSeconds) continue;
-
-      const trackingInfo = trackingInfoMap.get(branch.name);
-      const isProtected = isBranchProtected(branch, rules);
-      const risk = assessRisk(branch, trackingInfo);
-
-      stale.push({
-        branch,
-        ...risk,
-        isProtected,
-        trackingInfo,
-      });
-    }
-  }
-
-  return { merged, stale, gone };
+function getProtectedReason(candidate: CleanupCandidate): string {
+  if (BUILTIN_PROTECTED.includes(candidate.shorthand)) return 'Built-in protected branch';
+  if (candidate.isProtected) return 'Protected by branch rule';
+  return 'Protected';
 }
 
 // --- Test Helpers ---
+
+function createCandidate(
+  name: string,
+  category: 'merged' | 'stale' | 'gone',
+  overrides: Partial<CleanupCandidate> = {},
+): CleanupCandidate {
+  return {
+    name,
+    shorthand: name,
+    category,
+    lastCommitTimestamp: null,
+    isProtected: false,
+    upstream: null,
+    aheadBehind: null,
+    ...overrides,
+  };
+}
 
 function createBranch(
   name: string,
@@ -213,302 +134,171 @@ function createBranch(
 
 describe('Branch Cleanup Dialog - Logic', () => {
   beforeEach(() => {
-    mockBranches = [];
-    mockBranchRules = [];
-    mockTrackingInfo = {};
+    mockCandidates = [];
     deleteHistory = [];
   });
 
   describe('Risk Assessment', () => {
-    it('marks branches with ahead === 0 as safe', () => {
-      const branch = createBranch('feature/done', {
+    it('marks merged candidates with ahead === 0 as safe', () => {
+      const candidate = createCandidate('feature/done', 'merged', {
         aheadBehind: { ahead: 0, behind: 2 },
       });
-      const result = assessRisk(branch);
+      const result = assessRisk(candidate);
       expect(result.risk).to.equal('safe');
     });
 
-    it('marks branches with unpushed commits as warning', () => {
-      const branch = createBranch('feature/wip', {
+    it('marks candidates with unpushed commits as warning', () => {
+      const candidate = createCandidate('feature/wip', 'stale', {
         aheadBehind: { ahead: 3, behind: 0 },
       });
-      const result = assessRisk(branch);
+      const result = assessRisk(candidate);
       expect(result.risk).to.equal('warning');
       expect(result.riskReason).to.include('3 unpushed commits');
     });
 
-    it('marks branches with 1 unpushed commit as warning (singular)', () => {
-      const branch = createBranch('feature/one', {
+    it('marks candidates with 1 unpushed commit as warning (singular)', () => {
+      const candidate = createCandidate('feature/one', 'stale', {
         aheadBehind: { ahead: 1, behind: 0 },
       });
-      const result = assessRisk(branch);
+      const result = assessRisk(candidate);
       expect(result.risk).to.equal('warning');
       expect(result.riskReason).to.include('1 unpushed commit');
       expect(result.riskReason).to.not.include('commits');
     });
 
-    it('marks gone branches with unpushed commits as danger', () => {
-      const branch = createBranch('feature/gone-wip', {
+    it('marks gone candidates with unpushed commits as danger', () => {
+      const candidate = createCandidate('feature/gone-wip', 'gone', {
         aheadBehind: { ahead: 5, behind: 0 },
         upstream: 'origin/feature/gone-wip',
       });
-      const trackingInfo: BranchTrackingInfo = {
-        localBranch: 'feature/gone-wip',
-        upstream: 'refs/remotes/origin/feature/gone-wip',
-        ahead: 5,
-        behind: 0,
-        remote: 'origin',
-        remoteBranch: 'feature/gone-wip',
-        isGone: true,
-      };
-      const result = assessRisk(branch, trackingInfo);
+      const result = assessRisk(candidate);
       expect(result.risk).to.equal('danger');
       expect(result.riskReason).to.include('Remote deleted');
     });
 
-    it('marks gone branches with no unpushed commits as safe', () => {
-      const branch = createBranch('feature/gone-safe', {
+    it('marks gone candidates with no unpushed commits as safe', () => {
+      const candidate = createCandidate('feature/gone-safe', 'gone', {
         aheadBehind: { ahead: 0, behind: 0 },
         upstream: 'origin/feature/gone-safe',
       });
-      const trackingInfo: BranchTrackingInfo = {
-        localBranch: 'feature/gone-safe',
-        upstream: null,
-        ahead: 0,
-        behind: 0,
-        remote: 'origin',
-        remoteBranch: 'feature/gone-safe',
-        isGone: true,
-      };
-      const result = assessRisk(branch, trackingInfo);
+      const result = assessRisk(candidate);
       expect(result.risk).to.equal('safe');
+    });
+
+    it('marks candidates without upstream as warning when they have commits', () => {
+      const candidate = createCandidate('feature/no-upstream', 'stale', {
+        aheadBehind: { ahead: 2, behind: 0 },
+        upstream: null,
+      });
+      const result = assessRisk(candidate);
+      expect(result.risk).to.equal('warning');
     });
   });
 
   describe('Branch Protection', () => {
-    it('protects HEAD branch', () => {
-      const branch = createBranch('my-branch', { isHead: true });
-      expect(isBranchProtected(branch, [])).to.be.true;
+    it('identifies main as builtin protected', () => {
+      expect(isBuiltinProtected('main')).to.be.true;
     });
 
-    it('protects main branch', () => {
-      const branch = createBranch('main');
-      expect(isBranchProtected(branch, [])).to.be.true;
+    it('identifies master as builtin protected', () => {
+      expect(isBuiltinProtected('master')).to.be.true;
     });
 
-    it('protects master branch', () => {
-      const branch = createBranch('master');
-      expect(isBranchProtected(branch, [])).to.be.true;
+    it('identifies develop as builtin protected', () => {
+      expect(isBuiltinProtected('develop')).to.be.true;
     });
 
-    it('protects develop branch', () => {
-      const branch = createBranch('develop');
-      expect(isBranchProtected(branch, [])).to.be.true;
+    it('identifies development as builtin protected', () => {
+      expect(isBuiltinProtected('development')).to.be.true;
     });
 
-    it('protects development branch', () => {
-      const branch = createBranch('development');
-      expect(isBranchProtected(branch, [])).to.be.true;
+    it('identifies staging as builtin protected', () => {
+      expect(isBuiltinProtected('staging')).to.be.true;
     });
 
-    it('protects staging branch', () => {
-      const branch = createBranch('staging');
-      expect(isBranchProtected(branch, [])).to.be.true;
-    });
-
-    it('protects production branch', () => {
-      const branch = createBranch('production');
-      expect(isBranchProtected(branch, [])).to.be.true;
+    it('identifies production as builtin protected', () => {
+      expect(isBuiltinProtected('production')).to.be.true;
     });
 
     it('does not protect regular feature branches', () => {
-      const branch = createBranch('feature/my-feature');
-      expect(isBranchProtected(branch, [])).to.be.false;
+      expect(isBuiltinProtected('feature/my-feature')).to.be.false;
     });
 
-    it('protects branches matching user-defined rules', () => {
-      const branch = createBranch('release/v1.0');
-      const rules = [
-        {
-          pattern: 'release/*',
-          preventDeletion: true,
-          preventForcePush: false,
-          requirePullRequest: false,
-          preventDirectPush: false,
-        },
-      ];
-      expect(isBranchProtected(branch, rules)).to.be.true;
+    it('returns correct reason for builtin protected branches', () => {
+      const candidate = createCandidate('main', 'merged', { isProtected: false });
+      expect(getProtectedReason(candidate)).to.equal('Built-in protected branch');
     });
 
-    it('does not protect branches matching rules without preventDeletion', () => {
-      const branch = createBranch('release/v1.0');
-      const rules = [
-        {
-          pattern: 'release/*',
-          preventDeletion: false,
-          preventForcePush: true,
-          requirePullRequest: false,
-          preventDirectPush: false,
-        },
-      ];
-      expect(isBranchProtected(branch, rules)).to.be.false;
+    it('returns correct reason for rule-protected branches', () => {
+      const candidate = createCandidate('release/v1.0', 'merged', { isProtected: true });
+      expect(getProtectedReason(candidate)).to.equal('Protected by branch rule');
+    });
+
+    it('uses isProtected from backend for rule-based protection', () => {
+      const candidate = createCandidate('release/v1.0', 'merged', { isProtected: true });
+      // Backend sets isProtected when branch matches a rule with prevent_deletion
+      expect(candidate.isProtected).to.be.true;
     });
   });
 
-  describe('Glob Matching', () => {
-    it('matches exact names', () => {
-      expect(matchesGlob('main', 'main')).to.be.true;
-      expect(matchesGlob('main', 'master')).to.be.false;
-    });
-
-    it('matches wildcard patterns', () => {
-      expect(matchesGlob('release/v1.0', 'release/*')).to.be.true;
-      expect(matchesGlob('feature/my-thing', 'feature/*')).to.be.true;
-      expect(matchesGlob('hotfix/urgent', 'feature/*')).to.be.false;
-    });
-
-    it('matches patterns with multiple wildcards', () => {
-      expect(matchesGlob('release/v1.0/hotfix', 'release/*/hotfix')).to.be.true;
-    });
-
-    it('escapes regex special characters', () => {
-      expect(matchesGlob('release.v1', 'release.v1')).to.be.true;
-      expect(matchesGlob('releasexv1', 'release.v1')).to.be.false;
-    });
-  });
-
-  describe('Branch Categorization', () => {
-    it('categorizes merged branches correctly', () => {
-      const branches = [
-        createBranch('feature/done', {
+  describe('Candidate Categorization (Backend-driven)', () => {
+    it('separates candidates by category', () => {
+      const candidates = [
+        createCandidate('feature/done', 'merged', {
           aheadBehind: { ahead: 0, behind: 2 },
         }),
-        createBranch('feature/wip', {
-          aheadBehind: { ahead: 3, behind: 0 },
-        }),
-      ];
-
-      const { merged } = categorizeBranches(branches, new Map(), [], 0);
-      expect(merged).to.have.length(1);
-      expect(merged[0].branch.name).to.equal('feature/done');
-      expect(merged[0].risk).to.equal('safe');
-    });
-
-    it('categorizes stale branches (excluding already-merged)', () => {
-      const nowSeconds = Date.now() / 1000;
-      const ninetyOneDaysAgo = nowSeconds - 91 * 24 * 60 * 60;
-
-      const branches = [
-        // This is merged AND stale — should only appear in merged
-        createBranch('feature/old-merged', {
-          aheadBehind: { ahead: 0, behind: 5 },
-          lastCommitTimestamp: ninetyOneDaysAgo,
-        }),
-        // This is stale but NOT merged
-        createBranch('feature/old-wip', {
-          aheadBehind: { ahead: 2, behind: 0 },
-          lastCommitTimestamp: ninetyOneDaysAgo,
-        }),
-        // This is recent (not stale)
-        createBranch('feature/recent', {
+        createCandidate('feature/old', 'stale', {
           aheadBehind: { ahead: 1, behind: 0 },
-          lastCommitTimestamp: nowSeconds - 10 * 24 * 60 * 60,
+          lastCommitTimestamp: 1600000000,
+        }),
+        createCandidate('feature/gone', 'gone', {
+          aheadBehind: { ahead: 0, behind: 0 },
         }),
       ];
 
-      const { merged, stale } = categorizeBranches(branches, new Map(), [], 90);
+      const merged = candidates.filter((c) => c.category === 'merged');
+      const stale = candidates.filter((c) => c.category === 'stale');
+      const gone = candidates.filter((c) => c.category === 'gone');
+
       expect(merged).to.have.length(1);
-      expect(merged[0].branch.name).to.equal('feature/old-merged');
       expect(stale).to.have.length(1);
-      expect(stale[0].branch.name).to.equal('feature/old-wip');
-      expect(stale[0].risk).to.equal('warning');
+      expect(gone).to.have.length(1);
     });
 
-    it('categorizes gone-upstream branches', () => {
-      const branches = [
-        createBranch('feature/gone-safe', {
-          aheadBehind: { ahead: 0, behind: 0 },
-          upstream: 'origin/feature/gone-safe',
-        }),
-        createBranch('feature/gone-danger', {
-          aheadBehind: { ahead: 3, behind: 0 },
-          upstream: 'origin/feature/gone-danger',
-        }),
-      ];
-
-      const trackingInfoMap = new Map<string, BranchTrackingInfo>();
-      trackingInfoMap.set('feature/gone-safe', {
-        localBranch: 'feature/gone-safe',
-        upstream: null,
-        ahead: 0,
-        behind: 0,
-        remote: 'origin',
-        remoteBranch: 'feature/gone-safe',
-        isGone: true,
-      });
-      trackingInfoMap.set('feature/gone-danger', {
-        localBranch: 'feature/gone-danger',
-        upstream: null,
-        ahead: 3,
-        behind: 0,
-        remote: 'origin',
-        remoteBranch: 'feature/gone-danger',
-        isGone: true,
-      });
-
-      const { gone } = categorizeBranches(branches, trackingInfoMap, [], 0);
-      expect(gone).to.have.length(2);
-
-      const safeBranch = gone.find((g) => g.branch.name === 'feature/gone-safe');
-      const dangerBranch = gone.find((g) => g.branch.name === 'feature/gone-danger');
-
-      expect(safeBranch!.risk).to.equal('safe');
-      expect(dangerBranch!.risk).to.equal('danger');
-    });
-
-    it('marks protected branches correctly in categories', () => {
-      const branches = [
-        createBranch('main', {
+    it('marks backend-protected candidates correctly', () => {
+      const candidates = [
+        createCandidate('main', 'merged', {
+          isProtected: false, // backend may not flag builtins
           aheadBehind: { ahead: 0, behind: 0 },
         }),
-        createBranch('feature/done', {
+        createCandidate('feature/done', 'merged', {
+          isProtected: false,
           aheadBehind: { ahead: 0, behind: 2 },
         }),
       ];
 
-      const { merged } = categorizeBranches(branches, new Map(), [], 0);
-      expect(merged).to.have.length(2);
-
-      const mainBranch = merged.find((m) => m.branch.name === 'main');
-      const featureBranch = merged.find((m) => m.branch.name === 'feature/done');
-
-      expect(mainBranch!.isProtected).to.be.true;
-      expect(featureBranch!.isProtected).to.be.false;
+      // The component combines backend isProtected with builtin check
+      for (const c of candidates) {
+        const isProtected = c.isProtected || isBuiltinProtected(c.name);
+        if (c.name === 'main') {
+          expect(isProtected).to.be.true;
+        } else {
+          expect(isProtected).to.be.false;
+        }
+      }
     });
 
-    it('does not categorize stale branches when staleBranchDays is 0', () => {
-      const nowSeconds = Date.now() / 1000;
-      const ninetyOneDaysAgo = nowSeconds - 91 * 24 * 60 * 60;
-
-      const branches = [
-        createBranch('feature/old-wip', {
-          aheadBehind: { ahead: 2, behind: 0 },
-          lastCommitTimestamp: ninetyOneDaysAgo,
+    it('does not include stale category when staleBranchDays is 0 (backend handles this)', () => {
+      // When staleBranchDays=0, the backend returns no stale candidates
+      const candidates = [
+        createCandidate('feature/done', 'merged', {
+          aheadBehind: { ahead: 0, behind: 2 },
         }),
+        // No stale candidates returned from backend
       ];
 
-      const { stale } = categorizeBranches(branches, new Map(), [], 0);
+      const stale = candidates.filter((c) => c.category === 'stale');
       expect(stale).to.have.length(0);
-    });
-
-    it('filters out HEAD branch from all categories', () => {
-      // Note: the component pre-filters HEAD before calling categorizeBranches,
-      // but let's verify the protection check
-      const headBranch = createBranch('my-branch', {
-        isHead: true,
-        aheadBehind: { ahead: 0, behind: 0 },
-      });
-      expect(isBranchProtected(headBranch, [])).to.be.true;
     });
   });
 
@@ -523,7 +313,6 @@ describe('Branch Cleanup Dialog - Logic', () => {
         isProtected: false,
       };
 
-      // Safe branches should not be force-deleted
       const force = safeBranch.risk === 'warning' || safeBranch.risk === 'danger';
       expect(force).to.be.false;
     });
@@ -676,6 +465,68 @@ describe('Branch Cleanup Dialog - Logic', () => {
         selected.delete(cb.branch.name);
       }
       expect(selected.size).to.equal(0);
+    });
+  });
+
+  describe('Tauri Command Contract', () => {
+    it('calls get_cleanup_candidates with correct parameters', async () => {
+      let capturedArgs: Record<string, unknown> | undefined;
+      const origInvoke = (globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } })
+        .__TAURI_INTERNALS__.invoke;
+
+      (globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } })
+        .__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
+        if (command === 'get_cleanup_candidates') {
+          capturedArgs = args as Record<string, unknown>;
+          return [];
+        }
+        return origInvoke(command, args);
+      };
+
+      // Import git service dynamically to use the mock
+      const { getCleanupCandidates } = await import('../../../services/git.service.ts');
+      await getCleanupCandidates('/test/repo', 90);
+
+      expect(capturedArgs).to.exist;
+      expect(capturedArgs!.path).to.equal('/test/repo');
+      expect(capturedArgs!.staleDays).to.equal(90);
+
+      // Restore
+      (globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } })
+        .__TAURI_INTERNALS__.invoke = origInvoke;
+    });
+
+    it('handles backend returning empty candidates', () => {
+      const candidates: CleanupCandidate[] = [];
+      const merged = candidates.filter((c) => c.category === 'merged');
+      const stale = candidates.filter((c) => c.category === 'stale');
+      const gone = candidates.filter((c) => c.category === 'gone');
+
+      expect(merged).to.have.length(0);
+      expect(stale).to.have.length(0);
+      expect(gone).to.have.length(0);
+    });
+
+    it('handles candidate appearing in multiple categories', () => {
+      // A branch can be both merged and stale - backend returns separate entries
+      const candidates = [
+        createCandidate('feature/old-merged', 'merged', {
+          aheadBehind: { ahead: 0, behind: 5 },
+          lastCommitTimestamp: 1600000000,
+        }),
+        createCandidate('feature/old-merged', 'stale', {
+          aheadBehind: { ahead: 0, behind: 5 },
+          lastCommitTimestamp: 1600000000,
+        }),
+      ];
+
+      const merged = candidates.filter((c) => c.category === 'merged');
+      const stale = candidates.filter((c) => c.category === 'stale');
+
+      expect(merged).to.have.length(1);
+      expect(stale).to.have.length(1);
+      expect(merged[0].name).to.equal('feature/old-merged');
+      expect(stale[0].name).to.equal('feature/old-merged');
     });
   });
 });

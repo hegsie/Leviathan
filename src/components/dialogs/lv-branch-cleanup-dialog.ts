@@ -8,11 +8,10 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, property, query } from 'lit/decorators.js';
 import { sharedStyles, buttonStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import type { BranchRule } from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
-import type { Branch, BranchTrackingInfo } from '../../types/git.types.ts';
+import type { Branch, CleanupCandidate } from '../../types/git.types.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 
@@ -25,21 +24,9 @@ interface CleanupBranch {
   riskReason: string;
   isProtected: boolean;
   protectedReason?: string;
-  trackingInfo?: BranchTrackingInfo;
 }
 
 const BUILTIN_PROTECTED = ['main', 'master', 'develop', 'development', 'staging', 'production'];
-
-/**
- * Simple glob pattern matching for branch rule patterns.
- * Supports `*` as wildcard for any characters.
- */
-function matchesGlob(name: string, pattern: string): boolean {
-  const regex = new RegExp(
-    '^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$',
-  );
-  return regex.test(name);
-}
 
 @customElement('lv-branch-cleanup-dialog')
 export class LvBranchCleanupDialog extends LitElement {
@@ -268,6 +255,27 @@ export class LvBranchCleanupDialog extends LitElement {
       .btn-danger:hover:not(:disabled) {
         opacity: 0.9;
       }
+
+      .prune-option {
+        display: flex;
+        align-items: center;
+        padding: var(--spacing-xs) var(--spacing-md);
+        border-top: 1px solid var(--color-border);
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+      }
+
+      .prune-option label {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .prune-option input[type="checkbox"] {
+        accent-color: var(--color-primary);
+      }
     `,
   ];
 
@@ -280,10 +288,9 @@ export class LvBranchCleanupDialog extends LitElement {
   @state() private selectedBranches = new Set<string>();
   @state() private activeTab: CleanupTab = 'merged';
   @state() private deleting = false;
+  @state() private pruneRemotes = true;
 
   @query('lv-modal') private modal!: LvModal;
-
-  private branchRules: BranchRule[] = [];
 
   public async open(): Promise<void> {
     this.reset();
@@ -303,47 +310,72 @@ export class LvBranchCleanupDialog extends LitElement {
     this.selectedBranches = new Set();
     this.activeTab = 'merged';
     this.deleting = false;
-    this.branchRules = [];
+    this.pruneRemotes = true;
   }
 
   private async loadCleanupData(): Promise<void> {
     this.loading = true;
 
     try {
-      const [branchesResult, rulesResult] = await Promise.all([
-        gitService.getBranches(this.repositoryPath),
-        gitService.getBranchRules(this.repositoryPath),
-      ]);
+      const { staleBranchDays } = settingsStore.getState();
+      const result = await gitService.getCleanupCandidates(
+        this.repositoryPath,
+        staleBranchDays,
+      );
 
-      if (!branchesResult.success || !branchesResult.data) {
-        showToast('Failed to load branches', 'error');
+      if (!result.success || !result.data) {
+        showToast('Failed to load cleanup candidates', 'error');
         this.loading = false;
         return;
       }
 
-      if (rulesResult.success && rulesResult.data) {
-        this.branchRules = rulesResult.data;
+      // Build CleanupBranch entries from backend candidates
+      const merged: CleanupBranch[] = [];
+      const stale: CleanupBranch[] = [];
+      const gone: CleanupBranch[] = [];
+
+      for (const candidate of result.data) {
+        const branch: Branch = {
+          name: candidate.name,
+          shorthand: candidate.shorthand,
+          isHead: false,
+          isRemote: false,
+          upstream: candidate.upstream,
+          targetOid: '',
+          aheadBehind: candidate.aheadBehind ?? undefined,
+          lastCommitTimestamp: candidate.lastCommitTimestamp ?? undefined,
+          isStale: candidate.category === 'stale',
+        };
+
+        const isProtected = candidate.isProtected || this.isBuiltinProtected(candidate.name);
+        const protectedReason = isProtected ? this.getProtectedReason(candidate) : undefined;
+        const risk = this.assessRisk(candidate);
+
+        const entry: CleanupBranch = {
+          branch,
+          ...risk,
+          isProtected,
+          protectedReason,
+        };
+
+        switch (candidate.category) {
+          case 'merged':
+            merged.push(entry);
+            break;
+          case 'stale':
+            stale.push(entry);
+            break;
+          case 'gone':
+            gone.push(entry);
+            break;
+        }
       }
 
-      const localBranches = branchesResult.data.filter((b) => !b.isRemote && !b.isHead);
+      this.mergedBranches = merged;
+      this.staleBranches = stale;
+      this.goneUpstreamBranches = gone;
 
-      // Load tracking info for branches with upstreams
-      const trackingInfoMap = new Map<string, BranchTrackingInfo>();
-      const trackingPromises = localBranches
-        .filter((b) => b.upstream)
-        .map(async (b) => {
-          const result = await gitService.getBranchTrackingInfo(this.repositoryPath, b.name);
-          if (result.success && result.data) {
-            trackingInfoMap.set(b.name, result.data);
-          }
-        });
-
-      await Promise.all(trackingPromises);
-
-      // Categorize branches
-      this.categorizeBranches(localBranches, trackingInfoMap);
-
-      // Auto-select safe branches in each category
+      // Auto-select safe branches in merged and gone categories
       for (const cb of this.mergedBranches) {
         if (!cb.isProtected && cb.risk === 'safe') {
           this.selectedBranches.add(cb.branch.name);
@@ -374,88 +406,14 @@ export class LvBranchCleanupDialog extends LitElement {
     }
   }
 
-  private categorizeBranches(
-    localBranches: Branch[],
-    trackingInfoMap: Map<string, BranchTrackingInfo>,
-  ): void {
-    const merged: CleanupBranch[] = [];
-    const stale: CleanupBranch[] = [];
-    const gone: CleanupBranch[] = [];
-    const mergedNames = new Set<string>();
-
-    for (const branch of localBranches) {
-      const trackingInfo = trackingInfoMap.get(branch.name);
-      const isProtected = this.isBranchProtected(branch);
-      const protectedReason = isProtected ? this.getProtectedReason(branch) : undefined;
-
-      // Check merged: ahead === 0 means all commits are in HEAD
-      if (branch.aheadBehind && branch.aheadBehind.ahead === 0) {
-        mergedNames.add(branch.name);
-        merged.push({
-          branch,
-          risk: 'safe',
-          riskReason: 'Fully merged into current branch',
-          isProtected,
-          protectedReason,
-          trackingInfo,
-        });
-      }
-
-      // Check gone upstream
-      if (trackingInfo?.isGone) {
-        const risk = this.assessRisk(branch, trackingInfo);
-        gone.push({
-          branch,
-          ...risk,
-          isProtected,
-          protectedReason,
-          trackingInfo,
-        });
-      }
-    }
-
-    // Stale branches: not already categorized as merged
-    const { staleBranchDays } = settingsStore.getState();
-    if (staleBranchDays > 0) {
-      const nowSeconds = Date.now() / 1000;
-      const staleThresholdSeconds = staleBranchDays * 24 * 60 * 60;
-
-      for (const branch of localBranches) {
-        if (mergedNames.has(branch.name)) continue;
-        if (!branch.lastCommitTimestamp) continue;
-        if (branch.lastCommitTimestamp >= nowSeconds - staleThresholdSeconds) continue;
-
-        const trackingInfo = trackingInfoMap.get(branch.name);
-        const isProtected = this.isBranchProtected(branch);
-        const protectedReason = isProtected ? this.getProtectedReason(branch) : undefined;
-        const risk = this.assessRisk(branch, trackingInfo);
-
-        stale.push({
-          branch,
-          ...risk,
-          isProtected,
-          protectedReason,
-          trackingInfo,
-        });
-      }
-    }
-
-    this.mergedBranches = merged;
-    this.staleBranches = stale;
-    this.goneUpstreamBranches = gone;
-  }
-
-  private assessRisk(
-    branch: Branch,
-    trackingInfo?: BranchTrackingInfo,
-  ): { risk: RiskLevel; riskReason: string } {
-    const ahead = branch.aheadBehind?.ahead ?? 0;
+  private assessRisk(candidate: CleanupCandidate): { risk: RiskLevel; riskReason: string } {
+    const ahead = candidate.aheadBehind?.ahead ?? 0;
 
     if (ahead === 0) {
       return { risk: 'safe', riskReason: 'Fully merged into current branch' };
     }
 
-    if (trackingInfo?.isGone && ahead > 0) {
+    if (candidate.category === 'gone' && ahead > 0) {
       return {
         risk: 'danger',
         riskReason: `Remote deleted with ${ahead} unpushed commit${ahead !== 1 ? 's' : ''}`,
@@ -469,40 +427,20 @@ export class LvBranchCleanupDialog extends LitElement {
       };
     }
 
-    if (!branch.upstream) {
+    if (!candidate.upstream) {
       return { risk: 'warning', riskReason: 'No upstream configured' };
     }
 
     return { risk: 'safe', riskReason: 'No unpushed work' };
   }
 
-  private isBranchProtected(branch: Branch): boolean {
-    // HEAD is always protected (already filtered out, but just in case)
-    if (branch.isHead) return true;
-
-    // Check built-in protected names
-    if (BUILTIN_PROTECTED.includes(branch.name)) return true;
-
-    // Check user-defined branch rules
-    for (const rule of this.branchRules) {
-      if (rule.preventDeletion && matchesGlob(branch.name, rule.pattern)) {
-        return true;
-      }
-    }
-
-    return false;
+  private isBuiltinProtected(name: string): boolean {
+    return BUILTIN_PROTECTED.includes(name);
   }
 
-  private getProtectedReason(branch: Branch): string {
-    if (branch.isHead) return 'Current branch';
-    if (BUILTIN_PROTECTED.includes(branch.name)) return 'Built-in protected branch';
-
-    for (const rule of this.branchRules) {
-      if (rule.preventDeletion && matchesGlob(branch.name, rule.pattern)) {
-        return `Protected by rule: ${rule.pattern}`;
-      }
-    }
-
+  private getProtectedReason(candidate: CleanupCandidate): string {
+    if (BUILTIN_PROTECTED.includes(candidate.shorthand)) return 'Built-in protected branch';
+    if (candidate.isProtected) return 'Protected by branch rule';
     return 'Protected';
   }
 
@@ -622,13 +560,19 @@ export class LvBranchCleanupDialog extends LitElement {
       }
     }
 
+    // Prune remote tracking branches if requested
+    if (this.pruneRemotes) {
+      await gitService.pruneRemoteTrackingBranches(this.repositoryPath);
+    }
+
     this.deleting = false;
 
     if (deleted > 0) {
+      const pruneNote = this.pruneRemotes ? ' (remotes pruned)' : '';
       const message =
         failed > 0
-          ? `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}, ${failed} failed`
-          : `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}`;
+          ? `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}, ${failed} failed${pruneNote}`
+          : `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}${pruneNote}`;
       showToast(message, failed > 0 ? 'warning' : 'success');
 
       this.dispatchEvent(
@@ -784,6 +728,18 @@ export class LvBranchCleanupDialog extends LitElement {
           ${this.loading
             ? html`<div class="loading">Loading branches...</div>`
             : this.renderBranchList(this.getActiveTabBranches())}
+        </div>
+
+        <div class="prune-option">
+          <label>
+            <input
+              type="checkbox"
+              .checked=${this.pruneRemotes}
+              @change=${(e: Event) => { this.pruneRemotes = (e.target as HTMLInputElement).checked; }}
+              ?disabled=${this.deleting}
+            />
+            Also prune remote tracking branches
+          </label>
         </div>
 
         <div slot="footer">

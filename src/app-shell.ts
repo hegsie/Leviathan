@@ -1708,6 +1708,13 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => { this.showClean = true; }),
       },
       {
+        id: 'branch-cleanup',
+        label: 'Clean up branches',
+        category: 'action',
+        icon: 'git-branch',
+        action: this.requiresRepository(() => { window.dispatchEvent(new CustomEvent('open-branch-cleanup')); }),
+      },
+      {
         id: 'bisect',
         label: 'Start bisect (find bug)',
         category: 'action',

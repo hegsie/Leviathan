@@ -37,7 +37,7 @@ fn get_rules_path(repo_path: &Path) -> Result<std::path::PathBuf> {
 }
 
 /// Load branch rules from the repository config
-fn load_rules(repo_path: &Path) -> Result<Vec<BranchRule>> {
+pub(crate) fn load_rules(repo_path: &Path) -> Result<Vec<BranchRule>> {
     let rules_path = get_rules_path(repo_path)?;
 
     if !rules_path.exists() {
