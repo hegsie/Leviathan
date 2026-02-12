@@ -386,8 +386,8 @@ pub async fn set_signing_key(
     if let Some(key) = key_id {
         run_git_command(repo_path, &["config", scope, "user.signingkey", &key])?;
     } else {
-        // Unset the signing key
-        let _ = run_git_command(repo_path, &["config", scope, "--unset", "user.signingkey"]);
+        // Set to empty string to override any global/system signing key
+        run_git_command(repo_path, &["config", scope, "user.signingkey", ""])?;
     }
 
     Ok(())

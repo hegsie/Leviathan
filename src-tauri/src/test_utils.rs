@@ -27,6 +27,22 @@ impl TestRepo {
         config
             .set_str("user.email", "test@example.com")
             .expect("Failed to set user.email");
+        // Disable signing and override any global/system signing config
+        config
+            .set_bool("commit.gpgsign", false)
+            .expect("Failed to set commit.gpgsign");
+        config
+            .set_bool("tag.gpgsign", false)
+            .expect("Failed to set tag.gpgsign");
+        config
+            .set_str("user.signingkey", "")
+            .expect("Failed to set user.signingkey");
+        config
+            .set_str("gpg.format", "")
+            .expect("Failed to set gpg.format");
+        config
+            .set_str("gpg.program", "")
+            .expect("Failed to set gpg.program");
 
         Self { dir, path }
     }
