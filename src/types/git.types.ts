@@ -577,3 +577,16 @@ export interface WorkspaceRepoStatus {
   ahead: number;
   behind: number;
 }
+
+/**
+ * A search result from workspace-level search across repos
+ */
+export interface WorkspaceSearchResult {
+  repoName: string;
+  repoPath: string;
+  filePath: string;
+  lineNumber: number;
+  lineContent: string;
+  matchStart: number;
+  matchEnd: number;
+}

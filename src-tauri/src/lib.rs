@@ -748,6 +748,9 @@ pub fn run() {
             commands::workspace::remove_repository_from_workspace,
             commands::workspace::update_workspace_last_opened,
             commands::workspace::validate_workspace_repositories,
+            commands::workspace::search_workspace,
+            commands::workspace::export_workspace,
+            commands::workspace::import_workspace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

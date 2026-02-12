@@ -8,12 +8,13 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as workspaceService from '../../services/workspace.service.ts';
 import * as gitService from '../../services/git.service.ts';
-import { openRepositoryDialog } from '../../services/dialog.service.ts';
+import { openRepositoryDialog, openDialog, saveDialog } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { workspaceStore } from '../../stores/workspace.store.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
-import type { Workspace, WorkspaceRepoStatus } from '../../types/git.types.ts';
+import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../../types/git.types.ts';
 
 const WORKSPACE_COLORS = [
   '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
@@ -519,6 +520,158 @@ export class LvWorkspaceManagerDialog extends LitElement {
         color: var(--color-text-muted);
         font-size: var(--font-size-sm);
       }
+
+      .search-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-sm);
+      }
+
+      .search-bar {
+        display: flex;
+        gap: var(--spacing-xs);
+      }
+
+      .search-input {
+        flex: 1;
+        padding: var(--spacing-sm) var(--spacing-md);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-primary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        font-family: inherit;
+        outline: none;
+        transition: border-color var(--transition-fast);
+      }
+
+      .search-input:focus {
+        border-color: var(--color-primary);
+      }
+
+      .search-btn {
+        padding: var(--spacing-sm) var(--spacing-md);
+        border: 1px solid var(--color-primary);
+        border-radius: var(--radius-md);
+        background: var(--color-primary);
+        color: white;
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+        white-space: nowrap;
+      }
+
+      .search-btn:hover {
+        filter: brightness(1.1);
+      }
+
+      .search-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .search-results {
+        max-height: 300px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-xs);
+      }
+
+      .search-result-group {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .search-result-repo {
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-primary);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-sm);
+      }
+
+      .search-result-item {
+        display: flex;
+        align-items: baseline;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        font-size: var(--font-size-xs);
+        transition: background var(--transition-fast);
+      }
+
+      .search-result-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .search-result-file {
+        font-family: var(--font-mono);
+        color: var(--color-text-secondary);
+        white-space: nowrap;
+      }
+
+      .search-result-line {
+        font-family: var(--font-mono);
+        color: var(--color-text-muted);
+        font-size: 10px;
+        flex-shrink: 0;
+      }
+
+      .search-result-content {
+        flex: 1;
+        font-family: var(--font-mono);
+        color: var(--color-text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .search-result-match {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+        border-radius: 2px;
+        padding: 0 1px;
+      }
+
+      .search-no-results {
+        padding: var(--spacing-md);
+        text-align: center;
+        color: var(--color-text-muted);
+        font-size: var(--font-size-sm);
+      }
+
+      .import-export-btns {
+        display: flex;
+        gap: var(--spacing-xs);
+      }
+
+      .ie-btn {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .ie-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .ie-btn svg {
+        width: 12px;
+        height: 12px;
+      }
     `,
   ];
 
@@ -529,6 +682,11 @@ export class LvWorkspaceManagerDialog extends LitElement {
   @state() private repoStatuses: Map<string, WorkspaceRepoStatus> = new Map();
   @state() private batchRunning = false;
   @state() private statusLoading = false;
+
+  // Search
+  @state() private searchQuery = '';
+  @state() private searchResults: WorkspaceSearchResult[] = [];
+  @state() private searching = false;
 
   // Editable fields
   @state() private editName = '';
@@ -748,6 +906,99 @@ export class LvWorkspaceManagerDialog extends LitElement {
     showToast(`Opened workspace: ${ws.name}`, 'success');
   }
 
+  private async handleSearch(): Promise<void> {
+    const ws = this.selectedWorkspace;
+    if (!ws || !this.searchQuery.trim()) return;
+
+    this.searching = true;
+    this.searchResults = [];
+
+    const result = await workspaceService.searchWorkspace(
+      ws.id,
+      this.searchQuery,
+      false,
+      false,
+      undefined,
+      200,
+    );
+
+    if (result.success && result.data) {
+      this.searchResults = result.data;
+    } else {
+      showToast('Search failed', 'error');
+    }
+    this.searching = false;
+  }
+
+  private handleSearchKeyDown(e: KeyboardEvent): void {
+    if (e.key === 'Enter') {
+      this.handleSearch();
+    }
+  }
+
+  private getGroupedSearchResults(): Map<string, WorkspaceSearchResult[]> {
+    const grouped = new Map<string, WorkspaceSearchResult[]>();
+    for (const r of this.searchResults) {
+      const key = r.repoName;
+      if (!grouped.has(key)) {
+        grouped.set(key, []);
+      }
+      grouped.get(key)!.push(r);
+    }
+    return grouped;
+  }
+
+  private async handleExportWorkspace(): Promise<void> {
+    const ws = this.selectedWorkspace;
+    if (!ws) return;
+
+    const result = await workspaceService.exportWorkspace(ws.id);
+    if (!result.success || !result.data) {
+      showToast('Failed to export workspace', 'error');
+      return;
+    }
+
+    const filePath = await saveDialog({
+      title: 'Export Workspace',
+      defaultPath: `${ws.name.replace(/\s+/g, '-').toLowerCase()}-workspace.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+
+    if (!filePath) return;
+
+    try {
+      await writeTextFile(filePath, result.data);
+      showToast(`Workspace exported to ${filePath}`, 'success');
+    } catch (err) {
+      console.error('Failed to write file:', err);
+      showToast('Failed to write file', 'error');
+    }
+  }
+
+  private async handleImportWorkspace(): Promise<void> {
+    const filePath = await openDialog({
+      title: 'Import Workspace',
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+
+    if (!filePath || Array.isArray(filePath)) return;
+
+    try {
+      const content = await readTextFile(filePath);
+      const result = await workspaceService.importWorkspace(content);
+      if (result.success && result.data) {
+        showToast(`Workspace "${result.data.name}" imported`, 'success');
+        await this.loadWorkspaces();
+        this.selectWorkspace(result.data.id);
+      } else {
+        showToast(`Import failed: ${result.error ?? 'Unknown error'}`, 'error');
+      }
+    } catch (err) {
+      console.error('Failed to import workspace:', err);
+      showToast('Failed to read file', 'error');
+    }
+  }
+
   private handleOverlayClick(e: MouseEvent): void {
     if (e.target === e.currentTarget) {
       this.close();
@@ -833,6 +1084,14 @@ export class LvWorkspaceManagerDialog extends LitElement {
               </svg>
               New Workspace
             </button>
+            <button class="new-btn" @click=${this.handleImportWorkspace}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              Import
+            </button>
             <div class="workspace-list">
               ${this.workspaces.map(
                 (w) => html`
@@ -899,17 +1158,80 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
                   <hr class="section-divider" />
 
+                  ${hasRepos ? html`
+                    <div class="search-section">
+                      <div class="search-bar">
+                        <input
+                          class="search-input"
+                          type="text"
+                          placeholder="Search across all repos..."
+                          .value=${this.searchQuery}
+                          @input=${(e: InputEvent) => {
+                            this.searchQuery = (e.target as HTMLInputElement).value;
+                          }}
+                          @keydown=${(e: KeyboardEvent) => this.handleSearchKeyDown(e)}
+                        />
+                        <button
+                          class="search-btn"
+                          ?disabled=${this.searching || !this.searchQuery.trim()}
+                          @click=${this.handleSearch}
+                        >
+                          ${this.searching ? 'Searching...' : 'Search'}
+                        </button>
+                      </div>
+                      ${this.searchResults.length > 0 ? html`
+                        <div class="search-results">
+                          ${Array.from(this.getGroupedSearchResults().entries()).map(
+                            ([repoName, results]) => html`
+                              <div class="search-result-group">
+                                <div class="search-result-repo">${repoName}</div>
+                                ${results.map(
+                                  (r) => html`
+                                    <div class="search-result-item" @click=${() => {
+                                      this.dispatchEvent(new CustomEvent('open-repo-file', {
+                                        detail: { repoPath: r.repoPath, filePath: r.filePath, lineNumber: r.lineNumber },
+                                        bubbles: true,
+                                        composed: true,
+                                      }));
+                                    }}>
+                                      <span class="search-result-file">${r.filePath}</span>
+                                      <span class="search-result-line">:${r.lineNumber}</span>
+                                      <span class="search-result-content">${r.lineContent}</span>
+                                    </div>
+                                  `,
+                                )}
+                              </div>
+                            `,
+                          )}
+                        </div>
+                      ` : this.searchQuery && !this.searching ? html`
+                        <div class="search-no-results">No results found</div>
+                      ` : nothing}
+                    </div>
+                    <hr class="section-divider" />
+                  ` : nothing}
+
                   <div class="repos-header">
                     <span class="repos-title">
                       Repositories (${ws.repositories.length})
                     </span>
-                    <button class="add-repo-btn" @click=${this.handleAddRepo}>
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <line x1="12" y1="5" x2="12" y2="19"></line>
-                        <line x1="5" y1="12" x2="19" y2="12"></line>
-                      </svg>
-                      Add Repo
-                    </button>
+                    <div class="import-export-btns">
+                      <button class="ie-btn" @click=${this.handleExportWorkspace} title="Export workspace">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path>
+                          <polyline points="17 8 12 3 7 8"></polyline>
+                          <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        Export
+                      </button>
+                      <button class="add-repo-btn" @click=${this.handleAddRepo}>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <line x1="12" y1="5" x2="12" y2="19"></line>
+                          <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        Add Repo
+                      </button>
+                    </div>
                   </div>
 
                   ${hasRepos
