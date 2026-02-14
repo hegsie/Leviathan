@@ -4,6 +4,7 @@ import { sharedStyles } from "../../styles/shared-styles.ts";
 import * as gitService from "../../services/git.service.ts";
 import * as watcherService from "../../services/watcher.service.ts";
 import { showConfirm } from "../../services/dialog.service.ts";
+import { showToast } from "../../services/notification.service.ts";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { join } from "@tauri-apps/api/path";
 import type { StatusEntry, FileStatus } from "../../types/git.types.ts";
@@ -1308,6 +1309,7 @@ export class LvFileStatus extends LitElement {
       await shellOpen(fullPath);
     } catch (err) {
       console.error("Failed to open file:", err);
+      showToast("Failed to open file in editor", "error");
     }
   }
 
@@ -1321,6 +1323,7 @@ export class LvFileStatus extends LitElement {
       await shellOpen(dirPath);
     } catch (err) {
       console.error("Failed to reveal:", err);
+      showToast("Failed to reveal file in file manager", "error");
     }
   }
 
@@ -1332,6 +1335,7 @@ export class LvFileStatus extends LitElement {
       await navigator.clipboard.writeText(file.path);
     } catch (err) {
       console.error("Failed to copy:", err);
+      showToast("Failed to copy file path to clipboard", "error");
     }
   }
 
