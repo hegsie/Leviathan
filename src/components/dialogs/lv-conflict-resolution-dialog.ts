@@ -7,6 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
 import type { LvMergeEditor } from '../panels/lv-merge-editor.ts';
 import '../panels/lv-merge-editor.ts';
@@ -420,21 +421,12 @@ export class LvConflictResolutionDialog extends LitElement {
       if (result.success && result.data?.success) {
         this.resolvedFiles = new Set([...this.resolvedFiles, conflictPath]);
         this.requestUpdate();
-        this.dispatchEvent(new CustomEvent('show-toast', {
-          bubbles: true, composed: true,
-          detail: { message: 'Merge tool completed', type: 'success' },
-        }));
+        showToast('Merge tool completed', 'success');
       } else {
-        this.dispatchEvent(new CustomEvent('show-toast', {
-          bubbles: true, composed: true,
-          detail: { message: result.data?.message ?? result.error?.message ?? 'Merge tool failed', type: 'error' },
-        }));
+        showToast(result.data?.message ?? result.error?.message ?? 'Merge tool failed', 'error');
       }
     } catch {
-      this.dispatchEvent(new CustomEvent('show-toast', {
-        bubbles: true, composed: true,
-        detail: { message: 'Failed to launch merge tool', type: 'error' },
-      }));
+      showToast('Failed to launch merge tool', 'error');
     } finally {
       this.launchingExternalTool = null;
     }

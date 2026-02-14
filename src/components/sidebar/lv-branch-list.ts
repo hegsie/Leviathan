@@ -950,6 +950,7 @@ export class LvBranchList extends LitElement {
       }));
     } else {
       console.error('Checkout failed:', result.data?.message || result.error);
+      showToast(`Checkout failed: ${result.data?.message || result.error?.message || 'Unknown error'}`, 'error');
     }
   }
 
@@ -994,6 +995,7 @@ export class LvBranchList extends LitElement {
       }));
     } else {
       console.error('Rename branch failed:', result.error);
+      showToast(`Failed to rename branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
     }
   }
 
@@ -1030,6 +1032,7 @@ export class LvBranchList extends LitElement {
       }));
     } else {
       console.error('Delete branch failed:', result.error);
+      showToast(`Failed to delete branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
     }
   }
 
@@ -1071,6 +1074,7 @@ export class LvBranchList extends LitElement {
         }
       } else {
         console.error('Merge failed:', result.error);
+        showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     }
   }
@@ -1113,6 +1117,7 @@ export class LvBranchList extends LitElement {
         }
       } else {
         console.error('Rebase failed:', result.error);
+        showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     }
   }
@@ -1479,6 +1484,7 @@ export class LvBranchList extends LitElement {
 
       if (!checkoutResult.success || !checkoutResult.data?.success) {
         console.error('Checkout failed:', checkoutResult.data?.message || checkoutResult.error);
+        showToast(`Checkout failed: ${checkoutResult.data?.message || checkoutResult.error?.message || 'Unknown error'}`, 'error');
         return;
       }
 

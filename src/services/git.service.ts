@@ -332,9 +332,9 @@ export async function searchCommits(
     path: repoPath,
     query: options.query,
     author: options.author,
-    date_from: options.dateFrom,
-    date_to: options.dateTo,
-    file_path: options.filePath,
+    dateFrom: options.dateFrom,
+    dateTo: options.dateTo,
+    filePath: options.filePath,
     branch: options.branch,
     limit: options.limit,
   });
@@ -986,7 +986,7 @@ export async function resolveConflict(
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>("resolve_conflict", {
     path,
-    file_path: filePath,
+    filePath,
     content,
   });
 }
@@ -1004,7 +1004,7 @@ export async function detectConflictMarkers(
 ): Promise<CommandResult<ConflictMarkerFile[]>> {
   return invokeCommand<ConflictMarkerFile[]>("detect_conflict_markers", {
     path,
-    file_path: filePath,
+    filePath,
   });
 }
 
@@ -1021,7 +1021,7 @@ export async function getConflictDetails(
 ): Promise<CommandResult<ConflictDetails>> {
   return invokeCommand<ConflictDetails>("get_conflict_details", {
     path,
-    file_path: filePath,
+    filePath,
   });
 }
 
@@ -6243,20 +6243,6 @@ export async function copyFilePath(
  */
 
 /**
- * Result of a garbage collection operation
- */
-export interface GcResult {
-  /** Whether the operation completed successfully */
-  success: boolean;
-  /** Human-readable message about the operation */
-  message: string;
-  /** Number of objects before GC (if available) */
-  objectsBefore: number | null;
-  /** Number of objects after GC (if available) */
-  objectsAfter: number | null;
-}
-
-/**
  * Result of a prune operation for remote tracking branches
  */
 export interface PruneResult {
@@ -6264,32 +6250,6 @@ export interface PruneResult {
   success: boolean;
   /** List of branches that were pruned */
   branchesPruned: string[];
-}
-
-/**
- * Result of a repository integrity check (fsck)
- */
-export interface FsckResult {
-  /** Whether the repository is valid (no errors) */
-  isValid: boolean;
-  /** List of errors found */
-  errors: string[];
-  /** List of warnings found */
-  warnings: string[];
-}
-
-/**
- * Information about repository size and storage
- */
-export interface RepoSizeInfo {
-  /** Total size of the .git directory in bytes */
-  totalSizeBytes: number;
-  /** Size of object storage in bytes */
-  objectsSizeBytes: number;
-  /** Number of pack files */
-  packFilesCount: number;
-  /** Number of loose objects */
-  looseObjectsCount: number;
 }
 
 /**
@@ -6338,28 +6298,6 @@ export async function getPackInfo(
 }
 
 /**
- * Run garbage collection on a repository
- *
- * This runs `git gc` to clean up unnecessary files and optimize the repository.
- *
- * @param repoPath Path to the repository
- * @param aggressive Use aggressive gc mode (slower but more thorough)
- * @param prune Prune objects older than this date (e.g., "2.weeks.ago")
- * @returns Result of the garbage collection
- */
-export async function runGarbageCollection(
-  repoPath: string,
-  aggressive: boolean = false,
-  prune?: string,
-): Promise<CommandResult<GcResult>> {
-  return invokeCommand<GcResult>("run_garbage_collection", {
-    path: repoPath,
-    aggressive,
-    prune,
-  });
-}
-
-/**
  * Prune remote tracking branches that no longer exist on the remote
  *
  * This runs `git remote prune` to remove stale remote tracking branches.
@@ -6375,41 +6313,6 @@ export async function pruneRemoteTrackingBranches(
   return invokeCommand<PruneResult>("prune_remote_tracking_branches", {
     path: repoPath,
     remote,
-  });
-}
-
-/**
- * Verify repository integrity using fsck
- *
- * This runs `git fsck` to check the connectivity and validity of objects.
- *
- * @param repoPath Path to the repository
- * @param full Perform a full check (slower but more thorough)
- * @returns Result of the integrity check
- */
-export async function verifyRepository(
-  repoPath: string,
-  full: boolean = false,
-): Promise<CommandResult<FsckResult>> {
-  return invokeCommand<FsckResult>("verify_repository", {
-    path: repoPath,
-    full,
-  });
-}
-
-/**
- * Get repository size information
- *
- * Returns information about the repository's storage usage.
- *
- * @param repoPath Path to the repository
- * @returns Size information for the repository
- */
-export async function getRepoSizeInfo(
-  repoPath: string,
-): Promise<CommandResult<RepoSizeInfo>> {
-  return invokeCommand<RepoSizeInfo>("get_repo_size_info", {
-    path: repoPath,
   });
 }
 

@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { DiffFile, DiffHunk, DiffLine, StatusEntry } from '../../types/git.types.ts';
 import {
@@ -1062,21 +1063,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         this.commitFile?.commitOid,
       );
       if (result.success && result.data?.success) {
-        this.dispatchEvent(new CustomEvent('show-toast', {
-          bubbles: true, composed: true,
-          detail: { message: 'Diff tool completed', type: 'success' },
-        }));
+        showToast('Diff tool completed', 'success');
       } else {
-        this.dispatchEvent(new CustomEvent('show-toast', {
-          bubbles: true, composed: true,
-          detail: { message: result.data?.message ?? result.error?.message ?? 'Diff tool failed', type: 'error' },
-        }));
+        showToast(result.data?.message ?? result.error?.message ?? 'Diff tool failed', 'error');
       }
     } catch {
-      this.dispatchEvent(new CustomEvent('show-toast', {
-        bubbles: true, composed: true,
-        detail: { message: 'Failed to launch diff tool', type: 'error' },
-      }));
+      showToast('Failed to launch diff tool', 'error');
     } finally {
       this.launchingDiffTool = false;
     }

@@ -213,7 +213,7 @@ describe('git.service - Tauri command invocations', () => {
     expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo' });
   });
 
-  it('searchCommits converts camelCase to snake_case', async () => {
+  it('searchCommits passes camelCase params to Tauri', async () => {
     const { searchCommits } = await import('../git.service.ts');
     await searchCommits('/test/repo', {
       query: 'search',
@@ -228,9 +228,9 @@ describe('git.service - Tauri command invocations', () => {
       path: '/test/repo',
       query: 'search',
       author: 'user',
-      date_from: 1000,
-      date_to: 2000,
-      file_path: 'file.ts',
+      dateFrom: 1000,
+      dateTo: 2000,
+      filePath: 'file.ts',
       branch: undefined,
       limit: 50,
     });

@@ -13,8 +13,8 @@ import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatu
 import { repositoryStore, type OpenRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus } from '../../services/git.service.ts';
+import { INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import type { UnifiedProfile, IntegrationAccount, IntegrationType, ProfileAssignmentSource } from '../../types/unified-profile.types.ts';
-import { INTEGRATION_TYPE_NAMES } from '../../types/integration-accounts.types.ts';
 import './lv-profile-card.ts';
 import './lv-integration-card.ts';
 import './lv-repository-card.ts';

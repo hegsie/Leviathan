@@ -17,6 +17,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
 import { isWhitespaceOnlyChange, computeInlineWhitespaceDiff } from '../../utils/diff-utils.ts';
@@ -544,22 +545,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     try {
       const result = await gitService.launchMergeTool(this.repositoryPath, this.conflictFile.path);
       if (result.success && result.data?.success) {
-        this.dispatchEvent(new CustomEvent('show-toast', {
-          bubbles: true, composed: true,
-          detail: { message: 'Merge tool completed', type: 'success' },
-        }));
+        showToast('Merge tool completed', 'success');
         await this.loadContents();
       } else {
-        this.dispatchEvent(new CustomEvent('show-toast', {
-          bubbles: true, composed: true,
-          detail: { message: result.data?.message ?? result.error?.message ?? 'Merge tool failed', type: 'error' },
-        }));
+        showToast(result.data?.message ?? result.error?.message ?? 'Merge tool failed', 'error');
       }
     } catch {
-      this.dispatchEvent(new CustomEvent('show-toast', {
-        bubbles: true, composed: true,
-        detail: { message: 'Failed to launch merge tool', type: 'error' },
-      }));
+      showToast('Failed to launch merge tool', 'error');
     } finally {
       this.launchingExternalTool = false;
     }
@@ -818,16 +810,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           });
         }
       } else {
-        this.dispatchEvent(new CustomEvent('show-toast', {
-          bubbles: true, composed: true,
-          detail: { message: result.error?.message ?? 'AI suggestion failed', type: 'error' },
-        }));
+        showToast(result.error?.message ?? 'AI suggestion failed', 'error');
       }
     } catch {
-      this.dispatchEvent(new CustomEvent('show-toast', {
-        bubbles: true, composed: true,
-        detail: { message: 'Failed to get AI suggestion', type: 'error' },
-      }));
+      showToast('Failed to get AI suggestion', 'error');
     } finally {
       this.suggestingConflict = null;
     }

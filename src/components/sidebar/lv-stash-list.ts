@@ -8,6 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import type { Stash } from '../../types/git.types.ts';
 
 interface ContextMenuState {
@@ -188,6 +189,7 @@ export class LvStashList extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load stashes:', err);
+      showToast('Failed to load stashes', 'error');
     } finally {
       this.loading = false;
     }
@@ -213,9 +215,11 @@ export class LvStashList extends LitElement {
         }));
       } else {
         console.error('Failed to create stash:', result.error);
+        showToast(result.error?.message ?? 'Failed to create stash', 'error');
       }
     } catch (err) {
       console.error('Failed to create stash:', err);
+      showToast('Failed to create stash', 'error');
     } finally {
       this.isStashing = false;
     }
@@ -253,6 +257,7 @@ export class LvStashList extends LitElement {
       }));
     } else {
       console.error('Failed to apply stash:', result.error);
+      showToast(result.error?.message ?? 'Failed to apply stash', 'error');
     }
   }
 
@@ -275,6 +280,7 @@ export class LvStashList extends LitElement {
       }));
     } else {
       console.error('Failed to pop stash:', result.error);
+      showToast(result.error?.message ?? 'Failed to pop stash', 'error');
     }
   }
 
@@ -306,6 +312,7 @@ export class LvStashList extends LitElement {
       }));
     } else {
       console.error('Failed to drop stash:', result.error);
+      showToast(result.error?.message ?? 'Failed to drop stash', 'error');
     }
   }
 

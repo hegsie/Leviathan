@@ -8,6 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { CleanEntry } from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 
 @customElement('lv-clean-dialog')
 export class LvCleanDialog extends LitElement {
@@ -358,6 +359,7 @@ export class LvCleanDialog extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load cleanable files:', err);
+      showToast('Failed to load cleanable files', 'error');
     } finally {
       this.loading = false;
     }
@@ -422,7 +424,7 @@ export class LvCleanDialog extends LitElement {
       const result = await gitService.cleanFiles(this.repositoryPath, paths);
 
       if (result.success) {
-        this.dispatchEvent(new CustomEvent('clean-complete', {
+        this.dispatchEvent(new CustomEvent('files-cleaned', {
           detail: { count: result.data },
           bubbles: true,
           composed: true,
@@ -431,6 +433,7 @@ export class LvCleanDialog extends LitElement {
       }
     } catch (err) {
       console.error('Clean failed:', err);
+      showToast('Clean operation failed', 'error');
     } finally {
       this.cleaning = false;
     }
