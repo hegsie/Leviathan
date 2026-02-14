@@ -1,4 +1,12 @@
 import { expect } from '@open-wc/testing';
+
+// Mock Tauri API before importing modules that use @tauri-apps/plugin-shell
+if (!(globalThis as Record<string, unknown>).__TAURI_INTERNALS__) {
+  (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
+    invoke: (_command: string): Promise<unknown> => Promise.resolve(null),
+  };
+}
+
 import { handleExternalLink } from '../external-link.ts';
 
 describe('external-link', () => {
