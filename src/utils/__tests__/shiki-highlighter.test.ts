@@ -194,12 +194,12 @@ describe('shiki-highlighter', () => {
       expect(['github-dark', 'github-light']).to.include(theme);
     });
 
-    it('should return github-dark when no data-theme is set', () => {
-      // Default in test environment (no data-theme attribute)
+    it('should fall back to system preference when no data-theme is set', () => {
       document.documentElement.removeAttribute('data-theme');
       const theme = getCurrentTheme();
-      // In test environment without prefers-color-scheme, defaults to dark
-      expect(theme).to.equal('github-dark');
+      // Result depends on browser's prefers-color-scheme setting
+      const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+      expect(theme).to.equal(prefersLight ? 'github-light' : 'github-dark');
     });
 
     it('should respect data-theme=light attribute', () => {
