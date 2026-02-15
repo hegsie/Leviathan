@@ -590,6 +590,26 @@ export class AppShell extends LitElement {
     this.showConflictDialog = true;
   };
 
+  // Handle merge-conflict events from branch list (e.g., sidebar merge resulting in conflicts)
+  private handleMergeConflictEvent = (): void => {
+    this.conflictOperationType = 'merge';
+    this.showConflictDialog = true;
+    this.handleRefresh();
+  };
+
+  // Handle gitflow events (init, feature/release/hotfix operations) to trigger refresh
+  private handleGitflowEvent = (): void => {
+    this.handleRefresh();
+  };
+
+  // Handle show-commit events (e.g., from reflog dialog "Show in graph")
+  private handleShowCommitEvent = (e: Event): void => {
+    const customEvent = e as CustomEvent<{ oid: string }>;
+    if (customEvent.detail?.oid) {
+      this.graphCanvas?.selectCommit(customEvent.detail.oid);
+    }
+  };
+
   connectedCallback(): void {
     super.connectedCallback();
     this.unsubscribe = repositoryStore.subscribe((state) => {
@@ -643,6 +663,10 @@ export class AppShell extends LitElement {
     window.addEventListener('open-settings', this.handleOpenSettings);
     window.addEventListener('trigger-abort', this.handleTriggerAbort);
     this.addEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
+    this.addEventListener('merge-conflict', this.handleMergeConflictEvent);
+    this.addEventListener('gitflow-initialized', this.handleGitflowEvent);
+    this.addEventListener('gitflow-operation', this.handleGitflowEvent);
+    this.addEventListener('show-commit', this.handleShowCommitEvent);
 
     // Load vim mode from keyboard service
     this.vimMode = keyboardService.isVimMode();
@@ -739,6 +763,10 @@ export class AppShell extends LitElement {
     window.removeEventListener('open-settings', this.handleOpenSettings);
     window.removeEventListener('trigger-abort', this.handleTriggerAbort);
     this.removeEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
+    this.removeEventListener('merge-conflict', this.handleMergeConflictEvent);
+    this.removeEventListener('gitflow-initialized', this.handleGitflowEvent);
+    this.removeEventListener('gitflow-operation', this.handleGitflowEvent);
+    this.removeEventListener('show-commit', this.handleShowCommitEvent);
     gitService.cleanupRemoteOperationListeners();
     // Clean up auto-fetch
     this.autoFetchUnsubscribe?.();
@@ -2145,8 +2173,9 @@ export class AppShell extends LitElement {
   }
 
   private handleFileHistoryCommitSelected(e: CustomEvent<{ commit: Commit }>): void {
-    // Select the commit in the graph
+    // Select the commit in the graph and navigate to it
     this.selectedCommit = e.detail.commit;
+    this.graphCanvas?.selectCommit(e.detail.commit.oid);
   }
 
   private handleFileHistoryViewDiff(e: CustomEvent<{ commitOid: string; filePath: string }>): void {
@@ -2584,6 +2613,7 @@ export class AppShell extends LitElement {
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showReflog = false; }}
           @undo-complete=${() => { this.showReflog = false; this.handleRefresh(); }}
+          @show-commit=${(e: CustomEvent<{ oid: string }>) => { this.showReflog = false; this.graphCanvas?.selectCommit(e.detail.oid); }}
         ></lv-reflog-dialog>
       ` : ''}
 
@@ -2614,7 +2644,7 @@ export class AppShell extends LitElement {
 
       ${this.activeRepository && this.showRepositoryHealth ? html`
         <lv-modal
-          title="Repository Health"
+          modalTitle="Repository Health"
           ?open=${this.showRepositoryHealth}
           @close=${() => { this.showRepositoryHealth = false; }}
         >

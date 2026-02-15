@@ -1,6 +1,6 @@
 import { expect } from '@open-wc/testing';
 import type { IntegrationAccount, IntegrationType } from '../../../types/unified-profile.types.ts';
-import { INTEGRATION_TYPE_NAMES } from '../../../types/integration-accounts.types.ts';
+import { INTEGRATION_TYPE_NAMES } from '../../../types/unified-profile.types.ts';
 
 // Mock Tauri API before importing any modules that use it
 const mockInvoke = (_command: string): Promise<unknown> => {

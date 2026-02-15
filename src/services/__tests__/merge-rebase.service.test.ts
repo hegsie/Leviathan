@@ -224,12 +224,12 @@ describe('git.service - Conflict resolution operations', () => {
   });
 
   describe('resolveConflict', () => {
-    it('invokes resolve_conflict with path, file_path, and content', async () => {
+    it('invokes resolve_conflict with path, filePath, and content', async () => {
       const result = await resolveConflict('/test/repo', 'src/index.ts', 'resolved content');
       expect(lastInvokedCommand).to.equal('resolve_conflict');
       expect(lastInvokedArgs).to.deep.equal({
         path: '/test/repo',
-        file_path: 'src/index.ts',
+        filePath: 'src/index.ts',
         content: 'resolved content',
       });
       expect(result.success).to.be.true;
@@ -403,16 +403,16 @@ describe('git.service - Conflict detection operations', () => {
 
       const result = await detectConflictMarkers('/test/repo');
       expect(lastInvokedCommand).to.equal('detect_conflict_markers');
-      expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo', file_path: undefined });
+      expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo', filePath: undefined });
       expect(result.success).to.be.true;
     });
 
-    it('invokes detect_conflict_markers with path and file_path', async () => {
+    it('invokes detect_conflict_markers with path and filePath', async () => {
       mockInvoke = () => Promise.resolve([]);
 
       const result = await detectConflictMarkers('/test/repo', 'src/file.ts');
       expect(lastInvokedCommand).to.equal('detect_conflict_markers');
-      expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo', file_path: 'src/file.ts' });
+      expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo', filePath: 'src/file.ts' });
       expect(result.success).to.be.true;
     });
 
@@ -460,7 +460,7 @@ describe('git.service - Conflict detection operations', () => {
   });
 
   describe('getConflictDetails', () => {
-    it('invokes get_conflict_details with path and file_path', async () => {
+    it('invokes get_conflict_details with path and filePath', async () => {
       const mockDetails = {
         filePath: 'src/index.ts',
         ourRef: 'main',
@@ -472,7 +472,7 @@ describe('git.service - Conflict detection operations', () => {
 
       const result = await getConflictDetails('/test/repo', 'src/index.ts');
       expect(lastInvokedCommand).to.equal('get_conflict_details');
-      expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo', file_path: 'src/index.ts' });
+      expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo', filePath: 'src/index.ts' });
       expect(result.success).to.be.true;
       expect(result.data).to.deep.equal(mockDetails);
     });

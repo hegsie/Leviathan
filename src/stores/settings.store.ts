@@ -50,10 +50,6 @@ export interface SettingsState {
   minimizeToTray: boolean;
   showNativeNotifications: boolean;
 
-  // Recent repositories
-  recentRepositories: string[];
-  maxRecentRepositories: number;
-
   // Actions
   setTheme: (theme: Theme) => void;
   setFontSize: (size: FontSize) => void;
@@ -77,9 +73,6 @@ export interface SettingsState {
   setNetworkOperationTimeout: (timeout: number) => void;
   setMinimizeToTray: (enabled: boolean) => void;
   setShowNativeNotifications: (enabled: boolean) => void;
-  addRecentRepository: (path: string) => void;
-  removeRecentRepository: (path: string) => void;
-  clearRecentRepositories: () => void;
   resetToDefaults: () => void;
 }
 
@@ -106,13 +99,11 @@ const defaultSettings = {
   networkOperationTimeout: 300,
   minimizeToTray: false,
   showNativeNotifications: true,
-  recentRepositories: [] as string[],
-  maxRecentRepositories: 10,
 };
 
 export const settingsStore = createStore<SettingsState>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       ...defaultSettings,
 
       setTheme: (theme) => {
@@ -170,21 +161,6 @@ export const settingsStore = createStore<SettingsState>()(
       setMinimizeToTray: (minimizeToTray) => set({ minimizeToTray }),
 
       setShowNativeNotifications: (showNativeNotifications) => set({ showNativeNotifications }),
-
-      addRecentRepository: (path) => {
-        const { recentRepositories, maxRecentRepositories } = get();
-        const filtered = recentRepositories.filter((p) => p !== path);
-        const updated = [path, ...filtered].slice(0, maxRecentRepositories);
-        set({ recentRepositories: updated });
-      },
-
-      removeRecentRepository: (path) => {
-        set((state) => ({
-          recentRepositories: state.recentRepositories.filter((p) => p !== path),
-        }));
-      },
-
-      clearRecentRepositories: () => set({ recentRepositories: [] }),
 
       resetToDefaults: () => {
         set(defaultSettings);

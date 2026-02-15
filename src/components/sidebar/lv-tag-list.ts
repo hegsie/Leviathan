@@ -369,6 +369,7 @@ export class LvTagList extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load tags:', err);
+      showToast('Failed to load tags', 'error');
     } finally {
       this.loading = false;
     }
@@ -475,7 +476,9 @@ export class LvTagList extends LitElement {
         composed: true,
       }));
     } else {
-      console.error('Failed to checkout tag:', result.data?.message || result.error);
+      const errorMsg = result.data?.message || result.error || 'Unknown error';
+      console.error('Failed to checkout tag:', errorMsg);
+      showToast(`Failed to checkout tag: ${errorMsg}`, 'error');
     }
   }
 
@@ -506,6 +509,7 @@ export class LvTagList extends LitElement {
       }));
     } else {
       console.error('Failed to delete tag:', result.error);
+      showToast(`Failed to delete tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
     }
   }
 
@@ -555,6 +559,7 @@ export class LvTagList extends LitElement {
       }));
     } else {
       console.error('Failed to push tag:', result.error);
+      showToast(`Failed to push tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
     }
   }
 
