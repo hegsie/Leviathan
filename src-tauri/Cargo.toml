@@ -47,7 +47,7 @@ chardetng = "0.1"
 encoding_rs = "0.8"
 
 # Archive support
-zip = { version = "7", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
 
