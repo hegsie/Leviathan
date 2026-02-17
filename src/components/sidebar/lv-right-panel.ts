@@ -28,9 +28,11 @@ export class LvRightPanel extends LitElement {
 
       .tab-bar {
         display: flex;
+        gap: 2px;
         border-bottom: 1px solid var(--color-border);
         background: var(--color-bg-secondary);
         flex-shrink: 0;
+        padding: 0 4px;
       }
 
       .tab {
@@ -40,8 +42,10 @@ export class LvRightPanel extends LitElement {
         font-weight: var(--font-weight-medium);
         color: var(--color-text-secondary);
         background: transparent;
-        border: none;
-        border-bottom: 2px solid transparent;
+        border: 1px solid transparent;
+        border-bottom: none;
+        border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+        margin-bottom: -1px;
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -58,8 +62,10 @@ export class LvRightPanel extends LitElement {
 
       .tab.active {
         color: var(--color-primary);
-        border-bottom-color: var(--color-primary);
+        font-weight: var(--font-weight-semibold);
         background: var(--color-bg-primary);
+        border-color: var(--color-border);
+        border-bottom-color: var(--color-bg-primary);
       }
 
       .tab .badge {

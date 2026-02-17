@@ -109,6 +109,37 @@ export class LvCommitDetails extends LitElement {
         user-select: all;
       }
 
+      .commit-sha-row {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+      }
+
+      .copy-sha-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .copy-sha-btn:hover {
+        background: var(--color-primary);
+        color: white;
+        border-color: var(--color-primary);
+      }
+
+      .copy-sha-btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
       .meta-row {
         display: flex;
         align-items: flex-start;
@@ -201,13 +232,13 @@ export class LvCommitDetails extends LitElement {
       .file-item {
         display: flex;
         align-items: center;
-        gap: 4px;
-        padding: 2px 6px;
+        gap: 6px;
+        padding: 4px 6px;
         margin: 0 -6px;
         cursor: default;
         font-size: var(--font-size-xs);
         border-radius: var(--radius-sm);
-        min-height: 20px;
+        min-height: 26px;
       }
 
       .file-item:hover {
@@ -219,14 +250,14 @@ export class LvCommitDetails extends LitElement {
       }
 
       .file-status {
-        width: 14px;
-        height: 14px;
+        width: 18px;
+        height: 18px;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 9px;
+        font-size: 11px;
         font-weight: var(--font-weight-bold);
-        border-radius: 2px;
+        border-radius: 3px;
         flex-shrink: 0;
       }
 
@@ -264,8 +295,8 @@ export class LvCommitDetails extends LitElement {
 
       .file-stats {
         display: flex;
-        gap: var(--spacing-xs);
-        font-size: var(--font-size-xs);
+        gap: var(--spacing-sm);
+        font-size: 12px;
         font-family: var(--font-family-mono);
       }
 
@@ -591,6 +622,23 @@ export class LvCommitDetails extends LitElement {
     openExternalUrl(url);
   }
 
+  private async copyFullSha(): Promise<void> {
+    if (!this.commit) return;
+    try {
+      await navigator.clipboard.writeText(this.commit.oid);
+      // Dispatch toast event
+      this.dispatchEvent(
+        new CustomEvent('copy-sha', {
+          detail: { sha: this.commit.oid.substring(0, 7) },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    } catch (err) {
+      console.error('Failed to copy SHA:', err);
+    }
+  }
+
   // Context menu handlers
   private handleFileContextMenu(e: MouseEvent, file: CommitFileEntry): void {
     e.preventDefault();
@@ -875,7 +923,19 @@ export class LvCommitDetails extends LitElement {
 
         <div class="section">
           <div class="section-title">SHA</div>
-          <code class="commit-oid">${this.commit.oid}</code>
+          <div class="commit-sha-row">
+            <code class="commit-oid">${this.commit.oid.slice(0, 7)}</code>
+            <button
+              class="copy-sha-btn"
+              @click=${this.copyFullSha}
+              title="Copy full SHA (${this.commit.oid})"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path>
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div class="section">
