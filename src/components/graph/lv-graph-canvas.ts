@@ -241,10 +241,12 @@ export class LvGraphCanvas extends LitElement {
 
       .graph-toolbar {
         position: absolute;
-        top: var(--spacing-xs);
+        top: 0;
         right: calc(var(--spacing-md) + 12px);
+        height: 28px;
         display: flex;
-        gap: var(--spacing-xs);
+        align-items: center;
+        gap: 2px;
         z-index: 10;
       }
 
@@ -252,16 +254,21 @@ export class LvGraphCanvas extends LitElement {
         display: flex;
         align-items: center;
         justify-content: center;
-        width: 28px;
-        height: 28px;
+        height: 22px;
+        padding: 0 var(--spacing-xs);
+        gap: 4px;
         border: 1px solid var(--color-border);
         border-radius: var(--radius-sm);
         background: var(--color-bg-secondary);
         color: var(--color-text-secondary);
         cursor: pointer;
-        font-size: var(--font-size-sm);
-        padding: 0;
+        font-size: 10px;
         transition: background 0.15s ease, color 0.15s ease;
+      }
+
+      .toolbar-btn svg {
+        width: 12px;
+        height: 12px;
       }
 
       .toolbar-btn:hover {
@@ -480,7 +487,7 @@ export class LvGraphCanvas extends LitElement {
 
   // Config - compact size
   private readonly ROW_HEIGHT = 22;
-  private readonly LANE_WIDTH = 14;
+  private readonly LANE_WIDTH = 16;
   private readonly PADDING = 20;
   private readonly NODE_RADIUS = 6;
   private readonly HEADER_HEIGHT = 28; // Must match canvas-renderer.ts
@@ -2340,12 +2347,27 @@ export class LvGraphCanvas extends LitElement {
               class="toolbar-btn ${this.showBranchPanel ? 'active' : ''}"
               title="Toggle branch visibility"
               @click=${() => { this.showBranchPanel = !this.showBranchPanel; this.showExportMenu = false; }}
-            >&#9734;</button>
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="6" y1="3" x2="6" y2="15"></line>
+                <circle cx="18" cy="6" r="3"></circle>
+                <circle cx="6" cy="18" r="3"></circle>
+                <path d="M18 9a9 9 0 01-9 9"></path>
+              </svg>
+              Branches
+            </button>
             <button
               class="toolbar-btn ${this.showExportMenu ? 'active' : ''}"
               title="Export graph"
               @click=${() => { this.showExportMenu = !this.showExportMenu; this.showBranchPanel = false; }}
-            >&#8615;</button>
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              Export
+            </button>
           </div>
 
           ${this.showBranchPanel ? this.renderBranchPanel() : ''}

@@ -1264,8 +1264,8 @@ export class LvBranchList extends LitElement {
 
     return html`
       <span class="ahead-behind">
-        ${ahead > 0 ? html`<span class="ahead">↑${ahead}</span>` : nothing}
-        ${behind > 0 ? html`<span class="behind">↓${behind}</span>` : nothing}
+        ${ahead > 0 ? html`<span class="ahead" title="${ahead} commit${ahead > 1 ? 's' : ''} ahead of remote">↑${ahead}</span>` : nothing}
+        ${behind > 0 ? html`<span class="behind" title="${behind} commit${behind > 1 ? 's' : ''} behind remote">↓${behind}</span>` : nothing}
       </span>
     `;
   }
@@ -1892,7 +1892,7 @@ export class LvBranchList extends LitElement {
             <button
               class="cleanup-btn"
               @click=${this.handleOpenCleanupDialog}
-              title="Clean up merged, stale, and gone branches"
+              title="${this.getMergedBranches().length} merged + ${this.getStaleBranches().length} stale branches can be safely deleted"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"></polyline>

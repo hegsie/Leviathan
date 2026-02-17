@@ -639,7 +639,7 @@ export class CanvasRenderer {
 
     // Calculate column positions
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
-    const avatarColumnX = graphEndX + 12;
+    const avatarColumnX = graphEndX + 20;
     const avatarSize = 22;
     const messageColumnX = avatarColumnX + avatarSize + 12;
 
@@ -940,7 +940,7 @@ export class CanvasRenderer {
 
     // Calculate column positions (left to right)
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
-    const avatarColumnX = graphEndX + 12;
+    const avatarColumnX = graphEndX + 20;
     const avatarSize = 22;
     const refsColumnX = avatarColumnX + avatarSize + 8;
     const refsColumnWidth = config.refsColumnWidth;
@@ -953,7 +953,7 @@ export class CanvasRenderer {
     const statsColumnX = timeColumnX - statsColumnWidth - 8;
 
     // Message column fills space up to stats column
-    const availableMessageWidth = statsColumnX - messageColumnX - 16;
+    const availableMessageWidth = statsColumnX - messageColumnX - 8;
 
     // Check if search highlighting is active
     const hasHighlighting = this.highlightedOids.size > 0;
@@ -975,13 +975,13 @@ export class CanvasRenderer {
       // Draw subtle row highlighting for selected/hovered rows
       if (isSelected || isHovered) {
         const rowTop = y - config.rowHeight / 2;
-        ctx.fillStyle = isSelected ? 'rgba(255, 255, 255, 0.06)' : 'rgba(255, 255, 255, 0.03)';
+        ctx.fillStyle = isSelected ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.05)';
         ctx.fillRect(0, rowTop, canvasWidth, config.rowHeight);
 
         // Draw left border stripe matching lane color
         ctx.fillStyle = laneColor;
         ctx.globalAlpha = isSelected ? 0.8 : 0.5;
-        ctx.fillRect(0, rowTop, 3, config.rowHeight);
+        ctx.fillRect(0, rowTop, 4, config.rowHeight);
         ctx.globalAlpha = 1.0;
       }
 
@@ -1818,7 +1818,7 @@ export class CanvasRenderer {
 
     // Calculate column positions (must match renderRefLabels logic)
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
-    const avatarColumnX = graphEndX + 12;
+    const avatarColumnX = graphEndX + 20;
     const avatarSize = 22;
     const refsColumnX = avatarColumnX + avatarSize + 8;
     const refsColumnWidth = config.refsColumnWidth;
