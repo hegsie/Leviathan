@@ -166,7 +166,8 @@ export class LvBranchList extends LitElement {
         color: var(--color-text-muted);
       }
 
-      .branch-item:hover {
+      .branch-item:hover,
+      .branch-item.context-target {
         background: var(--color-bg-hover);
       }
 
@@ -555,13 +556,19 @@ export class LvBranchList extends LitElement {
     await this.loadBranches();
     document.addEventListener('click', this.handleDocumentClick);
     window.addEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
+    window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('click', this.handleDocumentClick);
     window.removeEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
+    window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
   }
+
+  private handleRepositoryRefresh = (): void => {
+    this.loadBranches();
+  };
 
   private handleExternalCleanupOpen = (): void => {
     this.handleOpenCleanupDialog();
@@ -1331,7 +1338,7 @@ export class LvBranchList extends LitElement {
 
     return html`
       <li
-        class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''} ${isDragging ? 'dragging' : ''} ${dropClass} ${staleClass}"
+        class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''} ${isDragging ? 'dragging' : ''} ${dropClass} ${staleClass} ${this.contextMenu.visible && this.contextMenu.branch?.name === branch.name ? 'context-target' : ''}"
         draggable=${!branch.isHead ? 'true' : 'false'}
         @click=${() => this.handleBranchClick(branch)}
         @dblclick=${() => this.handleCheckout(branch)}

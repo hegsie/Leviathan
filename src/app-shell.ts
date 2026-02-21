@@ -965,7 +965,7 @@ export class AppShell extends LitElement {
 
     if (result.success && result.data?.success) {
       this.handleAutoStashToast(result.data, refName);
-      this.graphCanvas?.refresh?.();
+      this.handleRefresh();
     } else {
       log.error('Checkout failed:', result.data?.message || result.error);
       showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Checkout failed');
@@ -994,7 +994,7 @@ export class AppShell extends LitElement {
     });
 
     if (result.success) {
-      this.graphCanvas?.refresh?.();
+      this.handleRefresh();
       showToast(`Merged ${refName}`, 'success');
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       this.conflictOperationType = 'merge';
@@ -1022,7 +1022,7 @@ export class AppShell extends LitElement {
     });
 
     if (result.success) {
-      this.graphCanvas?.refresh?.();
+      this.handleRefresh();
       showToast(`Rebased onto ${refName}`, 'success');
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       this.conflictOperationType = 'rebase';
@@ -1051,7 +1051,7 @@ export class AppShell extends LitElement {
     );
 
     if (result.success) {
-      this.graphCanvas?.refresh?.();
+      this.handleRefresh();
       showToast(`Deleted branch ${branchName}`, 'success');
     } else {
       log.error('Delete branch failed:', result.error);
@@ -1071,7 +1071,7 @@ export class AppShell extends LitElement {
     });
 
     if (result.success) {
-      this.graphCanvas?.refresh?.();
+      this.handleRefresh();
       showToast(`Deleted tag ${tagName}`, 'success');
     } else {
       log.error('Delete tag failed:', result.error);

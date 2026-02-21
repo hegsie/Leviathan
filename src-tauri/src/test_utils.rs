@@ -166,6 +166,21 @@ impl TestRepo {
         repo.tag_lightweight(name, commit.as_object(), false)
             .expect("Failed to create lightweight tag");
     }
+
+    /// Create a fake remote branch ref (simulates `origin/branch-name`).
+    /// This creates a ref at `refs/remotes/origin/<name>` pointing at `target_oid`.
+    pub fn create_remote_branch(&self, name: &str, target_oid: git2::Oid) {
+        let repo = self.repo();
+        let commit = repo.find_commit(target_oid).expect("Failed to find commit");
+        let refname = format!("refs/remotes/origin/{}", name);
+        repo.reference(
+            &refname,
+            commit.id(),
+            false,
+            "create remote branch for test",
+        )
+        .expect("Failed to create remote branch ref");
+    }
 }
 
 impl Default for TestRepo {

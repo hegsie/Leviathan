@@ -606,7 +606,7 @@ pub async fn checkout_with_autostash(
     }
 
     // Get target commit OID for checkout - use block to limit borrow scope
-    let resolve_result: std::result::Result<(git2::Oid, bool), String> = {
+    let resolve_result: std::result::Result<(git2::Oid, bool, bool), String> = {
         let obj = match repo.revparse_single(&ref_name) {
             Ok(obj) => obj,
             Err(e) => {
@@ -629,11 +629,17 @@ pub async fn checkout_with_autostash(
         };
 
         let is_local = repo.find_branch(&ref_name, git2::BranchType::Local).is_ok();
+        let is_remote = repo
+            .find_branch(&ref_name, git2::BranchType::Remote)
+            .is_ok()
+            || repo
+                .find_reference(&format!("refs/remotes/{}", ref_name))
+                .is_ok();
 
-        Ok((commit.id(), is_local))
+        Ok((commit.id(), is_local, is_remote))
     }; // obj and commit dropped here
 
-    let (target_oid, is_local_branch) = resolve_result.map_err(|msg| {
+    let (target_oid, is_local_branch, is_remote_branch) = resolve_result.map_err(|msg| {
         // Restore stash if checkout target resolution failed
         if stashed {
             // Best effort - try to pop stash, but don't fail if it doesn't work
@@ -704,6 +710,30 @@ pub async fn checkout_with_autostash(
     if is_local_branch {
         if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
             repo.set_head(branch.get().name().unwrap())?;
+        }
+    } else if is_remote_branch {
+        // Check out a remote branch by finding or creating a local tracking branch.
+        // e.g., "origin/feature-x" → local branch "feature-x" tracking "origin/feature-x"
+        let local_name = if let Some(pos) = ref_name.find('/') {
+            &ref_name[pos + 1..]
+        } else {
+            &ref_name
+        };
+
+        // Use existing local branch if it exists, otherwise create one
+        let local_branch =
+            if let Ok(existing) = repo.find_branch(local_name, git2::BranchType::Local) {
+                existing
+            } else {
+                let commit = repo.find_commit(target_oid)?;
+                let mut new_branch = repo.branch(local_name, &commit, false)?;
+                // Best effort: set upstream tracking (may fail if remote config is incomplete)
+                let _ = new_branch.set_upstream(Some(&ref_name));
+                new_branch
+            };
+
+        if let Some(name) = local_branch.get().name() {
+            repo.set_head(name)?;
         }
     } else {
         repo.set_head_detached(target_oid)?;
@@ -1139,5 +1169,161 @@ mod tests {
             // Should be back on the original branch
             assert_eq!(repo.current_branch(), original_branch);
         }
+    }
+
+    // ── checkout_with_autostash tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_local_branch() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string()).await;
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!(data.success);
+        assert!(!data.stashed);
+        assert_eq!(repo.current_branch(), "feature");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_stashes_uncommitted_changes() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+
+        // Create uncommitted changes
+        repo.create_file("README.md", "modified content");
+        repo.stage_file("README.md");
+
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string()).await;
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!(data.success);
+        assert!(data.stashed);
+        assert!(data.stash_applied);
+        assert_eq!(repo.current_branch(), "feature");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_nonexistent_ref_fails() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = checkout_with_autostash(repo.path_str(), "nonexistent".to_string()).await;
+        assert!(result.is_err());
+        // Should still be on original branch
+        assert_eq!(repo.current_branch(), "main");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_remote_branch_creates_local_tracking() {
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+
+        // Simulate a remote branch
+        repo.create_remote_branch("feature-remote", oid);
+
+        let result =
+            checkout_with_autostash(repo.path_str(), "origin/feature-remote".to_string()).await;
+        assert!(result.is_ok(), "checkout failed: {:?}", result.err());
+        let data = result.unwrap();
+        assert!(data.success);
+
+        // Should have created a local branch and set HEAD to it (not detached)
+        let git_repo = repo.repo();
+        assert!(
+            !git_repo.head_detached().unwrap(),
+            "HEAD should not be detached after remote branch checkout"
+        );
+        assert_eq!(repo.current_branch(), "feature-remote");
+
+        // Verify the local branch exists
+        let local_branch = git_repo.find_branch("feature-remote", git2::BranchType::Local);
+        assert!(
+            local_branch.is_ok(),
+            "Local tracking branch should have been created"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_remote_branch_existing_local() {
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+
+        // Create a local branch and a remote branch with the same short name
+        repo.create_branch("feature-existing");
+        repo.create_remote_branch("feature-existing", oid);
+
+        let result =
+            checkout_with_autostash(repo.path_str(), "origin/feature-existing".to_string()).await;
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!(data.success);
+
+        // Should check out the existing local branch (not fail with "already exists")
+        let git_repo = repo.repo();
+        assert!(
+            !git_repo.head_detached().unwrap(),
+            "HEAD should not be detached"
+        );
+        assert_eq!(repo.current_branch(), "feature-existing");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_remote_branch_with_prefix() {
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+
+        // Simulate origin/feature/my-branch (nested path)
+        repo.create_remote_branch("feature/my-branch", oid);
+
+        let result =
+            checkout_with_autostash(repo.path_str(), "origin/feature/my-branch".to_string()).await;
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!(data.success);
+
+        // Should create local branch "feature/my-branch"
+        let git_repo = repo.repo();
+        assert!(!git_repo.head_detached().unwrap());
+        assert_eq!(repo.current_branch(), "feature/my-branch");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_head_branch_has_is_head() {
+        // After checkout, get_branches should show the new branch as HEAD
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string()).await;
+        assert!(result.is_ok());
+
+        let branches = get_branches(repo.path_str()).await.unwrap();
+        let head_branch = branches.iter().find(|b| b.is_head);
+        assert!(head_branch.is_some(), "One branch should be HEAD");
+        assert_eq!(head_branch.unwrap().name, "feature");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_remote_branch_has_is_head_in_branches() {
+        // After remote checkout, get_branches should show the new local branch as HEAD
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+        repo.create_remote_branch("new-feature", oid);
+
+        let result =
+            checkout_with_autostash(repo.path_str(), "origin/new-feature".to_string()).await;
+        assert!(result.is_ok());
+
+        let branches = get_branches(repo.path_str()).await.unwrap();
+        let head_branch = branches.iter().find(|b| b.is_head);
+        assert!(
+            head_branch.is_some(),
+            "One branch should be HEAD after remote checkout"
+        );
+        assert_eq!(head_branch.unwrap().name, "new-feature");
+        assert!(
+            !head_branch.unwrap().is_remote,
+            "HEAD branch should be local, not remote"
+        );
     }
 }

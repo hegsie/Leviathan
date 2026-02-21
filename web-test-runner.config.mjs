@@ -5,7 +5,7 @@ export default {
   files: 'src/**/*.test.ts',
   nodeResolve: true,
   plugins: [
-    esbuildPlugin({ ts: true, target: 'auto', tsconfig: 'tsconfig.json' }),
+    esbuildPlugin({ ts: true, target: 'auto', tsconfig: 'tsconfig.json', loaders: { '.png': 'dataurl' } }),
   ],
   browsers: [
     playwrightLauncher({ product: 'chromium' }),
