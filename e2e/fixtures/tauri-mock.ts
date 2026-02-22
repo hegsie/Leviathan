@@ -198,12 +198,95 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'get_current_branch':
         return mocks.branches.find((b) => b.isHead) || null;
 
-      case 'checkout_branch':
+      // === Branch mutations ===
       case 'checkout':
-      case 'create_branch':
-      case 'delete_branch':
+      case 'checkout_branch': {
+        const refName = (args?.refName as string) || (args?.name as string) || '';
+        mocks.branches.forEach((b) => { b.isHead = false; });
+        if (refName.startsWith('refs/remotes/')) {
+          const parts = refName.replace('refs/remotes/', '').split('/');
+          parts.shift();
+          const localName = parts.join('/');
+          const remoteBranch = mocks.branches.find((b) => b.name === refName);
+          const targetOid = remoteBranch?.targetOid || 'checkout-oid';
+          const existingLocal = mocks.branches.find((b) => b.name === `refs/heads/${localName}`);
+          if (existingLocal) {
+            existingLocal.isHead = true;
+            existingLocal.upstream = refName;
+          } else {
+            mocks.branches.push({
+              name: `refs/heads/${localName}`,
+              shorthand: localName,
+              isHead: true,
+              isRemote: false,
+              upstream: refName,
+              targetOid,
+              isStale: false,
+            } as MockBranch);
+          }
+        } else {
+          const branch = mocks.branches.find((b) => b.name === refName);
+          if (branch) branch.isHead = true;
+        }
+        const newHead = mocks.branches.find((b) => b.isHead);
+        if (newHead) mocks.repository.headRef = newHead.name;
+        return null;
+      }
+      case 'create_branch': {
+        const name = (args?.name as string) || '';
+        const startPoint = (args?.startPoint as string) || mocks.commits[0]?.oid || 'abc123';
+        mocks.branches.push({
+          name: `refs/heads/${name}`,
+          shorthand: name,
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: startPoint,
+          isStale: false,
+        } as MockBranch);
+        return null;
+      }
+      case 'delete_branch': {
+        const branchName = (args?.name as string) || '';
+        mocks.branches = mocks.branches.filter(
+          (b) => b.name !== branchName && b.shorthand !== branchName
+        );
+        return null;
+      }
       case 'rename_branch':
         return null;
+      case 'checkout_with_autostash': {
+        const refName = (args?.refName as string) || '';
+        mocks.branches.forEach((b) => { b.isHead = false; });
+        if (refName.startsWith('refs/remotes/')) {
+          const parts = refName.replace('refs/remotes/', '').split('/');
+          parts.shift();
+          const localName = parts.join('/');
+          const remoteBranch = mocks.branches.find((b) => b.name === refName);
+          const targetOid = remoteBranch?.targetOid || 'checkout-oid';
+          const existingLocal = mocks.branches.find((b) => b.name === `refs/heads/${localName}`);
+          if (existingLocal) {
+            existingLocal.isHead = true;
+            existingLocal.upstream = refName;
+          } else {
+            mocks.branches.push({
+              name: `refs/heads/${localName}`,
+              shorthand: localName,
+              isHead: true,
+              isRemote: false,
+              upstream: refName,
+              targetOid,
+              isStale: false,
+            } as MockBranch);
+          }
+        } else {
+          const branch = mocks.branches.find((b) => b.name === refName);
+          if (branch) branch.isHead = true;
+        }
+        const newHead = mocks.branches.find((b) => b.isHead);
+        if (newHead) mocks.repository.headRef = newHead.name;
+        return { success: true, stashed: false, stashApplied: false, stashConflict: false, message: 'Switched branch' };
+      }
 
       case 'get_remote_status': {
         // Get ahead/behind from the current branch
@@ -224,8 +307,25 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'get_refs_by_commit':
         return {};
 
-      case 'create_commit':
-        return 'new-commit-oid';
+      case 'create_commit': {
+        const oid = 'new-commit-' + Date.now().toString(36);
+        const shortId = oid.substring(0, 7);
+        const message = (args?.message as string) || '';
+        const summary = message.split('\n')[0];
+        mocks.commits.unshift({
+          oid,
+          shortId,
+          message,
+          summary,
+          body: message.includes('\n') ? message.substring(message.indexOf('\n') + 1).trim() : null,
+          author: { name: 'Test User', email: 'test@example.com', timestamp: Date.now() / 1000 },
+          committer: { name: 'Test User', email: 'test@example.com', timestamp: Date.now() / 1000 },
+          parentIds: mocks.commits.length > 0 ? [mocks.commits[0].oid] : [],
+          timestamp: Date.now() / 1000,
+        });
+        mocks.status.staged = [];
+        return oid;
+      }
 
       // Status commands
       case 'get_status':
@@ -237,29 +337,87 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'get_unstaged_files':
         return mocks.status.unstaged;
 
-      // Staging commands
-      case 'stage_files':
-      case 'unstage_files':
-      case 'stage_all':
-      case 'unstage_all':
+      // Staging mutations
+      case 'stage_files': {
+        const paths = (args?.paths as string[]) || [];
+        const toStage = mocks.status.unstaged.filter((f) => paths.includes(f.path));
+        mocks.status.unstaged = mocks.status.unstaged.filter((f) => !paths.includes(f.path));
+        mocks.status.staged.push(...toStage.map((f) => ({ ...f, isStaged: true })));
         return null;
+      }
+      case 'unstage_files': {
+        const paths = (args?.paths as string[]) || [];
+        const toUnstage = mocks.status.staged.filter((f) => paths.includes(f.path));
+        mocks.status.staged = mocks.status.staged.filter((f) => !paths.includes(f.path));
+        mocks.status.unstaged.push(...toUnstage.map((f) => ({ ...f, isStaged: false })));
+        return null;
+      }
+      case 'stage_all': {
+        const all = mocks.status.unstaged.map((f) => ({ ...f, isStaged: true }));
+        mocks.status.staged.push(...all);
+        mocks.status.unstaged = [];
+        return null;
+      }
+      case 'unstage_all': {
+        const all = mocks.status.staged.map((f) => ({ ...f, isStaged: false }));
+        mocks.status.unstaged.push(...all);
+        mocks.status.staged = [];
+        return null;
+      }
 
       // Stash commands
       case 'get_stashes':
         return mocks.stashes;
 
-      case 'create_stash':
-      case 'apply_stash':
-      case 'pop_stash':
-      case 'drop_stash':
+      case 'create_stash': {
+        const stashMsg = (args?.message as string) || `WIP on ${mocks.repository.headRef || 'HEAD'}`;
+        mocks.stashes.unshift({
+          index: 0,
+          message: stashMsg,
+          oid: 'stash-' + Date.now().toString(36),
+        });
+        mocks.stashes.forEach((s, i) => { s.index = i; });
+        mocks.status.unstaged = [];
         return null;
+      }
+      case 'apply_stash':
+        return null;
+      case 'pop_stash': {
+        const popIndex = (args?.index as number) ?? 0;
+        mocks.stashes = mocks.stashes.filter((s) => s.index !== popIndex);
+        mocks.stashes.forEach((s, i) => { s.index = i; });
+        return null;
+      }
+      case 'drop_stash': {
+        const dropIndex = (args?.index as number) ?? 0;
+        mocks.stashes = mocks.stashes.filter((s) => s.index !== dropIndex);
+        mocks.stashes.forEach((s, i) => { s.index = i; });
+        return null;
+      }
 
       // Tag commands
       case 'get_tags':
         return mocks.tags;
 
-      case 'create_tag':
-      case 'delete_tag':
+      case 'create_tag': {
+        const tagName = (args?.name as string) || (args?.tagName as string) || '';
+        const tagTarget = (args?.targetOid as string) || mocks.commits[0]?.oid || 'abc123';
+        mocks.tags.push({
+          name: tagName,
+          targetOid: tagTarget,
+          message: (args?.message as string) || null,
+          tagger: (args?.message as string)
+            ? { name: 'Test User', email: 'test@example.com', timestamp: Date.now() / 1000 }
+            : null,
+          isAnnotated: !!(args?.message as string),
+        });
+        return null;
+      }
+      case 'delete_tag': {
+        const tagToDelete = (args?.name as string) || (args?.tagName as string) || '';
+        mocks.tags = mocks.tags.filter((t) => t.name !== tagToDelete);
+        return null;
+      }
       case 'push_tag':
         return null;
 
@@ -280,9 +438,17 @@ function createMockHandler(mocks: typeof defaultMockData) {
         return mocks.remotes;
 
       case 'fetch':
-      case 'pull':
-      case 'push':
         return null;
+      case 'push': {
+        const headForPush = mocks.branches.find((b) => b.isHead);
+        if (headForPush?.aheadBehind) headForPush.aheadBehind.ahead = 0;
+        return null;
+      }
+      case 'pull': {
+        const headForPull = mocks.branches.find((b) => b.isHead);
+        if (headForPull?.aheadBehind) headForPull.aheadBehind.behind = 0;
+        return null;
+      }
 
       // Diff commands
       case 'get_diff':
@@ -367,6 +533,61 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'detect_github_repo':
         return null;
 
+      // Template commands
+      case 'list_templates':
+        return [];
+      case 'save_template':
+        return args?.template || null;
+      case 'get_commit_template':
+        return null;
+      case 'get_conventional_types':
+        return [
+          { typeName: 'feat', description: 'A new feature', emoji: null },
+          { typeName: 'fix', description: 'A bug fix', emoji: null },
+          { typeName: 'docs', description: 'Documentation only changes', emoji: null },
+          { typeName: 'style', description: 'Code style changes', emoji: null },
+          { typeName: 'refactor', description: 'Code refactoring', emoji: null },
+          { typeName: 'test', description: 'Adding tests', emoji: null },
+          { typeName: 'chore', description: 'Maintenance tasks', emoji: null },
+        ];
+
+      // AI availability
+      case 'is_ai_available':
+        return false;
+
+      // Identity
+      case 'get_user_identity':
+        return { name: 'Test User', email: 'test@example.com' };
+
+      // Unified profile commands
+      case 'get_unified_profiles_config':
+        return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+      case 'save_global_account':
+        return args;
+      case 'update_global_account_cached_user':
+      case 'load_unified_profile_for_repository':
+        return null;
+
+      // Credential/vault commands
+      case 'get_machine_vault_password':
+        return 'test-vault-password';
+      case 'store_git_credentials':
+      case 'delete_git_credentials':
+        return null;
+
+      // Integration detection commands
+      case 'detect_ado_repo':
+      case 'detect_gitlab_repo':
+      case 'detect_bitbucket_repo':
+        return null;
+
+      // Integration connection commands
+      case 'check_ado_connection':
+      case 'check_gitlab_connection':
+      case 'check_bitbucket_connection':
+      case 'check_bitbucket_connection_with_token':
+        return { connected: false, user: null };
+
       // Default - log unmocked commands
       default:
         console.warn(`[Tauri Mock] Unmocked command: ${command}`, args);
@@ -390,48 +611,48 @@ export async function setupTauriMocks(
   // Inject the mock before any page scripts run
   await page.addInitScript(
     ({ mockData }) => {
-      // Create the mock handler
-      const handler = (command: string, args?: Record<string, unknown>): unknown => {
-        const data = mockData as typeof defaultMockData;
+      // Deep clone mock data into mutable state that mutations can update
+      const state = JSON.parse(JSON.stringify(mockData)) as typeof defaultMockData;
 
+      const handler = (command: string, args?: Record<string, unknown>): unknown => {
         switch (command) {
           case 'open_repository':
           case 'get_repository_info':
-            return data.repository;
+            return state.repository;
           case 'get_recent_repositories':
-            return [data.repository];
+            return [state.repository];
           case 'get_branches':
-            return data.branches;
+            return state.branches;
           case 'get_current_branch':
-            return data.branches.find((b: MockBranch) => b.isHead) || null;
+            return state.branches.find((b: MockBranch) => b.isHead) || null;
           case 'get_remote_status': {
-            const headBranch = data.branches.find((b: MockBranch) => b.isHead);
+            const headBranch = state.branches.find((b: MockBranch) => b.isHead);
             if (headBranch?.aheadBehind) {
               return { ahead: headBranch.aheadBehind.ahead, behind: headBranch.aheadBehind.behind };
             }
             return { ahead: 0, behind: 0 };
           }
           case 'get_commit_history':
-            return data.commits;
+            return state.commits;
           case 'get_commit':
             return (
-              data.commits.find((c: MockCommit) => c.oid === (args as { oid?: string })?.oid) ||
-              data.commits[0]
+              state.commits.find((c: MockCommit) => c.oid === (args as { oid?: string })?.oid) ||
+              state.commits[0]
             );
           case 'get_refs_by_commit':
             return {};
           case 'get_status':
-            return [...data.status.staged, ...data.status.unstaged];
+            return [...state.status.staged, ...state.status.unstaged];
           case 'get_staged_files':
-            return data.status.staged;
+            return state.status.staged;
           case 'get_unstaged_files':
-            return data.status.unstaged;
+            return state.status.unstaged;
           case 'get_stashes':
-            return data.stashes;
+            return state.stashes;
           case 'get_tags':
-            return data.tags;
+            return state.tags;
           case 'get_remotes':
-            return data.remotes;
+            return state.remotes;
           case 'get_profiles':
             return [
               { id: 'default', name: 'Default', gitName: 'Test User', gitEmail: 'test@example.com' },
@@ -452,7 +673,7 @@ export async function setupTauriMocks(
           case 'detect_github_repo':
             return null;
           case 'get_settings':
-            return data.settings;
+            return state.settings;
           case 'get_diff':
           case 'get_file_diff': {
             // get_file_diff sends { path: repoPath, filePath, staged }
@@ -491,26 +712,213 @@ export async function setupTauriMocks(
               imageType,
             };
           }
-          case 'checkout_branch':
+          // === Staging mutations ===
+          case 'stage_files': {
+            const paths = ((args as { paths?: string[] })?.paths) || [];
+            const toStage = state.status.unstaged.filter((f: MockStatusEntry) => paths.includes(f.path));
+            state.status.unstaged = state.status.unstaged.filter((f: MockStatusEntry) => !paths.includes(f.path));
+            state.status.staged.push(...toStage.map((f: MockStatusEntry) => ({ ...f, isStaged: true })));
+            return null;
+          }
+          case 'unstage_files': {
+            const paths = ((args as { paths?: string[] })?.paths) || [];
+            const toUnstage = state.status.staged.filter((f: MockStatusEntry) => paths.includes(f.path));
+            state.status.staged = state.status.staged.filter((f: MockStatusEntry) => !paths.includes(f.path));
+            state.status.unstaged.push(...toUnstage.map((f: MockStatusEntry) => ({ ...f, isStaged: false })));
+            return null;
+          }
+          case 'stage_all': {
+            const all = state.status.unstaged.map((f: MockStatusEntry) => ({ ...f, isStaged: true }));
+            state.status.staged.push(...all);
+            state.status.unstaged = [];
+            return null;
+          }
+          case 'unstage_all': {
+            const all = state.status.staged.map((f: MockStatusEntry) => ({ ...f, isStaged: false }));
+            state.status.unstaged.push(...all);
+            state.status.staged = [];
+            return null;
+          }
+
+          // === Branch mutations ===
           case 'checkout':
-          case 'create_branch':
-          case 'delete_branch':
+          case 'checkout_branch': {
+            const refName = ((args as { refName?: string })?.refName) || ((args as { name?: string })?.name) || '';
+            // Clear isHead on all branches
+            state.branches.forEach((b: MockBranch) => { b.isHead = false; });
+            if (refName.startsWith('refs/remotes/')) {
+              // Remote branch checkout: create local tracking branch
+              const parts = refName.replace('refs/remotes/', '').split('/');
+              parts.shift(); // remove remote name
+              const localName = parts.join('/');
+              const remoteBranch = state.branches.find((b: MockBranch) => b.name === refName);
+              const targetOid = remoteBranch?.targetOid || 'checkout-oid';
+              const existingLocal = state.branches.find((b: MockBranch) => b.name === `refs/heads/${localName}`);
+              if (existingLocal) {
+                existingLocal.isHead = true;
+                existingLocal.upstream = refName;
+              } else {
+                state.branches.push({
+                  name: `refs/heads/${localName}`,
+                  shorthand: localName,
+                  isHead: true,
+                  isRemote: false,
+                  upstream: refName,
+                  targetOid,
+                  isStale: false,
+                } as MockBranch);
+              }
+            } else {
+              const branch = state.branches.find((b: MockBranch) => b.name === refName);
+              if (branch) branch.isHead = true;
+            }
+            const newHead = state.branches.find((b: MockBranch) => b.isHead);
+            if (newHead) state.repository.headRef = newHead.name;
+            return null;
+          }
+          case 'create_branch': {
+            const name = (args as { name?: string })?.name || '';
+            const startPoint = (args as { startPoint?: string })?.startPoint || state.commits[0]?.oid || 'abc123';
+            state.branches.push({
+              name: `refs/heads/${name}`,
+              shorthand: name,
+              isHead: false,
+              isRemote: false,
+              upstream: null,
+              targetOid: startPoint,
+              isStale: false,
+            } as MockBranch);
+            return null;
+          }
+          case 'delete_branch': {
+            const branchName = (args as { name?: string })?.name || '';
+            state.branches = state.branches.filter(
+              (b: MockBranch) => b.name !== branchName && b.shorthand !== branchName
+            );
+            return null;
+          }
           case 'rename_branch':
-          case 'create_commit':
-          case 'stage_files':
-          case 'unstage_files':
-          case 'stage_all':
-          case 'unstage_all':
-          case 'create_stash':
-          case 'apply_stash':
-          case 'pop_stash':
-          case 'drop_stash':
-          case 'create_tag':
-          case 'delete_tag':
+            return null;
+          case 'checkout_with_autostash': {
+            const refName = ((args as { refName?: string })?.refName) || '';
+            // Clear isHead on all branches
+            state.branches.forEach((b: MockBranch) => { b.isHead = false; });
+            if (refName.startsWith('refs/remotes/')) {
+              const parts = refName.replace('refs/remotes/', '').split('/');
+              parts.shift();
+              const localName = parts.join('/');
+              const remoteBranch = state.branches.find((b: MockBranch) => b.name === refName);
+              const targetOid = remoteBranch?.targetOid || 'checkout-oid';
+              const existingLocal = state.branches.find((b: MockBranch) => b.name === `refs/heads/${localName}`);
+              if (existingLocal) {
+                existingLocal.isHead = true;
+                existingLocal.upstream = refName;
+              } else {
+                state.branches.push({
+                  name: `refs/heads/${localName}`,
+                  shorthand: localName,
+                  isHead: true,
+                  isRemote: false,
+                  upstream: refName,
+                  targetOid,
+                  isStale: false,
+                } as MockBranch);
+              }
+            } else {
+              const branch = state.branches.find((b: MockBranch) => b.name === refName);
+              if (branch) branch.isHead = true;
+            }
+            const newHead = state.branches.find((b: MockBranch) => b.isHead);
+            if (newHead) state.repository.headRef = newHead.name;
+            return { success: true, stashed: false, stashApplied: false, stashConflict: false, message: 'Switched branch' };
+          }
+
+          // === Commit mutations ===
+          case 'create_commit': {
+            const oid = 'new-commit-' + Date.now().toString(36);
+            const shortId = oid.substring(0, 7);
+            const message = (args as { message?: string })?.message || '';
+            const summary = message.split('\n')[0];
+            state.commits.unshift({
+              oid,
+              shortId,
+              message,
+              summary,
+              body: message.includes('\n') ? message.substring(message.indexOf('\n') + 1).trim() : null,
+              author: { name: 'Test User', email: 'test@example.com', timestamp: Date.now() / 1000 },
+              committer: { name: 'Test User', email: 'test@example.com', timestamp: Date.now() / 1000 },
+              parentIds: state.commits.length > 0 ? [state.commits[0].oid] : [],
+              timestamp: Date.now() / 1000,
+            } as MockCommit);
+            state.status.staged = [];
+            return oid;
+          }
+
+          // === Tag mutations ===
+          case 'create_tag': {
+            const tagName = (args as { name?: string; tagName?: string })?.name || (args as { tagName?: string })?.tagName || '';
+            const targetOid = (args as { targetOid?: string })?.targetOid || state.commits[0]?.oid || 'abc123';
+            state.tags.push({
+              name: tagName,
+              targetOid,
+              message: (args as { message?: string })?.message || null,
+              tagger: (args as { message?: string })?.message
+                ? { name: 'Test User', email: 'test@example.com', timestamp: Date.now() / 1000 }
+                : null,
+              isAnnotated: !!(args as { message?: string })?.message,
+            } as MockTag);
+            return null;
+          }
+          case 'delete_tag': {
+            const tagToDelete = (args as { name?: string; tagName?: string })?.name || (args as { tagName?: string })?.tagName || '';
+            state.tags = state.tags.filter((t: MockTag) => t.name !== tagToDelete);
+            return null;
+          }
           case 'push_tag':
+            return null;
+
+          // === Stash mutations ===
+          case 'create_stash': {
+            const stashMsg = (args as { message?: string })?.message || `WIP on ${state.repository.headRef || 'HEAD'}`;
+            state.stashes.unshift({
+              index: 0,
+              message: stashMsg,
+              oid: 'stash-' + Date.now().toString(36),
+            } as MockStash);
+            state.stashes.forEach((s: MockStash, i: number) => { s.index = i; });
+            state.status.unstaged = [];
+            return null;
+          }
+          case 'apply_stash':
+            return null;
+          case 'pop_stash': {
+            const popIndex = (args as { index?: number })?.index ?? 0;
+            state.stashes = state.stashes.filter((s: MockStash) => s.index !== popIndex);
+            state.stashes.forEach((s: MockStash, i: number) => { s.index = i; });
+            return null;
+          }
+          case 'drop_stash': {
+            const dropIndex = (args as { index?: number })?.index ?? 0;
+            state.stashes = state.stashes.filter((s: MockStash) => s.index !== dropIndex);
+            state.stashes.forEach((s: MockStash, i: number) => { s.index = i; });
+            return null;
+          }
+
+          // === Remote mutations ===
           case 'fetch':
-          case 'pull':
-          case 'push':
+            return null;
+          case 'push': {
+            const headForPush = state.branches.find((b: MockBranch) => b.isHead);
+            if (headForPush?.aheadBehind) headForPush.aheadBehind.ahead = 0;
+            return null;
+          }
+          case 'pull': {
+            const headForPull = state.branches.find((b: MockBranch) => b.isHead);
+            if (headForPull?.aheadBehind) headForPull.aheadBehind.behind = 0;
+            return null;
+          }
+
+          // === Rewrite commands ===
           case 'cherry_pick':
           case 'revert':
           case 'reset':
@@ -521,6 +929,64 @@ export async function setupTauriMocks(
           case 'abort_rebase':
           case 'abort_revert':
             return null;
+
+          // === Template commands ===
+          case 'list_templates':
+            return [];
+          case 'save_template':
+            return (args as { template?: unknown })?.template || null;
+          case 'get_commit_template':
+            return null;
+          case 'get_conventional_types':
+            return [
+              { typeName: 'feat', description: 'A new feature', emoji: null },
+              { typeName: 'fix', description: 'A bug fix', emoji: null },
+              { typeName: 'docs', description: 'Documentation only changes', emoji: null },
+              { typeName: 'style', description: 'Code style changes', emoji: null },
+              { typeName: 'refactor', description: 'Code refactoring', emoji: null },
+              { typeName: 'test', description: 'Adding tests', emoji: null },
+              { typeName: 'chore', description: 'Maintenance tasks', emoji: null },
+            ];
+
+          // === AI commands ===
+          case 'is_ai_available':
+            return false;
+          case 'generate_commit_message':
+            return { summary: 'Auto-generated commit', body: null };
+
+          // === Identity commands ===
+          case 'get_user_identity':
+            return { name: 'Test User', email: 'test@example.com' };
+
+          // === Unified profile commands ===
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'save_global_account':
+            return args;
+          case 'update_global_account_cached_user':
+          case 'load_unified_profile_for_repository':
+            return null;
+
+          // === Credential/vault commands ===
+          case 'get_machine_vault_password':
+            return 'test-vault-password';
+          case 'store_git_credentials':
+          case 'delete_git_credentials':
+            return null;
+
+          // === Integration detection commands ===
+          case 'detect_ado_repo':
+          case 'detect_gitlab_repo':
+          case 'detect_bitbucket_repo':
+            return null;
+
+          // === Integration connection commands ===
+          case 'check_ado_connection':
+          case 'check_gitlab_connection':
+          case 'check_bitbucket_connection':
+          case 'check_bitbucket_connection_with_token':
+            return { connected: false, user: null };
+
           default:
             console.warn(`[Tauri Mock] Unmocked command: ${command}`, args);
             return null;
@@ -667,8 +1133,12 @@ export async function initializeRepositoryStore(
     }
   );
 
-  // Wait for the UI to update
-  await page.waitForTimeout(100);
+  await page.waitForFunction(() => {
+    const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+      repositoryStore?: { getState: () => { openRepositories: unknown[] } };
+    } | undefined;
+    return (stores?.repositoryStore?.getState()?.openRepositories?.length ?? 0) > 0;
+  });
 }
 
 /**
@@ -810,8 +1280,12 @@ export async function initializeUnifiedProfileStore(
     }
   );
 
-  // Wait for the UI to update
-  await page.waitForTimeout(100);
+  await page.waitForFunction(() => {
+    const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+      unifiedProfileStore?: { getState: () => { profiles: unknown[] } };
+    } | undefined;
+    return (stores?.unifiedProfileStore?.getState()?.profiles?.length ?? 0) > 0;
+  });
 }
 
 /**

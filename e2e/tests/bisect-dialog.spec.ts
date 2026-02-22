@@ -1,479 +1,741 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  startCommandCapture,
+  findCommand,
+  waitForCommand,
+  injectCommandError,
+  injectCommandMock,
+  openViaCommandPalette,
+} from '../fixtures/test-helpers';
 
 /**
  * E2E tests for Bisect Dialog
- * Tests the git bisect workflow: setup -> in-progress -> complete
+ *
+ * The bisect dialog is opened via the command palette ("Start bisect (find bug)").
+ * It has three states: setup -> in-progress -> complete.
+ *
+ * The dialog element is `lv-bisect-dialog` with an `open` attribute.
+ * It renders an overlay dialog with `.dialog` class inside its shadow root.
  */
-test.describe('Bisect Dialog', () => {
+
+/** Open the bisect dialog via the command palette */
+async function openBisectDialog(page: import('@playwright/test').Page) {
+  await openViaCommandPalette(page, 'bisect');
+  await page.locator('lv-bisect-dialog .dialog').waitFor({ state: 'visible' });
+}
+
+test.describe('Bisect Dialog - Setup State', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    // Add mocks for bisect commands
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      let bisectState: 'inactive' | 'in_progress' | 'complete' = 'inactive';
-      let stepsRemaining = 5;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
-
-        if (command === 'get_bisect_status') {
-          if (bisectState === 'inactive') {
-            return { active: false };
-          } else if (bisectState === 'in_progress') {
-            return {
-              active: true,
-              currentCommit: {
-                oid: 'test123abc',
-                shortId: 'test123',
-                summary: 'Test commit message',
-                author: { name: 'Test User', email: 'test@test.com', timestamp: Date.now() / 1000 },
-              },
-              stepsRemaining,
-              goodCommits: ['good123'],
-              badCommits: ['bad456'],
-            };
-          } else {
-            return {
-              active: true,
-              culprit: {
-                oid: 'culprit123',
-                shortId: 'culprit',
-                summary: 'Bug introducing commit',
-                author: { name: 'Bug Author', email: 'bug@test.com', timestamp: Date.now() / 1000 },
-              },
-            };
-          }
-        }
-
-        if (command === 'start_bisect') {
-          bisectState = 'in_progress';
-          return null;
-        }
-
-        if (command === 'mark_bisect_good' || command === 'mark_bisect_bad') {
-          stepsRemaining--;
-          if (stepsRemaining <= 0) {
-            bisectState = 'complete';
-          }
-          return null;
-        }
-
-        if (command === 'mark_bisect_skip') {
-          return null;
-        }
-
-        if (command === 'end_bisect') {
-          bisectState = 'inactive';
-          stepsRemaining = 5;
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    // Mock bisect commands to return inactive status initially
+    await injectCommandMock(page, {
+      get_bisect_status: {
+        active: false,
+        currentCommit: null,
+        badCommit: null,
+        goodCommit: null,
+        remaining: null,
+        totalSteps: null,
+        currentStep: null,
+        log: [],
+      },
+      bisect_start: {
+        status: {
+          active: true,
+          currentCommit: 'test123abc456',
+          badCommit: 'HEAD',
+          goodCommit: 'abc123',
+          remaining: 5,
+          currentStep: 1,
+          totalSteps: 7,
+          log: [],
+        },
+        culprit: null,
+        message: 'Bisecting: 5 revisions left to test',
+      },
+      get_commit: {
+        oid: 'test123abc456',
+        shortId: 'test123',
+        message: 'Test commit to evaluate',
+        summary: 'Test commit to evaluate',
+        body: null,
+        author: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        committer: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        parentIds: [],
+        timestamp: Math.floor(Date.now() / 1000),
+      },
     });
   });
 
-  test('should open bisect dialog', async ({ page }) => {
-    // Open via keyboard shortcut or menu - assuming there's a way to trigger it
-    // For now, we'll check if the component renders correctly when opened programmatically
-    await page.evaluate(() => {
-      const dialog = document.querySelector('lv-bisect-dialog') as HTMLElement & { open: () => void };
-      if (dialog && dialog.open) {
-        dialog.open();
-      }
-    });
+  test('dialog opens and shows setup state with bad/good commit inputs', async ({ page }) => {
+    await openBisectDialog(page);
 
-    // If there's no dialog, let's check for its presence
-    const dialog = page.locator('lv-bisect-dialog');
-    // The dialog component should exist in the DOM
-    const count = await dialog.count();
-    expect(count).toBeGreaterThanOrEqual(0); // Component may or may not be present
+    const dialog = page.locator('lv-bisect-dialog .dialog');
+    await expect(dialog).toBeVisible();
+
+    // Should show "Git Bisect" title
+    const title = page.locator('lv-bisect-dialog .dialog-title');
+    await expect(title).toContainText('Git Bisect');
+
+    // Should have Bad Commit and Good Commit sections
+    const badSection = page.locator('lv-bisect-dialog h3', { hasText: 'Bad Commit' });
+    const goodSection = page.locator('lv-bisect-dialog h3', { hasText: 'Good Commit' });
+    await expect(badSection).toBeVisible();
+    await expect(goodSection).toBeVisible();
+
+    // Should have two input fields
+    const inputs = page.locator('lv-bisect-dialog .commit-input input');
+    await expect(inputs).toHaveCount(2);
   });
 
-  test('should show setup state with good/bad commit inputs', async ({ page }) => {
-    // Look for the bisect dialog in the app
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
+  test('Start Bisect button is disabled without both inputs', async ({ page }) => {
+    await openBisectDialog(page);
 
-    // If dialog is visible, check for setup elements
-    if (await bisectDialog.isVisible()) {
-      // Should have inputs for good and bad commits
-      const goodInput = page.locator('lv-bisect-dialog input[placeholder*="good"]');
-      const badInput = page.locator('lv-bisect-dialog input[placeholder*="bad"]');
-
-      await expect(goodInput).toBeVisible();
-      await expect(badInput).toBeVisible();
-    }
+    const startBtn = page.locator('lv-bisect-dialog .btn-primary', { hasText: 'Start Bisect' });
+    await expect(startBtn).toBeDisabled();
   });
 
-  test('should start bisect with valid commits', async ({ page }) => {
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
+  test('filling both inputs enables Start Bisect button', async ({ page }) => {
+    await openBisectDialog(page);
 
-    if (await bisectDialog.isVisible()) {
-      // Fill in good and bad commits
-      const goodInput = page.locator('lv-bisect-dialog input').first();
-      const badInput = page.locator('lv-bisect-dialog input').nth(1);
+    // Fill in bad commit
+    const badInput = page.locator('lv-bisect-dialog .commit-input input').first();
+    await badInput.fill('HEAD');
 
-      await goodInput.fill('abc123');
-      await badInput.fill('def456');
+    // Fill in good commit
+    const goodInput = page.locator('lv-bisect-dialog .commit-input input').nth(1);
+    await goodInput.fill('abc123');
 
-      // Click start button
-      const startButton = page.locator('lv-bisect-dialog button', { hasText: 'Start' });
-      await startButton.click();
-
-      // Should transition to in-progress state
-      await page.waitForTimeout(100);
-
-      const commands = await page.evaluate(() => {
-        return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__;
-      });
-
-      const startCommand = commands.find(c => c.command === 'start_bisect');
-      expect(startCommand).toBeDefined();
-    }
+    // Start button should be enabled
+    const startBtn = page.locator('lv-bisect-dialog .btn-primary', { hasText: 'Start Bisect' });
+    await expect(startBtn).toBeEnabled();
   });
 
-  test('should show current commit in progress state', async ({ page }) => {
-    // Manually set bisect to in-progress state via mock
-    await page.evaluate(() => {
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string) => {
-        if (command === 'get_bisect_status') {
-          return {
-            active: true,
-            currentCommit: {
-              oid: 'test123abc',
-              shortId: 'test123',
-              summary: 'Test commit to evaluate',
-              author: { name: 'Test User', email: 'test@test.com', timestamp: Date.now() / 1000 },
-            },
-            stepsRemaining: 3,
-            goodCommits: ['good123'],
-            badCommits: ['bad456'],
-          };
-        }
-        return null;
-      };
-    });
+  test('clicking Start Bisect calls bisect_start and transitions to in-progress', async ({ page }) => {
+    await startCommandCapture(page);
+    await openBisectDialog(page);
 
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
+    // Fill inputs
+    const badInput = page.locator('lv-bisect-dialog .commit-input input').first();
+    await badInput.fill('HEAD');
+    const goodInput = page.locator('lv-bisect-dialog .commit-input input').nth(1);
+    await goodInput.fill('abc123');
 
-    if (await bisectDialog.isVisible()) {
-      // Should show current commit info
-      const commitOid = page.locator('lv-bisect-dialog .current-commit-oid');
-      if (await commitOid.isVisible()) {
-        await expect(commitOid).toContainText('test123');
-      }
+    // Click Start
+    const startBtn = page.locator('lv-bisect-dialog .btn-primary', { hasText: 'Start Bisect' });
+    await startBtn.click();
 
-      // Should show action buttons
-      const goodButton = page.locator('lv-bisect-dialog .action-btn', { hasText: /good/i });
-      const badButton = page.locator('lv-bisect-dialog .action-btn', { hasText: /bad/i });
-      const skipButton = page.locator('lv-bisect-dialog .action-btn', { hasText: /skip/i });
+    await waitForCommand(page, 'bisect_start');
 
-      if (await goodButton.isVisible()) {
-        await expect(goodButton).toBeVisible();
-        await expect(badButton).toBeVisible();
-        await expect(skipButton).toBeVisible();
-      }
-    }
+    const commands = await findCommand(page, 'bisect_start');
+    expect(commands.length).toBeGreaterThanOrEqual(1);
+
+    // Verify args contain bad and good commits
+    const args = commands[0].args as { badCommit?: string; goodCommit?: string };
+    expect(args.badCommit).toBe('HEAD');
+    expect(args.goodCommit).toBe('abc123');
+
+    // Should transition to in-progress state showing current commit
+    const currentCommitLabel = page.locator('lv-bisect-dialog .current-commit-label');
+    await expect(currentCommitLabel).toBeVisible();
+    await expect(currentCommitLabel).toContainText('Current Commit');
   });
 
-  test('should mark commit as good', async ({ page }) => {
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
+  test('Cancel button closes dialog', async ({ page }) => {
+    await openBisectDialog(page);
 
-    if (await bisectDialog.isVisible()) {
-      const goodButton = page.locator('lv-bisect-dialog .action-btn', { hasText: /good/i });
+    const cancelBtn = page.locator('lv-bisect-dialog .btn-secondary', { hasText: 'Cancel' });
+    await cancelBtn.click();
 
-      if (await goodButton.isVisible()) {
-        await goodButton.click();
-
-        await page.waitForTimeout(100);
-
-        const commands = await page.evaluate(() => {
-          return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-            .__INVOKED_COMMANDS__;
-        });
-
-        const markCommand = commands.find(c => c.command === 'mark_bisect_good');
-        expect(markCommand).toBeDefined();
-      }
-    }
-  });
-
-  test('should mark commit as bad', async ({ page }) => {
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
-
-    if (await bisectDialog.isVisible()) {
-      const badButton = page.locator('lv-bisect-dialog .action-btn', { hasText: /bad/i });
-
-      if (await badButton.isVisible()) {
-        await badButton.click();
-
-        await page.waitForTimeout(100);
-
-        const commands = await page.evaluate(() => {
-          return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-            .__INVOKED_COMMANDS__;
-        });
-
-        const markCommand = commands.find(c => c.command === 'mark_bisect_bad');
-        expect(markCommand).toBeDefined();
-      }
-    }
-  });
-
-  test('should skip commit', async ({ page }) => {
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
-
-    if (await bisectDialog.isVisible()) {
-      const skipButton = page.locator('lv-bisect-dialog .action-btn', { hasText: /skip/i });
-
-      if (await skipButton.isVisible()) {
-        await skipButton.click();
-
-        await page.waitForTimeout(100);
-
-        const commands = await page.evaluate(() => {
-          return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-            .__INVOKED_COMMANDS__;
-        });
-
-        const skipCommand = commands.find(c => c.command === 'mark_bisect_skip');
-        expect(skipCommand).toBeDefined();
-      }
-    }
-  });
-
-  test('should show culprit when bisect completes', async ({ page }) => {
-    // Set mock to return complete state
-    await page.evaluate(() => {
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string) => {
-        if (command === 'get_bisect_status') {
-          return {
-            active: true,
-            culprit: {
-              oid: 'culprit123abc',
-              shortId: 'culprit',
-              summary: 'This commit introduced the bug',
-              author: { name: 'Bug Author', email: 'bug@test.com', timestamp: Date.now() / 1000 },
-            },
-          };
-        }
-        return null;
-      };
-    });
-
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
-
-    if (await bisectDialog.isVisible()) {
-      // Should show culprit information
-      const culpritInfo = page.locator('lv-bisect-dialog', { hasText: /culprit|found/i });
-      if (await culpritInfo.isVisible()) {
-        await expect(culpritInfo).toContainText('culprit');
-      }
-    }
-  });
-
-  test('should end bisect and return to inactive state', async ({ page }) => {
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
-
-    if (await bisectDialog.isVisible()) {
-      const endButton = page.locator('lv-bisect-dialog button', { hasText: /end|reset|close/i });
-
-      if (await endButton.isVisible()) {
-        await endButton.click();
-
-        await page.waitForTimeout(100);
-
-        const commands = await page.evaluate(() => {
-          return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-            .__INVOKED_COMMANDS__;
-        });
-
-        const endCommand = commands.find(c => c.command === 'end_bisect');
-        expect(endCommand).toBeDefined();
-      }
-    }
-  });
-
-  test('should show steps remaining during bisect', async ({ page }) => {
-    // Set mock to return in-progress state with steps
-    await page.evaluate(() => {
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string) => {
-        if (command === 'get_bisect_status') {
-          return {
-            active: true,
-            currentCommit: {
-              oid: 'test123',
-              shortId: 'test123',
-              summary: 'Test commit',
-              author: { name: 'Test', email: 'test@test.com', timestamp: Date.now() / 1000 },
-            },
-            stepsRemaining: 4,
-            goodCommits: ['good1'],
-            badCommits: ['bad1'],
-          };
-        }
-        return null;
-      };
-    });
-
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
-
-    if (await bisectDialog.isVisible()) {
-      // Should show steps remaining
-      const stepsIndicator = page.locator('lv-bisect-dialog .progress-stat-value');
-      if (await stepsIndicator.first().isVisible()) {
-        // Steps remaining should be displayed
-        await expect(stepsIndicator.first()).toBeVisible();
-      }
-    }
+    // Dialog should close (no longer visible)
+    const dialog = page.locator('lv-bisect-dialog .dialog');
+    await expect(dialog).not.toBeVisible();
   });
 });
 
-test.describe('Bisect Dialog - Event Propagation', () => {
+test.describe('Bisect Dialog - In-Progress State', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      let bisectState: 'inactive' | 'in_progress' = 'inactive';
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_bisect_status') {
-          if (bisectState === 'inactive') {
-            return { active: false };
-          }
-          return {
-            active: true,
-            currentCommit: {
-              oid: 'test123',
-              shortId: 'test123',
-              summary: 'Test commit',
-              author: { name: 'Test', email: 'test@test.com', timestamp: Date.now() / 1000 },
-            },
-            stepsRemaining: 3,
-            goodCommits: ['good1'],
-            badCommits: ['bad1'],
-          };
-        }
-
-        if (command === 'start_bisect') {
-          bisectState = 'in_progress';
-          return null;
-        }
-
-        if (command === 'mark_bisect_good' || command === 'mark_bisect_bad' || command === 'mark_bisect_skip') {
-          return null;
-        }
-
-        if (command === 'end_bisect') {
-          bisectState = 'inactive';
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    // Mock bisect status as already in-progress
+    await injectCommandMock(page, {
+      get_bisect_status: {
+        active: true,
+        currentCommit: 'test123abc456',
+        badCommit: 'bad_ref',
+        goodCommit: 'good_ref',
+        remaining: 4,
+        currentStep: 2,
+        totalSteps: 7,
+        log: [
+          { action: 'bad', commitOid: 'bad_commit_oid', message: null },
+          { action: 'good', commitOid: 'good_commit_oid', message: null },
+        ],
+      },
+      get_commit: {
+        oid: 'test123abc456',
+        shortId: 'test123',
+        message: 'Test commit to evaluate\n\nDetailed body.',
+        summary: 'Test commit to evaluate',
+        body: 'Detailed body.',
+        author: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        committer: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        parentIds: ['parent1'],
+        timestamp: Math.floor(Date.now() / 1000),
+      },
+      bisect_good: {
+        status: {
+          active: true,
+          currentCommit: 'next_commit_aaa',
+          badCommit: 'bad_ref',
+          goodCommit: 'good_ref',
+          remaining: 3,
+          currentStep: 3,
+          totalSteps: 7,
+          log: [],
+        },
+        culprit: null,
+        message: 'Bisecting: 3 revisions left',
+      },
+      bisect_bad: {
+        status: {
+          active: true,
+          currentCommit: 'next_commit_bbb',
+          badCommit: 'bad_ref',
+          goodCommit: 'good_ref',
+          remaining: 2,
+          currentStep: 3,
+          totalSteps: 7,
+          log: [],
+        },
+        culprit: null,
+        message: 'Bisecting: 2 revisions left',
+      },
+      bisect_skip: {
+        status: {
+          active: true,
+          currentCommit: 'next_commit_ccc',
+          badCommit: 'bad_ref',
+          goodCommit: 'good_ref',
+          remaining: 3,
+          currentStep: 3,
+          totalSteps: 7,
+          log: [],
+        },
+        culprit: null,
+        message: 'Bisecting: 3 revisions left',
+      },
+      bisect_reset: {
+        status: {
+          active: false,
+          currentCommit: null,
+          badCommit: null,
+          goodCommit: null,
+          remaining: null,
+          totalSteps: null,
+          currentStep: null,
+          log: [],
+        },
+        culprit: null,
+        message: 'Bisect reset',
+      },
     });
   });
 
-  test('should dispatch repository-changed event after starting bisect', async ({ page }) => {
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
+  test('shows current commit info with OID and message', async ({ page }) => {
+    await openBisectDialog(page);
 
-    if (await bisectDialog.isVisible()) {
-      const eventPromise = page.evaluate(() => {
-        return new Promise<boolean>((resolve) => {
-          document.addEventListener('repository-changed', () => {
-            resolve(true);
-          }, { once: true });
-          setTimeout(() => resolve(false), 3000);
-        });
-      });
+    // Should display the current commit OID (truncated to first 12 chars)
+    const commitOid = page.locator('lv-bisect-dialog .current-commit-oid');
+    await expect(commitOid).toBeVisible();
+    await expect(commitOid).toContainText('test123abc45');
 
-      const goodInput = page.locator('lv-bisect-dialog input').first();
-      const badInput = page.locator('lv-bisect-dialog input').nth(1);
-
-      if (await goodInput.isVisible() && await badInput.isVisible()) {
-        await goodInput.fill('abc123');
-        await badInput.fill('def456');
-
-        const startButton = page.locator('lv-bisect-dialog button', { hasText: 'Start' });
-        await startButton.click();
-
-        const eventReceived = await eventPromise;
-        expect(eventReceived).toBe(true);
-      }
-    }
+    // Should display the commit message
+    const commitMessage = page.locator('lv-bisect-dialog .current-commit-message');
+    await expect(commitMessage).toBeVisible();
+    await expect(commitMessage).toContainText('Test commit to evaluate');
   });
 
-  test('should dispatch repository-changed event after marking good', async ({ page }) => {
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
+  test('shows progress stats (commits left, steps taken, total steps)', async ({ page }) => {
+    await openBisectDialog(page);
 
-    if (await bisectDialog.isVisible()) {
-      const goodButton = page.locator('lv-bisect-dialog .action-btn', { hasText: /good/i });
-
-      if (await goodButton.isVisible()) {
-        const eventPromise = page.evaluate(() => {
-          return new Promise<boolean>((resolve) => {
-            document.addEventListener('repository-changed', () => {
-              resolve(true);
-            }, { once: true });
-            setTimeout(() => resolve(false), 3000);
-          });
-        });
-
-        await goodButton.click();
-
-        const eventReceived = await eventPromise;
-        expect(eventReceived).toBe(true);
-      }
-    }
+    const statValues = page.locator('lv-bisect-dialog .progress-stat-value');
+    // Should have at least 3 stat values
+    await expect(statValues.first()).toBeVisible();
+    const count = await statValues.count();
+    expect(count).toBeGreaterThanOrEqual(3);
   });
 
-  test('should dispatch repository-changed event after ending bisect', async ({ page }) => {
-    const bisectDialog = page.locator('lv-bisect-dialog .dialog');
+  test('shows Good, Bad, and Skip action buttons', async ({ page }) => {
+    await openBisectDialog(page);
 
-    if (await bisectDialog.isVisible()) {
-      const endButton = page.locator('lv-bisect-dialog button', { hasText: /end|reset|close/i });
+    const goodBtn = page.locator('lv-bisect-dialog .action-btn.good');
+    const badBtn = page.locator('lv-bisect-dialog .action-btn.bad');
+    const skipBtn = page.locator('lv-bisect-dialog .action-btn.skip');
 
-      if (await endButton.isVisible()) {
-        const eventPromise = page.evaluate(() => {
-          return new Promise<boolean>((resolve) => {
-            document.addEventListener('repository-changed', () => {
-              resolve(true);
-            }, { once: true });
-            setTimeout(() => resolve(false), 3000);
-          });
-        });
+    await expect(goodBtn).toBeVisible();
+    await expect(badBtn).toBeVisible();
+    await expect(skipBtn).toBeVisible();
 
-        await endButton.click();
+    await expect(goodBtn).toContainText('Good');
+    await expect(badBtn).toContainText('Bad');
+    await expect(skipBtn).toContainText('Skip');
+  });
 
-        const eventReceived = await eventPromise;
-        expect(eventReceived).toBe(true);
-      }
-    }
+  test('Abort Bisect button calls bisect_reset and closes the dialog', async ({ page }) => {
+    await startCommandCapture(page);
+    await openBisectDialog(page);
+
+    // Verify we start in the in-progress state with action buttons visible
+    await expect(page.locator('lv-bisect-dialog .action-btn.good')).toBeVisible();
+
+    const abortBtn = page.locator('lv-bisect-dialog .btn-danger', { hasText: 'Abort Bisect' });
+    await expect(abortBtn).toBeVisible();
+    await abortBtn.click();
+
+    await waitForCommand(page, 'bisect_reset');
+
+    const commands = await findCommand(page, 'bisect_reset');
+    expect(commands.length).toBeGreaterThanOrEqual(1);
+
+    // Verify the dialog closes after aborting bisect (handleReset dispatches 'bisect-complete')
+    await expect(page.locator('lv-bisect-dialog .dialog')).not.toBeVisible({ timeout: 5000 });
+  });
+
+  test('shows bisect history log', async ({ page }) => {
+    await openBisectDialog(page);
+
+    const logTitle = page.locator('lv-bisect-dialog .bisect-log-title');
+    await expect(logTitle).toBeVisible();
+    await expect(logTitle).toContainText('Bisect History');
+
+    const logEntries = page.locator('lv-bisect-dialog .bisect-log-entry');
+    await expect(logEntries).toHaveCount(2);
+  });
+});
+
+test.describe('Bisect Dialog - Complete State', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    // Mock bisect as completing with a culprit found
+    await injectCommandMock(page, {
+      get_bisect_status: {
+        active: true,
+        currentCommit: null,
+        badCommit: 'bad_ref',
+        goodCommit: 'good_ref',
+        remaining: 0,
+        currentStep: 7,
+        totalSteps: 7,
+        log: [
+          { action: 'bad', commitOid: 'bad_oid', message: null },
+          { action: 'good', commitOid: 'good_oid', message: null },
+        ],
+      },
+      // Simulate that bisect_good finds the culprit
+      bisect_good: {
+        status: {
+          active: true,
+          currentCommit: null,
+          badCommit: 'bad_ref',
+          goodCommit: 'good_ref',
+          remaining: 0,
+          currentStep: 7,
+          totalSteps: 7,
+          log: [],
+        },
+        culprit: {
+          oid: 'culprit_abc123def456',
+          summary: 'This commit introduced the bug',
+          author: 'Bug Author',
+          email: 'bug@test.com',
+        },
+        message: 'Culprit found',
+      },
+      bisect_reset: {
+        status: {
+          active: false,
+          currentCommit: null,
+          badCommit: null,
+          goodCommit: null,
+          remaining: null,
+          totalSteps: null,
+          currentStep: null,
+          log: [],
+        },
+        culprit: null,
+        message: 'Bisect reset',
+      },
+      get_commit: {
+        oid: 'test123abc456',
+        shortId: 'test123',
+        message: 'Test commit',
+        summary: 'Test commit',
+        body: null,
+        author: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        committer: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        parentIds: [],
+        timestamp: Math.floor(Date.now() / 1000),
+      },
+    });
+  });
+
+  test('marking good that finds culprit shows Bug-Introducing Commit Found', async ({ page }) => {
+    // Override to in-progress first to trigger good -> culprit
+    await injectCommandMock(page, {
+      get_bisect_status: {
+        active: true,
+        currentCommit: 'test_commit_oid',
+        badCommit: 'bad_ref',
+        goodCommit: 'good_ref',
+        remaining: 1,
+        currentStep: 6,
+        totalSteps: 7,
+        log: [],
+      },
+      get_commit: {
+        oid: 'test_commit_oid',
+        shortId: 'test_co',
+        message: 'Last commit to test',
+        summary: 'Last commit to test',
+        body: null,
+        author: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        committer: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        parentIds: [],
+        timestamp: Math.floor(Date.now() / 1000),
+      },
+      bisect_good: {
+        status: {
+          active: true,
+          currentCommit: null,
+          badCommit: 'bad_ref',
+          goodCommit: 'good_ref',
+          remaining: 0,
+          currentStep: 7,
+          totalSteps: 7,
+          log: [],
+        },
+        culprit: {
+          oid: 'culprit_abc123def456',
+          summary: 'This commit introduced the bug',
+          author: 'Bug Author',
+          email: 'bug@test.com',
+        },
+        message: 'Culprit found',
+      },
+      bisect_reset: {
+        status: {
+          active: false,
+          currentCommit: null,
+          badCommit: null,
+          goodCommit: null,
+          remaining: null,
+          totalSteps: null,
+          currentStep: null,
+          log: [],
+        },
+        culprit: null,
+        message: 'Reset',
+      },
+    });
+
+    await openBisectDialog(page);
+
+    // Click Good to trigger culprit detection
+    const goodBtn = page.locator('lv-bisect-dialog .action-btn.good');
+    await goodBtn.click();
+
+    const culpritCard = page.locator('lv-bisect-dialog .culprit-card');
+    await expect(culpritCard).toBeVisible();
+
+    // Should show "Bug-Introducing Commit Found"
+    const culpritTitle = page.locator('lv-bisect-dialog .culprit-title');
+    await expect(culpritTitle).toContainText('Bug-Introducing Commit Found');
+
+    // Should show culprit OID and summary
+    const culpritOid = page.locator('lv-bisect-dialog .culprit-oid');
+    await expect(culpritOid).toContainText('culprit_abc123def456');
+
+    const culpritSummary = page.locator('lv-bisect-dialog .culprit-summary');
+    await expect(culpritSummary).toContainText('This commit introduced the bug');
+
+    // Should show Finish button instead of action buttons
+    const finishBtn = page.locator('lv-bisect-dialog .btn-primary', { hasText: 'Finish' });
+    await expect(finishBtn).toBeVisible();
+  });
+
+  test('Finish button resets bisect and returns to setup', async ({ page }) => {
+    // Same setup as above to get to complete state
+    await injectCommandMock(page, {
+      get_bisect_status: {
+        active: true,
+        currentCommit: 'test_oid',
+        badCommit: 'bad_ref',
+        goodCommit: 'good_ref',
+        remaining: 1,
+        currentStep: 6,
+        totalSteps: 7,
+        log: [],
+      },
+      get_commit: {
+        oid: 'test_oid',
+        shortId: 'test_oi',
+        message: 'Test',
+        summary: 'Test',
+        body: null,
+        author: { name: 'Test', email: 'test@test.com', timestamp: Math.floor(Date.now() / 1000) },
+        committer: { name: 'Test', email: 'test@test.com', timestamp: Math.floor(Date.now() / 1000) },
+        parentIds: [],
+        timestamp: Math.floor(Date.now() / 1000),
+      },
+      bisect_good: {
+        status: {
+          active: true,
+          currentCommit: null,
+          badCommit: 'bad_ref',
+          goodCommit: 'good_ref',
+          remaining: 0,
+          currentStep: 7,
+          totalSteps: 7,
+          log: [],
+        },
+        culprit: { oid: 'culprit_oid', summary: 'Bug', author: 'Author', email: 'a@b.com' },
+        message: 'Found',
+      },
+      bisect_reset: {
+        status: {
+          active: false,
+          currentCommit: null,
+          badCommit: null,
+          goodCommit: null,
+          remaining: null,
+          totalSteps: null,
+          currentStep: null,
+          log: [],
+        },
+        culprit: null,
+        message: 'Reset',
+      },
+    });
+
+    await startCommandCapture(page);
+    await openBisectDialog(page);
+
+    // Get to complete state
+    const goodBtn = page.locator('lv-bisect-dialog .action-btn.good');
+    await goodBtn.click();
+
+    const finishBtn = page.locator('lv-bisect-dialog .btn-primary', { hasText: 'Finish' });
+    await expect(finishBtn).toBeVisible();
+    await finishBtn.click();
+
+    await waitForCommand(page, 'bisect_reset');
+
+    const commands = await findCommand(page, 'bisect_reset');
+    expect(commands.length).toBeGreaterThanOrEqual(1);
+
+    // Verify the dialog closes after finishing bisect
+    await expect(page.locator('lv-bisect-dialog .dialog')).not.toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('Bisect Dialog - Error Handling', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await injectCommandMock(page, {
+      get_bisect_status: {
+        active: false,
+        currentCommit: null,
+        badCommit: null,
+        goodCommit: null,
+        remaining: null,
+        totalSteps: null,
+        currentStep: null,
+        log: [],
+      },
+    });
+  });
+
+  test('start bisect failure shows error message', async ({ page }) => {
+    await injectCommandError(page, 'bisect_start', 'Invalid commit reference');
+
+    await openBisectDialog(page);
+
+    // Fill inputs
+    const badInput = page.locator('lv-bisect-dialog .commit-input input').first();
+    await badInput.fill('HEAD');
+    const goodInput = page.locator('lv-bisect-dialog .commit-input input').nth(1);
+    await goodInput.fill('nonexistent');
+
+    // Click Start
+    const startBtn = page.locator('lv-bisect-dialog .btn-primary', { hasText: 'Start Bisect' });
+    await startBtn.click();
+
+    const errorMessage = page.locator('lv-bisect-dialog .message.error');
+    await expect(errorMessage).toBeVisible();
+    await expect(errorMessage).toContainText('Invalid commit reference');
+  });
+
+  test('empty inputs show validation error', async ({ page }) => {
+    await openBisectDialog(page);
+
+    // The Start Bisect button should be disabled when inputs are empty
+    const startBtn = page.locator('lv-bisect-dialog .btn-primary', { hasText: 'Start Bisect' });
+    await expect(startBtn).toBeDisabled();
+  });
+});
+
+test.describe('Bisect Dialog - Extended Tests', () => {
+  test('marking a commit as good updates step count and current commit in UI', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    // Start with in-progress bisect at step 2 of 7
+    await injectCommandMock(page, {
+      get_bisect_status: {
+        active: true,
+        currentCommit: 'commit_step2_oid',
+        badCommit: 'bad_ref',
+        goodCommit: 'good_ref',
+        remaining: 4,
+        currentStep: 2,
+        totalSteps: 7,
+        log: [
+          { action: 'bad', commitOid: 'bad_commit_oid', message: null },
+          { action: 'good', commitOid: 'good_commit_oid', message: null },
+        ],
+      },
+      get_commit: {
+        oid: 'commit_step2_oid',
+        shortId: 'commit_',
+        message: 'Step 2 commit to evaluate',
+        summary: 'Step 2 commit to evaluate',
+        body: null,
+        author: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        committer: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        parentIds: ['parent1'],
+        timestamp: Math.floor(Date.now() / 1000),
+      },
+      bisect_good: {
+        status: {
+          active: true,
+          currentCommit: 'commit_step3_oid',
+          badCommit: 'bad_ref',
+          goodCommit: 'good_ref',
+          remaining: 3,
+          currentStep: 3,
+          totalSteps: 7,
+          log: [
+            { action: 'bad', commitOid: 'bad_commit_oid', message: null },
+            { action: 'good', commitOid: 'good_commit_oid', message: null },
+            { action: 'good', commitOid: 'commit_step2_oid', message: null },
+          ],
+        },
+        culprit: null,
+        message: 'Bisecting: 3 revisions left',
+      },
+      bisect_bad: {
+        status: {
+          active: true,
+          currentCommit: 'commit_step3_bad_oid',
+          badCommit: 'bad_ref',
+          goodCommit: 'good_ref',
+          remaining: 2,
+          currentStep: 3,
+          totalSteps: 7,
+          log: [
+            { action: 'bad', commitOid: 'bad_commit_oid', message: null },
+            { action: 'good', commitOid: 'good_commit_oid', message: null },
+            { action: 'bad', commitOid: 'commit_step2_oid', message: null },
+          ],
+        },
+        culprit: null,
+        message: 'Bisecting: 2 revisions left',
+      },
+      bisect_reset: null,
+    });
+
+    await openBisectDialog(page);
+
+    // Verify initial state shows current commit OID
+    const commitOid = page.locator('lv-bisect-dialog .current-commit-oid');
+    await expect(commitOid).toBeVisible();
+    await expect(commitOid).toContainText('commit_step2');
+
+    // Verify initial progress stats are visible
+    const statValues = page.locator('lv-bisect-dialog .progress-stat-value');
+    await expect(statValues.first()).toBeVisible();
+
+    // Click Good to advance bisect
+    const goodBtn = page.locator('lv-bisect-dialog .action-btn.good');
+    await goodBtn.click();
+
+    // After marking good, the dialog should update to show new current commit
+    // The commit OID should change to the next commit
+    await expect(commitOid).toContainText('commit_step3');
+
+    // The dialog should remain in the in-progress state with action buttons
+    await expect(page.locator('lv-bisect-dialog .action-btn.good')).toBeVisible();
+    await expect(page.locator('lv-bisect-dialog .action-btn.bad')).toBeVisible();
+  });
+
+  test('bisect history log shows entries with correct good/bad action labels', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    // Set up bisect in-progress with a log that has both good and bad entries
+    await injectCommandMock(page, {
+      get_bisect_status: {
+        active: true,
+        currentCommit: 'current_eval_oid',
+        badCommit: 'bad_ref',
+        goodCommit: 'good_ref',
+        remaining: 3,
+        currentStep: 3,
+        totalSteps: 7,
+        log: [
+          { action: 'bad', commitOid: 'bad_commit_aaa', message: null },
+          { action: 'good', commitOid: 'good_commit_bbb', message: null },
+          { action: 'bad', commitOid: 'bad_commit_ccc', message: null },
+        ],
+      },
+      get_commit: {
+        oid: 'current_eval_oid',
+        shortId: 'current',
+        message: 'Commit under evaluation',
+        summary: 'Commit under evaluation',
+        body: null,
+        author: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        committer: { name: 'Test User', email: 'test@example.com', timestamp: Math.floor(Date.now() / 1000) },
+        parentIds: [],
+        timestamp: Math.floor(Date.now() / 1000),
+      },
+      bisect_reset: null,
+    });
+
+    await openBisectDialog(page);
+
+    // The bisect history log section should be visible
+    const logTitle = page.locator('lv-bisect-dialog .bisect-log-title');
+    await expect(logTitle).toBeVisible();
+    await expect(logTitle).toContainText('Bisect History');
+
+    // Verify the correct number of log entries (3 steps taken)
+    const logEntries = page.locator('lv-bisect-dialog .bisect-log-entry');
+    await expect(logEntries).toHaveCount(3);
+
+    // Verify the first entry shows "bad" action label
+    const firstEntry = logEntries.first();
+    await expect(firstEntry).toContainText(/bad/i);
+
+    // Verify the second entry shows "good" action label
+    const secondEntry = logEntries.nth(1);
+    await expect(secondEntry).toContainText(/good/i);
+
+    // Verify the third entry shows "bad" action label
+    const thirdEntry = logEntries.nth(2);
+    await expect(thirdEntry).toContainText(/bad/i);
   });
 });

@@ -1,900 +1,711 @@
-import { expect } from '@open-wc/testing';
-import type { RebaseAction } from '../../../types/git.types.ts';
+/**
+ * Fixture-based tests for lv-interactive-rebase-dialog.
+ *
+ * These render the REAL component, mock only the Tauri invoke layer,
+ * and verify actual DOM output and behavior.
+ */
 
-// Mock Tauri API before importing any modules that use it
-const mockRebaseCommits = [
-  { oid: 'abc1234567890', shortId: 'abc1234', summary: 'Add feature A', action: 'pick' },
-  { oid: 'def1234567890', shortId: 'def1234', summary: 'Fix bug in feature A', action: 'pick' },
-  { oid: 'ghi1234567890', shortId: 'ghi1234', summary: 'Add feature B', action: 'pick' },
-  { oid: 'jkl1234567890', shortId: 'jkl1234', summary: 'fixup! Add feature A', action: 'pick' },
-  { oid: 'mno1234567890', shortId: 'mno1234', summary: 'squash! Add feature B', action: 'pick' },
+// ── Tauri mock (must be set before any imports) ────────────────────────────
+type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
+
+let cbId = 0;
+const invokeHistory: Array<{ command: string; args?: unknown }> = [];
+let mockInvoke: MockInvoke = () => Promise.resolve(null);
+
+(globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
+  invoke: (command: string, args?: unknown) => {
+    invokeHistory.push({ command, args });
+    return mockInvoke(command, args);
+  },
+  transformCallback: () => cbId++,
+};
+
+// ── Imports (after Tauri mock) ─────────────────────────────────────────────
+import { expect, fixture, html } from '@open-wc/testing';
+import type { LvInteractiveRebaseDialog } from '../lv-interactive-rebase-dialog.ts';
+
+// Import the actual component — registers <lv-interactive-rebase-dialog>
+import '../lv-interactive-rebase-dialog.ts';
+
+// ── Test data ──────────────────────────────────────────────────────────────
+const REPO_PATH = '/test/repo';
+
+const mockCommits = [
+  { oid: 'aaa1111111111', shortId: 'aaa1111', summary: 'Add feature A' },
+  { oid: 'bbb2222222222', shortId: 'bbb2222', summary: 'Fix bug in feature A' },
+  { oid: 'ccc3333333333', shortId: 'ccc3333', summary: 'Add feature B' },
 ];
 
-const mockInvoke = (command: string): Promise<unknown> => {
-  switch (command) {
-    case 'get_rebase_commits':
-      return Promise.resolve(mockRebaseCommits);
-    case 'execute_interactive_rebase':
-      return Promise.resolve(undefined);
-    default:
-      return Promise.resolve(null);
-  }
-};
+const mockCommitsWithAutosquash = [
+  { oid: 'aaa1111111111', shortId: 'aaa1111', summary: 'Add feature A' },
+  { oid: 'bbb2222222222', shortId: 'bbb2222', summary: 'Add feature B' },
+  { oid: 'ccc3333333333', shortId: 'ccc3333', summary: 'fixup! Add feature A' },
+  { oid: 'ddd4444444444', shortId: 'ddd4444', summary: 'squash! Add feature B' },
+];
 
-// Mock the Tauri invoke function globally
-(globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
-  invoke: mockInvoke,
-};
+const mockCommitsWithUnmatchedAutosquash = [
+  { oid: 'aaa1111111111', shortId: 'aaa1111', summary: 'Add feature A' },
+  { oid: 'bbb2222222222', shortId: 'bbb2222', summary: 'fixup! Nonexistent commit' },
+];
 
-interface EditableRebaseCommit {
-  oid: string;
-  shortId: string;
-  summary: string;
-  action: RebaseAction;
-  newMessage?: string;
+// ── Helpers ────────────────────────────────────────────────────────────────
+function clearHistory(): void {
+  invokeHistory.length = 0;
 }
 
-interface PreviewCommit {
-  shortId: string;
-  summary: string;
-  isSquashed: boolean;
-  squashedFrom?: string[];
-  error?: string;
+function findCommands(name: string): Array<{ command: string; args?: unknown }> {
+  return invokeHistory.filter((h) => h.command === name);
 }
 
-/**
- * Helper to create editable commits with default values
- */
-function createEditableCommit(
-  shortId: string,
-  summary: string,
-  action: RebaseAction = 'pick',
-  newMessage?: string
-): EditableRebaseCommit {
-  return {
-    oid: `${shortId}00000000000`,
-    shortId,
-    summary,
-    action,
-    newMessage,
+function setupDefaultMocks(commits = mockCommits): void {
+  mockInvoke = async (command: string) => {
+    switch (command) {
+      case 'get_rebase_commits':
+        return commits;
+      case 'execute_interactive_rebase':
+        return undefined;
+      default:
+        return null;
+    }
   };
 }
 
-/*
- * ============================================================================
- * WARNING: DUPLICATED LOGIC - KEEP IN SYNC WITH COMPONENT
- * ============================================================================
- * The following functions (generatePreview, applyAutosquash, getStats,
- * generateTodo) duplicate logic from lv-interactive-rebase-dialog.ts.
- * This allows unit testing without mocking internal component methods.
- *
- * If you modify the corresponding logic in the component, you MUST update
- * these test functions to match. Failure to keep them in sync will cause
- * tests to pass while the actual component behavior differs.
- *
- * Consider extracting these into a shared utility module if the maintenance
- * burden becomes too high.
- * ============================================================================
- */
-
-/**
- * Generate preview of what commits will look like after rebase
- * @see lv-interactive-rebase-dialog.ts generatePreview()
- */
-function generatePreview(commits: EditableRebaseCommit[]): PreviewCommit[] {
-  const preview: PreviewCommit[] = [];
-  let i = 0;
-  let hasBaseCommit = false;
-
-  while (i < commits.length) {
-    const commit = commits[i];
-
-    if (commit.action === 'drop') {
-      i++;
-      continue;
-    }
-
-    // Check if this is an orphaned squash/fixup (no base commit before it)
-    if ((commit.action === 'squash' || commit.action === 'fixup') && !hasBaseCommit) {
-      preview.push({
-        shortId: commit.shortId,
-        summary: commit.summary,
-        isSquashed: false,
-        error: `Cannot ${commit.action}: no previous commit to combine with`,
-      });
-      i++;
-      continue;
-    }
-
-    // This is a base commit (pick/reword/edit)
-    hasBaseCommit = true;
-
-    const squashedFrom: string[] = [];
-    let j = i + 1;
-    while (j < commits.length &&
-           (commits[j].action === 'squash' || commits[j].action === 'fixup')) {
-      squashedFrom.push(commits[j].shortId);
-      j++;
-    }
-
-    let summary = commit.summary;
-    if (commit.action === 'reword' && commit.newMessage !== undefined) {
-      const firstLine = commit.newMessage.split('\n')[0].trim();
-      summary = firstLine || '(empty message)';
-    }
-
-    preview.push({
-      shortId: commit.shortId,
-      summary,
-      isSquashed: squashedFrom.length > 0,
-      squashedFrom: squashedFrom.length > 0 ? squashedFrom : undefined,
-    });
-
-    i = j;
-  }
-
-  return preview;
-
-}
-
-/**
- * Check if the configuration has validation errors
- */
-function hasValidationErrors(commits: EditableRebaseCommit[]): boolean {
-  const preview = generatePreview(commits);
-  return preview.some(p => p.error !== undefined);
-}
-
-/**
- * Detect commits with fixup! or squash! prefixes
- */
-function detectAutosquashCommits(commits: EditableRebaseCommit[]): boolean {
-  return commits.some(
-    c => c.summary.startsWith('fixup! ') || c.summary.startsWith('squash! ')
+async function createDialog(): Promise<LvInteractiveRebaseDialog> {
+  const el = await fixture<LvInteractiveRebaseDialog>(
+    html`<lv-interactive-rebase-dialog .repositoryPath=${REPO_PATH}></lv-interactive-rebase-dialog>`
   );
+  return el;
 }
 
-/**
- * Apply autosquash: reorder and mark fixup!/squash! commits
- * @see lv-interactive-rebase-dialog.ts applyAutosquash()
- */
-function applyAutosquash(commits: EditableRebaseCommit[]): EditableRebaseCommit[] {
-  const newCommits: EditableRebaseCommit[] = [];
-  const autosquashCommits: EditableRebaseCommit[] = [];
+async function openAndWait(el: LvInteractiveRebaseDialog, onto = 'main'): Promise<void> {
+  await el.open(onto);
+  await el.updateComplete;
+  await new Promise((r) => setTimeout(r, 50));
+  await el.updateComplete;
+}
 
-  for (const commit of commits) {
-    if (commit.summary.startsWith('fixup! ') || commit.summary.startsWith('squash! ')) {
-      autosquashCommits.push({ ...commit });
-    } else {
-      newCommits.push({ ...commit });
-    }
-  }
+// ── Tests ──────────────────────────────────────────────────────────────────
+describe('lv-interactive-rebase-dialog (fixture)', () => {
+  beforeEach(() => {
+    clearHistory();
+    setupDefaultMocks();
+  });
 
-  for (const asCommit of autosquashCommits) {
-    const isFixup = asCommit.summary.startsWith('fixup! ');
-    const targetSummary = asCommit.summary.slice(isFixup ? 7 : 8);
+  // ── Rendering ──────────────────────────────────────────────────────────
+  describe('Rendering', () => {
+    it('open(onto) renders commit rows in .commits-list', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-    // Two-pass approach: exact match first, then prefix match (matches git's autosquash behavior)
-    let targetIndex = newCommits.findIndex(c => c.summary === targetSummary);
-    if (targetIndex === -1) {
-      // No exact match, try prefix match
-      targetIndex = newCommits.findIndex(c => c.summary.startsWith(targetSummary));
-    }
+      const rows = el.shadowRoot!.querySelectorAll('.commits-list .commit-row');
+      expect(rows.length).to.equal(3);
+    });
 
-    if (targetIndex !== -1) {
-      asCommit.action = isFixup ? 'fixup' : 'squash';
-      let insertIndex = targetIndex + 1;
-      while (insertIndex < newCommits.length &&
-             (newCommits[insertIndex].action === 'squash' ||
-              newCommits[insertIndex].action === 'fixup')) {
-        insertIndex++;
+    it('each .commit-row has .commit-hash and .commit-message', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const rows = el.shadowRoot!.querySelectorAll('.commit-row');
+      for (const row of Array.from(rows)) {
+        const hash = row.querySelector('.commit-hash');
+        const message = row.querySelector('.commit-message');
+        expect(hash, 'commit-hash should exist').to.not.be.null;
+        expect(message, 'commit-message should exist').to.not.be.null;
       }
-      newCommits.splice(insertIndex, 0, asCommit);
-    } else {
-      newCommits.push(asCommit);
-    }
-  }
 
-  return newCommits;
-}
+      // Verify specific content
+      const firstHash = rows[0].querySelector('.commit-hash')!;
+      expect(firstHash.textContent).to.include('aaa1111');
 
-/**
- * Get statistics about the rebase operation
- * @see lv-interactive-rebase-dialog.ts getStats()
- */
-function getStats(commits: EditableRebaseCommit[]): { kept: number; squashed: number; dropped: number; reworded: number } {
-  let kept = 0;
-  let squashed = 0;
-  let dropped = 0;
-  let reworded = 0;
-
-  for (const commit of commits) {
-    switch (commit.action) {
-      case 'pick':
-      case 'edit':
-        kept++;
-        break;
-      case 'reword':
-        reworded++;
-        kept++;
-        break;
-      case 'squash':
-      case 'fixup':
-        squashed++;
-        break;
-      case 'drop':
-        dropped++;
-        break;
-    }
-  }
-
-  return { kept, squashed, dropped, reworded };
-}
-
-describe('Interactive Rebase Dialog', () => {
-  describe('Preview Generation', () => {
-    it('should show all commits when all are pick', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Feature B', 'pick'),
-        createEditableCommit('ghi1234', 'Feature C', 'pick'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview).to.have.length(3);
-      expect(preview[0].shortId).to.equal('abc1234');
-      expect(preview[1].shortId).to.equal('def1234');
-      expect(preview[2].shortId).to.equal('ghi1234');
-      expect(preview.every(p => !p.isSquashed)).to.be.true;
+      const firstMsg = rows[0].querySelector('.commit-message')!;
+      expect(firstMsg.textContent).to.include('Add feature A');
     });
 
-    it('should hide dropped commits in preview', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Feature B', 'drop'),
-        createEditableCommit('ghi1234', 'Feature C', 'pick'),
-      ];
+    it('header shows the "onto" ref name and commit count', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const preview = generatePreview(commits);
+      const headerInfo = el.shadowRoot!.querySelector('.header-info');
+      expect(headerInfo).to.not.be.null;
+      expect(headerInfo!.textContent).to.include('main');
 
-      expect(preview).to.have.length(2);
-      expect(preview[0].shortId).to.equal('abc1234');
-      expect(preview[1].shortId).to.equal('ghi1234');
+      const commitCount = el.shadowRoot!.querySelector('.commit-count');
+      expect(commitCount).to.not.be.null;
+      expect(commitCount!.textContent).to.include('3');
     });
 
-    it('should mark squashed commits correctly', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Fix for A', 'squash'),
-        createEditableCommit('ghi1234', 'Feature B', 'pick'),
-      ];
+    it('preview toggle button visible in .header-actions', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const preview = generatePreview(commits);
+      const headerActions = el.shadowRoot!.querySelector('.header-actions');
+      expect(headerActions).to.not.be.null;
 
-      expect(preview).to.have.length(2);
-      expect(preview[0].isSquashed).to.be.true;
-      expect(preview[0].squashedFrom).to.deep.equal(['def1234']);
-      expect(preview[1].isSquashed).to.be.false;
-    });
-
-    it('should handle multiple squashed commits', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Fix 1', 'fixup'),
-        createEditableCommit('ghi1234', 'Fix 2', 'squash'),
-        createEditableCommit('jkl1234', 'Feature B', 'pick'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview).to.have.length(2);
-      expect(preview[0].isSquashed).to.be.true;
-      expect(preview[0].squashedFrom).to.deep.equal(['def1234', 'ghi1234']);
-    });
-
-    it('should use new message for reworded commits', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old message', 'reword', 'New message'),
-        createEditableCommit('def1234', 'Feature B', 'pick'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview[0].summary).to.equal('New message');
-      expect(preview[1].summary).to.equal('Feature B');
-    });
-
-    it('should use first line of multiline reword message', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 'First line\nSecond line\nThird line'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview[0].summary).to.equal('First line');
-    });
-
-    it('should show placeholder for empty reword message', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', ''),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview[0].summary).to.equal('(empty message)');
-    });
-
-    it('should show placeholder for reword message starting with newline', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', '\nSecond line'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview[0].summary).to.equal('(empty message)');
-    });
-
-    it('should trim whitespace from reword message first line', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', '  Trimmed message  \nSecond line'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview[0].summary).to.equal('Trimmed message');
-    });
-
-    it('should handle all commits dropped', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'drop'),
-        createEditableCommit('def1234', 'Feature B', 'drop'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview).to.have.length(0);
-    });
-
-    it('should mark squash at index 0 as error', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'squash'),
-        createEditableCommit('def1234', 'Feature B', 'pick'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview).to.have.length(2);
-      expect(preview[0].error).to.equal('Cannot squash: no previous commit to combine with');
-      expect(preview[1].error).to.be.undefined;
-    });
-
-    it('should mark fixup at index 0 as error', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'fixup'),
-        createEditableCommit('def1234', 'Feature B', 'pick'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview).to.have.length(2);
-      expect(preview[0].error).to.equal('Cannot fixup: no previous commit to combine with');
-      expect(preview[1].error).to.be.undefined;
-    });
-
-    it('should mark squash/fixup after all dropped commits as error', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'drop'),
-        createEditableCommit('def1234', 'Feature B', 'drop'),
-        createEditableCommit('ghi1234', 'Feature C', 'squash'),
-        createEditableCommit('jkl1234', 'Feature D', 'pick'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview).to.have.length(2);
-      expect(preview[0].shortId).to.equal('ghi1234');
-      expect(preview[0].error).to.equal('Cannot squash: no previous commit to combine with');
-      expect(preview[1].shortId).to.equal('jkl1234');
-      expect(preview[1].error).to.be.undefined;
-    });
-
-    it('should mark multiple consecutive orphaned squash/fixup as errors', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'squash'),
-        createEditableCommit('def1234', 'Feature B', 'fixup'),
-        createEditableCommit('ghi1234', 'Feature C', 'pick'),
-      ];
-
-      const preview = generatePreview(commits);
-
-      expect(preview).to.have.length(3);
-      expect(preview[0].error).to.equal('Cannot squash: no previous commit to combine with');
-      expect(preview[1].error).to.equal('Cannot fixup: no previous commit to combine with');
-      expect(preview[2].error).to.be.undefined;
-    });
-
-    it('should validate hasValidationErrors returns true for orphaned squash', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'squash'),
-        createEditableCommit('def1234', 'Feature B', 'pick'),
-      ];
-
-      expect(hasValidationErrors(commits)).to.be.true;
-    });
-
-    it('should validate hasValidationErrors returns false for valid config', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Feature B', 'squash'),
-      ];
-
-      expect(hasValidationErrors(commits)).to.be.false;
+      const previewBtn = headerActions!.querySelector('button');
+      expect(previewBtn).to.not.be.null;
+      expect(previewBtn!.textContent).to.include('Preview');
     });
   });
 
-  describe('Autosquash Detection', () => {
-    it('should detect fixup! commits', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'fixup! Feature A', 'pick'),
-      ];
-
-      expect(detectAutosquashCommits(commits)).to.be.true;
-    });
-
-    it('should detect squash! commits', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'squash! Feature A', 'pick'),
-      ];
-
-      expect(detectAutosquashCommits(commits)).to.be.true;
-    });
-
-    it('should return false when no autosquash commits', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Feature B', 'pick'),
-      ];
-
-      expect(detectAutosquashCommits(commits)).to.be.false;
-    });
-  });
-
-  describe('Autosquash Application', () => {
-    it('should reorder fixup! commits after their target', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Feature B', 'pick'),
-        createEditableCommit('ghi1234', 'fixup! Feature A', 'pick'),
-      ];
-
-      const result = applyAutosquash(commits);
-
-      expect(result).to.have.length(3);
-      expect(result[0].shortId).to.equal('abc1234');
-      expect(result[1].shortId).to.equal('ghi1234');
-      expect(result[1].action).to.equal('fixup');
-      expect(result[2].shortId).to.equal('def1234');
-    });
-
-    it('should reorder squash! commits after their target', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Feature B', 'pick'),
-        createEditableCommit('ghi1234', 'squash! Feature A', 'pick'),
-      ];
-
-      const result = applyAutosquash(commits);
-
-      expect(result).to.have.length(3);
-      expect(result[0].shortId).to.equal('abc1234');
-      expect(result[1].shortId).to.equal('ghi1234');
-      expect(result[1].action).to.equal('squash');
-      expect(result[2].shortId).to.equal('def1234');
-    });
-
-    it('should handle multiple autosquash commits for same target', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'fixup! Feature A', 'pick'),
-        createEditableCommit('ghi1234', 'squash! Feature A', 'pick'),
-      ];
-
-      const result = applyAutosquash(commits);
-
-      expect(result).to.have.length(3);
-      expect(result[0].shortId).to.equal('abc1234');
-      expect(result[1].shortId).to.equal('def1234');
-      expect(result[1].action).to.equal('fixup');
-      expect(result[2].shortId).to.equal('ghi1234');
-      expect(result[2].action).to.equal('squash');
-    });
-
-    it('should keep autosquash commits at end if no target found', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'fixup! Unknown Feature', 'pick'),
-      ];
-
-      const result = applyAutosquash(commits);
-
-      expect(result).to.have.length(2);
-      expect(result[0].shortId).to.equal('abc1234');
-      expect(result[1].shortId).to.equal('def1234');
-      // Action stays as pick since no target found
-      expect(result[1].action).to.equal('pick');
-    });
-
-    it('should prefer exact match over prefix match', () => {
-      // "Add feature" should match exactly, not "Add feature X" via prefix
-      const commits = [
-        createEditableCommit('abc1234', 'Add feature X', 'pick'),
-        createEditableCommit('def1234', 'Add feature', 'pick'),
-        createEditableCommit('ghi1234', 'fixup! Add feature', 'pick'),
-      ];
-
-      const result = applyAutosquash(commits);
-
-      expect(result).to.have.length(3);
-      // fixup should be placed after "Add feature" (exact match), not "Add feature X"
-      expect(result[0].shortId).to.equal('abc1234');
-      expect(result[0].summary).to.equal('Add feature X');
-      expect(result[1].shortId).to.equal('def1234');
-      expect(result[1].summary).to.equal('Add feature');
-      expect(result[2].shortId).to.equal('ghi1234');
-      expect(result[2].action).to.equal('fixup');
-    });
-
-    it('should fall back to prefix match when no exact match exists', () => {
-      // "fixup! Add" should match "Add feature" via prefix when no exact "Add" exists
-      const commits = [
-        createEditableCommit('abc1234', 'Add feature', 'pick'),
-        createEditableCommit('def1234', 'Other commit', 'pick'),
-        createEditableCommit('ghi1234', 'fixup! Add', 'pick'),
-      ];
-
-      const result = applyAutosquash(commits);
-
-      expect(result).to.have.length(3);
-      // fixup should be placed after "Add feature" via prefix match
-      expect(result[0].shortId).to.equal('abc1234');
-      expect(result[1].shortId).to.equal('ghi1234');
-      expect(result[1].action).to.equal('fixup');
-      expect(result[2].shortId).to.equal('def1234');
-    });
-
-    it('should handle exact match even when prefix match appears first in list', () => {
-      // "Add feature" appears after "Add feature - part 1" but should still be matched exactly
-      const commits = [
-        createEditableCommit('aaa1234', 'Add feature - part 1', 'pick'),
-        createEditableCommit('bbb1234', 'Add feature - part 2', 'pick'),
-        createEditableCommit('ccc1234', 'Add feature', 'pick'),
-        createEditableCommit('ddd1234', 'squash! Add feature', 'pick'),
-      ];
-
-      const result = applyAutosquash(commits);
-
-      expect(result).to.have.length(4);
-      // squash should follow the exact "Add feature" match, not the first prefix match
-      expect(result[0].shortId).to.equal('aaa1234');
-      expect(result[1].shortId).to.equal('bbb1234');
-      expect(result[2].shortId).to.equal('ccc1234');
-      expect(result[3].shortId).to.equal('ddd1234');
-      expect(result[3].action).to.equal('squash');
-    });
-  });
-
-  describe('Statistics Calculation', () => {
-    it('should count pick commits as kept', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Feature B', 'pick'),
-      ];
-
-      const stats = getStats(commits);
-
-      expect(stats.kept).to.equal(2);
-      expect(stats.squashed).to.equal(0);
-      expect(stats.dropped).to.equal(0);
-      expect(stats.reworded).to.equal(0);
-    });
-
-    it('should count edit commits as kept', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'edit'),
-      ];
-
-      const stats = getStats(commits);
-
-      expect(stats.kept).to.equal(1);
-    });
-
-    it('should count reword commits as both kept and reworded', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'reword'),
-      ];
-
-      const stats = getStats(commits);
-
-      expect(stats.kept).to.equal(1);
-      expect(stats.reworded).to.equal(1);
-    });
-
-    it('should count squash and fixup as squashed', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Fix 1', 'squash'),
-        createEditableCommit('ghi1234', 'Fix 2', 'fixup'),
-      ];
-
-      const stats = getStats(commits);
-
-      expect(stats.kept).to.equal(1);
-      expect(stats.squashed).to.equal(2);
-    });
-
-    it('should count dropped commits', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Remove me', 'drop'),
-      ];
-
-      const stats = getStats(commits);
-
-      expect(stats.kept).to.equal(1);
-      expect(stats.dropped).to.equal(1);
-    });
-
-    it('should handle complex scenarios', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Feature B', 'reword'),
-        createEditableCommit('ghi1234', 'Fix', 'squash'),
-        createEditableCommit('jkl1234', 'Remove', 'drop'),
-        createEditableCommit('mno1234', 'Edit this', 'edit'),
-        createEditableCommit('pqr1234', 'Fixup', 'fixup'),
-      ];
-
-      const stats = getStats(commits);
-
-      expect(stats.kept).to.equal(3); // pick + reword + edit
-      expect(stats.reworded).to.equal(1);
-      expect(stats.squashed).to.equal(2); // squash + fixup
-      expect(stats.dropped).to.equal(1);
-    });
-  });
-
-  describe('RebaseAction Type', () => {
-    it('should support all valid rebase actions', () => {
-      const validActions: RebaseAction[] = ['pick', 'reword', 'edit', 'squash', 'fixup', 'drop'];
-
-      expect(validActions).to.have.length(6);
-      expect(validActions).to.include('pick');
-      expect(validActions).to.include('reword');
-      expect(validActions).to.include('edit');
-      expect(validActions).to.include('squash');
-      expect(validActions).to.include('fixup');
-      expect(validActions).to.include('drop');
-    });
-  });
-
-  describe('Todo File Generation', () => {
-    /**
-     * Generate todo file content for interactive rebase
-     * For reword with changed message, uses pick + exec git commit --amend
-     * @see lv-interactive-rebase-dialog.ts handleExecute()
-     */
-    function generateTodo(commits: EditableRebaseCommit[]): string {
-      const todoLines: string[] = [];
-
-      for (const c of commits) {
-        // Sanitize summary for todo file format (line-based, no newlines allowed)
-        const sanitizedSummary = c.summary.replace(/[\r\n]+/g, ' ').trim();
-
-        if (c.action === 'reword' && c.newMessage && c.newMessage !== c.summary) {
-          // Use pick + exec to amend with new message
-          todoLines.push(`pick ${c.shortId} ${sanitizedSummary}`);
-          // Use printf for POSIX shell compatibility
-          // Handle both \r\n (CRLF) and \r (CR) line endings
-          const escapedMessage = c.newMessage
-            .replace(/\\/g, '\\\\')
-            .replace(/'/g, "'\\''")
-            .replace(/\r\n/g, '\\n')
-            .replace(/\r/g, '\\n')
-            .replace(/\n/g, '\\n');
-          todoLines.push(`exec git commit --amend -m "$(printf '%b' '${escapedMessage}')"`);
-        } else if (c.action === 'reword') {
-          // Reword without message change - keep as pick
-          todoLines.push(`pick ${c.shortId} ${sanitizedSummary}`);
-        } else {
-          todoLines.push(`${c.action} ${c.shortId} ${sanitizedSummary}`);
+  // ── Loading state ──────────────────────────────────────────────────────
+  describe('Loading state', () => {
+    it('shows .loading with "Loading commits..." during fetch', async () => {
+      // Use a deferred promise to hold the loading state
+      let resolveLoad!: (value: unknown) => void;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_rebase_commits') {
+          return new Promise((resolve) => {
+            resolveLoad = resolve;
+          });
         }
+        return null;
+      };
+
+      const el = await createDialog();
+
+      // Start open but don't await its completion
+      const openPromise = el.open('main');
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      const loading = el.shadowRoot!.querySelector('.loading');
+      expect(loading).to.not.be.null;
+      expect(loading!.textContent).to.include('Loading commits...');
+
+      // Resolve to clean up
+      resolveLoad(mockCommits);
+      await openPromise;
+      await el.updateComplete;
+    });
+
+    it('loading disappears after commits load', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const loading = el.shadowRoot!.querySelector('.loading');
+      expect(loading).to.be.null;
+
+      const rows = el.shadowRoot!.querySelectorAll('.commit-row');
+      expect(rows.length).to.be.greaterThan(0);
+    });
+  });
+
+  // ── Empty state ────────────────────────────────────────────────────────
+  describe('Empty state', () => {
+    it('empty commits array shows .empty element', async () => {
+      setupDefaultMocks([]);
+
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const empty = el.shadowRoot!.querySelector('.empty');
+      expect(empty).to.not.be.null;
+      expect(empty!.textContent).to.include('No commits to rebase');
+    });
+  });
+
+  // ── Action changes ─────────────────────────────────────────────────────
+  describe('Action changes', () => {
+    it('default action is pick — select shows "pick" selected', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const selects = el.shadowRoot!.querySelectorAll('.action-select') as NodeListOf<HTMLSelectElement>;
+      expect(selects.length).to.equal(3);
+      for (const select of Array.from(selects)) {
+        expect(select.value).to.equal('pick');
       }
-
-      return todoLines.join('\n');
-    }
-
-    it('should generate correct todo format for basic actions', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A', 'pick'),
-        createEditableCommit('def1234', 'Feature B', 'squash'),
-        createEditableCommit('ghi1234', 'Feature C', 'drop'),
-      ];
-
-      const todo = generateTodo(commits);
-
-      expect(todo).to.equal(
-        'pick abc1234 Feature A\n' +
-        'squash def1234 Feature B\n' +
-        'drop ghi1234 Feature C'
-      );
     });
 
-    it('should use pick + exec for reword with changed message', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old message', 'reword', 'New message'),
-      ];
+    it('changing action select to reword shows .reword-input textarea', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const todo = generateTodo(commits);
+      const select = el.shadowRoot!.querySelector('.action-select') as HTMLSelectElement;
+      select.value = 'reword';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
 
-      expect(todo).to.equal(
-        'pick abc1234 Old message\n' +
-        "exec git commit --amend -m \"$(printf '%b' 'New message')\""
-      );
+      const textarea = el.shadowRoot!.querySelector('.reword-input');
+      expect(textarea).to.not.be.null;
     });
 
-    it('should use pick for reword without message change', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Same message', 'reword', 'Same message'),
-      ];
+    it('changing action to drop adds .action-drop class to row', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const todo = generateTodo(commits);
+      const select = el.shadowRoot!.querySelector('.action-select') as HTMLSelectElement;
+      select.value = 'drop';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
 
-      expect(todo).to.equal('pick abc1234 Same message');
+      const firstRow = el.shadowRoot!.querySelector('.commit-row');
+      expect(firstRow!.classList.contains('action-drop')).to.be.true;
     });
 
-    it('should use pick for reword without newMessage set', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Some message', 'reword'),
-      ];
+    it('changing action from reword back to pick hides textarea', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const todo = generateTodo(commits);
+      const select = el.shadowRoot!.querySelector('.action-select') as HTMLSelectElement;
 
-      expect(todo).to.equal('pick abc1234 Some message');
+      // Set to reword first
+      select.value = 'reword';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      let textarea = el.shadowRoot!.querySelector('.reword-input');
+      expect(textarea, 'textarea should appear for reword').to.not.be.null;
+
+      // Set back to pick
+      select.value = 'pick';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      textarea = el.shadowRoot!.querySelector('.reword-input');
+      expect(textarea, 'textarea should disappear for pick').to.be.null;
+    });
+  });
+
+  // ── Preview panel ──────────────────────────────────────────────────────
+  describe('Preview panel', () => {
+    it('preview panel (.preview-section) shown by default', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const preview = el.shadowRoot!.querySelector('.preview-section');
+      expect(preview).to.not.be.null;
     });
 
-    it('should escape single quotes in reword message', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', "It's working"),
-      ];
+    it('toggle preview button hides .preview-section', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const todo = generateTodo(commits);
+      const toggleBtn = el.shadowRoot!.querySelector('.header-actions button') as HTMLButtonElement;
+      toggleBtn.click();
+      await el.updateComplete;
 
-      // Single quotes escaped using '\'' technique for shell compatibility
-      expect(todo).to.equal(
-        'pick abc1234 Old\n' +
-        "exec git commit --amend -m \"$(printf '%b' 'It'\\''s working')\""
-      );
+      const preview = el.shadowRoot!.querySelector('.preview-section');
+      expect(preview).to.be.null;
     });
 
-    it('should escape backslashes in reword message', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 'Path\\to\\file'),
-      ];
+    it('preview shows correct number of .preview-commit items', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const todo = generateTodo(commits);
-
-      expect(todo).to.equal(
-        'pick abc1234 Old\n' +
-        "exec git commit --amend -m \"$(printf '%b' 'Path\\\\to\\\\file')\""
-      );
+      const previewCommits = el.shadowRoot!.querySelectorAll('.preview-commit');
+      expect(previewCommits.length).to.equal(3);
     });
 
-    it('should not escape dollar signs in reword message', () => {
-      // Single-quoted printf arg doesn't do variable expansion
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 'Cost $100'),
-      ];
+    it('dropped commits are excluded from preview', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const todo = generateTodo(commits);
+      // Drop the first commit
+      const select = el.shadowRoot!.querySelector('.action-select') as HTMLSelectElement;
+      select.value = 'drop';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
 
-      expect(todo).to.equal(
-        'pick abc1234 Old\n' +
-        "exec git commit --amend -m \"$(printf '%b' 'Cost $100')\""
-      );
+      const previewCommits = el.shadowRoot!.querySelectorAll('.preview-commit');
+      expect(previewCommits.length).to.equal(2);
     });
 
-    it('should not escape backticks in reword message', () => {
-      // Single-quoted printf arg doesn't do command substitution
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 'Use `code` here'),
-      ];
+    it('squash commits show .squash-badge on the parent preview commit', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const todo = generateTodo(commits);
+      // Set second commit to squash
+      const selects = el.shadowRoot!.querySelectorAll('.action-select') as NodeListOf<HTMLSelectElement>;
+      selects[1].value = 'squash';
+      selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
 
-      expect(todo).to.equal(
-        'pick abc1234 Old\n' +
-        `exec git commit --amend -m "$(printf '%b' 'Use \`code\` here')"`
-      );
+      // Preview should have 2 commits (first + squash merged, third alone)
+      const previewCommits = el.shadowRoot!.querySelectorAll('.preview-commit');
+      expect(previewCommits.length).to.equal(2);
+
+      const badge = previewCommits[0].querySelector('.squash-badge');
+      expect(badge).to.not.be.null;
+      expect(badge!.textContent).to.include('+1 squashed');
+    });
+  });
+
+  // ── Autosquash ─────────────────────────────────────────────────────────
+  describe('Autosquash', () => {
+    it('.autosquash-banner shown when commits have fixup!/squash! prefixes', async () => {
+      setupDefaultMocks(mockCommitsWithAutosquash);
+
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const banner = el.shadowRoot!.querySelector('.autosquash-banner');
+      expect(banner).to.not.be.null;
     });
 
-    it('should handle multiple reword commits', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'First', 'reword', 'First reworded'),
-        createEditableCommit('def1234', 'Second', 'pick'),
-        createEditableCommit('ghi1234', 'Third', 'reword', 'Third reworded'),
-      ];
+    it('banner hidden when no autosquash commits', async () => {
+      setupDefaultMocks(mockCommits);
 
-      const todo = generateTodo(commits);
+      const el = await createDialog();
+      await openAndWait(el);
 
-      expect(todo).to.equal(
-        'pick abc1234 First\n' +
-        "exec git commit --amend -m \"$(printf '%b' 'First reworded')\"\n" +
-        'pick def1234 Second\n' +
-        'pick ghi1234 Third\n' +
-        "exec git commit --amend -m \"$(printf '%b' 'Third reworded')\""
-      );
+      const banner = el.shadowRoot!.querySelector('.autosquash-banner');
+      expect(banner).to.be.null;
     });
 
-    it('should escape newlines in reword messages', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 'Line 1\nLine 2\nLine 3'),
-      ];
+    it('clicking apply autosquash button reorders commits', async () => {
+      setupDefaultMocks(mockCommitsWithAutosquash);
 
-      const todo = generateTodo(commits);
+      const el = await createDialog();
+      await openAndWait(el);
 
-      // printf '%b' interprets \n as actual newlines
-      expect(todo).to.equal(
-        'pick abc1234 Old\n' +
-        "exec git commit --amend -m \"$(printf '%b' 'Line 1\\nLine 2\\nLine 3')\""
-      );
+      // Before autosquash, order is: A, B, fixup!A, squash!B
+      let rows = el.shadowRoot!.querySelectorAll('.commit-row');
+      let hashes = Array.from(rows).map(r => r.querySelector('.commit-hash')!.textContent!.trim());
+      expect(hashes).to.deep.equal(['aaa1111', 'bbb2222', 'ccc3333', 'ddd4444']);
+
+      // Click apply autosquash
+      const banner = el.shadowRoot!.querySelector('.autosquash-banner');
+      const applyBtn = banner!.querySelector('button') as HTMLButtonElement;
+      applyBtn.click();
+      await el.updateComplete;
+
+      // After autosquash, fixup!A should follow A, squash!B should follow B
+      rows = el.shadowRoot!.querySelectorAll('.commit-row');
+      hashes = Array.from(rows).map(r => r.querySelector('.commit-hash')!.textContent!.trim());
+      expect(hashes).to.deep.equal(['aaa1111', 'ccc3333', 'bbb2222', 'ddd4444']);
     });
 
-    it('should escape carriage returns in reword messages', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old', 'reword', 'Line 1\r\nLine 2\rLine 3'),
-      ];
+    it('warning message shown after autosquash with unmatched targets', async () => {
+      setupDefaultMocks(mockCommitsWithUnmatchedAutosquash);
 
-      const todo = generateTodo(commits);
+      const el = await createDialog();
+      await openAndWait(el);
 
-      // Both \r\n and \r should be converted to \n for shell
-      expect(todo).to.equal(
-        'pick abc1234 Old\n' +
-        "exec git commit --amend -m \"$(printf '%b' 'Line 1\\nLine 2\\nLine 3')\""
-      );
+      const banner = el.shadowRoot!.querySelector('.autosquash-banner');
+      const applyBtn = banner!.querySelector('button') as HTMLButtonElement;
+      applyBtn.click();
+      await el.updateComplete;
+
+      const warning = el.shadowRoot!.querySelector('.warning-message');
+      expect(warning).to.not.be.null;
+      expect(warning!.textContent).to.include("couldn't find");
+    });
+  });
+
+  // ── Stats row ──────────────────────────────────────────────────────────
+  describe('Stats row', () => {
+    it('stats show "kept" count for pick/edit commits', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const statsRow = el.shadowRoot!.querySelector('.stats-row');
+      expect(statsRow).to.not.be.null;
+
+      const stats = Array.from(statsRow!.querySelectorAll('.stat'));
+      const resultingStat = stats.find(s => s.textContent!.includes('Resulting'));
+      expect(resultingStat).to.not.be.null;
+
+      const value = resultingStat!.querySelector('.stat-value');
+      expect(value!.textContent!.trim()).to.equal('3');
     });
 
-    it('should sanitize commit summaries containing newlines', () => {
-      // Commit summaries with newlines would break todo file format
-      // They should be sanitized to single line
-      const commits = [
-        createEditableCommit('abc1234', 'Feature A\nExtra line\rAnother line', 'pick'),
-        createEditableCommit('def1234', 'Feature B\r\nWith CRLF', 'squash'),
-      ];
+    it('stats show "dropped" count when commits are dropped', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const todo = generateTodo(commits);
+      // Drop one commit
+      const selects = el.shadowRoot!.querySelectorAll('.action-select') as NodeListOf<HTMLSelectElement>;
+      selects[0].value = 'drop';
+      selects[0].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
 
-      // Newlines in summaries should be replaced with spaces
-      expect(todo).to.equal(
-        'pick abc1234 Feature A Extra line Another line\n' +
-        'squash def1234 Feature B With CRLF'
-      );
+      const statsRow = el.shadowRoot!.querySelector('.stats-row');
+      const stats = Array.from(statsRow!.querySelectorAll('.stat'));
+      const droppedStat = stats.find(s => s.textContent!.includes('Dropped'));
+      expect(droppedStat).to.not.be.null;
+
+      const value = droppedStat!.querySelector('.stat-value');
+      expect(value!.textContent!.trim()).to.equal('1');
     });
 
-    it('should sanitize reword commit summaries containing newlines', () => {
-      const commits = [
-        createEditableCommit('abc1234', 'Old\nwith newline', 'reword', 'New message'),
-      ];
+    it('stats show "squashed" count when commits use squash/fixup', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
 
-      const todo = generateTodo(commits);
+      // Squash the second commit
+      const selects = el.shadowRoot!.querySelectorAll('.action-select') as NodeListOf<HTMLSelectElement>;
+      selects[1].value = 'squash';
+      selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
 
-      // The original summary in the todo line should be sanitized
-      expect(todo).to.equal(
-        'pick abc1234 Old with newline\n' +
-        "exec git commit --amend -m \"$(printf '%b' 'New message')\""
-      );
+      const statsRow = el.shadowRoot!.querySelector('.stats-row');
+      const stats = Array.from(statsRow!.querySelectorAll('.stat'));
+      const squashedStat = stats.find(s => s.textContent!.includes('Squashed'));
+      expect(squashedStat).to.not.be.null;
+
+      const value = squashedStat!.querySelector('.stat-value');
+      expect(value!.textContent!.trim()).to.equal('1');
+    });
+  });
+
+  // ── Execute ────────────────────────────────────────────────────────────
+  describe('Execute', () => {
+    it('execute button enabled when commits exist and no validation errors', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      expect(executeBtn).to.not.be.null;
+      expect(executeBtn.disabled).to.be.false;
+      expect(executeBtn.textContent).to.include('Start Rebase');
+    });
+
+    it('execute button disabled during execution (shows "Rebasing...")', async () => {
+      let resolveExec!: (value: unknown) => void;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_rebase_commits':
+            return mockCommits;
+          case 'execute_interactive_rebase':
+            return new Promise((resolve) => { resolveExec = resolve; });
+          default:
+            return null;
+        }
+      };
+
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      executeBtn.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      const btnDuring = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      expect(btnDuring.disabled).to.be.true;
+      expect(btnDuring.textContent).to.include('Rebasing...');
+
+      // Clean up
+      resolveExec(undefined);
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+    });
+
+    it('execute calls execute_interactive_rebase with correct path, onto, and todo string', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+      clearHistory();
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      executeBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const execCalls = findCommands('execute_interactive_rebase');
+      expect(execCalls.length).to.equal(1);
+
+      const args = execCalls[0].args as { path: string; onto: string; todo: string };
+      expect(args.path).to.equal(REPO_PATH);
+      expect(args.onto).to.equal('main');
+      expect(args.todo).to.include('pick aaa1111');
+      expect(args.todo).to.include('pick bbb2222');
+      expect(args.todo).to.include('pick ccc3333');
+    });
+
+    it('rebase-complete event dispatched on success', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      let eventFired = false;
+      el.addEventListener('rebase-complete', () => { eventFired = true; });
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      executeBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(eventFired).to.be.true;
+    });
+
+    it('error message shown when execute fails', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_rebase_commits':
+            return mockCommits;
+          case 'execute_interactive_rebase':
+            throw new Error('Rebase failed: conflicts detected');
+          default:
+            return null;
+        }
+      };
+
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      executeBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const errorMsg = el.shadowRoot!.querySelector('.error-message');
+      expect(errorMsg).to.not.be.null;
+      expect(errorMsg!.textContent).to.include('Rebase failed');
+    });
+  });
+
+  // ── Conflict handling ──────────────────────────────────────────────────
+  describe('Conflict handling', () => {
+    it('REBASE_CONFLICT error dispatches open-conflict-dialog with { operationType: rebase }', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_rebase_commits':
+            return mockCommits;
+          case 'execute_interactive_rebase':
+            // Tauri serializes Rust errors as objects, caught by invokeCommand
+            throw { code: 'REBASE_CONFLICT', message: 'Conflict during rebase' };
+          default:
+            return null;
+        }
+      };
+
+      const el = await createDialog();
+      await openAndWait(el);
+
+      let conflictDetail: { operationType?: string } | null = null;
+      el.addEventListener('open-conflict-dialog', ((e: CustomEvent) => {
+        conflictDetail = e.detail;
+      }) as EventListener);
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      executeBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(conflictDetail).to.not.be.null;
+      expect(conflictDetail!.operationType).to.equal('rebase');
+    });
+
+    it('dialog closes on conflict (modal.open becomes false)', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_rebase_commits':
+            return mockCommits;
+          case 'execute_interactive_rebase':
+            throw { code: 'REBASE_CONFLICT', message: 'Conflict during rebase' };
+          default:
+            return null;
+        }
+      };
+
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const modal = el.shadowRoot!.querySelector('lv-modal') as HTMLElement & { open: boolean };
+      expect(modal.open).to.be.true;
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      executeBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(modal.open).to.be.false;
+    });
+  });
+
+  // ── Validation errors ──────────────────────────────────────────────────
+  describe('Validation errors', () => {
+    it('squash at index 0 shows .error-badge in preview', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      // Set first commit to squash (orphaned)
+      const selects = el.shadowRoot!.querySelectorAll('.action-select') as NodeListOf<HTMLSelectElement>;
+      selects[0].value = 'squash';
+      selects[0].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      const errorBadge = el.shadowRoot!.querySelector('.error-badge');
+      expect(errorBadge).to.not.be.null;
+      expect(errorBadge!.textContent).to.include('Error');
+    });
+
+    it('execute button disabled when validation errors exist', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      // Set first commit to squash (orphaned squash = validation error)
+      const selects = el.shadowRoot!.querySelectorAll('.action-select') as NodeListOf<HTMLSelectElement>;
+      selects[0].value = 'squash';
+      selects[0].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      expect(executeBtn.disabled).to.be.true;
+    });
+  });
+
+  // ── Drag and drop ──────────────────────────────────────────────────────
+  describe('Drag and drop', () => {
+    it('commit row has .drag-handle element', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const row = el.shadowRoot!.querySelector('.commit-row');
+      const handle = row!.querySelector('.drag-handle');
+      expect(handle).to.not.be.null;
+    });
+
+    it('commit rows have draggable="true" attribute', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const rows = el.shadowRoot!.querySelectorAll('.commit-row');
+      for (const row of Array.from(rows)) {
+        expect(row.getAttribute('draggable')).to.equal('true');
+      }
+    });
+  });
+
+  // ── Close/Cancel ───────────────────────────────────────────────────────
+  describe('Close/Cancel', () => {
+    it('cancel button dispatches close', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const cancelBtn = el.shadowRoot!.querySelector('.btn-secondary') as HTMLButtonElement;
+      expect(cancelBtn).to.not.be.null;
+      expect(cancelBtn.textContent).to.include('Cancel');
+
+      const modal = el.shadowRoot!.querySelector('lv-modal') as HTMLElement & { open: boolean };
+      expect(modal.open).to.be.true;
+
+      cancelBtn.click();
+      await el.updateComplete;
+
+      expect(modal.open).to.be.false;
+    });
+
+    it('handleModalClose resets state (commits array cleared)', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      // Verify commits are loaded
+      let rows = el.shadowRoot!.querySelectorAll('.commit-row');
+      expect(rows.length).to.equal(3);
+
+      // Simulate modal close event
+      const modal = el.shadowRoot!.querySelector('lv-modal')!;
+      modal.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      // Commits should be cleared after close handler runs
+      rows = el.shadowRoot!.querySelectorAll('.commit-row');
+      expect(rows.length).to.equal(0);
     });
   });
 });

@@ -1,341 +1,888 @@
-import { expect } from '@open-wc/testing';
-import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../../../types/git.types.ts';
+/**
+ * Workspace Manager Dialog Tests
+ *
+ * These render the REAL lv-workspace-manager-dialog component, mock only the
+ * Tauri invoke layer, and verify the actual component code calls the right
+ * commands in the right order and updates its DOM accordingly.
+ */
 
-// Mock Tauri API
-const mockWorkspaces: Workspace[] = [
-  {
+// ── Tauri mock (must be set before any imports) ────────────────────────────
+type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
+
+let cbId = 0;
+const invokeHistory: Array<{ command: string; args?: unknown }> = [];
+let mockInvoke: MockInvoke = () => Promise.resolve(null);
+
+(globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
+  invoke: (command: string, args?: unknown) => {
+    invokeHistory.push({ command, args });
+    return mockInvoke(command, args);
+  },
+  transformCallback: () => cbId++,
+};
+
+// ── Imports (after Tauri mock) ─────────────────────────────────────────────
+import { expect, fixture, html } from '@open-wc/testing';
+import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../../../types/git.types.ts';
+import type { LvWorkspaceManagerDialog } from '../lv-workspace-manager-dialog.ts';
+
+// Import the actual component — registers <lv-workspace-manager-dialog>
+import '../lv-workspace-manager-dialog.ts';
+
+// ── Test data ──────────────────────────────────────────────────────────────
+function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
+  return {
     id: 'ws-1',
-    name: 'Backend',
-    description: 'Backend services',
+    name: 'My Workspace',
+    description: 'Test workspace',
     color: '#4fc3f7',
-    repositories: [
-      { path: '/repos/api-gateway', name: 'api-gateway' },
-      { path: '/repos/auth-service', name: 'auth-service' },
-    ],
+    repositories: [],
     createdAt: '2025-01-01T00:00:00Z',
     lastOpened: null,
-  },
-  {
-    id: 'ws-2',
-    name: 'Frontend',
-    description: 'Frontend apps',
-    color: '#81c784',
-    repositories: [],
-    createdAt: '2025-01-02T00:00:00Z',
-    lastOpened: null,
-  },
-];
+    ...overrides,
+  };
+}
 
-const mockStatuses: WorkspaceRepoStatus[] = [
-  {
-    path: '/repos/api-gateway',
-    name: 'api-gateway',
-    exists: true,
-    isValidRepo: true,
-    changedFilesCount: 2,
-    currentBranch: 'main',
-    ahead: 1,
-    behind: 0,
-  },
-  {
-    path: '/repos/auth-service',
-    name: 'auth-service',
+function makeRepoStatus(overrides: Partial<WorkspaceRepoStatus> = {}): WorkspaceRepoStatus {
+  return {
+    path: '/repos/alpha',
+    name: 'alpha',
     exists: true,
     isValidRepo: true,
     changedFilesCount: 0,
     currentBranch: 'main',
     ahead: 0,
     behind: 0,
-  },
-];
+    ...overrides,
+  };
+}
 
-const mockSearchResults: WorkspaceSearchResult[] = [
-  {
-    repoName: 'api-gateway',
-    repoPath: '/repos/api-gateway',
-    filePath: 'src/main.ts',
-    lineNumber: 42,
-    lineContent: 'const searchTerm = "hello";',
-    matchStart: 22,
-    matchEnd: 27,
-  },
-  {
-    repoName: 'api-gateway',
-    repoPath: '/repos/api-gateway',
-    filePath: 'src/utils.ts',
-    lineNumber: 10,
-    lineContent: 'function hello() {}',
-    matchStart: 9,
-    matchEnd: 14,
-  },
-  {
-    repoName: 'auth-service',
-    repoPath: '/repos/auth-service',
-    filePath: 'index.ts',
-    lineNumber: 1,
-    lineContent: '// hello world',
-    matchStart: 3,
-    matchEnd: 8,
-  },
-];
+const WS_ALPHA: Workspace = makeWorkspace({
+  id: 'ws-1',
+  name: 'Alpha Workspace',
+  description: 'First workspace',
+  color: '#4fc3f7',
+  repositories: [
+    { path: '/repos/alpha', name: 'alpha' },
+    { path: '/repos/beta', name: 'beta' },
+  ],
+});
 
-const mockExportedJson = JSON.stringify(mockWorkspaces[0], null, 2);
+const WS_BETA: Workspace = makeWorkspace({
+  id: 'ws-2',
+  name: 'Beta Workspace',
+  description: 'Second workspace',
+  color: '#81c784',
+  repositories: [{ path: '/repos/gamma', name: 'gamma' }],
+});
 
-let lastInvokedCommand: string | null = null;
-let lastInvokedArgs: unknown = null;
+const WS_EMPTY: Workspace = makeWorkspace({
+  id: 'ws-3',
+  name: 'Empty Workspace',
+  description: '',
+  color: '#ef5350',
+  repositories: [],
+});
 
-const mockInvoke = (command: string, args?: unknown): Promise<unknown> => {
-  lastInvokedCommand = command;
-  lastInvokedArgs = args;
-  switch (command) {
-    case 'get_workspaces':
-      return Promise.resolve(mockWorkspaces);
-    case 'get_workspace':
-      return Promise.resolve(mockWorkspaces[0]);
-    case 'save_workspace':
-      return Promise.resolve((args as Record<string, unknown>).workspace ?? mockWorkspaces[0]);
-    case 'delete_workspace':
-      return Promise.resolve(null);
-    case 'add_repository_to_workspace':
-      return Promise.resolve(mockWorkspaces[0]);
-    case 'remove_repository_from_workspace':
-      return Promise.resolve(mockWorkspaces[0]);
-    case 'update_workspace_last_opened':
-      return Promise.resolve(null);
-    case 'validate_workspace_repositories':
-      return Promise.resolve(mockStatuses);
-    case 'open_repository':
-      return Promise.resolve({
-        path: '/repos/api-gateway',
-        name: 'api-gateway',
-        isValid: true,
-        isBare: false,
-        headRef: 'main',
-        state: 'clean',
-      });
-    case 'search_workspace':
-      return Promise.resolve(mockSearchResults);
-    case 'export_workspace':
-      return Promise.resolve(mockExportedJson);
-    case 'import_workspace':
-      return Promise.resolve({
-        ...mockWorkspaces[0],
-        id: 'ws-imported',
-        name: 'Imported Workspace',
-      });
-    default:
-      return Promise.resolve(null);
-  }
-};
+const STATUS_ALPHA = makeRepoStatus({ path: '/repos/alpha', name: 'alpha', currentBranch: 'main' });
+const STATUS_BETA = makeRepoStatus({
+  path: '/repos/beta',
+  name: 'beta',
+  currentBranch: 'develop',
+  changedFilesCount: 3,
+  ahead: 1,
+});
+const STATUS_GAMMA = makeRepoStatus({ path: '/repos/gamma', name: 'gamma', currentBranch: 'main' });
 
-(globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
-  invoke: mockInvoke,
-};
+// ── Helpers ────────────────────────────────────────────────────────────────
+function clearHistory(): void {
+  invokeHistory.length = 0;
+}
 
-describe('Workspace Manager Dialog Data', () => {
-  beforeEach(() => {
-    lastInvokedCommand = null;
-    lastInvokedArgs = null;
-  });
+function findCommands(name: string): Array<{ command: string; args?: unknown }> {
+  return invokeHistory.filter((h) => h.command === name);
+}
 
-  describe('Workspace type', () => {
-    it('has correct structure', () => {
-      const ws = mockWorkspaces[0];
-      expect(ws.id).to.equal('ws-1');
-      expect(ws.name).to.equal('Backend');
-      expect(ws.description).to.equal('Backend services');
-      expect(ws.color).to.equal('#4fc3f7');
-      expect(ws.repositories.length).to.equal(2);
-      expect(ws.createdAt).to.be.a('string');
-      expect(ws.lastOpened).to.be.null;
-    });
+/** Result to return from the next plugin:dialog|open invoke (repo picker / file picker). */
+let dialogOpenResult: string | null = null;
+/** Result to return from the next plugin:dialog|save invoke (save dialog). */
+let dialogSaveResult: string | null = null;
 
-    it('repositories have path and name', () => {
-      const repos = mockWorkspaces[0].repositories;
-      expect(repos[0].path).to.equal('/repos/api-gateway');
-      expect(repos[0].name).to.equal('api-gateway');
-    });
+function setupDefaultMocks(opts: {
+  workspaces?: Workspace[];
+  statuses?: WorkspaceRepoStatus[];
+  savedWorkspace?: Workspace;
+  deleteFails?: boolean;
+  searchResults?: WorkspaceSearchResult[];
+  exportData?: string;
+} = {}): void {
+  const workspaces = opts.workspaces ?? [WS_ALPHA, WS_BETA];
+  const statuses = opts.statuses ?? [STATUS_ALPHA, STATUS_BETA, STATUS_GAMMA];
 
-    it('supports empty repositories', () => {
-      const ws = mockWorkspaces[1];
-      expect(ws.repositories).to.deep.equal([]);
-    });
-  });
+  mockInvoke = async (command: string, args?: unknown) => {
+    const params = args as Record<string, unknown> | undefined;
 
-  describe('WorkspaceRepoStatus type', () => {
-    it('has correct structure for valid repo', () => {
-      const status = mockStatuses[0];
-      expect(status.path).to.equal('/repos/api-gateway');
-      expect(status.exists).to.be.true;
-      expect(status.isValidRepo).to.be.true;
-      expect(status.changedFilesCount).to.equal(2);
-      expect(status.currentBranch).to.equal('main');
-      expect(status.ahead).to.equal(1);
-      expect(status.behind).to.equal(0);
-    });
-
-    it('has correct structure for clean repo', () => {
-      const status = mockStatuses[1];
-      expect(status.changedFilesCount).to.equal(0);
-      expect(status.ahead).to.equal(0);
-      expect(status.behind).to.equal(0);
-    });
-
-    it('supports missing repo', () => {
-      const missingStatus: WorkspaceRepoStatus = {
-        path: '/repos/missing',
-        name: 'missing',
-        exists: false,
-        isValidRepo: false,
-        changedFilesCount: 0,
-        currentBranch: null,
-        ahead: 0,
-        behind: 0,
-      };
-      expect(missingStatus.exists).to.be.false;
-      expect(missingStatus.isValidRepo).to.be.false;
-      expect(missingStatus.currentBranch).to.be.null;
-    });
-  });
-
-  describe('Tauri commands', () => {
-    it('get_workspaces returns workspace list', async () => {
-      const result = await mockInvoke('get_workspaces');
-      expect(lastInvokedCommand).to.equal('get_workspaces');
-      expect(result).to.deep.equal(mockWorkspaces);
-    });
-
-    it('save_workspace passes workspace object', async () => {
-      const ws = mockWorkspaces[0];
-      await mockInvoke('save_workspace', { workspace: ws });
-      expect(lastInvokedCommand).to.equal('save_workspace');
-      expect((lastInvokedArgs as Record<string, unknown>).workspace).to.deep.equal(ws);
-    });
-
-    it('delete_workspace passes workspaceId', async () => {
-      await mockInvoke('delete_workspace', { workspaceId: 'ws-1' });
-      expect(lastInvokedCommand).to.equal('delete_workspace');
-      expect((lastInvokedArgs as Record<string, unknown>).workspaceId).to.equal('ws-1');
-    });
-
-    it('add_repository_to_workspace passes camelCase args', async () => {
-      await mockInvoke('add_repository_to_workspace', {
-        workspaceId: 'ws-1',
-        path: '/new/repo',
-        name: 'repo',
-      });
-      expect(lastInvokedCommand).to.equal('add_repository_to_workspace');
-      const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.workspaceId).to.equal('ws-1');
-      expect(args.path).to.equal('/new/repo');
-      expect(args.name).to.equal('repo');
-    });
-
-    it('remove_repository_from_workspace passes camelCase args', async () => {
-      await mockInvoke('remove_repository_from_workspace', {
-        workspaceId: 'ws-1',
-        path: '/repos/api-gateway',
-      });
-      const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.workspaceId).to.equal('ws-1');
-      expect(args.path).to.equal('/repos/api-gateway');
-    });
-
-    it('validate_workspace_repositories passes workspaceId', async () => {
-      const result = await mockInvoke('validate_workspace_repositories', {
-        workspaceId: 'ws-1',
-      });
-      expect(lastInvokedCommand).to.equal('validate_workspace_repositories');
-      expect(result).to.deep.equal(mockStatuses);
-    });
-
-    it('update_workspace_last_opened passes workspaceId', async () => {
-      await mockInvoke('update_workspace_last_opened', { workspaceId: 'ws-1' });
-      expect(lastInvokedCommand).to.equal('update_workspace_last_opened');
-      expect((lastInvokedArgs as Record<string, unknown>).workspaceId).to.equal('ws-1');
-    });
-  });
-
-  describe('Workspace color constants', () => {
-    it('should have valid hex colors', () => {
-      const colors = ['#4fc3f7', '#81c784', '#ef5350', '#ffb74d', '#ce93d8', '#4dd0e1', '#ff8a65', '#aed581'];
-      for (const color of colors) {
-        expect(color).to.match(/^#[0-9a-f]{6}$/);
-      }
-    });
-  });
-
-  describe('Workspace search', () => {
-    it('search_workspace passes correct args', async () => {
-      await mockInvoke('search_workspace', {
-        workspaceId: 'ws-1',
-        query: 'hello',
-        caseSensitive: false,
-        regex: false,
-        maxResults: 200,
-      });
-      expect(lastInvokedCommand).to.equal('search_workspace');
-      const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.workspaceId).to.equal('ws-1');
-      expect(args.query).to.equal('hello');
-      expect(args.caseSensitive).to.equal(false);
-    });
-
-    it('search results have correct structure', async () => {
-      const results = (await mockInvoke('search_workspace', {
-        workspaceId: 'ws-1',
-        query: 'hello',
-      })) as WorkspaceSearchResult[];
-
-      expect(results).to.have.lengthOf(3);
-
-      const first = results[0];
-      expect(first.repoName).to.equal('api-gateway');
-      expect(first.repoPath).to.equal('/repos/api-gateway');
-      expect(first.filePath).to.equal('src/main.ts');
-      expect(first.lineNumber).to.equal(42);
-      expect(first.lineContent).to.include('searchTerm');
-      expect(first.matchStart).to.be.a('number');
-      expect(first.matchEnd).to.be.a('number');
-    });
-
-    it('search results can be grouped by repo', () => {
-      const grouped = new Map<string, WorkspaceSearchResult[]>();
-      for (const r of mockSearchResults) {
-        if (!grouped.has(r.repoName)) {
-          grouped.set(r.repoName, []);
+    switch (command) {
+      // ── Workspace CRUD ────────────────────────────────────────────
+      case 'get_workspaces':
+        return workspaces;
+      case 'save_workspace': {
+        const ws = params?.workspace as Workspace | undefined;
+        if (opts.savedWorkspace) return opts.savedWorkspace;
+        if (ws) {
+          return { ...ws, id: ws.id || 'ws-new-1' };
         }
-        grouped.get(r.repoName)!.push(r);
+        return null;
       }
+      case 'delete_workspace':
+        if (opts.deleteFails) throw new Error('Delete failed');
+        return undefined;
+      case 'validate_workspace_repositories':
+        return statuses;
+      case 'add_repository_to_workspace':
+        return workspaces[0] ?? null;
+      case 'remove_repository_from_workspace':
+        return workspaces[0] ?? null;
+      case 'search_workspace':
+        return opts.searchResults ?? [];
+      case 'export_workspace':
+        return opts.exportData ?? '{"id":"ws-1","name":"Alpha"}';
+      case 'import_workspace':
+        return makeWorkspace({ id: 'ws-imported', name: 'Imported WS' });
+      case 'update_workspace_last_opened':
+        return undefined;
 
-      expect(grouped.size).to.equal(2);
-      expect(grouped.get('api-gateway')!.length).to.equal(2);
-      expect(grouped.get('auth-service')!.length).to.equal(1);
+      // ── Git operations (batch fetch / pull) ───────────────────────
+      case 'open_repository':
+        return { path: params?.path as string, name: 'repo' };
+      case 'fetch':
+        return undefined;
+      case 'pull':
+        return undefined;
+
+      // ── Tauri plugins ─────────────────────────────────────────────
+      case 'plugin:notification|is_permission_granted':
+        return false;
+      case 'plugin:dialog|open':
+        return dialogOpenResult;
+      case 'plugin:dialog|save':
+        return dialogSaveResult;
+      case 'plugin:fs|read_text_file':
+        return '{"id":"ws-file","name":"From File"}';
+      case 'plugin:fs|write_text_file':
+        return undefined;
+
+      default:
+        return null;
+    }
+  };
+}
+
+async function renderDialog(open = true): Promise<LvWorkspaceManagerDialog> {
+  const el = await fixture<LvWorkspaceManagerDialog>(
+    html`<lv-workspace-manager-dialog ?open=${open}></lv-workspace-manager-dialog>`,
+  );
+  await el.updateComplete;
+  // Wait for async loadWorkspaces triggered by open=true
+  await new Promise((r) => setTimeout(r, 50));
+  await el.updateComplete;
+  return el;
+}
+
+async function tick(el: LvWorkspaceManagerDialog, ms = 50): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms));
+  await el.updateComplete;
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+describe('lv-workspace-manager-dialog', () => {
+  beforeEach(() => {
+    clearHistory();
+    dialogOpenResult = null;
+    dialogSaveResult = null;
+    setupDefaultMocks();
+  });
+
+  // ── Rendering ──────────────────────────────────────────────────────────
+  describe('Rendering', () => {
+    it('renders the dialog with header, body and footer when open', async () => {
+      const el = await renderDialog();
+
+      const header = el.shadowRoot!.querySelector('.header');
+      const body = el.shadowRoot!.querySelector('.body');
+      const footer = el.shadowRoot!.querySelector('.footer');
+
+      expect(header).to.not.be.null;
+      expect(body).to.not.be.null;
+      expect(footer).to.not.be.null;
+    });
+
+    it('renders workspace list with names in the left panel', async () => {
+      const el = await renderDialog();
+
+      const items = el.shadowRoot!.querySelectorAll('.workspace-item');
+      expect(items.length).to.equal(2);
+
+      const names = Array.from(items).map(
+        (i) => i.querySelector('.workspace-item-name')?.textContent?.trim(),
+      );
+      expect(names).to.include('Alpha Workspace');
+      expect(names).to.include('Beta Workspace');
+    });
+
+    it('renders color dots for each workspace', async () => {
+      const el = await renderDialog();
+
+      const dots = el.shadowRoot!.querySelectorAll('.workspace-color-dot');
+      expect(dots.length).to.equal(2);
+    });
+
+    it('auto-selects the first workspace and shows its repo count', async () => {
+      const el = await renderDialog();
+
+      const activeItem = el.shadowRoot!.querySelector('.workspace-item.active');
+      expect(activeItem).to.not.be.null;
+      expect(activeItem!.textContent).to.include('Alpha Workspace');
+
+      const reposTitle = el.shadowRoot!.querySelector('.repos-title');
+      expect(reposTitle).to.not.be.null;
+      expect(reposTitle!.textContent).to.include('2');
+    });
+
+    it('shows empty state when no workspace is selected', async () => {
+      setupDefaultMocks({ workspaces: [] });
+      const el = await renderDialog();
+
+      const emptyState = el.shadowRoot!.querySelector('.empty-state');
+      expect(emptyState).to.not.be.null;
+      expect(emptyState!.textContent).to.include('Select a workspace');
+    });
+
+    it('shows "No repositories added yet" for workspace with no repos', async () => {
+      setupDefaultMocks({ workspaces: [WS_EMPTY] });
+      const el = await renderDialog();
+
+      const noRepos = el.shadowRoot!.querySelector('.no-repos');
+      expect(noRepos).to.not.be.null;
+      expect(noRepos!.textContent).to.include('No repositories added yet');
     });
   });
 
-  describe('Workspace export/import', () => {
-    it('export_workspace returns JSON string', async () => {
-      const result = await mockInvoke('export_workspace', { workspaceId: 'ws-1' });
-      expect(lastInvokedCommand).to.equal('export_workspace');
-      expect(result).to.be.a('string');
-      const parsed = JSON.parse(result as string);
-      expect(parsed.id).to.equal('ws-1');
-      expect(parsed.name).to.equal('Backend');
+  // ── Create Workspace ──────────────────────────────────────────────────
+  describe('Create Workspace', () => {
+    it('calls save_workspace when "New Workspace" is clicked', async () => {
+      const el = await renderDialog();
+      clearHistory();
+
+      const newBtn = el.shadowRoot!.querySelector('.new-btn') as HTMLButtonElement;
+      expect(newBtn).to.not.be.null;
+      expect(newBtn.textContent).to.include('New Workspace');
+
+      newBtn.click();
+      await tick(el, 100);
+
+      const saveCalls = findCommands('save_workspace');
+      expect(saveCalls.length).to.be.greaterThan(0);
+
+      const savedArg = saveCalls[0].args as Record<string, unknown>;
+      const workspace = savedArg.workspace as Workspace;
+      expect(workspace.name).to.equal('New Workspace');
+      expect(workspace.repositories).to.deep.equal([]);
     });
 
-    it('import_workspace passes JSON data', async () => {
-      const jsonData = JSON.stringify(mockWorkspaces[0]);
-      const result = (await mockInvoke('import_workspace', { jsonData })) as Workspace;
-      expect(lastInvokedCommand).to.equal('import_workspace');
-      expect(result.id).to.equal('ws-imported');
-      expect(result.name).to.equal('Imported Workspace');
+    it('reloads workspace list after creating a new workspace', async () => {
+      const el = await renderDialog();
+      clearHistory();
+
+      const newBtn = el.shadowRoot!.querySelector('.new-btn') as HTMLButtonElement;
+      newBtn.click();
+      await tick(el, 100);
+
+      // After save, should reload workspaces
+      const getCalls = findCommands('get_workspaces');
+      expect(getCalls.length).to.be.greaterThan(0);
+    });
+  });
+
+  // ── Edit Workspace ────────────────────────────────────────────────────
+  describe('Edit Workspace', () => {
+    it('populates editor fields with selected workspace data', async () => {
+      const el = await renderDialog();
+
+      const nameInput = el.shadowRoot!.querySelector('.form-input') as HTMLInputElement;
+      expect(nameInput).to.not.be.null;
+      expect(nameInput.value).to.equal('Alpha Workspace');
+
+      const descTextarea = el.shadowRoot!.querySelector('.form-textarea') as HTMLTextAreaElement;
+      expect(descTextarea).to.not.be.null;
+      expect(descTextarea.value).to.equal('First workspace');
     });
 
-    it('imported workspace gets new ID', async () => {
-      const jsonData = JSON.stringify(mockWorkspaces[0]);
-      const result = (await mockInvoke('import_workspace', { jsonData })) as Workspace;
-      expect(result.id).to.not.equal(mockWorkspaces[0].id);
+    it('saves workspace on name input blur', async () => {
+      const el = await renderDialog();
+      clearHistory();
+
+      const nameInput = el.shadowRoot!.querySelector('.form-input') as HTMLInputElement;
+      // Simulate typing a new name
+      nameInput.value = 'Renamed Workspace';
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      // Trigger blur to save
+      nameInput.dispatchEvent(new Event('blur', { bubbles: true }));
+      await tick(el, 100);
+
+      const saveCalls = findCommands('save_workspace');
+      expect(saveCalls.length).to.be.greaterThan(0);
+
+      const savedArg = saveCalls[0].args as Record<string, unknown>;
+      const workspace = savedArg.workspace as Workspace;
+      expect(workspace.name).to.equal('Renamed Workspace');
+    });
+
+    it('saves workspace when a color swatch is clicked', async () => {
+      const el = await renderDialog();
+      clearHistory();
+
+      const swatches = el.shadowRoot!.querySelectorAll('.color-swatch');
+      expect(swatches.length).to.equal(8);
+
+      // Click the second swatch (different color)
+      (swatches[1] as HTMLButtonElement).click();
+      await tick(el, 100);
+
+      const saveCalls = findCommands('save_workspace');
+      expect(saveCalls.length).to.be.greaterThan(0);
+
+      const savedArg = saveCalls[0].args as Record<string, unknown>;
+      const workspace = savedArg.workspace as Workspace;
+      expect(workspace.color).to.equal('#81c784');
+    });
+
+    it('switches editor fields when selecting a different workspace', async () => {
+      const el = await renderDialog();
+
+      // Click the second workspace
+      const items = el.shadowRoot!.querySelectorAll('.workspace-item');
+      (items[1] as HTMLButtonElement).click();
+      await tick(el);
+
+      const nameInput = el.shadowRoot!.querySelector('.form-input') as HTMLInputElement;
+      expect(nameInput.value).to.equal('Beta Workspace');
+
+      const reposTitle = el.shadowRoot!.querySelector('.repos-title');
+      expect(reposTitle!.textContent).to.include('1');
+    });
+  });
+
+  // ── Delete Workspace ──────────────────────────────────────────────────
+  describe('Delete Workspace', () => {
+    it('calls delete_workspace when Delete button is clicked', async () => {
+      const el = await renderDialog();
+      clearHistory();
+
+      const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
+      expect(deleteBtn).to.not.be.null;
+      expect(deleteBtn.textContent).to.include('Delete');
+
+      deleteBtn.click();
+      await tick(el, 100);
+
+      const deleteCalls = findCommands('delete_workspace');
+      expect(deleteCalls.length).to.equal(1);
+      expect((deleteCalls[0].args as Record<string, unknown>).workspaceId).to.equal('ws-1');
+    });
+
+    it('reloads workspaces after successful delete', async () => {
+      const el = await renderDialog();
+      clearHistory();
+
+      const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
+      deleteBtn.click();
+      await tick(el, 100);
+
+      const getCalls = findCommands('get_workspaces');
+      expect(getCalls.length).to.be.greaterThan(0);
+    });
+
+    it('clears selection after deleting a workspace', async () => {
+      const el = await renderDialog();
+
+      // Initially a workspace is selected
+      let activeItem = el.shadowRoot!.querySelector('.workspace-item.active');
+      expect(activeItem).to.not.be.null;
+
+      // After delete, the deletion sets selectedWorkspaceId = null then reloads.
+      // Switch mock so reload returns only WS_BETA.
+      setupDefaultMocks({ workspaces: [WS_BETA] });
+      const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
+      deleteBtn.click();
+      await tick(el, 100);
+
+      // After reload, the remaining workspace should be auto-selected
+      activeItem = el.shadowRoot!.querySelector('.workspace-item.active');
+      expect(activeItem).to.not.be.null;
+      expect(activeItem!.textContent).to.include('Beta Workspace');
+    });
+  });
+
+  // ── Add / Remove Repos ────────────────────────────────────────────────
+  describe('Add/Remove Repos', () => {
+    it('calls add_repository_to_workspace when a repo is selected via dialog', async () => {
+      dialogOpenResult = '/repos/new-repo';
+      const el = await renderDialog();
+      clearHistory();
+
+      const addBtn = el.shadowRoot!.querySelector('.add-repo-btn') as HTMLButtonElement;
+      expect(addBtn).to.not.be.null;
+      expect(addBtn.textContent).to.include('Add Repo');
+
+      addBtn.click();
+      await tick(el, 100);
+
+      const addCalls = findCommands('add_repository_to_workspace');
+      expect(addCalls.length).to.equal(1);
+
+      const addArgs = addCalls[0].args as Record<string, unknown>;
+      expect(addArgs.workspaceId).to.equal('ws-1');
+      expect(addArgs.path).to.equal('/repos/new-repo');
+      expect(addArgs.name).to.equal('new-repo');
+    });
+
+    it('does not call add_repository_to_workspace when dialog is cancelled', async () => {
+      dialogOpenResult = null;
+      const el = await renderDialog();
+      clearHistory();
+
+      const addBtn = el.shadowRoot!.querySelector('.add-repo-btn') as HTMLButtonElement;
+      addBtn.click();
+      await tick(el, 100);
+
+      const addCalls = findCommands('add_repository_to_workspace');
+      expect(addCalls.length).to.equal(0);
+    });
+
+    it('renders repo items with names', async () => {
+      const el = await renderDialog();
+
+      const repoItems = el.shadowRoot!.querySelectorAll('.repo-item');
+      expect(repoItems.length).to.equal(2);
+
+      const repoNames = Array.from(repoItems).map(
+        (r) => r.querySelector('.repo-name')?.textContent?.trim(),
+      );
+      expect(repoNames).to.include('alpha');
+      expect(repoNames).to.include('beta');
+    });
+
+    it('calls remove_repository_from_workspace when remove button is clicked', async () => {
+      const el = await renderDialog();
+      clearHistory();
+
+      const removeButtons = el.shadowRoot!.querySelectorAll('.repo-remove');
+      expect(removeButtons.length).to.equal(2);
+
+      // Remove the first repo
+      (removeButtons[0] as HTMLButtonElement).click();
+      await tick(el, 100);
+
+      const removeCalls = findCommands('remove_repository_from_workspace');
+      expect(removeCalls.length).to.equal(1);
+
+      const removeArgs = removeCalls[0].args as Record<string, unknown>;
+      expect(removeArgs.workspaceId).to.equal('ws-1');
+      expect(removeArgs.path).to.equal('/repos/alpha');
+    });
+  });
+
+  // ── Search / Filter ───────────────────────────────────────────────────
+  describe('Search/Filter Repos', () => {
+    it('renders search input when workspace has repos', async () => {
+      const el = await renderDialog();
+
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+      expect(searchInput).to.not.be.null;
+      expect(searchInput.placeholder).to.include('Search across all repos');
+    });
+
+    it('calls search_workspace when search button is clicked', async () => {
+      const searchResults: WorkspaceSearchResult[] = [
+        {
+          repoName: 'alpha',
+          repoPath: '/repos/alpha',
+          filePath: 'src/main.ts',
+          lineNumber: 42,
+          lineContent: 'const foo = "bar"',
+          matchStart: 6,
+          matchEnd: 9,
+        },
+      ];
+      setupDefaultMocks({ searchResults });
+      const el = await renderDialog();
+      clearHistory();
+
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+      searchInput.value = 'foo';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      const searchBtn = el.shadowRoot!.querySelector('.search-btn') as HTMLButtonElement;
+      searchBtn.click();
+      await tick(el, 100);
+
+      const searchCalls = findCommands('search_workspace');
+      expect(searchCalls.length).to.equal(1);
+
+      const searchArgs = searchCalls[0].args as Record<string, unknown>;
+      expect(searchArgs.workspaceId).to.equal('ws-1');
+      expect(searchArgs.query).to.equal('foo');
+    });
+
+    it('renders search results grouped by repo', async () => {
+      const searchResults: WorkspaceSearchResult[] = [
+        {
+          repoName: 'alpha',
+          repoPath: '/repos/alpha',
+          filePath: 'src/main.ts',
+          lineNumber: 42,
+          lineContent: 'const foo = "bar"',
+          matchStart: 6,
+          matchEnd: 9,
+        },
+        {
+          repoName: 'alpha',
+          repoPath: '/repos/alpha',
+          filePath: 'src/utils.ts',
+          lineNumber: 10,
+          lineContent: 'export function foo() {}',
+          matchStart: 16,
+          matchEnd: 19,
+        },
+      ];
+      setupDefaultMocks({ searchResults });
+      const el = await renderDialog();
+
+      // Type and search
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+      searchInput.value = 'foo';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      const searchBtn = el.shadowRoot!.querySelector('.search-btn') as HTMLButtonElement;
+      searchBtn.click();
+      await tick(el, 150);
+
+      const resultGroups = el.shadowRoot!.querySelectorAll('.search-result-group');
+      expect(resultGroups.length).to.equal(1);
+
+      const repoLabel = el.shadowRoot!.querySelector('.search-result-repo');
+      expect(repoLabel!.textContent).to.include('alpha');
+
+      const resultItems = el.shadowRoot!.querySelectorAll('.search-result-item');
+      expect(resultItems.length).to.equal(2);
+    });
+
+    it('calls search_workspace on Enter key in search input', async () => {
+      const el = await renderDialog();
+      clearHistory();
+
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+      searchInput.value = 'test';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await tick(el, 100);
+
+      const searchCalls = findCommands('search_workspace');
+      expect(searchCalls.length).to.equal(1);
+    });
+
+    it('does not show search section for workspace with no repos', async () => {
+      setupDefaultMocks({ workspaces: [WS_EMPTY] });
+      const el = await renderDialog();
+
+      const searchInput = el.shadowRoot!.querySelector('.search-input');
+      expect(searchInput).to.be.null;
+    });
+  });
+
+  // ── Import / Export ───────────────────────────────────────────────────
+  describe('Import/Export Workspace', () => {
+    it('calls export_workspace when Export button is clicked', async () => {
+      dialogSaveResult = '/tmp/workspace-export.json';
+      const el = await renderDialog();
+      clearHistory();
+
+      const exportBtn = el.shadowRoot!.querySelector('.ie-btn') as HTMLButtonElement;
+      expect(exportBtn).to.not.be.null;
+      expect(exportBtn.textContent).to.include('Export');
+
+      exportBtn.click();
+      await tick(el, 100);
+
+      const exportCalls = findCommands('export_workspace');
+      expect(exportCalls.length).to.equal(1);
+      expect((exportCalls[0].args as Record<string, unknown>).workspaceId).to.equal('ws-1');
+    });
+
+    it('calls import_workspace when Import button is clicked with a file', async () => {
+      dialogOpenResult = '/tmp/workspace.json';
+      const el = await renderDialog();
+      clearHistory();
+
+      // The Import button is the second .new-btn in the left panel
+      const leftPanelButtons = el.shadowRoot!.querySelectorAll('.new-btn');
+      const importBtn = Array.from(leftPanelButtons).find(
+        (btn) => btn.textContent?.includes('Import'),
+      ) as HTMLButtonElement;
+      expect(importBtn).to.not.be.null;
+
+      importBtn.click();
+      await tick(el, 100);
+
+      const importCalls = findCommands('import_workspace');
+      expect(importCalls.length).to.equal(1);
+    });
+
+    it('does not call import_workspace when dialog is cancelled', async () => {
+      dialogOpenResult = null;
+      const el = await renderDialog();
+      clearHistory();
+
+      const leftPanelButtons = el.shadowRoot!.querySelectorAll('.new-btn');
+      const importBtn = Array.from(leftPanelButtons).find(
+        (btn) => btn.textContent?.includes('Import'),
+      ) as HTMLButtonElement;
+
+      importBtn.click();
+      await tick(el, 100);
+
+      const importCalls = findCommands('import_workspace');
+      expect(importCalls.length).to.equal(0);
+    });
+  });
+
+  // ── Validation (repo status) ──────────────────────────────────────────
+  describe('Validation: repo status', () => {
+    it('calls validate_workspace_repositories on workspace select', async () => {
+      await renderDialog();
+
+      const validateCalls = findCommands('validate_workspace_repositories');
+      expect(validateCalls.length).to.be.greaterThan(0);
+    });
+
+    it('renders repo status badges from validation result', async () => {
+      setupDefaultMocks({
+        statuses: [
+          makeRepoStatus({ path: '/repos/alpha', name: 'alpha', changedFilesCount: 0 }),
+          makeRepoStatus({ path: '/repos/beta', name: 'beta', changedFilesCount: 3 }),
+        ],
+      });
+
+      const el = await renderDialog();
+      await tick(el, 100);
+
+      const statusBadges = el.shadowRoot!.querySelectorAll('.repo-status');
+      expect(statusBadges.length).to.be.greaterThan(0);
+    });
+
+    it('marks missing repos with "missing" class on repo-item', async () => {
+      setupDefaultMocks({
+        statuses: [
+          makeRepoStatus({ path: '/repos/alpha', name: 'alpha', exists: false, isValidRepo: false }),
+          makeRepoStatus({ path: '/repos/beta', name: 'beta', exists: true, isValidRepo: true }),
+        ],
+      });
+
+      const el = await renderDialog();
+      await tick(el, 100);
+
+      const missingItems = el.shadowRoot!.querySelectorAll('.repo-item.missing');
+      expect(missingItems.length).to.equal(1);
+    });
+
+    it('shows "missing" status text for repos that do not exist on disk', async () => {
+      setupDefaultMocks({
+        statuses: [
+          makeRepoStatus({ path: '/repos/alpha', name: 'alpha', exists: false, isValidRepo: false }),
+          makeRepoStatus({ path: '/repos/beta', name: 'beta', exists: true, isValidRepo: true }),
+        ],
+      });
+
+      const el = await renderDialog();
+      await tick(el, 100);
+
+      const missingStatus = el.shadowRoot!.querySelector('.repo-status.missing');
+      expect(missingStatus).to.not.be.null;
+      expect(missingStatus!.textContent?.trim()).to.equal('missing');
+    });
+
+    it('shows "clean" status for repos with no changes', async () => {
+      setupDefaultMocks({
+        statuses: [
+          makeRepoStatus({ path: '/repos/alpha', name: 'alpha', changedFilesCount: 0 }),
+          makeRepoStatus({ path: '/repos/beta', name: 'beta', changedFilesCount: 0 }),
+        ],
+      });
+
+      const el = await renderDialog();
+      await tick(el, 100);
+
+      const cleanStatuses = el.shadowRoot!.querySelectorAll('.repo-status.clean');
+      expect(cleanStatuses.length).to.equal(2);
+    });
+
+    it('shows changed files count for repos with uncommitted changes', async () => {
+      setupDefaultMocks({
+        statuses: [
+          makeRepoStatus({ path: '/repos/alpha', name: 'alpha', changedFilesCount: 5 }),
+          makeRepoStatus({ path: '/repos/beta', name: 'beta', changedFilesCount: 0 }),
+        ],
+      });
+
+      const el = await renderDialog();
+      await tick(el, 100);
+
+      const changedStatus = el.shadowRoot!.querySelector('.repo-status.changed');
+      expect(changedStatus).to.not.be.null;
+      expect(changedStatus!.textContent).to.include('5');
+    });
+
+    it('refreshes status when Refresh Status button is clicked', async () => {
+      const el = await renderDialog();
+      await tick(el, 100);
+      clearHistory();
+
+      const batchBtns = el.shadowRoot!.querySelectorAll('.batch-btn');
+      const refreshBtn = Array.from(batchBtns).find(
+        (btn) => btn.textContent?.includes('Refresh Status'),
+      ) as HTMLButtonElement;
+      expect(refreshBtn).to.not.be.null;
+
+      refreshBtn.click();
+      await tick(el, 100);
+
+      const validateCalls = findCommands('validate_workspace_repositories');
+      expect(validateCalls.length).to.be.greaterThan(0);
+    });
+  });
+
+  // ── Error handling ────────────────────────────────────────────────────
+  describe('Error handling', () => {
+    it('handles save_workspace returning no data gracefully', async () => {
+      setupDefaultMocks();
+      // Override to return null from save (simulating backend not returning data)
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'save_workspace') return null;
+        return origMock(command, args);
+      };
+
+      const el = await renderDialog();
+      clearHistory();
+
+      const nameInput = el.shadowRoot!.querySelector('.form-input') as HTMLInputElement;
+      nameInput.value = 'Updated';
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      nameInput.dispatchEvent(new Event('blur', { bubbles: true }));
+      await tick(el, 100);
+
+      // Should not crash; workspace list should remain
+      const items = el.shadowRoot!.querySelectorAll('.workspace-item');
+      expect(items.length).to.be.greaterThan(0);
+    });
+
+    it('handles delete_workspace failure gracefully', async () => {
+      setupDefaultMocks({ deleteFails: true });
+      const el = await renderDialog();
+      clearHistory();
+
+      const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
+
+      // The delete throws but the component should not crash
+      deleteBtn.click();
+      await tick(el, 100);
+
+      // Workspace list should still be intact
+      const items = el.shadowRoot!.querySelectorAll('.workspace-item');
+      expect(items.length).to.be.greaterThan(0);
+    });
+  });
+
+  // ── Dialog open/close behavior ────────────────────────────────────────
+  describe('Dialog open/close behavior', () => {
+    it('calls get_workspaces when dialog is opened', async () => {
+      clearHistory();
+      await renderDialog(true);
+
+      const getCalls = findCommands('get_workspaces');
+      expect(getCalls.length).to.be.greaterThan(0);
+    });
+
+    it('closes dialog when close button is clicked', async () => {
+      const el = await renderDialog();
+      expect(el.open).to.be.true;
+
+      const closeBtn = el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement;
+      closeBtn.click();
+      await el.updateComplete;
+
+      expect(el.open).to.be.false;
+    });
+
+    it('closes dialog when Close footer button is clicked', async () => {
+      const el = await renderDialog();
+      expect(el.open).to.be.true;
+
+      const footerBtns = el.shadowRoot!.querySelectorAll('.btn-secondary');
+      const closeBtn = Array.from(footerBtns).find(
+        (btn) => btn.textContent?.trim() === 'Close',
+      ) as HTMLButtonElement;
+      expect(closeBtn).to.not.be.null;
+
+      closeBtn.click();
+      await el.updateComplete;
+
+      expect(el.open).to.be.false;
+    });
+
+    it('closes dialog when overlay is clicked', async () => {
+      const el = await renderDialog();
+      expect(el.open).to.be.true;
+
+      const overlay = el.shadowRoot!.querySelector('.overlay') as HTMLDivElement;
+      overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+
+      expect(el.open).to.be.false;
+    });
+
+    it('closes dialog on Escape key', async () => {
+      const el = await renderDialog();
+      expect(el.open).to.be.true;
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await el.updateComplete;
+
+      expect(el.open).to.be.false;
+    });
+
+    it('dispatches close event when dialog closes', async () => {
+      const el = await renderDialog();
+
+      let closeFired = false;
+      el.addEventListener('close', () => {
+        closeFired = true;
+      });
+
+      const closeBtn = el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement;
+      closeBtn.click();
+      await el.updateComplete;
+
+      expect(closeFired).to.be.true;
     });
   });
 });

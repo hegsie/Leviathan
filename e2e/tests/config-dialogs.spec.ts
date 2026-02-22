@@ -1,553 +1,356 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  startCommandCaptureWithMocks,
+  findCommand,
+  injectCommandError,
+  openViaCommandPalette,
+  autoConfirmDialogs,
+} from '../fixtures/test-helpers';
 
 /**
- * E2E tests for Configuration Dialogs
- * Tests Git config, credentials, GPG, SSH, hooks, and LFS dialogs
+ * E2E tests for the Git Configuration Dialog (lv-config-dialog).
+ *
+ * The dialog has three tabs: Identity, Settings, and Aliases.
+ * It is opened by setting showConfig = true on the app-shell and renders
+ * inside an lv-modal with the title "Git Configuration".
  */
 
-test.describe('Git Config Dialog', () => {
+/** Open the config dialog via the command palette and wait for it to appear */
+async function openConfigDialog(page: import('@playwright/test').Page): Promise<void> {
+  await openViaCommandPalette(page, 'Git Configuration');
+  await page.locator('lv-config-dialog[open]').waitFor({ state: 'attached', timeout: 5000 });
+}
+
+// --------------------------------------------------------------------------
+// Identity Tab
+// --------------------------------------------------------------------------
+test.describe('Config Dialog - Identity Tab', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
-
-        if (command === 'get_config') {
-          return {
-            'user.name': 'Test User',
-            'user.email': 'test@example.com',
-            'core.autocrlf': 'input',
-            'push.default': 'current',
-          };
-        }
-
-        if (command === 'set_config') {
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_user_identity: {
+        name: 'Test User',
+        email: 'test@example.com',
+        nameIsGlobal: false,
+        emailIsGlobal: true,
+      },
+      get_common_settings: [
+        { key: 'core.autocrlf', value: 'input', scope: 'local' },
+        { key: 'push.default', value: 'current', scope: 'global' },
+      ],
+      get_aliases: [
+        { name: 'co', command: 'checkout', isGlobal: true },
+        { name: 'st', command: 'status', isGlobal: false },
+      ],
+      set_user_identity: null,
     });
+
+    await openConfigDialog(page);
   });
 
-  test('should display config dialog', async ({ page }) => {
-    const configDialog = page.locator('lv-config-dialog');
-    const count = await configDialog.count();
-    expect(count).toBeGreaterThanOrEqual(0);
+  test('should display the dialog with Identity tab active by default', async ({ page }) => {
+    await expect(page.locator('lv-config-dialog[open]')).toBeVisible();
+    await expect(page.locator('lv-config-dialog .tab.active')).toHaveText('Identity');
   });
 
-  test('should show config entries', async ({ page }) => {
-    const configDialog = page.locator('lv-config-dialog');
-
-    if (await configDialog.isVisible()) {
-      const configEntries = page.locator('lv-config-dialog .config-entry, lv-config-dialog .config-row');
-      const count = await configEntries.count();
-      expect(count).toBeGreaterThan(0);
-    }
+  test('should show Name and Email form fields populated from backend', async ({ page }) => {
+    const inputs = page.locator('lv-config-dialog .form-group input');
+    await expect(inputs.nth(0)).toHaveValue('Test User');
+    await expect(inputs.nth(1)).toHaveValue('test@example.com');
   });
 
-  test('should allow editing config values', async ({ page }) => {
-    const configDialog = page.locator('lv-config-dialog');
-
-    if (await configDialog.isVisible()) {
-      const valueInput = page.locator('lv-config-dialog input').first();
-
-      if (await valueInput.isVisible()) {
-        await valueInput.fill('New Value');
-        await expect(valueInput).toHaveValue('New Value');
-      }
-    }
+  test('should show scope toggle with Repository and Global buttons', async ({ page }) => {
+    const scopeButtons = page.locator('lv-config-dialog .scope-btn');
+    await expect(scopeButtons).toContainText(['Repository', 'Global']);
   });
 
-  test('should have Save button', async ({ page }) => {
-    const configDialog = page.locator('lv-config-dialog');
-
-    if (await configDialog.isVisible()) {
-      const saveButton = page.locator('lv-config-dialog button', { hasText: /save/i });
-      await expect(saveButton).toBeVisible();
-    }
+  test('should show scope badge "from global" on email field', async ({ page }) => {
+    await expect(page.locator('lv-config-dialog .scope-badge', { hasText: 'from global' })).toBeVisible();
   });
 
-  test('should invoke set_config command on save', async ({ page }) => {
-    const configDialog = page.locator('lv-config-dialog');
+  test('should call set_user_identity when clicking Save', async ({ page }) => {
+    await page.locator('lv-config-dialog .form-group input').first().fill('New Name');
+    await page.locator('lv-config-dialog .btn-primary').click();
 
-    if (await configDialog.isVisible()) {
-      const saveButton = page.locator('lv-config-dialog button', { hasText: /save/i });
+    const commands = await findCommand(page, 'set_user_identity');
+    expect(commands.length).toBeGreaterThan(0);
+  });
 
-      if (await saveButton.isVisible()) {
-        await saveButton.click();
-
-        await page.waitForTimeout(100);
-
-        const commands = await page.evaluate(() => {
-          return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-            .__INVOKED_COMMANDS__;
-        });
-
-        const setConfigCommand = commands.find(c => c.command === 'set_config');
-        expect(setConfigCommand).toBeDefined();
-      }
-    }
+  test('should show error banner when save fails', async ({ page }) => {
+    await injectCommandError(page, 'set_user_identity', 'Permission denied');
+    await page.locator('lv-config-dialog .btn-primary').click();
+    await expect(page.locator('lv-config-dialog .error-banner')).toBeVisible();
   });
 });
 
-test.describe('Credentials Dialog', () => {
+// --------------------------------------------------------------------------
+// Settings Tab
+// --------------------------------------------------------------------------
+test.describe('Config Dialog - Settings Tab', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
-
-        if (command === 'get_credentials') {
-          return [
-            { host: 'github.com', username: 'testuser', hasPassword: true },
-            { host: 'gitlab.com', username: 'testuser2', hasPassword: true },
-          ];
-        }
-
-        if (command === 'save_credentials' || command === 'delete_credentials') {
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_user_identity: {
+        name: 'Test User',
+        email: 'test@example.com',
+        nameIsGlobal: false,
+        emailIsGlobal: false,
+      },
+      get_common_settings: [
+        { key: 'core.autocrlf', value: 'input', scope: 'local' },
+        { key: 'push.default', value: 'current', scope: 'global' },
+      ],
+      get_aliases: [],
+      set_config_value: null,
     });
+
+    await openConfigDialog(page);
+
+    await page.locator('lv-config-dialog .tab', { hasText: 'Settings' }).click();
+    await page.locator('lv-config-dialog .settings-list, lv-config-dialog .setting-item').first().waitFor({ state: 'visible' });
   });
 
-  test('should display credentials dialog', async ({ page }) => {
-    const credentialsDialog = page.locator('lv-credentials-dialog');
-    const count = await credentialsDialog.count();
-    expect(count).toBeGreaterThanOrEqual(0);
+  test('should display setting items loaded from backend', async ({ page }) => {
+    await expect(page.locator('lv-config-dialog .setting-item')).toHaveCount(2);
   });
 
-  test('should show stored credentials', async ({ page }) => {
-    const credentialsDialog = page.locator('lv-credentials-dialog');
+  test('each setting should show its key and scope badge', async ({ page }) => {
+    const items = page.locator('lv-config-dialog .setting-item');
 
-    if (await credentialsDialog.isVisible()) {
-      const credentialEntries = page.locator('lv-credentials-dialog .credential-entry, lv-credentials-dialog .credential-row');
-      const count = await credentialEntries.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
+    await expect(items.nth(0).locator('.setting-key')).toHaveText('core.autocrlf');
+    await expect(items.nth(0).locator('.scope-badge')).toHaveText('local');
+    await expect(items.nth(1).locator('.setting-key')).toHaveText('push.default');
+    await expect(items.nth(1).locator('.scope-badge')).toHaveText('global');
   });
 
-  test('should have Add Credential button', async ({ page }) => {
-    const credentialsDialog = page.locator('lv-credentials-dialog');
+  test('changing a setting value should call set_config_value', async ({ page }) => {
+    const input = page.locator('lv-config-dialog .setting-value input').first();
+    await input.fill('true');
+    await input.dispatchEvent('change');
 
-    if (await credentialsDialog.isVisible()) {
-      const addButton = page.locator('lv-credentials-dialog button', { hasText: /add/i });
-      await expect(addButton).toBeVisible();
-    }
+    const commands = await findCommand(page, 'set_config_value');
+    expect(commands.length).toBeGreaterThan(0);
   });
 
-  test('should show form fields for new credential', async ({ page }) => {
-    const credentialsDialog = page.locator('lv-credentials-dialog');
+  test('should show error banner when setting save fails', async ({ page }) => {
+    await injectCommandError(page, 'set_config_value', 'Failed to write config');
 
-    if (await credentialsDialog.isVisible()) {
-      const hostInput = page.locator('lv-credentials-dialog input[name="host"], lv-credentials-dialog input[placeholder*="host"]');
-      const usernameInput = page.locator('lv-credentials-dialog input[name="username"], lv-credentials-dialog input[placeholder*="username"]');
-      const passwordInput = page.locator('lv-credentials-dialog input[type="password"]');
+    const input = page.locator('lv-config-dialog .setting-value input').first();
+    await input.fill('true');
+    await input.dispatchEvent('change');
 
-      // At least some of these should exist
-      const hostCount = await hostInput.count();
-      const usernameCount = await usernameInput.count();
-      const passwordCount = await passwordInput.count();
-
-      expect(hostCount + usernameCount + passwordCount).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  test('should allow deleting credentials', async ({ page }) => {
-    const credentialsDialog = page.locator('lv-credentials-dialog');
-
-    if (await credentialsDialog.isVisible()) {
-      const deleteButton = page.locator('lv-credentials-dialog button', { hasText: /delete|remove/i }).first();
-
-      if (await deleteButton.isVisible()) {
-        await deleteButton.click();
-
-        // May show confirmation
-        const confirmButton = page.locator('button', { hasText: /confirm|yes|ok/i });
-        if (await confirmButton.isVisible()) {
-          await confirmButton.click();
-        }
-
-        await page.waitForTimeout(100);
-
-        const commands = await page.evaluate(() => {
-          return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-            .__INVOKED_COMMANDS__;
-        });
-
-        const deleteCommand = commands.find(c => c.command === 'delete_credentials');
-        expect(deleteCommand).toBeDefined();
-      }
-    }
+    await expect(page.locator('lv-config-dialog .error-banner')).toBeVisible();
   });
 });
 
-test.describe('GPG Dialog', () => {
+// --------------------------------------------------------------------------
+// Settings Tab - Empty State
+// --------------------------------------------------------------------------
+test.describe('Config Dialog - Settings Tab Empty State', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
-
-        if (command === 'get_gpg_keys') {
-          return [
-            { id: 'ABC123', email: 'test@example.com', name: 'Test User', expires: null },
-            { id: 'DEF456', email: 'other@example.com', name: 'Other User', expires: Date.now() / 1000 + 86400 * 365 },
-          ];
-        }
-
-        if (command === 'set_signing_key') {
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_user_identity: { name: '', email: '', nameIsGlobal: false, emailIsGlobal: false },
+      get_common_settings: [],
+      get_aliases: [],
     });
+
+    await openConfigDialog(page);
+
+    await page.locator('lv-config-dialog .tab', { hasText: 'Settings' }).click();
+    await page.locator('lv-config-dialog .empty-state, lv-config-dialog .settings-list').first().waitFor({ state: 'visible' });
   });
 
-  test('should display GPG dialog', async ({ page }) => {
-    const gpgDialog = page.locator('lv-gpg-dialog');
-    const count = await gpgDialog.count();
-    expect(count).toBeGreaterThanOrEqual(0);
-  });
-
-  test('should show available GPG keys', async ({ page }) => {
-    const gpgDialog = page.locator('lv-gpg-dialog');
-
-    if (await gpgDialog.isVisible()) {
-      const keyEntries = page.locator('lv-gpg-dialog .key-entry, lv-gpg-dialog .gpg-key');
-      const count = await keyEntries.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  test('should allow selecting a signing key', async ({ page }) => {
-    const gpgDialog = page.locator('lv-gpg-dialog');
-
-    if (await gpgDialog.isVisible()) {
-      const keySelect = page.locator('lv-gpg-dialog select, lv-gpg-dialog input[type="radio"]').first();
-
-      if (await keySelect.isVisible()) {
-        await keySelect.click();
-        expect(true).toBe(true);
-      }
-    }
-  });
-
-  test('should have toggle for commit signing', async ({ page }) => {
-    const gpgDialog = page.locator('lv-gpg-dialog');
-
-    if (await gpgDialog.isVisible()) {
-      const signingToggle = page.locator('lv-gpg-dialog input[type="checkbox"], lv-gpg-dialog .toggle');
-
-      if (await signingToggle.first().isVisible()) {
-        await expect(signingToggle.first()).toBeVisible();
-      }
-    }
+  test('should show empty state when no settings configured', async ({ page }) => {
+    await expect(page.locator('lv-config-dialog .empty-state', { hasText: 'No common settings' })).toBeVisible();
   });
 });
 
-test.describe('SSH Dialog', () => {
+// --------------------------------------------------------------------------
+// Aliases Tab
+// --------------------------------------------------------------------------
+test.describe('Config Dialog - Aliases Tab', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
-
-        if (command === 'get_ssh_keys') {
-          return [
-            { path: '~/.ssh/id_rsa', type: 'RSA', bits: 4096 },
-            { path: '~/.ssh/id_ed25519', type: 'ED25519', bits: 256 },
-          ];
-        }
-
-        if (command === 'generate_ssh_key' || command === 'set_ssh_key') {
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_user_identity: { name: 'Test User', email: 'test@example.com', nameIsGlobal: false, emailIsGlobal: false },
+      get_common_settings: [],
+      get_aliases: [
+        { name: 'co', command: 'checkout', isGlobal: true },
+        { name: 'st', command: 'status', isGlobal: false },
+      ],
+      set_alias: null,
+      delete_alias: null,
     });
+
+    await openConfigDialog(page);
+
+    await page.locator('lv-config-dialog .tab', { hasText: 'Aliases' }).click();
+    await page.locator('lv-config-dialog .alias-list, lv-config-dialog .alias-item').first().waitFor({ state: 'visible' });
   });
 
-  test('should display SSH dialog', async ({ page }) => {
-    const sshDialog = page.locator('lv-ssh-dialog');
-    const count = await sshDialog.count();
-    expect(count).toBeGreaterThanOrEqual(0);
+  test('should display existing aliases', async ({ page }) => {
+    await expect(page.locator('lv-config-dialog .alias-item')).toHaveCount(2);
   });
 
-  test('should show available SSH keys', async ({ page }) => {
-    const sshDialog = page.locator('lv-ssh-dialog');
+  test('each alias should show name, command, and scope badge', async ({ page }) => {
+    const items = page.locator('lv-config-dialog .alias-item');
 
-    if (await sshDialog.isVisible()) {
-      const keyEntries = page.locator('lv-ssh-dialog .key-entry, lv-ssh-dialog .ssh-key');
-      const count = await keyEntries.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
+    await expect(items.nth(0).locator('.alias-name')).toContainText('co');
+    await expect(items.nth(0).locator('.alias-name')).toContainText('global');
+    await expect(items.nth(0).locator('.alias-command')).toHaveText('checkout');
+    await expect(items.nth(1).locator('.alias-name')).toContainText('st');
+    await expect(items.nth(1).locator('.alias-command')).toHaveText('status');
   });
 
-  test('should have Generate Key button', async ({ page }) => {
-    const sshDialog = page.locator('lv-ssh-dialog');
-
-    if (await sshDialog.isVisible()) {
-      const generateButton = page.locator('lv-ssh-dialog button', { hasText: /generate/i });
-      await expect(generateButton).toBeVisible();
-    }
+  test('should have Add New Alias form with name and command inputs', async ({ page }) => {
+    const formInputs = page.locator('lv-config-dialog .add-alias-form input');
+    await expect(formInputs).toHaveCount(2);
   });
 
-  test('should allow selecting an SSH key', async ({ page }) => {
-    const sshDialog = page.locator('lv-ssh-dialog');
+  test('Add button should be disabled when inputs are empty', async ({ page }) => {
+    await expect(page.locator('lv-config-dialog .add-alias-form .btn-primary')).toBeDisabled();
+  });
 
-    if (await sshDialog.isVisible()) {
-      const keySelect = page.locator('lv-ssh-dialog select, lv-ssh-dialog input[type="radio"]').first();
+  test('filling alias name and command then clicking Add should call set_alias', async ({ page }) => {
+    const inputs = page.locator('lv-config-dialog .inline-form input');
+    await inputs.nth(0).fill('br');
+    await inputs.nth(1).fill('branch');
 
-      if (await keySelect.isVisible()) {
-        await keySelect.click();
-        expect(true).toBe(true);
-      }
-    }
+    await page.locator('lv-config-dialog .add-alias-form .btn-primary').click();
+
+    const commands = await findCommand(page, 'set_alias');
+    expect(commands.length).toBeGreaterThan(0);
+  });
+
+  test('clicking delete button on alias should call delete_alias', async ({ page }) => {
+    await autoConfirmDialogs(page);
+
+    await page.locator('lv-config-dialog .btn-icon.danger').first().click();
+
+    const commands = await findCommand(page, 'delete_alias');
+    expect(commands.length).toBeGreaterThan(0);
+  });
+
+  test('should show error banner when adding alias fails', async ({ page }) => {
+    await injectCommandError(page, 'set_alias', 'Alias already exists');
+
+    const inputs = page.locator('lv-config-dialog .inline-form input');
+    await inputs.nth(0).fill('co');
+    await inputs.nth(1).fill('checkout');
+
+    await page.locator('lv-config-dialog .add-alias-form .btn-primary').click();
+
+    await expect(page.locator('lv-config-dialog .error-banner')).toBeVisible();
   });
 });
 
-test.describe('Hooks Dialog', () => {
+// --------------------------------------------------------------------------
+// Aliases Tab - Empty State
+// --------------------------------------------------------------------------
+test.describe('Config Dialog - Aliases Tab Empty State', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
-
-        if (command === 'get_hooks') {
-          return [
-            { name: 'pre-commit', enabled: true, content: '#!/bin/sh\nnpm test' },
-            { name: 'commit-msg', enabled: false, content: '' },
-            { name: 'pre-push', enabled: true, content: '#!/bin/sh\nnpm run lint' },
-          ];
-        }
-
-        if (command === 'save_hook' || command === 'enable_hook' || command === 'disable_hook') {
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_user_identity: { name: '', email: '', nameIsGlobal: false, emailIsGlobal: false },
+      get_common_settings: [],
+      get_aliases: [],
     });
+
+    await openConfigDialog(page);
+
+    await page.locator('lv-config-dialog .tab', { hasText: 'Aliases' }).click();
+    await page.locator('lv-config-dialog .empty-state, lv-config-dialog .add-alias-form').first().waitFor({ state: 'visible' });
   });
 
-  test('should display hooks dialog', async ({ page }) => {
-    const hooksDialog = page.locator('lv-hooks-dialog');
-    const count = await hooksDialog.count();
-    expect(count).toBeGreaterThanOrEqual(0);
-  });
-
-  test('should show available hooks', async ({ page }) => {
-    const hooksDialog = page.locator('lv-hooks-dialog');
-
-    if (await hooksDialog.isVisible()) {
-      const hookEntries = page.locator('lv-hooks-dialog .hook-entry, lv-hooks-dialog .hook-item');
-      const count = await hookEntries.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  test('should allow enabling/disabling hooks', async ({ page }) => {
-    const hooksDialog = page.locator('lv-hooks-dialog');
-
-    if (await hooksDialog.isVisible()) {
-      const toggles = page.locator('lv-hooks-dialog input[type="checkbox"], lv-hooks-dialog .toggle');
-
-      if (await toggles.first().isVisible()) {
-        await toggles.first().click();
-        expect(true).toBe(true);
-      }
-    }
-  });
-
-  test('should allow editing hook content', async ({ page }) => {
-    const hooksDialog = page.locator('lv-hooks-dialog');
-
-    if (await hooksDialog.isVisible()) {
-      const editor = page.locator('lv-hooks-dialog textarea, lv-hooks-dialog .hook-editor');
-
-      if (await editor.first().isVisible()) {
-        await editor.first().fill('#!/bin/sh\necho "test"');
-        expect(true).toBe(true);
-      }
-    }
+  test('should show empty state when no aliases configured', async ({ page }) => {
+    await expect(page.locator('lv-config-dialog .empty-state', { hasText: 'No aliases' })).toBeVisible();
   });
 });
 
-test.describe('LFS Dialog', () => {
+// --------------------------------------------------------------------------
+// Tab Navigation
+// --------------------------------------------------------------------------
+test.describe('Config Dialog - Tab Navigation', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
+    await startCommandCaptureWithMocks(page, {
+      get_user_identity: { name: 'Test User', email: 'test@example.com', nameIsGlobal: false, emailIsGlobal: false },
+      get_common_settings: [
+        { key: 'core.autocrlf', value: 'input', scope: 'local' },
+      ],
+      get_aliases: [
+        { name: 'co', command: 'checkout', isGlobal: true },
+      ],
+    });
+
+    await openConfigDialog(page);
+  });
+
+  test('should have Identity, Settings, and Aliases tabs', async ({ page }) => {
+    const tabs = page.locator('lv-config-dialog .tab');
+    await expect(tabs).toHaveCount(3);
+    await expect(tabs.nth(0)).toHaveText('Identity');
+    await expect(tabs.nth(1)).toHaveText('Settings');
+    await expect(tabs.nth(2)).toHaveText('Aliases');
+  });
+
+  test('clicking Settings tab should show settings list', async ({ page }) => {
+    await page.locator('lv-config-dialog .tab', { hasText: 'Settings' }).click();
+    await expect(page.locator('lv-config-dialog .settings-list')).toBeVisible();
+  });
+
+  test('clicking Aliases tab should show alias list', async ({ page }) => {
+    await page.locator('lv-config-dialog .tab', { hasText: 'Aliases' }).click();
+    await expect(page.locator('lv-config-dialog .alias-list, lv-config-dialog .add-alias-form').first()).toBeVisible();
+  });
+
+  test('dialog should close when modal close event fires', async ({ page }) => {
     await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
+      const el = document.querySelector('lv-config-dialog');
+      if (el) {
+        el.dispatchEvent(new CustomEvent('close', { bubbles: true }));
+      }
+    });
 
-      (window as unknown as {
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
+    const isOpen = await page.evaluate(() => {
+      const appShell = document.querySelector('app-shell') as HTMLElement & { showConfig: boolean };
+      return appShell?.showConfig ?? false;
+    });
+    expect(isOpen).toBe(false);
+  });
+});
 
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
+// --------------------------------------------------------------------------
+// Loading State
+// --------------------------------------------------------------------------
+test.describe('Config Dialog - Loading State', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
 
-        if (command === 'get_lfs_status') {
-          return {
-            installed: true,
-            trackedPatterns: ['*.psd', '*.zip', '*.bin'],
-            files: [
-              { path: 'assets/image.psd', size: 1024000, isPointer: true },
-              { path: 'data/archive.zip', size: 5120000, isPointer: true },
-            ],
-          };
-        }
-
-        if (command === 'lfs_track' || command === 'lfs_untrack' || command === 'lfs_fetch' || command === 'lfs_pull') {
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_user_identity: { name: 'Test', email: 'test@test.com', nameIsGlobal: false, emailIsGlobal: false },
+      get_common_settings: [],
+      get_aliases: [],
     });
   });
 
-  test('should display LFS dialog', async ({ page }) => {
-    const lfsDialog = page.locator('lv-lfs-dialog');
-    const count = await lfsDialog.count();
-    expect(count).toBeGreaterThanOrEqual(0);
-  });
+  test('should call get_user_identity, get_common_settings, and get_aliases on open', async ({ page }) => {
+    await openConfigDialog(page);
 
-  test('should show LFS installation status', async ({ page }) => {
-    const lfsDialog = page.locator('lv-lfs-dialog');
+    const identityCmds = await findCommand(page, 'get_user_identity');
+    const settingsCmds = await findCommand(page, 'get_common_settings');
+    const aliasesCmds = await findCommand(page, 'get_aliases');
 
-    if (await lfsDialog.isVisible()) {
-      const statusElement = page.locator('lv-lfs-dialog .lfs-status, lv-lfs-dialog :text("installed")');
-      const count = await statusElement.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  test('should show tracked patterns', async ({ page }) => {
-    const lfsDialog = page.locator('lv-lfs-dialog');
-
-    if (await lfsDialog.isVisible()) {
-      const patterns = page.locator('lv-lfs-dialog .pattern, lv-lfs-dialog .tracked-pattern');
-      const count = await patterns.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  test('should have Track Pattern button', async ({ page }) => {
-    const lfsDialog = page.locator('lv-lfs-dialog');
-
-    if (await lfsDialog.isVisible()) {
-      const trackButton = page.locator('lv-lfs-dialog button', { hasText: /track/i });
-      await expect(trackButton.first()).toBeVisible();
-    }
-  });
-
-  test('should allow adding new pattern', async ({ page }) => {
-    const lfsDialog = page.locator('lv-lfs-dialog');
-
-    if (await lfsDialog.isVisible()) {
-      const patternInput = page.locator('lv-lfs-dialog input[placeholder*="pattern"], lv-lfs-dialog input[name="pattern"]');
-
-      if (await patternInput.isVisible()) {
-        await patternInput.fill('*.png');
-        expect(true).toBe(true);
-      }
-    }
-  });
-
-  test('should show LFS files', async ({ page }) => {
-    const lfsDialog = page.locator('lv-lfs-dialog');
-
-    if (await lfsDialog.isVisible()) {
-      const fileEntries = page.locator('lv-lfs-dialog .lfs-file, lv-lfs-dialog .file-entry');
-      const count = await fileEntries.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  test('should have Fetch/Pull buttons', async ({ page }) => {
-    const lfsDialog = page.locator('lv-lfs-dialog');
-
-    if (await lfsDialog.isVisible()) {
-      const fetchButton = page.locator('lv-lfs-dialog button', { hasText: /fetch/i });
-      const pullButton = page.locator('lv-lfs-dialog button', { hasText: /pull/i });
-
-      // At least one should exist
-      const fetchCount = await fetchButton.count();
-      const pullCount = await pullButton.count();
-      expect(fetchCount + pullCount).toBeGreaterThanOrEqual(0);
-    }
+    expect(identityCmds.length).toBeGreaterThan(0);
+    expect(settingsCmds.length).toBeGreaterThan(0);
+    expect(aliasesCmds.length).toBeGreaterThan(0);
   });
 });

@@ -1,327 +1,292 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  startCommandCapture,
+  findCommand,
+  injectCommandError,
+  openViaCommandPalette,
+  waitForCommand,
+} from '../fixtures/test-helpers';
 
 /**
- * E2E tests for Create Tag Dialog
- * Tests tag creation with annotated/lightweight options
+ * Open the Create Tag dialog via the command palette (no targetRef).
+ * Returns a locator scoped to the dialog instance that has an open modal.
  */
+async function openCreateTagDialog(page: import('@playwright/test').Page) {
+  await openViaCommandPalette(page, 'Create tag');
+  const modal = page.locator('lv-create-tag-dialog lv-modal[open]');
+  await modal.waitFor({ state: 'visible' });
+  // Scope to the lv-create-tag-dialog that has the open modal
+  return page.locator('lv-create-tag-dialog').filter({ has: page.locator('lv-modal[open]') });
+}
+
+/**
+ * Open the Create Tag dialog with a specific target ref pre-filled.
+ * Uses Playwright's locator.evaluate() to call the component's open() method
+ * on the app-shell's dialog instance.
+ */
+async function openCreateTagDialogWithRef(
+  page: import('@playwright/test').Page,
+  targetRef: string
+) {
+  // The app-shell's lv-create-tag-dialog is the first one; use .first() to target it
+  const dialogEl = page.locator('lv-create-tag-dialog').first();
+  await dialogEl.evaluate(
+    (el, ref) => (el as HTMLElement & { open: (t?: string) => void }).open(ref),
+    targetRef
+  );
+  const modal = page.locator('lv-create-tag-dialog lv-modal[open]');
+  await modal.waitFor({ state: 'visible' });
+  return page.locator('lv-create-tag-dialog').filter({ has: page.locator('lv-modal[open]') });
+}
+
 test.describe('Create Tag Dialog', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+  });
 
-    // Mock create_tag command
+  test('dialog opens with name input and target ref fields', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
+
+    const nameInput = dialog.locator('#tag-name-input');
+    await expect(nameInput).toBeVisible();
+
+    const targetInput = dialog.locator('#target-input');
+    await expect(targetInput).toBeVisible();
+  });
+
+  test('dialog opens with target ref pre-filled when provided', async ({ page }) => {
+    const dialog = await openCreateTagDialogWithRef(page, 'abc123def456');
+
+    const targetInput = dialog.locator('#target-input');
+    await expect(targetInput).toHaveValue('abc123def456');
+  });
+
+  test('annotated tag is enabled by default and message textarea is visible', async ({
+    page,
+  }) => {
+    const dialog = await openCreateTagDialog(page);
+
+    const annotatedCheckbox = dialog.locator('.toggle-switch input[type="checkbox"]');
+    await expect(annotatedCheckbox).toBeChecked();
+
+    const messageTextarea = dialog.locator('#message-input');
+    await expect(messageTextarea).toBeVisible();
+  });
+
+  test('disabling annotated tag hides message textarea', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
+
+    // Click the visible toggle slider to uncheck (the hidden input has zero dimensions)
+    const toggleSlider = dialog.locator('.toggle-slider');
+    await toggleSlider.click();
+
+    const messageTextarea = dialog.locator('#message-input');
+    await expect(messageTextarea).not.toBeVisible();
+  });
+
+  test('re-enabling annotated tag shows message textarea again', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
+    const toggleSlider = dialog.locator('.toggle-slider');
+
+    // Click to uncheck (disable annotated)
+    await toggleSlider.click();
+    await expect(dialog.locator('#message-input')).not.toBeVisible();
+
+    // Click again to re-check (enable annotated)
+    await toggleSlider.click();
+    await expect(dialog.locator('#message-input')).toBeVisible();
+  });
+
+  test('Create Tag button is disabled when name is empty', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
+    const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+
+    await expect(createBtn).toBeDisabled();
+  });
+
+  test('Create Tag button is disabled when annotated but message is empty', async ({
+    page,
+  }) => {
+    const dialog = await openCreateTagDialog(page);
+
+    const nameInput = dialog.locator('#tag-name-input');
+    await nameInput.fill('v1.0.0');
+
+    const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await expect(createBtn).toBeDisabled();
+  });
+
+  test('Create Tag button becomes enabled when form is valid', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
+
+    const nameInput = dialog.locator('#tag-name-input');
+    await nameInput.fill('v2.0.0');
+
+    const messageTextarea = dialog.locator('#message-input');
+    await messageTextarea.fill('Release version 2.0.0');
+
+    const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await expect(createBtn).toBeEnabled();
+  });
+
+  test('lightweight tag (annotated off) only needs name to be valid', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
+
+    // Click the visible toggle slider to uncheck (disable annotated)
+    const toggleSlider = dialog.locator('.toggle-slider');
+    await toggleSlider.click();
+
+    const nameInput = dialog.locator('#tag-name-input');
+    await nameInput.fill('v2.0.0');
+
+    const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await expect(createBtn).toBeEnabled();
+  });
+
+  test('fill form and create calls create_tag with correct args', async ({ page }) => {
+    await startCommandCapture(page);
+    const dialog = await openCreateTagDialog(page);
+
+    const nameInput = dialog.locator('#tag-name-input');
+    await nameInput.fill('v3.0.0');
+
+    const targetInput = dialog.locator('#target-input');
+    await targetInput.fill('abc123');
+
+    const messageTextarea = dialog.locator('#message-input');
+    await messageTextarea.fill('Release v3.0.0');
+
+    const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await createBtn.click();
+
+    await waitForCommand(page, 'create_tag');
+
+    const commands = await findCommand(page, 'create_tag');
+    expect(commands.length).toBeGreaterThanOrEqual(1);
+
+    const args = commands[0].args as {
+      name?: string;
+      target?: string;
+      message?: string;
+      path?: string;
+    };
+    expect(args.name).toBe('v3.0.0');
+    expect(args.target).toBe('abc123');
+    expect(args.message).toBe('Release v3.0.0');
+
+    // Verify the dialog closes after successful tag creation
+    await expect(
+      page.locator('lv-create-tag-dialog lv-modal[open]')
+    ).not.toBeVisible({ timeout: 3000 });
+  });
+
+  test('tag-created event fires after successful creation', async ({ page }) => {
+    // Set up event listener before opening dialog
     await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'create_tag') {
-          return { name: 'v1.0.0', oid: 'abc123' };
-        }
-
-        return originalInvoke(command, args);
-      };
+      (window as any).__TAG_CREATED_RECEIVED__ = false;
+      document.addEventListener(
+        'tag-created',
+        () => {
+          (window as any).__TAG_CREATED_RECEIVED__ = true;
+        },
+        { once: true }
+      );
     });
+
+    const dialog = await openCreateTagDialog(page);
+
+    const nameInput = dialog.locator('#tag-name-input');
+    await nameInput.fill('v4.0.0');
+
+    const messageTextarea = dialog.locator('#message-input');
+    await messageTextarea.fill('Release v4.0.0');
+
+    const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await createBtn.click();
+
+    await page.waitForFunction(
+      () => (window as any).__TAG_CREATED_RECEIVED__ === true,
+      { timeout: 5000 }
+    );
   });
 
-  test('should open create tag dialog from toolbar or menu', async ({ page }) => {
-    // Try to open via command palette or menu
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('dialog closes after successful tag creation', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
+    const nameInput = dialog.locator('#tag-name-input');
+    await nameInput.fill('v5.0.0');
 
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
+    const messageTextarea = dialog.locator('#message-input');
+    await messageTextarea.fill('Release v5.0.0');
 
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        await expect(tagDialog).toBeVisible({ timeout: 3000 });
-      }
-    }
+    const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await createBtn.click();
+
+    const modal = page.locator('lv-create-tag-dialog lv-modal[open]');
+    await expect(modal).not.toBeVisible();
   });
 
-  test('should have tag name input field', async ({ page }) => {
-    // Open dialog via command palette
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('cancel closes dialog without creating tag', async ({ page }) => {
+    await startCommandCapture(page);
+    const dialog = await openCreateTagDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
+    const nameInput = dialog.locator('#tag-name-input');
+    await nameInput.fill('v-canceled');
 
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
+    const cancelBtn = dialog.locator('button.btn-secondary', { hasText: /Cancel/ });
+    await cancelBtn.click();
 
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          const nameInput = tagDialog.locator('input#tag-name-input, input[placeholder*="v1.0"]');
-          await expect(nameInput).toBeVisible();
-        }
-      }
-    }
+    const modal = page.locator('lv-create-tag-dialog lv-modal[open]');
+    await expect(modal).not.toBeVisible();
+
+    const commands = await findCommand(page, 'create_tag');
+    expect(commands.length).toBe(0);
   });
 
-  test('should have target ref input field', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('error from create_tag shows error message in dialog', async ({ page }) => {
+    await injectCommandError(page, 'create_tag', 'Tag already exists: v1.0.0');
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
+    const dialog = await openCreateTagDialog(page);
 
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
+    const nameInput = dialog.locator('#tag-name-input');
+    await nameInput.fill('v1.0.0');
 
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          const targetInput = tagDialog.locator('input#target-input, input[placeholder*="HEAD"]');
-          await expect(targetInput).toBeVisible();
-        }
-      }
-    }
+    const messageTextarea = dialog.locator('#message-input');
+    await messageTextarea.fill('Duplicate tag');
+
+    const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await createBtn.click();
+
+    const errorMessage = dialog.locator('.error-message');
+    await expect(errorMessage).toBeVisible();
+    await expect(errorMessage).toContainText('Tag already exists: v1.0.0');
+
+    const modal = page.locator('lv-create-tag-dialog lv-modal[open]');
+    await expect(modal).toBeVisible();
   });
 
-  test('should have annotated tag toggle', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
-
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
-
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          const annotatedToggle = tagDialog.locator('input[type="checkbox"], .toggle, label', { hasText: /annotated/i });
-          const toggleCount = await annotatedToggle.count();
-          expect(toggleCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+  test('semantic versioning hint is displayed', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
+    const hint = dialog.locator('.field-hint', { hasText: /semantic versioning/ });
+    await expect(hint).toBeVisible();
   });
 
-  test('should show message textarea when annotated is enabled', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('tag name starting with dash shows validation error', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
+    const nameInput = dialog.locator('#tag-name-input');
+    await nameInput.fill('-invalid-tag');
 
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
+    // Click the visible toggle slider to uncheck (disable annotated)
+    const toggleSlider = dialog.locator('.toggle-slider');
+    await toggleSlider.click();
 
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          // By default annotated is enabled, so message textarea should be visible
-          const messageTextarea = tagDialog.locator('textarea#message-input, textarea');
-          const textareaCount = await messageTextarea.count();
-          expect(textareaCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
-  });
+    const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await createBtn.click();
 
-  test('should have Cancel and Create Tag buttons', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
-
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
-
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          const cancelButton = tagDialog.locator('button', { hasText: /cancel/i });
-          const createButton = tagDialog.locator('button', { hasText: /create.*tag/i });
-
-          await expect(cancelButton).toBeVisible();
-          await expect(createButton).toBeVisible();
-        }
-      }
-    }
-  });
-
-  test('Create Tag button should be disabled when name is empty', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
-
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
-
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          const createButton = tagDialog.locator('button', { hasText: /create.*tag/i });
-          const isDisabled = await createButton.isDisabled().catch(() => false);
-          expect(typeof isDisabled).toBe('boolean');
-        }
-      }
-    }
-  });
-
-  test('should close dialog on Cancel click', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
-
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
-
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          const cancelButton = tagDialog.locator('button', { hasText: /cancel/i });
-          await cancelButton.click();
-
-          await expect(tagDialog).not.toBeVisible();
-        }
-      }
-    }
-  });
-
-  test('should create tag when form is valid', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
-
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
-
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          const nameInput = tagDialog.locator('input#tag-name-input, input[placeholder*="v1.0"]').first();
-          await nameInput.fill('v1.0.0');
-
-          const messageTextarea = tagDialog.locator('textarea').first();
-          if (await messageTextarea.isVisible()) {
-            await messageTextarea.fill('Release version 1.0.0');
-          }
-
-          const createButton = tagDialog.locator('button', { hasText: /create.*tag/i });
-          await createButton.click();
-
-          // Dialog should close after successful creation
-          await page.waitForTimeout(500);
-        }
-      }
-    }
-  });
-
-  test('should show hint about semantic versioning', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
-
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
-
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          const hint = tagDialog.locator('.hint, .help-text, small', { hasText: /semantic|version/i });
-          const hintCount = await hint.count();
-          expect(hintCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
-  });
-});
-
-test.describe('Create Tag Dialog - Event Propagation', () => {
-  test.beforeEach(async ({ page }) => {
-    await setupOpenRepository(page);
-
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'create_tag') {
-          return { name: 'v1.0.0', oid: 'abc123' };
-        }
-        return originalInvoke(command, args);
-      };
-    });
-  });
-
-  test('should dispatch repository-changed event after creating tag', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('create tag');
-      await page.waitForTimeout(200);
-
-      const tagOption = page.locator('lv-command-palette .command-item', { hasText: /create.*tag/i });
-      if (await tagOption.isVisible()) {
-        await tagOption.click();
-
-        const tagDialog = page.locator('lv-create-tag-dialog');
-        if (await tagDialog.isVisible()) {
-          const eventPromise = page.evaluate(() => {
-            return new Promise<boolean>((resolve) => {
-              document.addEventListener('repository-changed', () => {
-                resolve(true);
-              }, { once: true });
-              setTimeout(() => resolve(false), 3000);
-            });
-          });
-
-          const nameInput = tagDialog.locator('input#tag-name-input, input[placeholder*="v1.0"]').first();
-          await nameInput.fill('v1.0.0');
-
-          const createButton = tagDialog.locator('button', { hasText: /create.*tag/i });
-          await createButton.click();
-
-          const eventReceived = await eventPromise;
-          expect(eventReceived).toBe(true);
-        }
-      }
-    }
+    const errorMessage = dialog.locator('.error-message');
+    await expect(errorMessage).toBeVisible();
+    await expect(errorMessage).toContainText('cannot start with');
   });
 });

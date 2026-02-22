@@ -1,11 +1,15 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
 import { LeftPanelPage } from '../pages/panels.page';
+import {
+  startCommandCaptureWithMocks,
+  startCommandCapture,
+  findCommand,
+  injectCommandError,
+  injectCommandMock,
+  waitForRepositoryChanged,
+} from '../fixtures/test-helpers';
 
-/**
- * E2E tests for Stash List Context Menu
- * Tests apply, pop, and drop stash operations via context menu
- */
 test.describe('Stash List Context Menu', () => {
   let leftPanel: LeftPanelPage;
 
@@ -20,50 +24,25 @@ test.describe('Stash List Context Menu', () => {
       ],
     });
 
-    // Add command tracking and auto-confirm dialogs
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
-
-        // Auto-confirm dialogs
-        if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|ask') {
-          return true;
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      'plugin:dialog|confirm': true,
+      'plugin:dialog|ask': true,
     });
   });
 
   test('should display stash items', async ({ page }) => {
-    // Expand stashes section
     await leftPanel.expandStashes();
 
-    // Should show 3 stash items
     const stashCount = await leftPanel.getStashCount();
     expect(stashCount).toBe(3);
   });
 
   test('should open context menu on right-click', async ({ page }) => {
-    // Expand stashes section
     await leftPanel.expandStashes();
 
-    // Right-click on first stash
     const firstStash = leftPanel.getStash(0);
     await firstStash.click({ button: 'right' });
 
-    // Context menu should appear
     const contextMenu = page.locator('.context-menu, .stash-context-menu');
     await expect(contextMenu).toBeVisible();
   });
@@ -105,10 +84,9 @@ test.describe('Stash List Context Menu', () => {
     await firstStash.click({ button: 'right' });
 
     const applyOption = page.locator('.context-menu-item, .menu-item', { hasText: /apply/i });
-    await applyOption.waitFor({ state: 'visible' });
+    await expect(applyOption).toBeVisible();
     await applyOption.click();
 
-    // Context menu should close
     const contextMenu = page.locator('.context-menu, .stash-context-menu');
     await expect(contextMenu).not.toBeVisible();
   });
@@ -120,18 +98,11 @@ test.describe('Stash List Context Menu', () => {
     await firstStash.click({ button: 'right' });
 
     const applyOption = page.locator('.context-menu-item, .menu-item', { hasText: /apply/i });
-    await applyOption.waitFor({ state: 'visible' });
+    await expect(applyOption).toBeVisible();
     await applyOption.click();
 
-    await page.waitForTimeout(100);
-
-    const commands = await page.evaluate(() => {
-      return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-        .__INVOKED_COMMANDS__;
-    });
-
-    const applyCommand = commands.find(c => c.command === 'apply_stash');
-    expect(applyCommand).toBeDefined();
+    const applyCommands = await findCommand(page, 'apply_stash');
+    expect(applyCommands.length).toBeGreaterThan(0);
   });
 
   test('should close context menu after clicking Pop', async ({ page }) => {
@@ -141,10 +112,9 @@ test.describe('Stash List Context Menu', () => {
     await firstStash.click({ button: 'right' });
 
     const popOption = page.locator('.context-menu-item, .menu-item', { hasText: /pop/i });
-    await popOption.waitFor({ state: 'visible' });
+    await expect(popOption).toBeVisible();
     await popOption.click();
 
-    // Context menu should close
     const contextMenu = page.locator('.context-menu, .stash-context-menu');
     await expect(contextMenu).not.toBeVisible();
   });
@@ -156,18 +126,14 @@ test.describe('Stash List Context Menu', () => {
     await firstStash.click({ button: 'right' });
 
     const popOption = page.locator('.context-menu-item, .menu-item', { hasText: /pop/i });
-    await popOption.waitFor({ state: 'visible' });
+    await expect(popOption).toBeVisible();
     await popOption.click();
 
-    await page.waitForTimeout(100);
+    const popCommands = await findCommand(page, 'pop_stash');
+    expect(popCommands.length).toBeGreaterThan(0);
 
-    const commands = await page.evaluate(() => {
-      return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-        .__INVOKED_COMMANDS__;
-    });
-
-    const popCommand = commands.find(c => c.command === 'pop_stash');
-    expect(popCommand).toBeDefined();
+    const stashCount = await leftPanel.getStashCount();
+    expect(stashCount).toBe(2);
   });
 
   test('should close context menu after clicking Drop', async ({ page }) => {
@@ -177,20 +143,9 @@ test.describe('Stash List Context Menu', () => {
     await firstStash.click({ button: 'right' });
 
     const dropOption = page.locator('.context-menu-item, .menu-item', { hasText: /drop|delete/i });
-    await dropOption.waitFor({ state: 'visible' });
+    await expect(dropOption).toBeVisible();
     await dropOption.click();
 
-    // May show confirmation dialog - look for it in a dialog/modal container
-    await page.waitForTimeout(100);
-    const confirmDialog = page.locator('.dialog, .modal, [role="dialog"]');
-    if (await confirmDialog.count() > 0) {
-      const confirmButton = confirmDialog.locator('button', { hasText: /confirm|yes|ok|drop/i }).first();
-      if (await confirmButton.isVisible()) {
-        await confirmButton.click();
-      }
-    }
-
-    // Context menu should close
     const contextMenu = page.locator('.context-menu, .stash-context-menu');
     await expect(contextMenu).not.toBeVisible();
   });
@@ -202,53 +157,29 @@ test.describe('Stash List Context Menu', () => {
     await firstStash.click({ button: 'right' });
 
     const dropOption = page.locator('.context-menu-item, .menu-item', { hasText: /drop|delete/i });
-    await dropOption.waitFor({ state: 'visible' });
-    // Use evaluate to click - context menu may extend outside viewport
-    await dropOption.evaluate((el: HTMLElement) => el.click());
+    await expect(dropOption).toBeVisible();
+    await dropOption.click();
 
-    // Handle potential confirmation dialog - look for it in a dialog/modal container
-    await page.waitForTimeout(100);
-    const confirmDialog = page.locator('.dialog, .modal, [role="dialog"]');
-    if (await confirmDialog.count() > 0) {
-      const confirmButton = confirmDialog.locator('button', { hasText: /confirm|yes|ok|drop/i }).first();
-      if (await confirmButton.isVisible()) {
-        await confirmButton.click();
-      }
-    }
+    const dropCommands = await findCommand(page, 'drop_stash');
+    expect(dropCommands.length).toBeGreaterThan(0);
 
-    await page.waitForTimeout(100);
-
-    const commands = await page.evaluate(() => {
-      return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-        .__INVOKED_COMMANDS__;
-    });
-
-    const dropCommand = commands.find(c => c.command === 'drop_stash');
-    expect(dropCommand).toBeDefined();
+    const stashCount = await leftPanel.getStashCount();
+    expect(stashCount).toBe(2);
   });
 
   test('should pass correct stash index to commands', async ({ page }) => {
     await leftPanel.expandStashes();
 
-    // Right-click on second stash (index 1)
     const secondStash = leftPanel.getStash(1);
     await secondStash.click({ button: 'right' });
 
     const applyOption = page.locator('.context-menu-item, .menu-item', { hasText: /apply/i });
-    await applyOption.waitFor({ state: 'visible' });
+    await expect(applyOption).toBeVisible();
     await applyOption.click();
 
-    await page.waitForTimeout(100);
-
-    const commands = await page.evaluate(() => {
-      return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-        .__INVOKED_COMMANDS__;
-    });
-
-    const applyCommand = commands.find(c => c.command === 'apply_stash');
-    expect(applyCommand).toBeDefined();
-    // Check that index 1 was passed
-    expect((applyCommand?.args as { index?: number })?.index).toBe(1);
+    const applyCommands = await findCommand(page, 'apply_stash');
+    expect(applyCommands.length).toBeGreaterThan(0);
+    expect((applyCommands[0]?.args as { index?: number })?.index).toBe(1);
   });
 });
 
@@ -264,29 +195,80 @@ test.describe('Stash Context Menu - Event Propagation', () => {
       ],
     });
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|ask') {
-          return true;
-        }
-        return originalInvoke(command, args);
-      };
+    await injectCommandMock(page, {
+      'plugin:dialog|confirm': true,
+      'plugin:dialog|ask': true,
     });
   });
 
   test('should dispatch repository-changed event after stash apply', async ({ page }) => {
-    const eventPromise = page.evaluate(() => {
-      return new Promise<boolean>((resolve) => {
-        document.addEventListener('repository-changed', () => {
-          resolve(true);
-        }, { once: true });
-        setTimeout(() => resolve(false), 3000);
+    await leftPanel.expandStashes();
+
+    const eventReceived = await waitForRepositoryChanged(page, async () => {
+      const stash = leftPanel.getStash(0);
+      await stash.click({ button: 'right' });
+
+      const applyOption = page.locator('.context-menu-item, .menu-item', { hasText: /apply/i });
+      await expect(applyOption).toBeVisible();
+      await applyOption.click();
+    });
+
+    expect(eventReceived).toBe(true);
+  });
+
+  test('should dispatch repository-changed event after stash pop', async ({ page }) => {
+    await leftPanel.expandStashes();
+
+    const eventReceived = await waitForRepositoryChanged(page, async () => {
+      const stash = leftPanel.getStash(0);
+      await stash.click({ button: 'right' });
+
+      const popOption = page.locator('.context-menu-item, .menu-item', { hasText: /pop/i });
+      await expect(popOption).toBeVisible();
+      await popOption.click();
+    });
+
+    expect(eventReceived).toBe(true);
+  });
+
+  test('should dispatch repository-changed event after stash drop', async ({ page }) => {
+    await leftPanel.expandStashes();
+
+    const eventReceived = await waitForRepositoryChanged(page, async () => {
+      const stash = leftPanel.getStash(0);
+      await stash.click({ button: 'right' });
+
+      const dropOption = page.locator('.context-menu-item, .menu-item', { hasText: /drop/i });
+      await expect(dropOption).toBeVisible();
+      await dropOption.click();
+    });
+
+    expect(eventReceived).toBe(true);
+  });
+});
+
+test.describe('Stash Context Menu - Error Handling', () => {
+  let leftPanel: LeftPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+
+    await setupOpenRepository(page, {
+      stashes: [
+        { index: 0, message: 'WIP on main: abc123 first stash', oid: 'stash1' },
+      ],
+    });
+  });
+
+  test('should show error toast when apply_stash fails', async ({ page }) => {
+    await injectCommandError(page, 'apply_stash', 'Apply failed: conflicts detected');
+
+    const toastPromise = page.evaluate(() => {
+      return new Promise<string>((resolve) => {
+        document.addEventListener('show-toast', ((e: CustomEvent) => {
+          resolve(e.detail.message || e.detail.toString());
+        }) as EventListener, { once: true });
+        setTimeout(() => resolve(''), 3000);
       });
     });
 
@@ -295,20 +277,22 @@ test.describe('Stash Context Menu - Event Propagation', () => {
     await stash.click({ button: 'right' });
 
     const applyOption = page.locator('.context-menu-item, .menu-item', { hasText: /apply/i });
-    await applyOption.waitFor({ state: 'visible' });
+    await expect(applyOption).toBeVisible();
     await applyOption.click();
 
-    const eventReceived = await eventPromise;
-    expect(eventReceived).toBe(true);
+    const toastMessage = await toastPromise;
+    expect(toastMessage).toContain('Apply failed');
   });
 
-  test('should dispatch repository-changed event after stash pop', async ({ page }) => {
-    const eventPromise = page.evaluate(() => {
-      return new Promise<boolean>((resolve) => {
-        document.addEventListener('repository-changed', () => {
-          resolve(true);
-        }, { once: true });
-        setTimeout(() => resolve(false), 3000);
+  test('should show error toast when pop_stash fails', async ({ page }) => {
+    await injectCommandError(page, 'pop_stash', 'Pop failed: working directory not clean');
+
+    const toastPromise = page.evaluate(() => {
+      return new Promise<string>((resolve) => {
+        document.addEventListener('show-toast', ((e: CustomEvent) => {
+          resolve(e.detail.message || e.detail.toString());
+        }) as EventListener, { once: true });
+        setTimeout(() => resolve(''), 3000);
       });
     });
 
@@ -317,20 +301,27 @@ test.describe('Stash Context Menu - Event Propagation', () => {
     await stash.click({ button: 'right' });
 
     const popOption = page.locator('.context-menu-item, .menu-item', { hasText: /pop/i });
-    await popOption.waitFor({ state: 'visible' });
+    await expect(popOption).toBeVisible();
     await popOption.click();
 
-    const eventReceived = await eventPromise;
-    expect(eventReceived).toBe(true);
+    const toastMessage = await toastPromise;
+    expect(toastMessage).toContain('Pop failed');
   });
 
-  test('should dispatch repository-changed event after stash drop', async ({ page }) => {
-    const eventPromise = page.evaluate(() => {
-      return new Promise<boolean>((resolve) => {
-        document.addEventListener('repository-changed', () => {
-          resolve(true);
-        }, { once: true });
-        setTimeout(() => resolve(false), 3000);
+  test('should show error toast when drop_stash fails', async ({ page }) => {
+    await injectCommandMock(page, {
+      'plugin:dialog|confirm': true,
+      'plugin:dialog|ask': true,
+    });
+
+    await injectCommandError(page, 'drop_stash', 'Drop failed: stash not found');
+
+    const toastPromise = page.evaluate(() => {
+      return new Promise<string>((resolve) => {
+        document.addEventListener('show-toast', ((e: CustomEvent) => {
+          resolve(e.detail.message || e.detail.toString());
+        }) as EventListener, { once: true });
+        setTimeout(() => resolve(''), 3000);
       });
     });
 
@@ -338,21 +329,129 @@ test.describe('Stash Context Menu - Event Propagation', () => {
     const stash = leftPanel.getStash(0);
     await stash.click({ button: 'right' });
 
-    const dropOption = page.locator('.context-menu-item, .menu-item', { hasText: /drop/i });
-    await dropOption.waitFor({ state: 'visible' });
-    await dropOption.evaluate((el: HTMLElement) => el.click());
+    const dropOption = page.locator('.context-menu-item, .menu-item', { hasText: /drop|delete/i });
+    await expect(dropOption).toBeVisible();
+    await dropOption.click();
 
-    // Handle confirmation dialog
-    await page.waitForTimeout(100);
-    const confirmDialog = page.locator('.dialog, .modal, [role="dialog"]');
-    if (await confirmDialog.count() > 0) {
-      const confirmButton = confirmDialog.locator('button', { hasText: /confirm|yes|ok|drop/i }).first();
-      if (await confirmButton.isVisible()) {
-        await confirmButton.click();
-      }
-    }
+    const toastMessage = await toastPromise;
+    expect(toastMessage).toContain('Drop failed');
+  });
 
-    const eventReceived = await eventPromise;
-    expect(eventReceived).toBe(true);
+  test('should keep stash list unchanged after apply failure', async ({ page }) => {
+    await injectCommandError(page, 'apply_stash', 'Apply failed: conflicts');
+
+    await leftPanel.expandStashes();
+
+    const stash = leftPanel.getStash(0);
+    await stash.click({ button: 'right' });
+
+    const applyOption = page.locator('.context-menu-item, .menu-item', { hasText: /apply/i });
+    await expect(applyOption).toBeVisible();
+    await applyOption.click();
+
+    const stashCount = await leftPanel.getStashCount();
+    expect(stashCount).toBe(1);
+  });
+
+  test('should verify drop triggers get_stashes refresh on success', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      'plugin:dialog|confirm': true,
+      'plugin:dialog|ask': true,
+    });
+
+    await leftPanel.expandStashes();
+    const stash = leftPanel.getStash(0);
+    await stash.click({ button: 'right' });
+
+    const dropOption = page.locator('.context-menu-item, .menu-item', { hasText: /drop|delete/i });
+    await expect(dropOption).toBeVisible();
+    await dropOption.click();
+
+    const stashCommands = await findCommand(page, 'get_stashes');
+    expect(stashCommands.length).toBeGreaterThan(0);
+  });
+});
+
+// ============================================================================
+// Extended Tests - Additional Coverage
+// ============================================================================
+
+test.describe('Stash Context Menu - Extended Tests', () => {
+  let leftPanel: LeftPanelPage;
+
+  test('apply with CONFLICT error should show error toast', async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+
+    await setupOpenRepository(page, {
+      stashes: [
+        { index: 0, message: 'WIP on main: abc123 first stash', oid: 'stash1' },
+        { index: 1, message: 'WIP on feature: def456 second stash', oid: 'stash2' },
+      ],
+    });
+
+    await injectCommandError(page, 'apply_stash', 'CONFLICT (content): Merge conflict in src/main.ts');
+
+    const toastPromise = page.evaluate(() => {
+      return new Promise<string>((resolve) => {
+        document.addEventListener('show-toast', ((e: CustomEvent) => {
+          resolve(e.detail.message || e.detail.toString());
+        }) as EventListener, { once: true });
+        setTimeout(() => resolve(''), 5000);
+      });
+    });
+
+    await leftPanel.expandStashes();
+    const stash = leftPanel.getStash(0);
+    await stash.click({ button: 'right' });
+
+    const applyOption = page.locator('.context-menu-item, .menu-item', { hasText: /apply/i });
+    await expect(applyOption).toBeVisible();
+    await applyOption.click();
+
+    const toastMessage = await toastPromise;
+    expect(toastMessage).toContain('CONFLICT');
+
+    // Stash list should remain unchanged after a failed apply
+    const stashCount = await leftPanel.getStashCount();
+    expect(stashCount).toBe(2);
+  });
+
+  test('pop should remove stash from the list on success', async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+
+    await setupOpenRepository(page, {
+      stashes: [
+        { index: 0, message: 'WIP on main: abc123 first stash', oid: 'stash1' },
+        { index: 1, message: 'WIP on feature: def456 second stash', oid: 'stash2' },
+        { index: 2, message: 'WIP on develop: ghi789 third stash', oid: 'stash3' },
+      ],
+    });
+
+    await startCommandCaptureWithMocks(page, {
+      'plugin:dialog|confirm': true,
+      'plugin:dialog|ask': true,
+    });
+
+    await leftPanel.expandStashes();
+
+    // Verify initial count is 3
+    const initialCount = await leftPanel.getStashCount();
+    expect(initialCount).toBe(3);
+
+    // Pop the first stash
+    const firstStash = leftPanel.getStash(0);
+    await firstStash.click({ button: 'right' });
+
+    const popOption = page.locator('.context-menu-item, .menu-item', { hasText: /pop/i });
+    await expect(popOption).toBeVisible();
+    await popOption.click();
+
+    // Verify pop_stash command was called
+    const popCommands = await findCommand(page, 'pop_stash');
+    expect(popCommands.length).toBeGreaterThan(0);
+
+    // Verify the stash count decreased to 2
+    const finalCount = await leftPanel.getStashCount();
+    expect(finalCount).toBe(2);
   });
 });

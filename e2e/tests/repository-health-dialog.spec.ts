@@ -1,199 +1,93 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  startCommandCapture,
+  startCommandCaptureWithMocks,
+  findCommand,
+  waitForCommand,
+  injectCommandMock,
+  injectCommandError,
+  openViaCommandPalette,
+} from '../fixtures/test-helpers';
 
-/**
- * E2E tests for Repository Health Dialog
- * Tests repository health stats, recommendations, and maintenance actions
- */
+async function openHealthDialog(page: import('@playwright/test').Page): Promise<void> {
+  await openViaCommandPalette(page, 'health');
+  await page.locator('lv-repository-health-dialog').waitFor({ state: 'visible', timeout: 3000 });
+}
+
+// The Tauri command get_repository_stats returns { count, loose, sizeKb }
+// The Tauri command get_pack_info returns { packCount, packSizeKb }
+// The maintenance commands (run_gc, run_fsck, run_prune) return MaintenanceResult { success, message }
+
 test.describe('Repository Health Dialog - Statistics', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    // Mock repository health commands
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_repository_stats') {
-          return {
-            objectCount: 1250,
-            sizeInBytes: 5242880, // 5MB
-            looseObjects: 150,
-            packFiles: 3,
-          };
-        }
-
-        if (command === 'get_pack_info') {
-          return {
-            packCount: 3,
-            totalSize: 4194304, // 4MB
-          };
-        }
-
-        if (command === 'run_gc') {
-          return { success: true };
-        }
-
-        if (command === 'run_fsck') {
-          return { success: true, issues: [] };
-        }
-
-        if (command === 'run_prune') {
-          return { success: true };
-        }
-
-        return originalInvoke(command, args);
-      };
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 150,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 3,
+        packSizeKb: 4096,
+      },
+      run_gc: { success: true, message: 'Garbage collection completed' },
+      run_fsck: { success: true, message: 'No issues found' },
+      run_prune: { success: true, message: 'Pruned unreachable objects' },
     });
   });
 
   test('should open repository health dialog from command palette', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
-
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        await expect(healthDialog).toBeVisible({ timeout: 3000 });
-      }
-    }
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    await expect(healthDialog).toBeVisible();
   });
 
   test('should display repository statistics', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          await page.waitForTimeout(500);
-
-          // Should show stats like object count, size
-          const stats = healthDialog.locator('.stat, .stat-card, [class*="stat"]');
-          const statCount = await stats.count();
-          expect(statCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    const stats = healthDialog.locator('.stat-card');
+    await expect(stats.first()).toBeVisible();
+    const statCount = await stats.count();
+    expect(statCount).toBeGreaterThan(0);
   });
 
   test('should show total objects count', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          await page.waitForTimeout(500);
-
-          const objectsText = healthDialog.locator('text=Objects, text=objects', { exact: false });
-          const objectsCount = await objectsText.count();
-          expect(objectsCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    await expect(healthDialog.getByText(/Total Objects/i).first()).toBeVisible();
   });
 
   test('should show repository size', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          await page.waitForTimeout(500);
-
-          const sizeText = healthDialog.locator('text=Size, text=MB, text=KB, text=GB', { exact: false });
-          const sizeCount = await sizeText.count();
-          expect(sizeCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    // formatSize(5120) = "5.0 MB"
+    await expect(healthDialog.getByText(/MB|KB|GB/i).first()).toBeVisible();
   });
 
   test('should show loose objects count', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          await page.waitForTimeout(500);
-
-          const looseText = healthDialog.locator('text=Loose, text=loose', { exact: false });
-          const looseCount = await looseText.count();
-          expect(looseCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    await expect(healthDialog.getByText(/Loose/i).first()).toBeVisible();
   });
 
   test('should show pack files count', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          await page.waitForTimeout(500);
-
-          const packText = healthDialog.locator('text=Pack, text=pack', { exact: false });
-          const packCount = await packText.count();
-          expect(packCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    await expect(healthDialog.getByText(/Pack/i).first()).toBeVisible();
   });
 });
 
@@ -201,156 +95,72 @@ test.describe('Repository Health Dialog - Maintenance Actions', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_repository_stats') {
-          return {
-            objectCount: 1250,
-            sizeInBytes: 5242880,
-            looseObjects: 600, // High loose objects to trigger warning
-            packFiles: 15, // High pack files to trigger warning
-          };
-        }
-
-        if (command === 'run_gc') {
-          return { success: true };
-        }
-
-        if (command === 'run_fsck') {
-          return { success: true, issues: [] };
-        }
-
-        if (command === 'run_prune') {
-          return { success: true };
-        }
-
-        return originalInvoke(command, args);
-      };
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 600,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 15,
+        packSizeKb: 4096,
+      },
+      run_gc: { success: true, message: 'Garbage collection completed' },
+      run_fsck: { success: true, message: 'No issues found' },
+      run_prune: { success: true, message: 'Pruned unreachable objects' },
     });
   });
 
   test('should have Garbage Collection button', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
-
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          const gcButton = healthDialog.locator('button', { hasText: /garbage.*collection|gc/i });
-          const buttonCount = await gcButton.count();
-          expect(buttonCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const gcButton = healthDialog.locator('.action-btn', { hasText: /Garbage Collection/i });
+    await expect(gcButton.first()).toBeVisible();
   });
 
   test('should have Aggressive GC button', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
-
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          const aggressiveButton = healthDialog.locator('button', { hasText: /aggressive/i });
-          const buttonCount = await aggressiveButton.count();
-          expect(buttonCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const aggressiveButton = healthDialog.locator('.action-btn', { hasText: /Aggressive GC/i });
+    await expect(aggressiveButton.first()).toBeVisible();
   });
 
   test('should have File System Check button', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
-
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          const fsckButton = healthDialog.locator('button', { hasText: /fsck|file.*system.*check/i });
-          const buttonCount = await fsckButton.count();
-          expect(buttonCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const fsckButton = healthDialog.locator('.action-btn', { hasText: /File System Check/i });
+    await expect(fsckButton.first()).toBeVisible();
   });
 
   test('should have Prune button', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
-
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          const pruneButton = healthDialog.locator('button', { hasText: /prune/i });
-          const buttonCount = await pruneButton.count();
-          expect(buttonCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const pruneButton = healthDialog.locator('.action-btn', { hasText: /Prune/i });
+    await expect(pruneButton.first()).toBeVisible();
   });
 
-  test('clicking GC should run garbage collection', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('clicking GC should invoke run_gc command', async ({ page }) => {
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
+    await startCommandCapture(page);
 
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          const gcButton = healthDialog.locator('button', { hasText: /garbage.*collection|^gc$/i }).first();
-          if (await gcButton.isVisible()) {
-            await gcButton.click();
-            await page.waitForTimeout(500);
-            expect(true).toBe(true);
-          }
-        }
-      }
-    }
+    const gcButton = healthDialog.locator('.action-btn', { hasText: /Garbage Collection/i }).first();
+    await expect(gcButton).toBeVisible();
+    await gcButton.click();
+
+    await waitForCommand(page, 'run_gc');
+
+    const gcCommands = await findCommand(page, 'run_gc');
+    expect(gcCommands.length).toBeGreaterThan(0);
+
+    // Verify the health dialog remains visible after GC operation
+    await expect(healthDialog).toBeVisible();
   });
 });
 
@@ -358,76 +168,41 @@ test.describe('Repository Health Dialog - Recommendations', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_repository_stats') {
-          return {
-            objectCount: 1250,
-            sizeInBytes: 5242880,
-            looseObjects: 600, // Above 500 threshold
-            packFiles: 15, // Above 10 threshold
-          };
-        }
-
-        return originalInvoke(command, args);
-      };
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 600,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 15,
+        packSizeKb: 4096,
+      },
     });
   });
 
   test('should show recommendations when issues detected', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          await page.waitForTimeout(500);
-
-          const recommendations = healthDialog.locator('.recommendation, .warning, [class*="recommendation"]');
-          const recCount = await recommendations.count();
-          expect(recCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    // With loose > 500 and packCount > 10, recommendations are shown
+    const recommendations = healthDialog.locator('.recommendation');
+    await expect(recommendations.first()).toBeVisible();
+    const recCount = await recommendations.count();
+    expect(recCount).toBeGreaterThan(0);
   });
 
   test('should show warning styling for high loose objects', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          await page.waitForTimeout(500);
-
-          const warningElements = healthDialog.locator('.warning, [class*="warning"]');
-          const warningCount = await warningElements.count();
-          expect(warningCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    // The loose objects stat-value gets the "warning" class when > 500
+    const warningElements = healthDialog.locator('.stat-value.warning');
+    await expect(warningElements.first()).toBeVisible();
+    const warningCount = await warningElements.count();
+    expect(warningCount).toBeGreaterThan(0);
   });
 });
 
@@ -435,51 +210,26 @@ test.describe('Repository Health Dialog - Healthy State', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_repository_stats') {
-          return {
-            objectCount: 500,
-            sizeInBytes: 1048576, // 1MB
-            looseObjects: 50, // Below 500 threshold
-            packFiles: 2, // Below 10 threshold
-          };
-        }
-
-        return originalInvoke(command, args);
-      };
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 500,
+        loose: 50,
+        sizeKb: 1024,
+      },
+      get_pack_info: {
+        packCount: 2,
+        packSizeKb: 800,
+      },
     });
   });
 
   test('should show healthy message when no issues', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          await page.waitForTimeout(500);
-
-          const healthyMessage = healthDialog.locator('text=healthy, text=good', { exact: false });
-          const healthyCount = await healthyMessage.count();
-          expect(healthyCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    // Component shows "Repository is healthy - no maintenance needed"
+    await expect(healthDialog.getByText(/healthy/i).first()).toBeVisible();
   });
 });
 
@@ -487,71 +237,343 @@ test.describe('Repository Health Dialog - Footer', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_repository_stats') {
-          return {
-            objectCount: 500,
-            sizeInBytes: 1048576,
-            looseObjects: 50,
-            packFiles: 2,
-          };
-        }
-
-        return originalInvoke(command, args);
-      };
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 500,
+        loose: 50,
+        sizeKb: 1024,
+      },
+      get_pack_info: {
+        packCount: 2,
+        packSizeKb: 800,
+      },
     });
   });
 
   test('should have Done button to close dialog', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
-
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
-
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          const doneButton = healthDialog.locator('button', { hasText: /done|close/i });
-          await expect(doneButton).toBeVisible();
-        }
-      }
-    }
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const doneButton = healthDialog.locator('button.primary', { hasText: /Done/i });
+    await expect(doneButton).toBeVisible();
   });
 
   test('clicking Done should close dialog', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+    await openHealthDialog(page);
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('health');
-      await page.waitForTimeout(200);
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const doneButton = healthDialog.locator('button.primary', { hasText: /Done/i });
+    await doneButton.click();
 
-      const healthOption = page.locator('lv-command-palette .command-item', { hasText: /health|maintenance/i });
-      if (await healthOption.isVisible()) {
-        await healthOption.click();
+    await expect(healthDialog).not.toBeVisible();
+  });
+});
 
-        const healthDialog = page.locator('lv-repository-health-dialog');
-        if (await healthDialog.isVisible()) {
-          const doneButton = healthDialog.locator('button', { hasText: /done|close/i });
-          await doneButton.click();
+// ============================================================================
+// Maintenance Action E2E - Command Verification
+// ============================================================================
 
-          await expect(healthDialog).not.toBeVisible();
-        }
-      }
-    }
+test.describe('Repository Health Dialog - GC E2E', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('run GC should invoke run_gc and show success feedback', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 600,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 15,
+        packSizeKb: 4096,
+      },
+      run_gc: { success: true, message: 'Garbage collection completed' },
+    });
+
+    await openHealthDialog(page);
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const gcButton = healthDialog.locator('.action-btn', { hasText: /Garbage Collection/i }).first();
+    await expect(gcButton).toBeVisible();
+    await gcButton.click();
+
+    await waitForCommand(page, 'run_gc');
+
+    const gcCommands = await findCommand(page, 'run_gc');
+    expect(gcCommands.length).toBe(1);
+
+    // Verify success feedback is visible after GC completes (toast with class "success")
+    const successIndicator = page.locator('.toast.success').first();
+    await expect(successIndicator).toBeVisible({ timeout: 5000 });
+
+    // Verify the health dialog remains open after GC
+    await expect(healthDialog).toBeVisible();
+  });
+
+  test('GC failure should show error feedback', async ({ page }) => {
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 600,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 15,
+        packSizeKb: 4096,
+      },
+      run_gc: { __error__: 'Garbage collection failed: repository locked' },
+    });
+
+    await openHealthDialog(page);
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const gcButton = healthDialog.locator('.action-btn', { hasText: /Garbage Collection/i }).first();
+    await expect(gcButton).toBeVisible();
+    await gcButton.click();
+
+    const errorIndicator = page.locator('.toast.error').first();
+    await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+  });
+
+  test('stats should display concrete values from mock data', async ({ page }) => {
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 150,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 3,
+        packSizeKb: 2048,
+      },
+    });
+
+    await openHealthDialog(page);
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+
+    // 1250.toLocaleString() produces "1,250"
+    await expect(healthDialog.getByText(/1[,.]?250/).first()).toBeVisible();
+  });
+
+  test('prune should invoke run_prune command', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      get_repository_stats: {
+        count: 500,
+        loose: 50,
+        sizeKb: 1024,
+      },
+      get_pack_info: {
+        packCount: 2,
+        packSizeKb: 800,
+      },
+      run_prune: { success: true, message: 'Pruned unreachable objects' },
+    });
+
+    await openHealthDialog(page);
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const pruneButton = healthDialog.locator('.action-btn', { hasText: /Prune/i }).first();
+    await expect(pruneButton).toBeVisible();
+    await pruneButton.click();
+
+    await waitForCommand(page, 'run_prune');
+
+    const pruneCommands = await findCommand(page, 'run_prune');
+    expect(pruneCommands.length).toBeGreaterThan(0);
+
+    // Verify the health dialog remains open after prune operation
+    await expect(healthDialog).toBeVisible();
+  });
+});
+
+test.describe('Repository Health Dialog - Error Scenarios', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 600,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 15,
+        packSizeKb: 4096,
+      },
+    });
+  });
+
+  test('should show error when run_gc fails', async ({ page }) => {
+    await injectCommandError(page, 'run_gc', 'Garbage collection failed: repository is locked');
+
+    await openHealthDialog(page);
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const gcButton = healthDialog.locator('.action-btn', { hasText: /Garbage Collection/i }).first();
+    await expect(gcButton).toBeVisible();
+    await gcButton.click();
+
+    await expect(page.locator('.toast.error').first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test('should show error when run_fsck fails', async ({ page }) => {
+    await injectCommandError(page, 'run_fsck', 'File system check failed: corrupt objects detected');
+
+    await openHealthDialog(page);
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const fsckButton = healthDialog.locator('.action-btn', { hasText: /File System Check/i }).first();
+    await expect(fsckButton).toBeVisible();
+    await fsckButton.click();
+
+    await expect(page.locator('.toast.error').first()).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ============================================================================
+// Extended Tests - Additional Coverage
+// ============================================================================
+
+test.describe('Repository Health - Extended Tests', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('clicking Aggressive GC should invoke run_gc command', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 600,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 15,
+        packSizeKb: 4096,
+      },
+      run_gc: { success: true, message: 'Aggressive garbage collection completed' },
+    });
+
+    await openHealthDialog(page);
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const aggressiveButton = healthDialog.locator('.action-btn', { hasText: /Aggressive GC/i }).first();
+    await expect(aggressiveButton).toBeVisible();
+    await aggressiveButton.click();
+
+    await waitForCommand(page, 'run_gc');
+
+    const gcCommands = await findCommand(page, 'run_gc');
+    expect(gcCommands.length).toBeGreaterThan(0);
+
+    // Verify the args indicate aggressive mode
+    const args = gcCommands[0].args as Record<string, unknown>;
+    const argsStr = JSON.stringify(args);
+    expect(argsStr).toMatch(/aggressive|true/i);
+
+    // Verify the health dialog remains open after operation
+    await expect(healthDialog).toBeVisible();
+  });
+
+  test('clicking File System Check should invoke run_fsck command', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 600,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 15,
+        packSizeKb: 4096,
+      },
+      run_fsck: { success: true, message: 'No issues found' },
+    });
+
+    await openHealthDialog(page);
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const fsckButton = healthDialog.locator('.action-btn', { hasText: /File System Check/i }).first();
+    await expect(fsckButton).toBeVisible();
+    await fsckButton.click();
+
+    await waitForCommand(page, 'run_fsck');
+
+    const fsckCommands = await findCommand(page, 'run_fsck');
+    expect(fsckCommands.length).toBe(1);
+
+    // Verify success feedback toast is shown
+    const successToast = page.locator('.toast.success').first();
+    await expect(successToast).toBeVisible({ timeout: 5000 });
+
+    // Verify the health dialog remains open
+    await expect(healthDialog).toBeVisible();
+  });
+
+  test('stats should refresh after running maintenance action', async ({ page }) => {
+    // Start with high loose objects count
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 1250,
+        loose: 600,
+        sizeKb: 5120,
+      },
+      get_pack_info: {
+        packCount: 15,
+        packSizeKb: 4096,
+      },
+      run_gc: { success: true, message: 'Garbage collection completed' },
+    });
+
+    await openHealthDialog(page);
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+
+    // Verify initial stats are displayed with high loose objects
+    await expect(healthDialog.locator('.stat-value.warning').first()).toBeVisible();
+
+    // Now inject updated stats that simulate post-GC state (fewer loose objects)
+    await injectCommandMock(page, {
+      get_repository_stats: {
+        count: 1100,
+        loose: 20,
+        sizeKb: 4800,
+      },
+      get_pack_info: {
+        packCount: 4,
+        packSizeKb: 4600,
+      },
+    });
+
+    // Start capturing commands to verify stats refresh
+    await startCommandCaptureWithMocks(page, {
+      run_gc: { success: true, message: 'Garbage collection completed' },
+      get_repository_stats: {
+        count: 1100,
+        loose: 20,
+        sizeKb: 4800,
+      },
+      get_pack_info: {
+        packCount: 4,
+        packSizeKb: 4600,
+      },
+    });
+
+    // Click GC to trigger maintenance
+    const gcButton = healthDialog.locator('.action-btn', { hasText: /Garbage Collection/i }).first();
+    await expect(gcButton).toBeVisible();
+    await gcButton.click();
+
+    // Wait for the GC command and subsequent stats refresh
+    await waitForCommand(page, 'run_gc');
+    await waitForCommand(page, 'get_repository_stats');
+
+    // Verify get_repository_stats was called to refresh stats after GC
+    const statsCommands = await findCommand(page, 'get_repository_stats');
+    expect(statsCommands.length).toBeGreaterThan(0);
+
+    // The dialog should still be open showing updated stats
+    await expect(healthDialog).toBeVisible();
   });
 });

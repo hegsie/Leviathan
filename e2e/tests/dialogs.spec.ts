@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { setupOpenRepository, setupTauriMocks } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
+import { injectCommandError } from '../fixtures/test-helpers';
 
 test.describe('Settings Dialog', () => {
   let app: AppPage;
@@ -98,10 +99,10 @@ test.describe('Profile Manager Dialog', () => {
     // Wait for dialog to open
     await expect(dialogs.profileManager.addProfileButton).toBeVisible();
 
-    // Either the profile list is visible or the empty state text
-    const hasEmptyState = await page.getByText('No profiles yet').isVisible().catch(() => false);
-    const hasProfileList = await dialogs.profileManager.profileList.isVisible().catch(() => false);
-    expect(hasProfileList || hasEmptyState).toBe(true);
+    // Either the profile list or the empty state text must be visible
+    await expect(
+      page.locator('lv-profile-manager-dialog[open] .profile-list, lv-profile-manager-dialog[open] :text("No profiles yet")').first()
+    ).toBeVisible({ timeout: 3000 });
   });
 
   test('should have new profile button', async () => {
@@ -240,12 +241,12 @@ test.describe('Dialog Backdrop', () => {
     await page.keyboard.press('Meta+,');
     await expect(dialogs.settings.dialog).toBeVisible();
 
-    // Click outside the dialog (on backdrop)
-    // Note: This depends on dialog implementation
-    const backdrop = page.locator('.modal-backdrop, .dialog-overlay');
-    if ((await backdrop.count()) > 0) {
-      await backdrop.click({ position: { x: 10, y: 10 } });
-    }
+    // Click the overlay behind the dialog to close it
+    // The overlay covers the full viewport but Playwright considers it "hidden"
+    // because it's behind the dialog in stacking order. Use force: true to click it.
+    const overlay = page.locator('lv-modal[open] .overlay');
+    await overlay.click({ position: { x: 5, y: 5 }, force: true });
+    await expect(dialogs.settings.dialog).not.toBeVisible();
   });
 });
 
@@ -291,10 +292,251 @@ test.describe('Multiple Dialogs', () => {
     await page.keyboard.press('Meta+,');
     await expect(dialogs.settings.dialog).toBeVisible();
 
-    // Open command palette (should close settings)
+    // Close settings via Escape (lv-modal handles this)
+    await page.keyboard.press('Escape');
+    await expect(dialogs.settings.dialog).not.toBeVisible();
+
+    // Now open command palette
     await page.keyboard.press('Meta+p');
     await expect(dialogs.commandPalette.palette).toBeVisible();
 
-    // Settings may or may not be closed depending on implementation
+    // Close command palette, then open shortcuts dialog
+    await page.keyboard.press('Escape');
+    await expect(dialogs.commandPalette.palette).not.toBeVisible();
+
+    // Open keyboard shortcuts
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+  });
+});
+
+test.describe('Settings Dialog - Theme Change', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('changing theme should update body class', async ({ page }) => {
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    // Change theme to light
+    await dialogs.settings.setTheme('light');
+
+    // The app should apply the theme as a class or attribute on the body/root
+    const bodyClass = await page.evaluate(() => document.documentElement.getAttribute('data-theme') || document.body.className);
+    expect(bodyClass).toContain('light');
+  });
+
+  test('changing theme should persist to settings store', async ({ page }) => {
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    await dialogs.settings.setTheme('light');
+
+    // Verify the settings store was updated (persisted via zustand/persist to localStorage)
+    await page.waitForFunction(() => {
+      const stores = (window as any).__LEVIATHAN_STORES__;
+      return stores?.settingsStore?.getState()?.theme === 'light';
+    });
+
+    const theme = await page.evaluate(() => {
+      return (window as any).__LEVIATHAN_STORES__?.settingsStore?.getState()?.theme;
+    });
+    expect(theme).toBe('light');
+  });
+});
+
+test.describe('Settings Dialog - Toggle Settings', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('toggling a setting should persist to settings store', async ({ page }) => {
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    // Get the initial value of the first toggle (showAvatars)
+    const initialValue = await page.evaluate(() => {
+      return (window as any).__LEVIATHAN_STORES__?.settingsStore?.getState()?.showAvatars;
+    });
+
+    // Toggle the first setting switch
+    await dialogs.settings.toggleVimMode();
+
+    // Verify the settings store was updated with the toggled value
+    await page.waitForFunction((initial) => {
+      const stores = (window as any).__LEVIATHAN_STORES__;
+      return stores?.settingsStore?.getState()?.showAvatars !== initial;
+    }, initialValue);
+
+    const newValue = await page.evaluate(() => {
+      return (window as any).__LEVIATHAN_STORES__?.settingsStore?.getState()?.showAvatars;
+    });
+    expect(newValue).toBe(!initialValue);
+  });
+
+  test('settings should persist after dialog close and reopen', async ({ page }) => {
+    // Open settings and change theme
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    await dialogs.settings.setTheme('light');
+
+    await dialogs.settings.closeWithEscape();
+    await expect(dialogs.settings.dialog).not.toBeVisible();
+
+    // Reopen settings
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    // Theme select should still be 'light'
+    await expect(dialogs.settings.themeSelect).toHaveValue('light');
+  });
+});
+
+test.describe('Settings Dialog - Error Handling', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('theme change should update document data-theme attribute', async ({ page }) => {
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    await dialogs.settings.setTheme('light');
+
+    // Verify the data-theme attribute is set on the document element
+    await page.waitForFunction(() =>
+      document.documentElement.getAttribute('data-theme') === 'light'
+    );
+
+    const dataTheme = await page.evaluate(() =>
+      document.documentElement.getAttribute('data-theme')
+    );
+    expect(dataTheme).toBe('light');
+  });
+});
+
+test.describe('Keyboard Shortcuts Dialog - Details', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('should display at least 5 shortcuts', async ({ page }) => {
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+
+    const count = await dialogs.keyboardShortcuts.getShortcutCount();
+    expect(count).toBeGreaterThanOrEqual(5);
+  });
+
+  test('should have vim mode toggle in shortcuts dialog', async ({ page }) => {
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+
+    await expect(dialogs.keyboardShortcuts.vimModeToggle).toBeVisible();
+  });
+
+  test('toggling vim mode in shortcuts dialog should persist', async ({ page }) => {
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+
+    await dialogs.keyboardShortcuts.toggleVimMode();
+
+    // Vim mode settings are persisted to localStorage by the keyboard service
+    await page.waitForFunction(() => {
+      const stored = localStorage.getItem('leviathan-keyboard-settings');
+      if (!stored) return false;
+      const settings = JSON.parse(stored);
+      return settings.vimMode === true;
+    });
+
+    const vimMode = await page.evaluate(() => {
+      const stored = localStorage.getItem('leviathan-keyboard-settings');
+      return stored ? JSON.parse(stored).vimMode : null;
+    });
+    expect(vimMode).toBe(true);
+  });
+});
+
+test.describe('Dialogs - Error Scenarios', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('settings save failure should show error display when setting merge tool', async ({ page }) => {
+    // Inject error for set_merge_tool_config command (used when changing merge tool in settings)
+    await injectCommandError(page, 'set_merge_tool_config', 'Failed to save merge tool configuration');
+
+    // Open settings dialog
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    // Find and interact with the merge tool select to trigger a save
+    const mergeToolSelect = page.locator('lv-settings-dialog select').first();
+    if (await mergeToolSelect.count() > 0) {
+      // Change the merge tool to trigger the set_merge_tool_config command
+      const options = await mergeToolSelect.locator('option').allTextContents();
+      if (options.length > 1) {
+        await mergeToolSelect.selectOption({ index: 1 });
+      }
+    }
+
+    // Error should be displayed (toast, error banner, or error message)
+    await expect(page.locator('.error, .error-banner, .toast').first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test('settings save failure should show error display when setting diff tool', async ({ page }) => {
+    // Inject error for set_diff_tool command
+    await injectCommandError(page, 'set_diff_tool', 'Failed to save diff tool configuration');
+
+    // Open settings dialog
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    // Look for diff tool select and try to change it
+    const diffToolSelects = page.locator('lv-settings-dialog select');
+    const count = await diffToolSelects.count();
+
+    // Try each select to find the diff tool one (typically second select)
+    for (let i = 0; i < count; i++) {
+      const select = diffToolSelects.nth(i);
+      const options = await select.locator('option').allTextContents();
+      const hasDiffOption = options.some(
+        (opt) => opt.toLowerCase().includes('diff') || opt.toLowerCase().includes('vimdiff')
+      );
+      if (hasDiffOption && options.length > 1) {
+        await select.selectOption({ index: 1 });
+        break;
+      }
+    }
+
+    // Error should be displayed
+    await expect(page.locator('.error, .error-banner, .toast').first()).toBeVisible({ timeout: 5000 });
   });
 });

@@ -522,7 +522,7 @@ export class AzureDevOpsDialogPage extends BaseDialog {
     // Connection
     this.organizationInput = page.locator('lv-azure-devops-dialog input[type="text"]').first();
     this.tokenInput = page.locator('lv-azure-devops-dialog input[type="password"]');
-    this.connectButton = page.locator('lv-azure-devops-dialog button:has-text("Connect with Token")');
+    this.connectButton = page.locator('lv-azure-devops-dialog .btn-primary:has-text("Connect")');
     this.connectionStatus = page.locator('lv-azure-devops-dialog .connection-status');
 
     // OAuth
@@ -706,6 +706,245 @@ export class CommandPalettePage {
 }
 
 /**
+ * Config Dialog Page Object
+ */
+export class ConfigDialogPage extends BaseDialog {
+  readonly identityTab: Locator;
+  readonly settingsTab: Locator;
+  readonly aliasesTab: Locator;
+  readonly nameInput: Locator;
+  readonly emailInput: Locator;
+  readonly scopeRepositoryBtn: Locator;
+  readonly scopeGlobalBtn: Locator;
+  readonly saveButton: Locator;
+  readonly settingsList: Locator;
+  readonly aliasList: Locator;
+  readonly addAliasForm: Locator;
+  readonly errorBanner: Locator;
+
+  constructor(page: Page) {
+    super(page, 'lv-config-dialog');
+    this.identityTab = page.locator('lv-config-dialog .tab', { hasText: 'Identity' });
+    this.settingsTab = page.locator('lv-config-dialog .tab', { hasText: 'Settings' });
+    this.aliasesTab = page.locator('lv-config-dialog .tab', { hasText: 'Aliases' });
+    this.nameInput = page.locator('lv-config-dialog .form-group input').first();
+    this.emailInput = page.locator('lv-config-dialog .form-group input').nth(1);
+    this.scopeRepositoryBtn = page.locator('lv-config-dialog .scope-btn', { hasText: 'Repository' });
+    this.scopeGlobalBtn = page.locator('lv-config-dialog .scope-btn', { hasText: 'Global' });
+    this.saveButton = page.locator('lv-config-dialog .btn-primary');
+    this.settingsList = page.locator('lv-config-dialog .settings-list');
+    this.aliasList = page.locator('lv-config-dialog .alias-list');
+    this.addAliasForm = page.locator('lv-config-dialog .add-alias-form');
+    this.errorBanner = page.locator('lv-config-dialog .error-banner');
+  }
+
+  async switchToIdentity(): Promise<void> {
+    await this.identityTab.click();
+  }
+
+  async switchToSettings(): Promise<void> {
+    await this.settingsTab.click();
+  }
+
+  async switchToAliases(): Promise<void> {
+    await this.aliasesTab.click();
+  }
+
+  async fillName(name: string): Promise<void> {
+    await this.nameInput.fill(name);
+  }
+
+  async fillEmail(email: string): Promise<void> {
+    await this.emailInput.fill(email);
+  }
+
+  async save(): Promise<void> {
+    await this.saveButton.click();
+  }
+
+  async addAlias(name: string, command: string): Promise<void> {
+    const inputs = this.addAliasForm.locator('input');
+    await inputs.first().fill(name);
+    await inputs.nth(1).fill(command);
+    await this.addAliasForm.locator('button').click();
+  }
+
+  async deleteAlias(index: number): Promise<void> {
+    await this.aliasList.locator('.btn-icon.danger').nth(index).click();
+  }
+}
+
+/**
+ * Reflog Dialog Page Object
+ */
+export class ReflogDialogPage extends BaseDialog {
+  readonly entries: Locator;
+  readonly currentBadge: Locator;
+
+  constructor(page: Page) {
+    super(page, 'lv-reflog-dialog');
+    this.entries = page.locator('lv-reflog-dialog .entry');
+    this.currentBadge = page.locator('lv-reflog-dialog .current-badge');
+  }
+
+  getEntry(index: number): Locator {
+    return this.entries.nth(index);
+  }
+
+  async getEntryOid(index: number): Promise<string> {
+    return (await this.entries.nth(index).locator('.entry-oid').textContent()) ?? '';
+  }
+
+  async openContextMenu(index: number): Promise<void> {
+    await this.entries.nth(index).click({ button: 'right' });
+  }
+
+  async clickContextMenuItem(text: string): Promise<void> {
+    await this.page.locator('.context-menu .menu-item', { hasText: text }).click();
+  }
+
+  async clickUndoButton(index: number): Promise<void> {
+    await this.entries.nth(index).locator('.reset-btn:not(.hard)').click();
+  }
+
+  async clickHardResetButton(index: number): Promise<void> {
+    await this.entries.nth(index).locator('.reset-btn.hard').click();
+  }
+}
+
+/**
+ * Remote Dialog Page Object
+ */
+export class RemoteDialogPage extends BaseDialog {
+  readonly remoteList: Locator;
+  readonly nameInput: Locator;
+  readonly urlInput: Locator;
+  readonly addButton: Locator;
+  readonly editButton: Locator;
+  readonly deleteButton: Locator;
+
+  constructor(page: Page) {
+    super(page, 'lv-remote-dialog');
+    this.remoteList = page.locator('lv-remote-dialog .remote-list, lv-remote-dialog .remote-item');
+    this.nameInput = page.locator('lv-remote-dialog input').first();
+    this.urlInput = page.locator('lv-remote-dialog input').nth(1);
+    this.addButton = page.locator('lv-remote-dialog .btn-primary, lv-remote-dialog button', { hasText: 'Add' });
+    this.editButton = page.locator('lv-remote-dialog button', { hasText: 'Edit' });
+    this.deleteButton = page.locator('lv-remote-dialog button', { hasText: 'Delete' });
+  }
+
+  async addRemote(name: string, url: string): Promise<void> {
+    await this.nameInput.fill(name);
+    await this.urlInput.fill(url);
+    await this.addButton.click();
+  }
+
+  async editRemote(name: string, newUrl: string): Promise<void> {
+    await this.remoteList.locator(`text=${name}`).click();
+    await this.editButton.click();
+    await this.urlInput.fill(newUrl);
+    await this.addButton.click();
+  }
+
+  async deleteRemote(name: string): Promise<void> {
+    await this.remoteList.locator(`text=${name}`).click();
+    await this.deleteButton.click();
+  }
+
+  async getRemoteCount(): Promise<number> {
+    return this.page.locator('lv-remote-dialog .remote-item').count();
+  }
+}
+
+/**
+ * Submodule Dialog Page Object
+ */
+export class SubmoduleDialogPage extends BaseDialog {
+  readonly submoduleList: Locator;
+  readonly urlInput: Locator;
+  readonly pathInput: Locator;
+  readonly addButton: Locator;
+  readonly updateButton: Locator;
+  readonly removeButton: Locator;
+
+  constructor(page: Page) {
+    super(page, 'lv-submodule-dialog');
+    this.submoduleList = page.locator('lv-submodule-dialog .submodule-list, lv-submodule-dialog .submodule-item');
+    this.urlInput = page.locator('lv-submodule-dialog input').first();
+    this.pathInput = page.locator('lv-submodule-dialog input').nth(1);
+    this.addButton = page.locator('lv-submodule-dialog .btn-primary, lv-submodule-dialog button', { hasText: 'Add' });
+    this.updateButton = page.locator('lv-submodule-dialog button', { hasText: 'Update' });
+    this.removeButton = page.locator('lv-submodule-dialog button', { hasText: 'Remove' });
+  }
+
+  async addSubmodule(url: string, path: string): Promise<void> {
+    await this.urlInput.fill(url);
+    await this.pathInput.fill(path);
+    await this.addButton.click();
+  }
+
+  async updateSubmodule(name: string): Promise<void> {
+    await this.submoduleList.locator(`text=${name}`).click();
+    await this.updateButton.click();
+  }
+
+  async removeSubmodule(name: string): Promise<void> {
+    await this.submoduleList.locator(`text=${name}`).click();
+    await this.removeButton.click();
+  }
+
+  async getSubmoduleCount(): Promise<number> {
+    return this.page.locator('lv-submodule-dialog .submodule-item').count();
+  }
+}
+
+/**
+ * Repository Health Dialog Page Object
+ */
+export class RepositoryHealthDialogPage extends BaseDialog {
+  readonly statCards: Locator;
+  readonly gcButton: Locator;
+  readonly aggressiveGcButton: Locator;
+  readonly fsckButton: Locator;
+  readonly pruneButton: Locator;
+  readonly doneButton: Locator;
+  readonly recommendations: Locator;
+
+  constructor(page: Page) {
+    super(page, 'lv-repository-health-dialog');
+    this.statCards = page.locator('lv-repository-health-dialog .stat-card');
+    this.gcButton = page.locator('lv-repository-health-dialog button', { hasText: 'Run GC' });
+    this.aggressiveGcButton = page.locator('lv-repository-health-dialog button', { hasText: 'Aggressive' });
+    this.fsckButton = page.locator('lv-repository-health-dialog button', { hasText: 'Check' });
+    this.pruneButton = page.locator('lv-repository-health-dialog button', { hasText: 'Prune' });
+    this.doneButton = page.locator('lv-repository-health-dialog button', { hasText: 'Done' });
+    this.recommendations = page.locator('lv-repository-health-dialog .recommendation');
+  }
+
+  async runGc(): Promise<void> {
+    await this.gcButton.click();
+  }
+
+  async runFsck(): Promise<void> {
+    await this.fsckButton.click();
+  }
+
+  async runPrune(): Promise<void> {
+    await this.pruneButton.click();
+  }
+
+  async close(): Promise<void> {
+    await this.doneButton.click();
+    await this.dialog.waitFor({ state: 'hidden' });
+  }
+
+  async getStatValue(label: string): Promise<string> {
+    const card = this.statCards.filter({ hasText: label });
+    return (await card.locator('.stat-value').textContent()) ?? '';
+  }
+}
+
+/**
  * Dialogs Page Object - Factory for all dialogs
  */
 export class DialogsPage {
@@ -757,5 +996,25 @@ export class DialogsPage {
 
   get commandPalette(): CommandPalettePage {
     return new CommandPalettePage(this.page);
+  }
+
+  get config(): ConfigDialogPage {
+    return new ConfigDialogPage(this.page);
+  }
+
+  get reflog(): ReflogDialogPage {
+    return new ReflogDialogPage(this.page);
+  }
+
+  get remote(): RemoteDialogPage {
+    return new RemoteDialogPage(this.page);
+  }
+
+  get submodule(): SubmoduleDialogPage {
+    return new SubmoduleDialogPage(this.page);
+  }
+
+  get repositoryHealth(): RepositoryHealthDialogPage {
+    return new RepositoryHealthDialogPage(this.page);
   }
 }

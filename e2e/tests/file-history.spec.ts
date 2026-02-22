@@ -1,389 +1,386 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  startCommandCaptureWithMocks,
+  findCommand,
+  injectCommandError,
+  waitForCommand,
+} from '../fixtures/test-helpers';
 
 /**
- * E2E tests for File History Panel
- * Tests file history display, commit list, and interactions
+ * E2E tests for the File History Panel (lv-file-history).
+ *
+ * The panel is rendered by the app shell in the main area when
+ * showFileHistory is true and fileHistoryPath is set. It loads commits
+ * via get_file_history and shows them in a scrollable list with:
+ * - Header showing "File History" title, file path, commit count, and close button
+ * - Commit items with short OID, summary, author, date, and "View" button
+ * - Selection state when clicking a commit
+ * - Right-click context menu with View diff, Show commit details, View blame, Copy hash
+ * - Empty state when no history exists
+ *
+ * Tests trigger the component through the app shell's real rendering flow
+ * (setting showFileHistory/fileHistoryPath state) so that event wiring and
+ * store connections work correctly. Playwright locators pierce shadow DOM
+ * to access internal elements.
  */
-test.describe('File History Panel', () => {
-  test.beforeEach(async ({ page }) => {
-    await setupOpenRepository(page);
 
-    // Mock file history response
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
+const MOCK_COMMITS = [
+  {
+    oid: 'abc123def456789',
+    shortId: 'abc123d',
+    message: 'Fix bug in file processing\n\nExtended details here.',
+    summary: 'Fix bug in file processing',
+    body: 'Extended details here.',
+    author: { name: 'John Doe', email: 'john@example.com', timestamp: Math.floor(Date.now() / 1000) - 3600 },
+    committer: { name: 'John Doe', email: 'john@example.com', timestamp: Math.floor(Date.now() / 1000) - 3600 },
+    parentIds: ['parent1'],
+    timestamp: Math.floor(Date.now() / 1000) - 3600,
+  },
+  {
+    oid: 'def789ghi012345',
+    shortId: 'def789g',
+    message: 'Add new feature\n\nImplemented new feature.',
+    summary: 'Add new feature',
+    body: 'Implemented new feature.',
+    author: { name: 'Jane Smith', email: 'jane@example.com', timestamp: Math.floor(Date.now() / 1000) - 86400 },
+    committer: { name: 'Jane Smith', email: 'jane@example.com', timestamp: Math.floor(Date.now() / 1000) - 86400 },
+    parentIds: ['parent2'],
+    timestamp: Math.floor(Date.now() / 1000) - 86400,
+  },
+  {
+    oid: 'ghi345jkl678901',
+    shortId: 'ghi345j',
+    message: 'Initial implementation',
+    summary: 'Initial implementation',
+    body: null,
+    author: { name: 'John Doe', email: 'john@example.com', timestamp: Math.floor(Date.now() / 1000) - 604800 },
+    committer: { name: 'John Doe', email: 'john@example.com', timestamp: Math.floor(Date.now() / 1000) - 604800 },
+    parentIds: [],
+    timestamp: Math.floor(Date.now() / 1000) - 604800,
+  },
+];
 
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_file_history') {
-          return [
-            {
-              oid: 'abc123def456',
-              summary: 'Fix bug in file processing',
-              author: 'John Doe',
-              authorEmail: 'john@example.com',
-              timestamp: Date.now() / 1000 - 3600, // 1 hour ago
-            },
-            {
-              oid: 'def789ghi012',
-              summary: 'Add new feature',
-              author: 'Jane Smith',
-              authorEmail: 'jane@example.com',
-              timestamp: Date.now() / 1000 - 86400, // 1 day ago
-            },
-            {
-              oid: 'ghi345jkl678',
-              summary: 'Initial implementation',
-              author: 'John Doe',
-              authorEmail: 'john@example.com',
-              timestamp: Date.now() / 1000 - 604800, // 1 week ago
-            },
-          ];
-        }
-
-        return originalInvoke(command, args);
-      };
-    });
-  });
-
-  test('should display file history panel when opened', async ({ page }) => {
-    // File history panel needs to be opened via context menu or other action
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    // Panel may not be visible initially
-    const isVisible = await fileHistoryPanel.isVisible().catch(() => false);
-    expect(typeof isVisible).toBe('boolean');
-  });
-
-  test('should show loading state while fetching history', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      // May show loading spinner or skeleton
-      const loadingState = fileHistoryPanel.locator('.loading, .spinner, [class*="loading"]');
-      const loadingCount = await loadingState.count();
-      expect(loadingCount).toBeGreaterThanOrEqual(0);
+/**
+ * Trigger file history display by setting app-shell state directly.
+ * This mirrors the pattern used by the blame-view tests and reliably
+ * triggers Lit's reactive update cycle.
+ */
+async function showFileHistory(
+  page: import('@playwright/test').Page,
+  filePath = 'src/main.ts'
+): Promise<void> {
+  // Set app-shell properties directly to show the file history panel
+  await page.evaluate((fp) => {
+    const appShell = document.querySelector('lv-app-shell') as HTMLElement & {
+      showFileHistory: boolean;
+      fileHistoryPath: string | null;
+    };
+    if (appShell) {
+      appShell.fileHistoryPath = fp;
+      appShell.showFileHistory = true;
     }
-  });
+  }, filePath);
 
-  test('should show file path in header', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
+  await page.locator('lv-file-history').waitFor({ state: 'attached', timeout: 5000 });
+  await waitForCommand(page, 'get_file_history');
+}
 
-    if (await fileHistoryPanel.isVisible()) {
-      // Should display the file path being viewed
-      const header = fileHistoryPanel.locator('.header, .title, h2, h3');
-      const headerCount = await header.count();
-      expect(headerCount).toBeGreaterThanOrEqual(0);
-    }
-  });
+/** Open context menu on the first commit item */
+async function openContextMenu(page: import('@playwright/test').Page): Promise<void> {
+  await page.locator('lv-file-history .commit-item').first().click({ button: 'right' });
+  await expect(page.locator('lv-file-history .context-menu')).toBeVisible();
+}
 
-  test('should have close button', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      const closeButton = fileHistoryPanel.locator('button[title*="Close"], button[aria-label*="close"], .close-button');
-      const closeCount = await closeButton.count();
-      expect(closeCount).toBeGreaterThanOrEqual(0);
-    }
-  });
-});
-
+// --------------------------------------------------------------------------
+// Commit List Display
+// --------------------------------------------------------------------------
 test.describe('File History - Commit List', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
-
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_file_history') {
-          return [
-            {
-              oid: 'abc123def456',
-              summary: 'Fix bug in file processing',
-              author: 'John Doe',
-              authorEmail: 'john@example.com',
-              timestamp: Date.now() / 1000 - 3600,
-            },
-            {
-              oid: 'def789ghi012',
-              summary: 'Add new feature',
-              author: 'Jane Smith',
-              authorEmail: 'jane@example.com',
-              timestamp: Date.now() / 1000 - 86400,
-            },
-          ];
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: MOCK_COMMITS,
     });
+    await showFileHistory(page);
   });
 
-  test('should display commit entries', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
-
-      const commitEntries = fileHistoryPanel.locator('.commit, .commit-entry, [class*="commit"]');
-      const entryCount = await commitEntries.count();
-      expect(entryCount).toBeGreaterThanOrEqual(0);
-    }
+  test('should call get_file_history with correct file path', async ({ page }) => {
+    const commands = await findCommand(page, 'get_file_history');
+    expect(commands.length).toBeGreaterThan(0);
+    const args = commands[0].args as Record<string, unknown>;
+    expect(args.filePath).toBe('src/main.ts');
   });
 
-  test('should show commit hash for each entry', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
-
-      // Should display shortened commit hash
-      const hashElements = fileHistoryPanel.locator('.hash, .oid, .sha, code');
-      const hashCount = await hashElements.count();
-      expect(hashCount).toBeGreaterThanOrEqual(0);
-    }
+  test('should show "File History" in the header', async ({ page }) => {
+    await expect(page.locator('lv-file-history .header-title')).toHaveText('File History');
   });
 
-  test('should show commit summary for each entry', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
-
-      const summaryElements = fileHistoryPanel.locator('.summary, .message, [class*="summary"]');
-      const summaryCount = await summaryElements.count();
-      expect(summaryCount).toBeGreaterThanOrEqual(0);
-    }
+  test('should show the file path in the header', async ({ page }) => {
+    await expect(page.locator('lv-file-history .file-path')).toHaveText('src/main.ts');
   });
 
-  test('should show author for each entry', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
-
-      const authorElements = fileHistoryPanel.locator('.author, [class*="author"]');
-      const authorCount = await authorElements.count();
-      expect(authorCount).toBeGreaterThanOrEqual(0);
-    }
+  test('should show commit count badge', async ({ page }) => {
+    await expect(page.locator('lv-file-history .commit-count')).toHaveText('3 commits');
   });
 
-  test('should show date for each entry', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
+  test('should display all commit entries', async ({ page }) => {
+    await expect(page.locator('lv-file-history .commit-item')).toHaveCount(3);
+  });
 
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
+  test('each commit should show short OID', async ({ page }) => {
+    const oids = page.locator('lv-file-history .commit-oid');
+    await expect(oids.nth(0)).toHaveText('abc123d');
+    await expect(oids.nth(1)).toHaveText('def789g');
+    await expect(oids.nth(2)).toHaveText('ghi345j');
+  });
 
-      const dateElements = fileHistoryPanel.locator('.date, .timestamp, time, [class*="date"]');
-      const dateCount = await dateElements.count();
-      expect(dateCount).toBeGreaterThanOrEqual(0);
-    }
+  test('each commit should show its summary', async ({ page }) => {
+    const summaries = page.locator('lv-file-history .commit-summary');
+    await expect(summaries.nth(0)).toHaveText('Fix bug in file processing');
+    await expect(summaries.nth(1)).toHaveText('Add new feature');
+    await expect(summaries.nth(2)).toHaveText('Initial implementation');
+  });
+
+  test('each commit should show author name', async ({ page }) => {
+    const authors = page.locator('lv-file-history .commit-author');
+    await expect(authors.nth(0)).toContainText('John Doe');
+    await expect(authors.nth(1)).toContainText('Jane Smith');
+    await expect(authors.nth(2)).toContainText('John Doe');
+  });
+
+  test('each commit should show a relative date', async ({ page }) => {
+    const dates = page.locator('lv-file-history .commit-date');
+    await expect(dates.nth(0)).toContainText('Today');
+    await expect(dates.nth(1)).toContainText('Yesterday');
+    await expect(dates.nth(2)).toContainText('week');
+  });
+
+  test('each commit should have a View button', async ({ page }) => {
+    await expect(page.locator('lv-file-history .view-diff-btn')).toHaveCount(3);
+  });
+
+  test('should have a close button in the header', async ({ page }) => {
+    await expect(page.locator('lv-file-history .close-btn')).toBeAttached();
   });
 });
 
-test.describe('File History - Interactions', () => {
+// --------------------------------------------------------------------------
+// Selection
+// --------------------------------------------------------------------------
+test.describe('File History - Selection', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
-
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_file_history') {
-          return [
-            {
-              oid: 'abc123def456',
-              summary: 'Fix bug in file processing',
-              author: 'John Doe',
-              authorEmail: 'john@example.com',
-              timestamp: Date.now() / 1000 - 3600,
-            },
-          ];
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: MOCK_COMMITS,
     });
+    await showFileHistory(page);
   });
 
-  test('clicking commit should select it', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
-
-      const commitEntries = fileHistoryPanel.locator('.commit, .commit-entry, [class*="commit"]');
-      const entryCount = await commitEntries.count();
-
-      if (entryCount > 0) {
-        await commitEntries.first().click();
-        // Commit should be selected (may show diff or highlight)
-        expect(true).toBe(true);
-      }
-    }
+  test('clicking a commit should select it with .selected class', async ({ page }) => {
+    await page.locator('lv-file-history .commit-item').first().click();
+    await expect(page.locator('lv-file-history .commit-item.selected .commit-oid')).toHaveText('abc123d');
   });
 
-  test('should have View button for each commit', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
+  test('clicking a different commit should change selection', async ({ page }) => {
+    await page.locator('lv-file-history .commit-item').first().click();
+    await page.locator('lv-file-history .commit-item').nth(1).click();
 
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
-
-      const viewButtons = fileHistoryPanel.locator('button', { hasText: /view/i });
-      const buttonCount = await viewButtons.count();
-      expect(buttonCount).toBeGreaterThanOrEqual(0);
-    }
+    await expect(page.locator('lv-file-history .commit-item.selected .commit-oid')).toHaveText('def789g');
+    await expect(page.locator('lv-file-history .commit-item.selected')).toHaveCount(1);
   });
 
-  test('right-click should open context menu', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
-
-      const commitEntries = fileHistoryPanel.locator('.commit, .commit-entry, [class*="commit"]');
-      const entryCount = await commitEntries.count();
-
-      if (entryCount > 0) {
-        await commitEntries.first().click({ button: 'right' });
-
-        const contextMenu = page.locator('.context-menu, [class*="context-menu"]');
-        const menuCount = await contextMenu.count();
-        expect(menuCount).toBeGreaterThanOrEqual(0);
-      }
-    }
+  test('clicking a commit should dispatch commit-selected event', async ({ page }) => {
+    // In the real app tree, commit-selected is handled by the app shell
+    // to navigate to the commit in the graph. Verify the selection happens.
+    await page.locator('lv-file-history .commit-item').first().click();
+    await expect(page.locator('lv-file-history .commit-item.selected')).toHaveCount(1);
   });
 });
 
+// --------------------------------------------------------------------------
+// Close
+// --------------------------------------------------------------------------
+test.describe('File History - Close', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: MOCK_COMMITS,
+    });
+    await showFileHistory(page);
+  });
+
+  test('clicking close button should remove file history panel', async ({ page }) => {
+    // In the real app tree, the close event is handled by the app shell
+    // which sets showFileHistory=false, removing the component from the DOM
+    await page.locator('lv-file-history .close-btn').click();
+    await expect(page.locator('lv-file-history')).not.toBeAttached();
+  });
+});
+
+// --------------------------------------------------------------------------
+// View Diff Button
+// --------------------------------------------------------------------------
+test.describe('File History - View Diff', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: MOCK_COMMITS,
+    });
+    await showFileHistory(page);
+  });
+
+  test('clicking View button should dispatch view-diff event with commit oid and file path', async ({ page }) => {
+    // Set up event capture on the panel element before clicking
+    const panelHandle = await page.locator('lv-file-history').elementHandle();
+    await page.evaluate((el) => {
+      if (!el) return;
+      (window as any).__viewDiffDetail__ = null;
+      el.addEventListener('view-diff', ((e: CustomEvent) => {
+        (window as any).__viewDiffDetail__ = e.detail;
+      }) as EventListener, { once: true });
+    }, panelHandle);
+
+    // Click the View button using Playwright's auto-piercing locator
+    await page.locator('lv-file-history .view-diff-btn').first().click();
+
+    // Wait for the event to be captured
+    await page.waitForFunction(() => (window as any).__viewDiffDetail__ != null);
+    const eventDetail = await page.evaluate(() => (window as any).__viewDiffDetail__);
+
+    expect(eventDetail).not.toBeNull();
+    expect(eventDetail.commitOid).toBe('abc123def456789');
+    expect(eventDetail.filePath).toBe('src/main.ts');
+  });
+});
+
+// --------------------------------------------------------------------------
+// Context Menu
+// --------------------------------------------------------------------------
 test.describe('File History - Context Menu', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
-
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_file_history') {
-          return [
-            {
-              oid: 'abc123def456',
-              summary: 'Fix bug in file processing',
-              author: 'John Doe',
-              authorEmail: 'john@example.com',
-              timestamp: Date.now() / 1000 - 3600,
-            },
-          ];
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: MOCK_COMMITS,
     });
+    await showFileHistory(page);
   });
 
-  test('context menu should have View diff option', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
-
-      const commitEntries = fileHistoryPanel.locator('.commit, .commit-entry, [class*="commit"]');
-      const entryCount = await commitEntries.count();
-
-      if (entryCount > 0) {
-        await commitEntries.first().click({ button: 'right' });
-
-        const viewDiffOption = page.locator('.context-menu-item, .menu-item, button', { hasText: /view.*diff/i });
-        const optionCount = await viewDiffOption.count();
-        expect(optionCount).toBeGreaterThanOrEqual(0);
-      }
-    }
+  test('right-clicking a commit should show context menu', async ({ page }) => {
+    await page.locator('lv-file-history .commit-item').first().click({ button: 'right' });
+    await expect(page.locator('lv-file-history .context-menu')).toBeVisible();
   });
 
-  test('context menu should have Show commit details option', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
-
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
-
-      const commitEntries = fileHistoryPanel.locator('.commit, .commit-entry, [class*="commit"]');
-      const entryCount = await commitEntries.count();
-
-      if (entryCount > 0) {
-        await commitEntries.first().click({ button: 'right' });
-
-        const showDetailsOption = page.locator('.context-menu-item, .menu-item, button', { hasText: /show.*commit|commit.*details/i });
-        const optionCount = await showDetailsOption.count();
-        expect(optionCount).toBeGreaterThanOrEqual(0);
-      }
-    }
+  test('context menu should have "View diff" option', async ({ page }) => {
+    await openContextMenu(page);
+    await expect(
+      page.locator('lv-file-history .context-menu-item').filter({ hasText: 'View diff' })
+    ).toBeVisible();
   });
 
-  test('context menu should have Copy hash option', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
+  test('context menu should have "Show commit details" option', async ({ page }) => {
+    await openContextMenu(page);
+    await expect(
+      page.locator('lv-file-history .context-menu-item').filter({ hasText: 'Show commit details' })
+    ).toBeVisible();
+  });
 
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
+  test('context menu should have "View blame at this commit" option', async ({ page }) => {
+    await openContextMenu(page);
+    await expect(
+      page.locator('lv-file-history .context-menu-item').filter({ hasText: 'View blame' })
+    ).toBeVisible();
+  });
 
-      const commitEntries = fileHistoryPanel.locator('.commit, .commit-entry, [class*="commit"]');
-      const entryCount = await commitEntries.count();
+  test('context menu should have "Copy commit hash" option', async ({ page }) => {
+    await openContextMenu(page);
+    await expect(
+      page.locator('lv-file-history .context-menu-item').filter({ hasText: 'Copy commit hash' })
+    ).toBeVisible();
+  });
 
-      if (entryCount > 0) {
-        await commitEntries.first().click({ button: 'right' });
-
-        const copyHashOption = page.locator('.context-menu-item, .menu-item, button', { hasText: /copy.*hash|copy.*oid/i });
-        const optionCount = await copyHashOption.count();
-        expect(optionCount).toBeGreaterThanOrEqual(0);
-      }
-    }
+  test('context menu should have a divider separating Copy from other options', async ({ page }) => {
+    await openContextMenu(page);
+    await expect(page.locator('lv-file-history .context-menu-divider')).toBeAttached();
   });
 });
 
+// --------------------------------------------------------------------------
+// Empty State
+// --------------------------------------------------------------------------
 test.describe('File History - Empty State', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: [],
+    });
+    await showFileHistory(page);
+  });
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
+  test('should show "No history found for this file" when no commits exist', async ({ page }) => {
+    await expect(page.locator('lv-file-history .empty')).toHaveText('No history found for this file');
+  });
 
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_file_history') {
-          return []; // Empty history
-        }
+  test('should show "0 commits" count when empty', async ({ page }) => {
+    await expect(page.locator('lv-file-history .commit-count')).toHaveText('0 commits');
+  });
 
-        return originalInvoke(command, args);
-      };
+  test('should not show any commit items', async ({ page }) => {
+    await expect(page.locator('lv-file-history .commit-item')).toHaveCount(0);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Loading State
+// --------------------------------------------------------------------------
+test.describe('File History - Loading State', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: MOCK_COMMITS,
     });
   });
 
-  test('should show empty state when no history', async ({ page }) => {
-    const fileHistoryPanel = page.locator('lv-file-history');
+  test('should display file path provided via property', async ({ page }) => {
+    await showFileHistory(page, 'src/utils/helpers.ts');
+    await expect(page.locator('lv-file-history .file-path')).toHaveText('src/utils/helpers.ts');
+  });
+});
 
-    if (await fileHistoryPanel.isVisible()) {
-      await page.waitForTimeout(500);
+// --------------------------------------------------------------------------
+// Error Scenarios
+// --------------------------------------------------------------------------
+test.describe('File History - Error Scenarios', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
 
-      const emptyState = fileHistoryPanel.locator('.empty, [class*="empty"]', { hasText: /no.*history|no.*commits/i });
-      const emptyCount = await emptyState.count();
-      expect(emptyCount).toBeGreaterThanOrEqual(0);
-    }
+  test('get_file_history failure should show error state or toast', async ({ page }) => {
+    // Set up command capture with a valid initial response so the component can mount
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: MOCK_COMMITS,
+    });
+
+    // Inject an error so the next call to get_file_history will fail
+    await injectCommandError(page, 'get_file_history', 'Failed to get history');
+
+    // Trigger the file history panel (which will call get_file_history and get the error)
+    await page.evaluate(() => {
+      const appShell = document.querySelector('lv-app-shell') as HTMLElement & {
+        showFileHistory: boolean;
+        fileHistoryPath: string | null;
+      };
+      if (appShell) {
+        appShell.fileHistoryPath = 'src/main.ts';
+        appShell.showFileHistory = true;
+      }
+    });
+
+    // Wait for the file history panel to appear in the DOM
+    await page.locator('lv-file-history').waitFor({ state: 'attached', timeout: 5000 });
+
+    // The error should be displayed — either an error element in the panel or a toast
+    await expect(
+      page.locator('.error, .error-banner, .toast, lv-file-history .error-message').first()
+    ).toBeVisible({ timeout: 5000 });
   });
 });

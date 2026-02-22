@@ -1,5 +1,6 @@
 import { expect } from '@open-wc/testing';
 import { uiStore } from '../stores/ui.store.js';
+import { repositoryStore } from '../stores/repository.store.js';
 
 // Mock Tauri API
 const mockInvoke = (_command: string, _args?: unknown): Promise<unknown> => {
@@ -108,51 +109,74 @@ describe('App Shell - requiresRepository', () => {
     });
   });
 
-  describe('requiresRepository behavior simulation', () => {
-    it('shows toast when action requires repository but none is open', () => {
-      // Simulate requiresRepository behavior
-      const activeRepository = null;
+  describe('requiresRepository store contract', () => {
+    beforeEach(() => {
+      repositoryStore.getState().reset();
+    });
 
-      const action = () => {
-        if (!activeRepository) {
-          uiStore.getState().addToast({
-            type: 'warning',
-            message: 'Please open a repository first',
-            duration: 3000,
-          });
-          return;
-        }
-        // Would open dialog here
-      };
+    it('repositoryStore.getActiveRepository returns null when no repo is set', () => {
+      const activeRepo = repositoryStore.getState().getActiveRepository();
+      expect(activeRepo).to.be.null;
+    });
 
-      action();
+    it('repositoryStore.getActiveRepository returns repo after addRepository', () => {
+      repositoryStore.getState().addRepository({
+        path: '/test/repo',
+        name: 'test-repo',
+        isValid: true,
+        isBare: false,
+        headRef: 'refs/heads/main',
+        state: 'clean',
+      });
+
+      const activeRepo = repositoryStore.getState().getActiveRepository();
+      expect(activeRepo).to.not.be.null;
+      expect(activeRepo!.repository.path).to.equal('/test/repo');
+      expect(activeRepo!.repository.name).to.equal('test-repo');
+    });
+
+    it('addToast with requiresRepository warning format creates correct toast', () => {
+      uiStore.getState().addToast({
+        type: 'warning',
+        message: 'Please open a repository first',
+        duration: 3000,
+      });
 
       const toasts = uiStore.getState().toasts;
       expect(toasts.length).to.equal(1);
+      expect(toasts[0].type).to.equal('warning');
       expect(toasts[0].message).to.equal('Please open a repository first');
+      expect(toasts[0].duration).to.equal(3000);
     });
 
-    it('does not show toast when repository is open', () => {
-      // Simulate requiresRepository behavior with active repo
-      const activeRepository = { path: '/test/repo' };
-      let dialogOpened = false;
+    it('full requiresRepository flow via stores', () => {
+      // With no active repo, the warning toast should be produced
+      const activeRepo = repositoryStore.getState().getActiveRepository();
+      expect(activeRepo).to.be.null;
 
-      const action = () => {
-        if (!activeRepository) {
-          uiStore.getState().addToast({
-            type: 'warning',
-            message: 'Please open a repository first',
-            duration: 3000,
-          });
-          return;
-        }
-        dialogOpened = true;
-      };
+      uiStore.getState().addToast({
+        type: 'warning',
+        message: 'Please open a repository first',
+        duration: 3000,
+      });
 
-      action();
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.length).to.equal(1);
+      expect(toasts[0].type).to.equal('warning');
 
-      expect(uiStore.getState().toasts.length).to.equal(0);
-      expect(dialogOpened).to.be.true;
+      // After adding a repository, getActiveRepository returns non-null
+      repositoryStore.getState().addRepository({
+        path: '/test/repo',
+        name: 'test-repo',
+        isValid: true,
+        isBare: false,
+        headRef: 'refs/heads/main',
+        state: 'clean',
+      });
+
+      const repoAfterAdd = repositoryStore.getState().getActiveRepository();
+      expect(repoAfterAdd).to.not.be.null;
+      expect(repoAfterAdd!.repository.path).to.equal('/test/repo');
     });
   });
 });

@@ -1,469 +1,505 @@
 import { test, expect } from '@playwright/test';
-import { setupOpenRepository } from '../fixtures/tauri-mock';
+import { setupOpenRepository, setupProfilesAndAccounts } from '../fixtures/tauri-mock';
+import { AppPage } from '../pages/app.page';
+import { DialogsPage, AzureDevOpsDialogPage } from '../pages/dialogs.page';
+import {
+  startCommandCapture,
+  findCommand,
+  injectCommandError,
+  injectCommandMock,
+  startCommandCaptureWithMocks,
+  waitForCommand,
+} from '../fixtures/test-helpers';
 
 /**
  * E2E tests for Azure DevOps Dialog
- * Tests Azure DevOps integration with PRs, Work Items, and Pipelines
+ *
+ * The Azure DevOps dialog is opened via the command palette ("Azure DevOps Integration").
+ * It has tabs: Connection, Pull Requests, Work Items, Pipelines.
+ * It uses `lv-modal[open]` internally and is accessed via `AzureDevOpsDialogPage`.
+ *
+ * The dialog element is `lv-azure-devops-dialog` with an internal `lv-modal[open]`.
  */
+
+test.describe('Azure DevOps Dialog - Display', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(
+      page,
+      {
+        profiles: [
+          {
+            id: 'default',
+            name: 'Default',
+            gitName: 'Test User',
+            gitEmail: 'test@example.com',
+            signingKey: null,
+            urlPatterns: [],
+            isDefault: true,
+            color: '#3b82f6',
+            defaultAccounts: { 'azure-devops': 'ado-account-1' },
+          },
+        ],
+        accounts: [
+          {
+            id: 'ado-account-1',
+            name: 'My Azure DevOps',
+            integrationType: 'azure-devops',
+            config: { type: 'pat', organization: 'testorg' },
+            color: null,
+            cachedUser: { username: 'testuser', displayName: 'Test User', avatarUrl: null },
+            urlPatterns: ['dev.azure.com/testorg'],
+            isDefault: false,
+          },
+        ],
+        connectedAccounts: ['ado-account-1'],
+      },
+      {
+        remotes: [
+          { name: 'origin', url: 'https://dev.azure.com/testorg/testproject/_git/testrepo', pushUrl: null },
+        ],
+      },
+    );
+
+    // Mock Azure DevOps commands
+    await startCommandCaptureWithMocks(page, {
+      detect_ado_repo: {
+        organization: 'testorg',
+        project: 'testproject',
+        repoName: 'testrepo',
+        remoteName: 'origin',
+      },
+      check_ado_connection_with_pat: {
+        user: { displayName: 'Test User', emailAddress: 'test@example.com', id: 'user-1' },
+      },
+      list_ado_pull_requests: [
+        {
+          pullRequestId: 123,
+          title: 'Add new feature',
+          status: 'active',
+          createdBy: { displayName: 'Developer', uniqueName: 'dev@example.com' },
+          creationDate: new Date().toISOString(),
+          sourceRefName: 'refs/heads/feature/new-feature',
+          targetRefName: 'refs/heads/main',
+        },
+        {
+          pullRequestId: 124,
+          title: 'Fix login bug',
+          status: 'active',
+          createdBy: { displayName: 'Developer 2', uniqueName: 'dev2@example.com' },
+          creationDate: new Date().toISOString(),
+          sourceRefName: 'refs/heads/fix/login',
+          targetRefName: 'refs/heads/main',
+        },
+      ],
+      list_ado_work_items: [
+        {
+          id: 45,
+          title: 'Bug: Application crashes',
+          workItemType: 'Bug',
+          state: 'Active',
+          assignedTo: { displayName: 'Developer' },
+          createdDate: new Date().toISOString(),
+          priority: 1,
+        },
+      ],
+      list_ado_pipeline_runs: [
+        {
+          id: 1,
+          name: 'CI Pipeline',
+          state: 'completed',
+          result: 'succeeded',
+          sourceBranch: 'refs/heads/main',
+          createdDate: new Date().toISOString(),
+          finishedDate: new Date().toISOString(),
+        },
+      ],
+    });
+  });
+
+  test('opens dialog with all tabs visible', async () => {
+    await app.executeCommand('Azure DevOps');
+
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+    await expect(dialogs.azureDevOps.connectionTab).toBeVisible();
+    await expect(dialogs.azureDevOps.pullRequestsTab).toBeVisible();
+    await expect(dialogs.azureDevOps.workItemsTab).toBeVisible();
+    await expect(dialogs.azureDevOps.pipelinesTab).toBeVisible();
+  });
+
+  test('Connection tab is active by default', async () => {
+    await app.executeCommand('Azure DevOps');
+
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+    await expect(dialogs.azureDevOps.connectionTab).toBeVisible();
+  });
+
+  test('can navigate between all tabs', async () => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    // Navigate to each tab
+    await dialogs.azureDevOps.pullRequestsTab.click();
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    await dialogs.azureDevOps.workItemsTab.click();
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    await dialogs.azureDevOps.pipelinesTab.click();
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    await dialogs.azureDevOps.switchToConnectionTab();
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+  });
+});
+
 test.describe('Azure DevOps Dialog - Connection Tab', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
   test.beforeEach(async ({ page }) => {
-    await setupOpenRepository(page);
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
 
-    // Mock Azure DevOps-related commands
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
+    await setupOpenRepository(page, {
+      remotes: [
+        { name: 'origin', url: 'https://dev.azure.com/testorg/testproject/_git/testrepo', pushUrl: null },
+      ],
+    });
 
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'detect_ado_repo') {
-          return {
-            organization: 'testorg',
-            project: 'testproject',
-            repoName: 'testrepo',
-            remoteName: 'origin',
-          };
-        }
-
-        if (command === 'check_ado_connection_with_pat') {
-          return {
-            user: { displayName: 'Test User', emailAddress: 'test@example.com', id: 'user-1' },
-          };
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      detect_ado_repo: {
+        organization: 'testorg',
+        project: 'testproject',
+        repoName: 'testrepo',
+        remoteName: 'origin',
+      },
+      // Default to not connected so the token form is shown
+      check_ado_connection: { connected: false, user: null },
     });
   });
 
-  test('should open Azure DevOps dialog from command palette', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('shows PAT authentication form', async ({ page }) => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
-
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
-
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        await expect(azureDialog).toBeVisible({ timeout: 3000 });
-      }
-    }
+    // ADO has no OAuth toggle - token form is shown by default
+    // Token input and connect button should be visible
+    await expect(dialogs.azureDevOps.tokenInput).toBeVisible();
+    await expect(dialogs.azureDevOps.connectButton).toBeVisible();
   });
 
-  test('should display detected repository info', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('can type in PAT input', async ({ page }) => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
-
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
-
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          await page.waitForTimeout(500);
-
-          // Should show repo info
-          const repoInfo = azureDialog.locator('text=testorg, text=testproject', { exact: false });
-          const infoCount = await repoInfo.count();
-          expect(infoCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    await dialogs.azureDevOps.tokenInput.fill('test-pat-token-123');
+    await expect(dialogs.azureDevOps.tokenInput).toHaveValue('test-pat-token-123');
   });
 
-  test('should have tab navigation', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('connecting with PAT calls check_ado_connection', async ({ page }) => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
+    // Now inject the connected response for when user clicks Connect
+    await startCommandCaptureWithMocks(page, {
+      check_ado_connection: {
+        connected: true,
+        user: { displayName: 'Test User', emailAddress: 'test@example.com', id: 'user-1' },
+        organization: 'testorg',
+      },
+      save_global_account: {
+        id: 'new-ado-account',
+        name: 'Azure DevOps (Test User)',
+        integrationType: 'azure-devops',
+        config: { type: 'pat', organization: 'testorg' },
+        color: null,
+        cachedUser: null,
+        urlPatterns: [],
+        isDefault: false,
+      },
+      store_git_credentials: null,
+    });
 
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
+    // Fill organization (required for the connect button to be enabled)
+    await dialogs.azureDevOps.organizationInput.fill('testorg');
+    await dialogs.azureDevOps.tokenInput.fill('valid-pat-token');
+    await dialogs.azureDevOps.connectButton.click();
 
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          // Should have tabs
-          const tabs = azureDialog.locator('.tab, button[role="tab"], [class*="tab"]');
-          const tabCount = await tabs.count();
-          expect(tabCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    await waitForCommand(page, 'check_ado_connection');
+
+    const commands = await findCommand(page, 'check_ado_connection');
+    expect(commands.length).toBeGreaterThan(0);
+
+    // Verify the UI shows connected state
+    await expect(dialogs.azureDevOps.connectionStatus).toBeVisible({ timeout: 10000 });
   });
 
-  test('should show Personal Access Token option', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('shows connected state after successful PAT validation', async ({ page }) => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
+    // Now inject the connected response for when user clicks Connect
+    await startCommandCaptureWithMocks(page, {
+      check_ado_connection: {
+        connected: true,
+        user: { displayName: 'Test User', emailAddress: 'test@example.com', id: 'user-1' },
+        organization: 'testorg',
+      },
+      save_global_account: {
+        id: 'new-ado-account',
+        name: 'Azure DevOps (Test User)',
+        integrationType: 'azure-devops',
+        config: { type: 'pat', organization: 'testorg' },
+        color: null,
+        cachedUser: null,
+        urlPatterns: [],
+        isDefault: false,
+      },
+      store_git_credentials: null,
+    });
 
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
+    // Fill organization (required for the connect button to be enabled)
+    await dialogs.azureDevOps.organizationInput.fill('testorg');
+    await dialogs.azureDevOps.tokenInput.fill('valid-pat-token');
+    await dialogs.azureDevOps.connectButton.click();
 
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          const patOption = azureDialog.locator('text=Personal Access Token, text=PAT, input[type="password"], button:has-text("token")', { exact: false });
-          const optionCount = await patOption.count();
-          expect(optionCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    // Connection status should show connected info
+    await expect(dialogs.azureDevOps.connectionStatus).toBeVisible({ timeout: 10000 });
   });
 
-  test('should have organization URL input', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('shows error on failed PAT validation', async ({ page }) => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
+    // Inject error for the check command before user clicks Connect
+    await injectCommandError(page, 'check_ado_connection', 'Invalid Personal Access Token');
 
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
+    // Fill organization (required for the connect button to be enabled)
+    await dialogs.azureDevOps.organizationInput.fill('testorg');
+    await dialogs.azureDevOps.tokenInput.fill('invalid-token');
+    await dialogs.azureDevOps.connectButton.click();
 
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          const orgInput = azureDialog.locator('input[placeholder*="organization"], input[placeholder*="dev.azure.com"]');
-          const inputCount = await orgInput.count();
-          expect(inputCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
   });
 });
 
-test.describe('Azure DevOps Dialog - Pull Requests Tab', () => {
+test.describe('Azure DevOps Dialog - Tabs Content', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
   test.beforeEach(async ({ page }) => {
-    await setupOpenRepository(page);
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
+    await setupProfilesAndAccounts(
+      page,
+      {
+        profiles: [
+          {
+            id: 'default',
+            name: 'Default',
+            gitName: 'Test User',
+            gitEmail: 'test@example.com',
+            signingKey: null,
+            urlPatterns: [],
+            isDefault: true,
+            color: '#3b82f6',
+            defaultAccounts: { 'azure-devops': 'ado-1' },
+          },
+        ],
+        accounts: [
+          {
+            id: 'ado-1',
+            name: 'Azure DevOps',
+            integrationType: 'azure-devops',
+            config: { type: 'pat', organization: 'testorg' },
+            color: null,
+            cachedUser: { username: 'testuser', displayName: 'Test User', avatarUrl: null },
+            urlPatterns: [],
+            isDefault: false,
+          },
+        ],
+        connectedAccounts: ['ado-1'],
+      },
+      {
+        remotes: [
+          { name: 'origin', url: 'https://dev.azure.com/testorg/testproject/_git/testrepo', pushUrl: null },
+        ],
+      },
+    );
 
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'detect_ado_repo') {
-          return { organization: 'testorg', project: 'testproject', repoName: 'testrepo', remoteName: 'origin' };
-        }
-
-        if (command === 'list_ado_pull_requests') {
-          return [
-            {
-              pullRequestId: 123,
-              title: 'Add new feature',
-              status: 'active',
-              createdBy: { displayName: 'Developer', uniqueName: 'dev@example.com' },
-              creationDate: new Date().toISOString(),
-              sourceRefName: 'refs/heads/feature/new-feature',
-              targetRefName: 'refs/heads/main',
-            },
-            {
-              pullRequestId: 122,
-              title: 'Fix bug in login',
-              status: 'completed',
-              createdBy: { displayName: 'Developer 2', uniqueName: 'dev2@example.com' },
-              creationDate: new Date().toISOString(),
-              sourceRefName: 'refs/heads/fix/login-bug',
-              targetRefName: 'refs/heads/main',
-            },
-          ];
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      detect_ado_repo: {
+        organization: 'testorg',
+        project: 'testproject',
+        repoName: 'testrepo',
+        remoteName: 'origin',
+      },
+      list_ado_pull_requests: [
+        {
+          pullRequestId: 123,
+          title: 'Add new feature',
+          status: 'active',
+          createdBy: { displayName: 'Developer', uniqueName: 'dev@example.com' },
+          creationDate: new Date().toISOString(),
+          sourceRefName: 'refs/heads/feature/new-feature',
+          targetRefName: 'refs/heads/main',
+        },
+      ],
+      list_ado_work_items: [
+        {
+          id: 45,
+          title: 'Bug: Application crashes',
+          workItemType: 'Bug',
+          state: 'Active',
+          assignedTo: { displayName: 'Developer' },
+          createdDate: new Date().toISOString(),
+          priority: 1,
+        },
+      ],
+      list_ado_pipeline_runs: [
+        {
+          id: 1,
+          name: 'CI Pipeline',
+          state: 'completed',
+          result: 'succeeded',
+          sourceBranch: 'refs/heads/main',
+          createdDate: new Date().toISOString(),
+          finishedDate: new Date().toISOString(),
+        },
+      ],
     });
   });
 
-  test('should display Pull Requests tab', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('Pull Requests tab is navigable', async () => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
+    await dialogs.azureDevOps.pullRequestsTab.click();
 
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
-
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          const prTab = azureDialog.locator('button, .tab', { hasText: /pull.*request/i });
-          const tabCount = await prTab.count();
-          expect(tabCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    // Tab should now be active
+    await expect(dialogs.azureDevOps.pullRequestsTab).toHaveClass(/active/);
   });
 
-  test('should have filter dropdown', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('Work Items tab is navigable', async () => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
+    await dialogs.azureDevOps.workItemsTab.click();
 
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
-
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          // Click PR tab
-          const prTab = azureDialog.locator('button, .tab', { hasText: /pull.*request/i }).first();
-          if (await prTab.isVisible()) {
-            await prTab.click();
-            await page.waitForTimeout(300);
-
-            const filterDropdown = azureDialog.locator('select, .dropdown, [class*="filter"]');
-            const filterCount = await filterDropdown.count();
-            expect(filterCount).toBeGreaterThanOrEqual(0);
-          }
-        }
-      }
-    }
+    await expect(dialogs.azureDevOps.workItemsTab).toHaveClass(/active/);
   });
 
-  test('should have New PR button', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('Pipelines tab is navigable', async () => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
+    await dialogs.azureDevOps.pipelinesTab.click();
 
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
-
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          const prTab = azureDialog.locator('button, .tab', { hasText: /pull.*request/i }).first();
-          if (await prTab.isVisible()) {
-            await prTab.click();
-            await page.waitForTimeout(300);
-
-            const newPrButton = azureDialog.locator('button', { hasText: /new.*pr|create.*pr/i });
-            const buttonCount = await newPrButton.count();
-            expect(buttonCount).toBeGreaterThanOrEqual(0);
-          }
-        }
-      }
-    }
-  });
-});
-
-test.describe('Azure DevOps Dialog - Work Items Tab', () => {
-  test.beforeEach(async ({ page }) => {
-    await setupOpenRepository(page);
-
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'detect_ado_repo') {
-          return { organization: 'testorg', project: 'testproject', repoName: 'testrepo', remoteName: 'origin' };
-        }
-
-        if (command === 'list_ado_work_items') {
-          return [
-            {
-              id: 45,
-              title: 'Bug: Application crashes on startup',
-              workItemType: 'Bug',
-              state: 'Active',
-              assignedTo: { displayName: 'Developer' },
-              createdDate: new Date().toISOString(),
-              priority: 1,
-            },
-            {
-              id: 46,
-              title: 'User Story: Add login feature',
-              workItemType: 'User Story',
-              state: 'New',
-              assignedTo: { displayName: 'Developer 2' },
-              createdDate: new Date().toISOString(),
-              priority: 2,
-            },
-          ];
-        }
-
-        return originalInvoke(command, args);
-      };
-    });
-  });
-
-  test('should display Work Items tab', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
-
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
-
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          const workItemsTab = azureDialog.locator('button, .tab', { hasText: /work.*item/i });
-          const tabCount = await workItemsTab.count();
-          expect(tabCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
-  });
-
-  test('should have New Work Item button', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
-
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
-
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          const workItemsTab = azureDialog.locator('button, .tab', { hasText: /work.*item/i }).first();
-          if (await workItemsTab.isVisible()) {
-            await workItemsTab.click();
-            await page.waitForTimeout(300);
-
-            const newWorkItemButton = azureDialog.locator('button', { hasText: /new.*work.*item/i });
-            const buttonCount = await newWorkItemButton.count();
-            expect(buttonCount).toBeGreaterThanOrEqual(0);
-          }
-        }
-      }
-    }
-  });
-});
-
-test.describe('Azure DevOps Dialog - Pipelines Tab', () => {
-  test.beforeEach(async ({ page }) => {
-    await setupOpenRepository(page);
-
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'detect_ado_repo') {
-          return { organization: 'testorg', project: 'testproject', repoName: 'testrepo', remoteName: 'origin' };
-        }
-
-        if (command === 'list_ado_pipeline_runs') {
-          return [
-            {
-              id: 1,
-              name: 'CI Pipeline',
-              state: 'completed',
-              result: 'succeeded',
-              sourceBranch: 'refs/heads/main',
-              createdDate: new Date().toISOString(),
-              finishedDate: new Date().toISOString(),
-            },
-          ];
-        }
-
-        return originalInvoke(command, args);
-      };
-    });
-  });
-
-  test('should display Pipelines tab', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
-
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
-
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          const pipelinesTab = azureDialog.locator('button, .tab', { hasText: /pipelines/i });
-          const tabCount = await pipelinesTab.count();
-          expect(tabCount).toBeGreaterThanOrEqual(0);
-        }
-      }
-    }
+    await expect(dialogs.azureDevOps.pipelinesTab).toHaveClass(/active/);
   });
 });
 
 test.describe('Azure DevOps Dialog - Close', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
   test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+
     await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      detect_ado_repo: null,
+    });
   });
 
-  test('should close dialog on close button click', async ({ page }) => {
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
+  test('closes dialog with Escape key', async () => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-    if (await commandPalette.isVisible()) {
-      const searchInput = commandPalette.locator('input');
-      await searchInput.fill('azure');
-      await page.waitForTimeout(200);
+    await dialogs.azureDevOps.closeWithEscape();
+    await expect(dialogs.azureDevOps.dialog).not.toBeVisible();
+  });
 
-      const azureOption = page.locator('lv-command-palette .command-item', { hasText: /azure.*devops/i });
-      if (await azureOption.isVisible()) {
-        await azureOption.click();
+  test('closes dialog with close button', async () => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
-        const azureDialog = page.locator('lv-azure-devops-dialog');
-        if (await azureDialog.isVisible()) {
-          const closeButton = azureDialog.locator('button[aria-label*="close"], button[title*="Close"], .close-button').first();
-          if (await closeButton.isVisible()) {
-            await closeButton.click();
-            await expect(azureDialog).not.toBeVisible();
-          }
-        }
-      }
-    }
+    await dialogs.azureDevOps.close();
+    await expect(dialogs.azureDevOps.dialog).not.toBeVisible();
+  });
+});
+
+test.describe('Azure DevOps Dialog - Extended Scenarios', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+
+    await setupOpenRepository(page, {
+      remotes: [
+        { name: 'origin', url: 'https://dev.azure.com/testorg/testproject/_git/testrepo', pushUrl: null },
+      ],
+    });
+
+    await startCommandCaptureWithMocks(page, {
+      detect_ado_repo: {
+        organization: 'testorg',
+        project: 'testproject',
+        repoName: 'testrepo',
+        remoteName: 'origin',
+      },
+    });
+  });
+
+  test('should show connected user info when already connected', async ({ page }) => {
+    // Inject connected state for the connection check
+    await injectCommandMock(page, {
+      check_ado_connection: {
+        connected: true,
+        user: { displayName: 'Test User', emailAddress: 'test@example.com', id: 'user-1' },
+        organization: 'testorg',
+      },
+    });
+
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    // Connection status should show the connected user info
+    await expect(dialogs.azureDevOps.connectionStatus).toBeVisible({ timeout: 10000 });
+  });
+
+  test('should show invalid organization error message', async ({ page }) => {
+    // Start with not-connected state
+    await injectCommandMock(page, {
+      check_ado_connection: { connected: false, user: null },
+    });
+
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    // Inject error for connection attempt with invalid organization
+    await injectCommandError(page, 'check_ado_connection', 'Invalid organization: organization not found');
+
+    // Fill in organization and token, then attempt to connect
+    await dialogs.azureDevOps.organizationInput.fill('invalidorg');
+    await dialogs.azureDevOps.tokenInput.fill('some-pat-token');
+    await dialogs.azureDevOps.connectButton.click();
+
+    // Dialog should remain open with error displayed
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    // Verify the error is shown within the dialog
+    await expect(page.locator('lv-azure-devops-dialog .error, lv-azure-devops-dialog .error-message, .toast.error').first()).toBeVisible({ timeout: 5000 });
   });
 });

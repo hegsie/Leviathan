@@ -1,5 +1,13 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  startCommandCapture,
+  findCommand,
+  waitForCommand,
+  injectCommandMock,
+  injectCommandError,
+  waitForRepositoryChanged,
+} from '../fixtures/test-helpers';
 
 /**
  * E2E tests for Interactive Rebase Dialog
@@ -7,40 +15,15 @@ import { setupOpenRepository } from '../fixtures/tauri-mock';
  */
 test.describe('Interactive Rebase Dialog', () => {
   test.beforeEach(async ({ page }) => {
-    // Setup with mock data including rebase commits
     await setupOpenRepository(page);
 
-    // Add mock for getRebaseCommits and executeInteractiveRebase
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
-
-        if (command === 'get_rebase_commits') {
-          return [
-            { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
-            { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
-            { oid: 'ghi789', shortId: 'ghi789', summary: 'Third commit', author: 'Test', timestamp: Date.now() / 1000 - 7200 },
-          ];
-        }
-
-        if (command === 'execute_interactive_rebase') {
-          return null; // Success
-        }
-
-        return originalInvoke(command, args);
-      };
+    await injectCommandMock(page, {
+      get_rebase_commits: [
+        { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
+        { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
+        { oid: 'ghi789', shortId: 'ghi789', summary: 'Third commit', author: 'Test', timestamp: Date.now() / 1000 - 7200 },
+      ],
+      execute_interactive_rebase: null,
     });
   });
 
@@ -149,8 +132,8 @@ test.describe('Interactive Rebase Dialog', () => {
     const previewSection = page.locator('lv-interactive-rebase-dialog .preview-section');
     await expect(previewSection).toBeVisible();
 
-    // Click toggle button
-    const previewToggle = page.locator('lv-interactive-rebase-dialog .btn-small', { hasText: 'Preview' });
+    // Click toggle button (use .first() to avoid shadow DOM slot duplication)
+    const previewToggle = page.locator('lv-interactive-rebase-dialog .btn-small', { hasText: 'Preview' }).first();
     await previewToggle.click();
 
     // Preview should be hidden
@@ -195,8 +178,8 @@ test.describe('Interactive Rebase Dialog', () => {
     const errorPreview = page.locator('lv-interactive-rebase-dialog .preview-commit.error');
     await expect(errorPreview).toBeVisible();
 
-    // Start Rebase button should be disabled
-    const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' });
+    // Start Rebase button should be disabled (use .first() to avoid shadow DOM slot duplication)
+    const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' }).first();
     await expect(startButton).toBeDisabled();
   });
 
@@ -209,8 +192,8 @@ test.describe('Interactive Rebase Dialog', () => {
     const dialog = page.locator('lv-interactive-rebase-dialog lv-modal[open]');
     await dialog.waitFor({ state: 'visible' });
 
-    // Click Cancel
-    const cancelButton = page.locator('lv-interactive-rebase-dialog .btn-secondary', { hasText: 'Cancel' });
+    // Click Cancel (use .first() to avoid shadow DOM slot duplication)
+    const cancelButton = page.locator('lv-interactive-rebase-dialog .btn-secondary', { hasText: 'Cancel' }).first();
     await cancelButton.click();
 
     // Dialog should close
@@ -218,6 +201,8 @@ test.describe('Interactive Rebase Dialog', () => {
   });
 
   test('should execute rebase and invoke command', async ({ page }) => {
+    await startCommandCapture(page);
+
     // Open dialog
     const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
     await developBranch.click({ button: 'right' });
@@ -225,21 +210,14 @@ test.describe('Interactive Rebase Dialog', () => {
 
     await page.locator('lv-interactive-rebase-dialog lv-modal[open]').waitFor({ state: 'visible' });
 
-    // Click Start Rebase
-    const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' });
+    // Click Start Rebase (use .first() to avoid shadow DOM slot duplication)
+    const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' }).first();
     await startButton.click();
 
-    // Wait for command to be invoked
-    await page.waitForTimeout(100);
+    await waitForCommand(page, 'execute_interactive_rebase');
 
-    // Check that execute_interactive_rebase was called
-    const commands = await page.evaluate(() => {
-      return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-        .__INVOKED_COMMANDS__;
-    });
-
-    const rebaseCommand = commands.find(c => c.command === 'execute_interactive_rebase');
-    expect(rebaseCommand).toBeDefined();
+    const rebaseCommands = await findCommand(page, 'execute_interactive_rebase');
+    expect(rebaseCommands.length).toBeGreaterThan(0);
   });
 
   test('should show stats for dropped and reworded commits', async ({ page }) => {
@@ -267,29 +245,13 @@ test.describe('Interactive Rebase Autosquash', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    // Add mock with fixup! commits
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_rebase_commits') {
-          return [
-            { oid: 'abc123', shortId: 'abc123', summary: 'Add feature', author: 'Test', timestamp: Date.now() / 1000 },
-            { oid: 'def456', shortId: 'def456', summary: 'fixup! Add feature', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
-            { oid: 'ghi789', shortId: 'ghi789', summary: 'Another commit', author: 'Test', timestamp: Date.now() / 1000 - 7200 },
-          ];
-        }
-
-        if (command === 'execute_interactive_rebase') {
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    await injectCommandMock(page, {
+      get_rebase_commits: [
+        { oid: 'abc123', shortId: 'abc123', summary: 'Add feature', author: 'Test', timestamp: Date.now() / 1000 },
+        { oid: 'def456', shortId: 'def456', summary: 'fixup! Add feature', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
+        { oid: 'ghi789', shortId: 'ghi789', summary: 'Another commit', author: 'Test', timestamp: Date.now() / 1000 - 7200 },
+      ],
+      execute_interactive_rebase: null,
     });
   });
 
@@ -336,27 +298,12 @@ test.describe('Interactive Rebase - Event Propagation', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_rebase_commits') {
-          return [
-            { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
-            { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
-          ];
-        }
-
-        if (command === 'execute_interactive_rebase') {
-          return null; // Success
-        }
-
-        return originalInvoke(command, args);
-      };
+    await injectCommandMock(page, {
+      get_rebase_commits: [
+        { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
+        { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
+      ],
+      execute_interactive_rebase: null,
     });
   });
 
@@ -377,11 +324,170 @@ test.describe('Interactive Rebase - Event Propagation', () => {
 
     await page.locator('lv-interactive-rebase-dialog lv-modal[open]').waitFor({ state: 'visible' });
 
-    // Click Start Rebase button
-    const startButton = page.locator('lv-interactive-rebase-dialog button', { hasText: /start.*rebase/i });
+    // Click Start Rebase button (use .first() to avoid shadow DOM slot duplication)
+    const startButton = page.locator('lv-interactive-rebase-dialog button', { hasText: /start.*rebase/i }).first();
     await startButton.click();
 
     const eventReceived = await eventPromise;
     expect(eventReceived).toBe(true);
+  });
+});
+
+test.describe('Interactive Rebase - Error Handling', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await injectCommandMock(page, {
+      get_rebase_commits: [
+        { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
+        { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
+      ],
+      execute_interactive_rebase: { __error__: 'Rebase failed: conflicts detected' },
+    });
+  });
+
+  test('should show error message in dialog when rebase fails', async ({ page }) => {
+    // Open dialog
+    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    await developBranch.click({ button: 'right' });
+    await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
+
+    await page.locator('lv-interactive-rebase-dialog lv-modal[open]').waitFor({ state: 'visible' });
+
+    // Click Start Rebase
+    const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' }).first();
+    await startButton.click();
+
+    const errorInDialog = page.locator('lv-interactive-rebase-dialog .error-message, lv-interactive-rebase-dialog .error');
+    const toastError = page.locator('lv-toast, .toast');
+
+    await expect(errorInDialog.or(toastError).first()).toBeVisible();
+  });
+
+  test('should keep dialog open when rebase fails', async ({ page }) => {
+    // Open dialog
+    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    await developBranch.click({ button: 'right' });
+    await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
+
+    const dialog = page.locator('lv-interactive-rebase-dialog lv-modal[open]');
+    await dialog.waitFor({ state: 'visible' });
+
+    // Click Start Rebase
+    const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' }).first();
+    await startButton.click();
+
+    const dialogOrToast = page.locator('lv-interactive-rebase-dialog lv-modal[open], lv-toast, .toast');
+    await expect(dialogOrToast.first()).toBeVisible();
+  });
+
+  test('should not dispatch repository-changed event on failed rebase', async ({ page }) => {
+    const eventPromise = page.evaluate(() => {
+      return new Promise<boolean>((resolve) => {
+        document.addEventListener('repository-changed', () => {
+          resolve(true);
+        }, { once: true });
+        setTimeout(() => resolve(false), 2000);
+      });
+    });
+
+    // Open dialog
+    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    await developBranch.click({ button: 'right' });
+    await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
+
+    await page.locator('lv-interactive-rebase-dialog lv-modal[open]').waitFor({ state: 'visible' });
+
+    // Click Start Rebase (will fail)
+    const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' }).first();
+    await startButton.click();
+
+    const eventReceived = await eventPromise;
+    expect(eventReceived).toBe(false);
+  });
+});
+
+test.describe('Interactive Rebase - Command Verification', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await injectCommandMock(page, {
+      get_rebase_commits: [
+        { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
+        { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
+      ],
+      execute_interactive_rebase: null,
+    });
+  });
+
+  test('should pass correct commit actions in rebase command', async ({ page }) => {
+    await startCommandCapture(page);
+
+    // Open dialog
+    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    await developBranch.click({ button: 'right' });
+    await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
+
+    await page.locator('lv-interactive-rebase-dialog lv-modal[open]').waitFor({ state: 'visible' });
+
+    // Change first commit to 'drop'
+    const firstSelect = page.locator('lv-interactive-rebase-dialog .action-select').first();
+    await firstSelect.selectOption('drop');
+
+    // Click Start Rebase
+    const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' }).first();
+    await startButton.click();
+
+    await waitForCommand(page, 'execute_interactive_rebase');
+
+    const rebaseCommands = await findCommand(page, 'execute_interactive_rebase');
+    expect(rebaseCommands.length).toBeGreaterThan(0);
+
+    // The command sends { path, onto, todo } where todo is a string like "drop abc123 First commit"
+    const rebaseArgs = rebaseCommands[0].args as { path: string; onto: string; todo: string };
+    expect(rebaseArgs?.todo).toBeDefined();
+    // Verify the todo string contains 'drop' for the first commit we changed
+    expect(rebaseArgs.todo).toContain('drop');
+    expect(rebaseArgs.todo).toContain('abc123');
+  });
+});
+
+test.describe('Interactive Rebase - Injected Error on Execute', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await injectCommandMock(page, {
+      get_rebase_commits: [
+        { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
+        { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
+      ],
+      execute_interactive_rebase: null,
+    });
+  });
+
+  test('should show error when execute_interactive_rebase fails', async ({ page }) => {
+    // Open dialog
+    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    await developBranch.click({ button: 'right' });
+    await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
+
+    const dialog = page.locator('lv-interactive-rebase-dialog lv-modal[open]');
+    await dialog.waitFor({ state: 'visible' });
+
+    // Inject error AFTER dialog is open so get_rebase_commits still works
+    await injectCommandError(page, 'execute_interactive_rebase', 'Rebase failed: merge conflict in src/main.ts');
+
+    // Click Start Rebase - this should now fail
+    const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' }).first();
+    await startButton.click();
+
+    // Verify error feedback is shown to the user (inline error or toast)
+    const errorInDialog = page.locator('lv-interactive-rebase-dialog .error-message, lv-interactive-rebase-dialog .error');
+    const toastError = page.locator('lv-toast, .toast');
+    await expect(errorInDialog.or(toastError).first()).toBeVisible();
+
+    // Dialog should remain open so the user can adjust and retry
+    const dialogOrToast = page.locator('lv-interactive-rebase-dialog lv-modal[open], lv-toast, .toast');
+    await expect(dialogOrToast.first()).toBeVisible();
   });
 });

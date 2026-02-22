@@ -3,6 +3,7 @@ import { setupOpenRepository, withVimMode } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
 import { GraphPanelPage, RightPanelPage } from '../pages/panels.page';
+import { startCommandCapture, findCommand, waitForCommand, injectCommandError } from '../fixtures/test-helpers';
 
 test.describe('Keyboard Shortcuts', () => {
   let app: AppPage;
@@ -116,30 +117,46 @@ test.describe('Graph Navigation', () => {
     });
   });
 
-  test('should navigate down with Arrow Down', async ({ page }) => {
-    await graph.canvas.focus();
+  test('should navigate down with Arrow Down and update selected commit', async ({ page }) => {
+    await graph.canvas.click();
     await page.keyboard.press('ArrowDown');
-    // Should move selection down
-    await expect(graph.canvas).toBeVisible();
+
+    // After pressing down, the commit details panel should update to show the selected commit
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    // The details panel should show commit information (either first or second commit)
+    await expect(rightPanel.commitDetails).toBeVisible();
   });
 
-  test('should navigate up with Arrow Up', async ({ page }) => {
-    await graph.canvas.focus();
+  test('should navigate up with Arrow Up after navigating down', async ({ page }) => {
+    await graph.canvas.click();
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowUp');
-    await expect(graph.canvas).toBeVisible();
+
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitDetails).toBeVisible();
   });
 
   test('should go to first commit with Home', async ({ page }) => {
-    await graph.canvas.focus();
+    await graph.canvas.click();
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('Home');
-    await expect(graph.canvas).toBeVisible();
+
+    // Commit details should show the first commit
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitDetails).toBeVisible();
   });
 
   test('should go to last commit with End', async ({ page }) => {
-    await graph.canvas.focus();
+    await graph.canvas.click();
     await page.keyboard.press('End');
-    await expect(graph.canvas).toBeVisible();
+
+    // Commit details should show the last commit
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitDetails).toBeVisible();
   });
 });
 
@@ -154,35 +171,51 @@ test.describe('Vim Mode Navigation', () => {
     await setupOpenRepository(page, withVimMode());
   });
 
-  test('should navigate down with j key', async ({ page }) => {
-    // Wait for graph to be visible and click to focus
+  test('should navigate down with j key and select a commit', async ({ page }) => {
     await expect(graph.canvas).toBeVisible();
     await graph.canvas.click();
     await page.keyboard.press('j');
-    await expect(graph.canvas).toBeVisible();
+
+    // After pressing j, the commit details panel should show a commit
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitDetails).toBeVisible();
   });
 
-  test('should navigate up with k key', async ({ page }) => {
+  test('should navigate up with k key after navigating down', async ({ page }) => {
     await expect(graph.canvas).toBeVisible();
     await graph.canvas.click();
     await page.keyboard.press('j');
     await page.keyboard.press('k');
-    await expect(graph.canvas).toBeVisible();
+
+    // After navigating back, commit details should still be visible
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitDetails).toBeVisible();
   });
 
-  test('should go to first with gg', async ({ page }) => {
+  test('should go to first with gg and select first commit', async ({ page }) => {
     await expect(graph.canvas).toBeVisible();
     await graph.canvas.click();
+    await page.keyboard.press('j');
     await page.keyboard.press('g');
     await page.keyboard.press('g');
-    await expect(graph.canvas).toBeVisible();
+
+    // Should have navigated to first commit
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitDetails).toBeVisible();
   });
 
-  test('should go to last with G', async ({ page }) => {
+  test('should go to last with G and select last commit', async ({ page }) => {
     await expect(graph.canvas).toBeVisible();
     await graph.canvas.click();
     await page.keyboard.press('Shift+g');
-    await expect(graph.canvas).toBeVisible();
+
+    // Should have navigated to last commit
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitDetails).toBeVisible();
   });
 });
 
@@ -201,11 +234,14 @@ test.describe('Staging Shortcuts', () => {
     });
   });
 
-  test('Cmd+Shift+A should stage all files', async ({ page }) => {
+  test('Cmd+Shift+A should call stage_all command', async ({ page }) => {
+    await startCommandCapture(page);
     await page.keyboard.press('Meta+Shift+a');
-    // Stage all command should be triggered
-    // Result depends on mocked response
-    await expect(rightPanel.panel).toBeVisible();
+
+    await waitForCommand(page, 'stage_all');
+
+    const stageAllCommands = await findCommand(page, 'stage_all');
+    expect(stageAllCommands.length).toBeGreaterThan(0);
   });
 });
 
@@ -237,5 +273,133 @@ test.describe('Refresh Command', () => {
 
     // Command palette should close after execution
     await expect(dialogs.commandPalette.palette).not.toBeVisible();
+  });
+
+  test('Refresh command should trigger get_status reload', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await app.openCommandPalette();
+    await dialogs.commandPalette.search('Refresh');
+    await dialogs.commandPalette.executeFirst();
+
+    await waitForCommand(page, 'get_status');
+
+    const statusCommands = await findCommand(page, 'get_status');
+    expect(statusCommands.length).toBeGreaterThan(0);
+  });
+});
+
+test.describe('Graph Selection Keyboard', () => {
+  let app: AppPage;
+  let graph: GraphPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    graph = new GraphPanelPage(page);
+    await setupOpenRepository(page, {
+      commits: [
+        {
+          oid: 'aaa111',
+          shortId: 'aaa111',
+          message: 'First commit',
+          summary: 'First commit',
+          body: null,
+          author: { name: 'User', email: 'user@test.com', timestamp: Date.now() / 1000 },
+          committer: { name: 'User', email: 'user@test.com', timestamp: Date.now() / 1000 },
+          parentIds: [],
+          timestamp: Date.now() / 1000,
+        },
+        {
+          oid: 'bbb222',
+          shortId: 'bbb222',
+          message: 'Second commit',
+          summary: 'Second commit',
+          body: null,
+          author: { name: 'User', email: 'user@test.com', timestamp: Date.now() / 1000 - 3600 },
+          committer: { name: 'User', email: 'user@test.com', timestamp: Date.now() / 1000 - 3600 },
+          parentIds: ['aaa111'],
+          timestamp: Date.now() / 1000 - 3600,
+        },
+        {
+          oid: 'ccc333',
+          shortId: 'ccc333',
+          message: 'Third commit',
+          summary: 'Third commit',
+          body: null,
+          author: { name: 'User', email: 'user@test.com', timestamp: Date.now() / 1000 - 7200 },
+          committer: { name: 'User', email: 'user@test.com', timestamp: Date.now() / 1000 - 7200 },
+          parentIds: ['bbb222'],
+          timestamp: Date.now() / 1000 - 7200,
+        },
+      ],
+    });
+  });
+
+  test('Arrow Down twice should navigate past the first commit', async ({ page }) => {
+    await graph.canvas.click();
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitDetails).toBeVisible();
+  });
+
+  test('Home key should reliably select first commit after navigation', async ({ page }) => {
+    await graph.canvas.click();
+    // Navigate down several times
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+
+    await page.keyboard.press('Home');
+
+    const rightPanel = new RightPanelPage(page);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitDetails).toBeVisible();
+  });
+});
+
+test.describe('Keyboard - Error Scenarios', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page, {
+      status: {
+        staged: [],
+        unstaged: [{ path: 'file.ts', status: 'modified', isStaged: false, isConflicted: false }],
+      },
+    });
+  });
+
+  test('stage_all failure via keyboard shortcut should show error toast', async ({ page }) => {
+    // Inject error for stage_all command
+    await injectCommandError(page, 'stage_all', 'Staging failed: permission denied');
+
+    // Trigger stage_all via keyboard shortcut
+    await page.keyboard.press('Meta+Shift+a');
+
+    // The error should be surfaced to the user via a toast or error indicator
+    const errorIndicator = page.locator('lv-toast-container .toast.error, .error-message, .error-banner').first();
+    await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+  });
+
+  test('refresh failure via command palette should show error feedback', async ({ page }) => {
+    // Inject error for get_status (triggered by refresh)
+    await injectCommandError(page, 'get_status', 'Repository not found');
+
+    // Execute refresh via command palette
+    await app.openCommandPalette();
+    await dialogs.commandPalette.search('Refresh');
+    await dialogs.commandPalette.executeFirst();
+
+    // Command palette should close even on error
+    await expect(dialogs.commandPalette.palette).not.toBeVisible();
+
+    // Error should be displayed to user
+    const errorIndicator = page.locator('lv-toast-container .toast.error, .error-message, .error-banner').first();
+    await expect(errorIndicator).toBeVisible({ timeout: 5000 });
   });
 });

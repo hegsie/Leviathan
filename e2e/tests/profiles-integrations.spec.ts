@@ -13,6 +13,13 @@ import { test, expect, Page } from '@playwright/test';
 import { setupOpenRepository, setupTauriMocks, setupProfilesAndAccounts } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
+import {
+  findCommand,
+  waitForCommand,
+  startCommandCaptureWithMocks,
+  injectCommandError,
+  injectCommandMock,
+} from '../fixtures/test-helpers';
 
 // ============================================================================
 // Test Data
@@ -137,9 +144,7 @@ test.describe('Profile Manager Dialog - Basic Operations', () => {
 
     await expect(dialogs.profileManager.addProfileButton).toBeVisible();
 
-    // Press Escape twice - first closes any inner form, second closes dialog
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(100);
     await page.keyboard.press('Escape');
 
     // Dialog should be closed - check the dialog element itself
@@ -161,6 +166,18 @@ test.describe('Profile Manager Dialog - With Existing Profiles', () => {
       profiles: [testProfiles.work, testProfiles.personal],
       accounts: [testAccounts.githubWork, testAccounts.githubPersonal],
     });
+
+    // The profile manager dialog calls loadProfiles() which invokes get_unified_profiles_config.
+    // The default mock returns empty data, overwriting the store. Inject a mock that returns our test data.
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work, testProfiles.personal],
+        accounts: [testAccounts.githubWork, testAccounts.githubPersonal],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
   });
 
   test('should display existing profiles in list', async ({ page }) => {
@@ -171,10 +188,10 @@ test.describe('Profile Manager Dialog - With Existing Profiles', () => {
     // Wait for New Profile button which indicates dialog is loaded
     await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
 
-    // Should see both profiles in the profile manager dialog
-    // Look for profile names followed by their emails
-    await expect(page.getByText('John Doe <john.doe@company.com>').first()).toBeVisible();
-    await expect(page.getByText('John D <johnd@personal.com>')).toBeVisible();
+    // Should see both profiles - the email is rendered as "Name <email>"
+    // The < and > are HTML entities, so use regex to match the text content
+    await expect(page.getByText(/john\.doe@company\.com/).first()).toBeVisible();
+    await expect(page.getByText(/johnd@personal\.com/)).toBeVisible();
   });
 
   test('should show default badge on default profile', async ({ page }) => {
@@ -185,8 +202,8 @@ test.describe('Profile Manager Dialog - With Existing Profiles', () => {
     // Wait for New Profile button which indicates dialog is loaded
     await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
 
-    // Work profile has "Default" badge - look for it near profile name
-    await expect(page.getByText('Default', { exact: true }).first()).toBeVisible();
+    // Work profile has "Default" badge
+    await expect(page.locator('.default-badge').first()).toBeVisible();
   });
 
   test('should show git email for each profile', async ({ page }) => {
@@ -210,13 +227,11 @@ test.describe('Profile Manager Dialog - With Existing Profiles', () => {
     // Wait for New Profile button which indicates dialog is loaded
     await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
 
-    // Click on Work profile's "Apply to current repository" button
-    // This button is unique to each profile card
-    await page.getByRole('button', { name: 'Apply to current repository' }).first().click();
+    // Click on Work profile item to enter edit mode
+    await page.locator('.profile-item').first().click();
 
-    // After applying, the profile should be active - check in toolbar
-    // Just verify the dialog action worked by checking we're back at the list
-    await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
+    // In edit mode, the dialog title changes and Save Profile button appears
+    await expect(page.getByRole('button', { name: 'Save Profile' })).toBeVisible();
   });
 });
 
@@ -236,6 +251,17 @@ test.describe('Global Accounts Management', () => {
       profiles: [testProfiles.work],
       accounts: [testAccounts.githubWork, testAccounts.githubPersonal, testAccounts.gitlab],
     });
+
+    // Inject mock so loadProfiles() returns our test data instead of empty defaults
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work],
+        accounts: [testAccounts.githubWork, testAccounts.githubPersonal, testAccounts.gitlab],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
   });
 
   test('should show global accounts section in profile manager', async ({ page }) => {
@@ -253,7 +279,10 @@ test.describe('Global Accounts Management', () => {
     await dialogs.commandPalette.search('Git Profiles');
     await dialogs.commandPalette.executeFirst();
 
-    // Profile cards show account info like "1 default account"
+    // Wait for dialog to load with profile data
+    await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
+
+    // Profile cards show "1 default account" in the meta section
     const profileManager = page.locator('lv-profile-manager-dialog');
     await expect(profileManager.getByText(/default account/i)).toBeVisible();
   });
@@ -289,7 +318,7 @@ test.describe('Multiple GitHub Accounts Management', () => {
     await expect(dialogs.github.connectButton).toBeVisible();
   });
 
-  test('should show account name input when adding account', async ({ page }) => {
+  test('should show account name input or PAT token input when adding account', async ({ page }) => {
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
@@ -297,15 +326,8 @@ test.describe('Multiple GitHub Accounts Management', () => {
     // Switch to PAT mode
     await dialogs.github.selectPATMethod();
 
-    // Should have account name/label input
-    const accountNameInput = page.getByPlaceholder(/account name|name|label/i).or(
-      page.locator('input[name="accountName"]')
-    );
-
-    // Account name input might be visible for naming the account
-    const hasAccountName = await accountNameInput.isVisible().catch(() => false);
-    // If not visible at this stage, it's ok - it might be shown after connection
-    expect(true).toBe(true); // Placeholder assertion
+    // PAT token input should always be visible in PAT mode
+    await expect(dialogs.github.tokenInput).toBeVisible();
   });
 
   test('should have OAuth sign in option', async ({ page }) => {
@@ -313,11 +335,11 @@ test.describe('Multiple GitHub Accounts Management', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Should have OAuth option visible or available
-    const hasOAuthButton = await dialogs.github.oauthSignInButton.isVisible().catch(() => false);
-    const hasOAuthOption = await page.getByText(/sign in with github|oauth/i).isVisible().catch(() => false);
-
-    expect(hasOAuthButton || hasOAuthOption).toBe(true);
+    // Should have OAuth option visible - the "Sign in with GitHub" text appears in
+    // both the auth method toggle button and the .btn-oauth button, use .first()
+    await expect(
+      page.getByRole('button', { name: /sign in with github/i }).first()
+    ).toBeVisible();
   });
 
   test('should switch between OAuth and PAT methods', async ({ page }) => {
@@ -325,21 +347,13 @@ test.describe('Multiple GitHub Accounts Management', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Check if toggle exists
-    const hasToggle = await dialogs.github.authMethodToggle.isVisible().catch(() => false);
+    // Switch to PAT
+    await dialogs.github.selectPATMethod();
+    await expect(dialogs.github.tokenInput).toBeVisible();
 
-    if (hasToggle) {
-      // Switch to PAT
-      await dialogs.github.selectPATMethod();
-      await expect(dialogs.github.tokenInput).toBeVisible();
-
-      // Switch back to OAuth
-      await dialogs.github.selectOAuthMethod();
-      await expect(dialogs.github.oauthSignInButton).toBeVisible();
-    } else {
-      // If no toggle, PAT should be available by default
-      await expect(dialogs.github.tokenInput).toBeVisible();
-    }
+    // Switch back to OAuth
+    await dialogs.github.selectOAuthMethod();
+    await expect(dialogs.github.oauthSignInButton).toBeVisible();
   });
 });
 
@@ -353,39 +367,22 @@ test.describe('Account Deletion Tests', () => {
     await setupOpenRepository(page);
   });
 
-  test('GitHub dialog should have disconnect option when connected', async ({ page }) => {
-    // This test verifies the UI has disconnect capability
+  test('GitHub dialog should load and show connection options', async ({ page }) => {
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Disconnect button might be visible if already connected
-    const disconnectBtn = page.getByRole('button', { name: /disconnect|sign out|remove/i });
-
-    // Check if disconnect button exists in the DOM (might be hidden if not connected)
-    const hasDisconnect = await disconnectBtn.count() > 0;
-
-    // The disconnect functionality should exist
-    expect(true).toBe(true); // Test passes - we're just verifying the dialog loads
+    // The GitHub dialog should be visible with connection tab
+    await expect(dialogs.github.connectionTab).toBeVisible();
   });
 
-  test('Profile manager should have delete account option', async ({ page }) => {
+  test('Profile manager should have New Profile button', async ({ page }) => {
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('Git Profiles');
     await dialogs.commandPalette.executeFirst();
 
-    // Profile manager should be open
+    // Profile manager should be open with the New Profile button
     await expect(dialogs.profileManager.addProfileButton).toBeVisible();
-
-    // Look for accounts tab or section
-    const accountsTab = page.getByRole('button', { name: /accounts|integrations/i }).or(
-      page.getByText(/accounts|integrations/i)
-    );
-
-    const hasAccountsSection = await accountsTab.isVisible().catch(() => false);
-
-    // The accounts management should exist somewhere in the UI
-    expect(true).toBe(true); // Test passes - dialog loads correctly
   });
 });
 
@@ -406,6 +403,19 @@ test.describe('GitHub Dialog - Account Selector', () => {
       accounts: [testAccounts.githubWork, testAccounts.githubPersonal],
       connectedAccounts: ['account-github-work'], // Work account is connected
     });
+
+    // The GitHub dialog calls loadInitialData() -> loadUnifiedProfiles() which resets the store.
+    // Inject mocks so the store data is preserved.
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work],
+        accounts: [testAccounts.githubWork, testAccounts.githubPersonal],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+      load_unified_profile_for_repository: testProfiles.work,
+    });
   });
 
   test('should show account selector when multiple accounts exist', async ({ page }) => {
@@ -415,8 +425,8 @@ test.describe('GitHub Dialog - Account Selector', () => {
 
     await expect(dialogs.github.dialog).toBeVisible();
 
-    // Should have account selector visible
-    const accountSelector = page.locator('lv-account-selector, .account-selector, [data-testid="account-selector"]');
+    // lv-account-selector is rendered when accounts exist in the store
+    const accountSelector = page.locator('lv-account-selector');
     await expect(accountSelector).toBeVisible();
   });
 
@@ -425,7 +435,7 @@ test.describe('GitHub Dialog - Account Selector', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Should show the connected account name (may appear multiple times, use first)
+    // Should show the connected account name in the account selector
     await expect(page.getByText('Work GitHub').first()).toBeVisible();
   });
 
@@ -434,11 +444,12 @@ test.describe('GitHub Dialog - Account Selector', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Click account selector to open dropdown
-    const accountSelector = page.locator('lv-account-selector, .account-selector').first();
-    await accountSelector.click();
+    // Click the account selector button to open dropdown
+    const selectorBtn = page.locator('lv-account-selector .selector-btn');
+    await expect(selectorBtn).toBeVisible();
+    await selectorBtn.click();
 
-    // Should show both accounts (use first() since names may appear multiple times)
+    // Should show both accounts in the dropdown
     await expect(page.getByText('Work GitHub').first()).toBeVisible();
     await expect(page.getByText('Personal GitHub').first()).toBeVisible();
   });
@@ -448,12 +459,13 @@ test.describe('GitHub Dialog - Account Selector', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Click account selector to open dropdown
-    const accountSelector = page.locator('lv-account-selector, .account-selector').first();
-    await accountSelector.click();
+    // Click the account selector button to open dropdown
+    const selectorBtn = page.locator('lv-account-selector .selector-btn');
+    await expect(selectorBtn).toBeVisible();
+    await selectorBtn.click();
 
-    // Should have Add Account option
-    await expect(page.getByText(/add account|new account/i).first()).toBeVisible();
+    // Should have Add Account option in dropdown
+    await expect(page.getByText('Add Account').first()).toBeVisible();
   });
 });
 
@@ -494,14 +506,28 @@ test.describe('GitHub Dialog - Connection States', () => {
       connectedAccounts: ['account-github-work'],
     });
 
+    // Inject mocks so store data is preserved when the dialog calls loadInitialData()
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work],
+        accounts: [testAccounts.githubWork],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+      load_unified_profile_for_repository: testProfiles.work,
+      // Mock check_github_connection to return connected state with user info
+      check_github_connection: { connected: true, user: { login: 'johndoe-work', name: 'John Doe', email: 'john.doe@company.com', avatarUrl: null } },
+    });
+
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Should show the account selector with cached user info
+    // The account selector shows the account name and cached username from the store
     const githubDialog = page.locator('lv-github-dialog');
-    // Account info from cachedUser is displayed (username @johndoe-work)
-    await expect(githubDialog.getByText(/@johndoe-work/)).toBeVisible();
+    // Account selector shows cached username @johndoe-work
+    await expect(githubDialog.getByText(/johndoe-work/).first()).toBeVisible();
   });
 
   test('should have disconnect option when connected', async ({ page }) => {
@@ -620,10 +646,8 @@ test.describe('Profile Creation Flow', () => {
 
     // Should have color selection - look for color swatches
     const colorOptions = page.locator('.color-option, .color-swatch, .color-picker button');
-
-    const hasColorOptions = (await colorOptions.count()) > 0;
-
-    expect(hasColorOptions).toBe(true);
+    const colorCount = await colorOptions.count();
+    expect(colorCount).toBeGreaterThan(0);
   });
 
   test('should have URL patterns textarea', async ({ page }) => {
@@ -738,3 +762,412 @@ test.describe('Error Handling', () => {
   });
 });
 
+// ============================================================================
+// Profile CRUD E2E Tests
+// ============================================================================
+
+test.describe('Profile CRUD Operations', () => {
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('create profile end-to-end: fill form, save, verify save_unified_profile command called', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    await expect(dialogs.profileManager.addProfileButton).toBeVisible();
+    await dialogs.profileManager.addProfileButton.click();
+
+    // Fill in the profile form
+    await dialogs.profileManager.fillProfileForm({
+      name: 'CI/CD',
+      gitName: 'CI Bot',
+      gitEmail: 'ci@company.com',
+    });
+
+    // Start capturing commands before clicking save
+    // The actual Tauri command is save_unified_profile (not save_profile)
+    await startCommandCaptureWithMocks(page, {
+      save_unified_profile: { id: 'profile-cicd', name: 'CI/CD', gitName: 'CI Bot', gitEmail: 'ci@company.com', signingKey: null, urlPatterns: [], isDefault: false, color: '#3b82f6', defaultAccounts: {} },
+    });
+
+    // Click the save button
+    const saveButton = page.getByRole('button', { name: 'Save Profile' });
+    await saveButton.click();
+
+    await waitForCommand(page, 'save_unified_profile');
+
+    const saveCommands = await findCommand(page, 'save_unified_profile');
+    expect(saveCommands.length).toBeGreaterThan(0);
+  });
+
+  test('delete profile should invoke delete_profile command', async ({ page }) => {
+    // Set up with existing profiles
+    await setupProfilesAndAccounts(page, {
+      profiles: [testProfiles.work, testProfiles.personal],
+      accounts: [testAccounts.githubWork],
+    });
+
+    dialogs = new DialogsPage(page);
+
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
+
+    // Start capturing commands with mock for delete
+    await startCommandCaptureWithMocks(page, {
+      delete_profile: null,
+      'plugin:dialog|confirm': true,
+      'plugin:dialog|ask': true,
+    });
+
+    // Click on the Personal profile to select it, then look for delete button
+    const deleteButton = page.getByRole('button', { name: /delete/i });
+    await expect(deleteButton).toBeVisible({ timeout: 3000 });
+    await deleteButton.click();
+
+    await expect.poll(async () => {
+      const cmds = await findCommand(page, 'delete_profile');
+      return cmds.length;
+    }).toBeGreaterThan(0);
+  });
+
+  test('apply profile should invoke apply_unified_profile command', async ({ page }) => {
+    // Set up with existing profiles
+    await setupProfilesAndAccounts(page, {
+      profiles: [testProfiles.work, testProfiles.personal],
+      accounts: [testAccounts.githubWork],
+    });
+
+    dialogs = new DialogsPage(page);
+
+    // Inject mock so loadProfiles() returns our test data
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work, testProfiles.personal],
+        accounts: [testAccounts.githubWork],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
+
+    // Start capturing commands - real command is apply_unified_profile
+    await startCommandCaptureWithMocks(page, {
+      apply_unified_profile: null,
+    });
+
+    // Click "Apply to current repository" button (the action-btn with checkmark icon and title)
+    const applyButton = page.locator('button[title="Apply to current repository"]').first();
+    await applyButton.click();
+
+    await waitForCommand(page, 'apply_unified_profile');
+
+    const applyCommands = await findCommand(page, 'apply_unified_profile');
+    expect(applyCommands.length).toBeGreaterThan(0);
+  });
+
+  test('save profile form should include git name and email in command args', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.profileManager.addProfileButton.click();
+
+    // Fill in form
+    await dialogs.profileManager.fillProfileForm({
+      name: 'Test Profile',
+      gitName: 'Test Author',
+      gitEmail: 'author@test.com',
+    });
+
+    // The actual Tauri command is save_unified_profile
+    await startCommandCaptureWithMocks(page, {
+      save_unified_profile: { id: 'profile-test', name: 'Test Profile', gitName: 'Test Author', gitEmail: 'author@test.com', signingKey: null, urlPatterns: [], isDefault: false, color: '#3b82f6', defaultAccounts: {} },
+    });
+
+    const saveButton = page.getByRole('button', { name: 'Save Profile' });
+    await saveButton.click();
+
+    await waitForCommand(page, 'save_unified_profile');
+
+    const commands = await findCommand(page, 'save_unified_profile');
+    expect(commands.length).toBeGreaterThan(0);
+
+    // Verify the args contain the profile data
+    const args = commands[0].args as Record<string, unknown>;
+    // The profile data should be somewhere in the args
+    const argsStr = JSON.stringify(args);
+    expect(argsStr).toContain('Test Author');
+    expect(argsStr).toContain('author@test.com');
+  });
+
+  test('cancel button in profile form should return to profile list', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.profileManager.addProfileButton.click();
+
+    // The form should be visible
+    await expect(page.getByPlaceholder('John Doe')).toBeVisible();
+
+    // Click the Cancel button in the dialog footer (not the back-btn in header)
+    const cancelButton = page.getByRole('button', { name: 'Cancel', exact: true });
+    await cancelButton.click();
+
+    await expect(dialogs.profileManager.addProfileButton).toBeVisible();
+  });
+
+  test('profile form should validate required fields', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.profileManager.addProfileButton.click();
+
+    // Save button should be present
+    const saveButton = page.getByRole('button', { name: 'Save Profile' });
+    await expect(saveButton).toBeVisible();
+
+    // Without filling any fields, clicking save should show a validation error toast
+    // (the component validates in handleSave() and shows toast errors, button is not disabled)
+    await saveButton.click();
+
+    // Should show error toast about required field (name, git name, or email)
+    await expect(page.locator('.toast, .error, [class*="toast"]').first()).toBeVisible({ timeout: 3000 });
+  });
+
+  test('profile creation error should show error feedback', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.profileManager.addProfileButton.click();
+
+    await dialogs.profileManager.fillProfileForm({
+      name: 'Error Profile',
+      gitName: 'Error User',
+      gitEmail: 'error@test.com',
+    });
+
+    // Inject error for save commands
+    await injectCommandError(page, 'save_unified_profile', 'Failed to save profile: disk full');
+    await injectCommandError(page, 'save_profile', 'Failed to save profile: disk full');
+    await injectCommandError(page, 'create_profile', 'Failed to save profile: disk full');
+
+    const saveButton = page.getByRole('button', { name: 'Save Profile' });
+    await saveButton.click();
+
+    // Error feedback should appear as a toast notification
+    await expect(page.locator('.toast, .error-banner, [class*="error"]').first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test('color picker should highlight selected color', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.profileManager.addProfileButton.click();
+
+    const colorOptions = page.locator('.color-option, .color-swatch, .color-picker button');
+    const colorCount = await colorOptions.count();
+    expect(colorCount).toBeGreaterThan(0);
+
+    // Click the second color option
+    await colorOptions.nth(1).click();
+
+    // The selected color should have a visual indicator (selected class, border, etc.)
+    const selectedColor = page.locator('.color-option.selected, .color-swatch.selected, .color-option[aria-selected="true"]');
+    await expect(selectedColor).toBeVisible();
+  });
+});
+
+// ============================================================================
+// Profiles - UI Outcome Verification Tests
+// ============================================================================
+
+test.describe('Profiles - UI Outcome Verification', () => {
+  let dialogs: DialogsPage;
+
+  test('save: verify dialog closes form and profile appears in list', async ({ page }) => {
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    await expect(dialogs.profileManager.addProfileButton).toBeVisible();
+    await dialogs.profileManager.addProfileButton.click();
+
+    // Fill in the profile form
+    await dialogs.profileManager.fillProfileForm({
+      name: 'Automation',
+      gitName: 'Auto Bot',
+      gitEmail: 'auto@company.com',
+    });
+
+    // Mock save to return the new profile, and mock get_unified_profiles_config
+    // to return the updated list including the new profile
+    const newProfile = {
+      id: 'profile-automation',
+      name: 'Automation',
+      gitName: 'Auto Bot',
+      gitEmail: 'auto@company.com',
+      signingKey: null,
+      urlPatterns: [],
+      isDefault: false,
+      color: '#3b82f6',
+      defaultAccounts: {},
+    };
+
+    await startCommandCaptureWithMocks(page, {
+      save_unified_profile: newProfile,
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [newProfile],
+        accounts: [],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+
+    // Click save
+    const saveButton = page.getByRole('button', { name: 'Save Profile' });
+    await saveButton.click();
+
+    // After save, the form should close and the profile list should be visible
+    // The "New Profile" button reappears when we're back in list view
+    await expect(dialogs.profileManager.addProfileButton).toBeVisible({ timeout: 5000 });
+
+    // The newly created profile name should appear in the profile list
+    await expect(page.getByText('Automation').first()).toBeVisible();
+    await expect(page.getByText('auto@company.com').first()).toBeVisible();
+  });
+
+  test('delete: verify profile removed from UI', async ({ page }) => {
+    dialogs = new DialogsPage(page);
+
+    // Set up with two profiles so we can delete one
+    await setupProfilesAndAccounts(page, {
+      profiles: [testProfiles.work, testProfiles.personal],
+      accounts: [testAccounts.githubWork],
+    });
+
+    // Inject mock so loadProfiles() returns our test data
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work, testProfiles.personal],
+        accounts: [testAccounts.githubWork],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    // Wait for dialog with profiles loaded
+    await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
+
+    // Verify both profiles are visible before deletion
+    await expect(page.getByText(/johnd@personal\.com/)).toBeVisible();
+    await expect(page.getByText(/john\.doe@company\.com/).first()).toBeVisible();
+
+    // Mock delete command and confirm dialog; after delete, return only the Work profile
+    await startCommandCaptureWithMocks(page, {
+      delete_profile: null,
+      'plugin:dialog|confirm': true,
+      'plugin:dialog|ask': true,
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work],
+        accounts: [testAccounts.githubWork],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+
+    // Click delete button (visible in the profile list view for each profile card)
+    const deleteButton = page.getByRole('button', { name: /delete/i });
+    await expect(deleteButton).toBeVisible({ timeout: 3000 });
+    await deleteButton.click();
+
+    // Wait for the delete command to be invoked
+    await expect.poll(async () => {
+      const cmds = await findCommand(page, 'delete_profile');
+      return cmds.length;
+    }).toBeGreaterThan(0);
+
+    // After deletion and reload, the Personal profile email should no longer be visible
+    await expect(page.getByText(/johnd@personal\.com/)).not.toBeVisible({ timeout: 5000 });
+
+    // The Work profile should still be present
+    await expect(page.getByText(/john\.doe@company\.com/).first()).toBeVisible();
+  });
+
+  test('apply: verify profile status updates with UI feedback', async ({ page }) => {
+    dialogs = new DialogsPage(page);
+
+    // Set up with existing profiles
+    await setupProfilesAndAccounts(page, {
+      profiles: [testProfiles.work, testProfiles.personal],
+      accounts: [testAccounts.githubWork],
+    });
+
+    // Inject mock so loadProfiles() returns our test data
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work, testProfiles.personal],
+        accounts: [testAccounts.githubWork],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+
+    // Wait for dialog with profiles loaded
+    await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
+
+    // Start capturing commands with mock for apply
+    await startCommandCaptureWithMocks(page, {
+      apply_unified_profile: null,
+    });
+
+    // Click "Apply to current repository" button
+    const applyButton = page.locator('button[title="Apply to current repository"]').first();
+    await applyButton.click();
+
+    // Wait for the apply command to be invoked
+    await waitForCommand(page, 'apply_unified_profile');
+
+    const applyCommands = await findCommand(page, 'apply_unified_profile');
+    expect(applyCommands.length).toBeGreaterThan(0);
+
+    // After applying, there should be some UI feedback - either a toast notification
+    // or an "Applied" badge/status indicator on the profile card
+    const feedbackLocator = page.locator(
+      '.toast, [class*="toast"], .applied-badge, .profile-item .status, .success-indicator'
+    );
+    await expect(feedbackLocator.first()).toBeVisible({ timeout: 5000 });
+  });
+});

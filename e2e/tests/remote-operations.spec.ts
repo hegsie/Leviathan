@@ -9,8 +9,9 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { setupOpenRepository, defaultMockData } from '../fixtures/tauri-mock';
+import { setupOpenRepository, defaultMockData, withConflicts } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
+import { startCommandCapture, findCommand, injectCommandError, waitForCommand } from '../fixtures/test-helpers';
 
 // ============================================================================
 // Helper function to create branches with ahead/behind status
@@ -297,5 +298,258 @@ test.describe('Context Dashboard', () => {
     await expect(fetchBtn).toBeVisible();
     await expect(pullBtn).toBeVisible();
     await expect(pushBtn).toBeVisible();
+  });
+});
+
+// ============================================================================
+// Fetch Operation Tests
+// ============================================================================
+
+test.describe('Fetch Operation', () => {
+  let app: AppPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('clicking Fetch button should call fetch command', async ({ page }) => {
+    await startCommandCapture(page);
+
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+
+    await waitForCommand(page, 'fetch');
+
+    const fetchCommands = await findCommand(page, 'fetch');
+    expect(fetchCommands.length).toBeGreaterThan(0);
+  });
+
+  test('fetch failure should show error toast', async ({ page }) => {
+    await injectCommandError(page, 'fetch', 'Network error: unable to reach remote');
+
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+
+    // Error toast should appear
+    const toast = page.locator('.toast');
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText(/error|fail|unable/i);
+  });
+});
+
+// ============================================================================
+// Push Operation Tests
+// ============================================================================
+
+test.describe('Push Operation', () => {
+  let app: AppPage;
+
+  test('clicking Push button should call push command', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(3, 0));
+
+    await startCommandCapture(page);
+
+    const pushButton = page.getByRole('button', { name: /Push/i });
+    await pushButton.click();
+
+    await waitForCommand(page, 'push');
+
+    const pushCommands = await findCommand(page, 'push');
+    expect(pushCommands.length).toBeGreaterThan(0);
+
+    // Verify DOM: push badge should disappear after successful push (ahead = 0)
+    const pushBadge = page.locator('.badge.push');
+    await expect(pushBadge).not.toBeVisible();
+  });
+
+  test('push failure should show error toast', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(3, 0));
+
+    await injectCommandError(page, 'push', 'Push rejected: non-fast-forward');
+
+    const pushButton = page.getByRole('button', { name: /Push/i });
+    await pushButton.click();
+
+    const toast = page.locator('.toast');
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText(/error|fail|rejected/i);
+  });
+});
+
+// ============================================================================
+// Pull Operation Tests
+// ============================================================================
+
+test.describe('Pull Operation', () => {
+  let app: AppPage;
+
+  test('clicking Pull button should call pull command', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(0, 5));
+
+    await startCommandCapture(page);
+
+    const pullButton = page.getByRole('button', { name: /Pull/i });
+    await pullButton.click();
+
+    await waitForCommand(page, 'pull');
+
+    const pullCommands = await findCommand(page, 'pull');
+    expect(pullCommands.length).toBeGreaterThan(0);
+
+    // Verify DOM: pull badge should disappear after successful pull (behind = 0)
+    const pullBadge = page.locator('.badge.pull');
+    await expect(pullBadge).not.toBeVisible();
+  });
+
+  test('pull failure should show error toast', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(0, 5));
+
+    await injectCommandError(page, 'pull', 'Pull failed: merge conflict');
+
+    const pullButton = page.getByRole('button', { name: /Pull/i });
+    await pullButton.click();
+
+    const toast = page.locator('.toast');
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText(/error|fail|conflict/i);
+  });
+
+  test('pull with conflicts should show merge state', async ({ page }) => {
+    app = new AppPage(page);
+    // Start with behind commits
+    await setupOpenRepository(page, {
+      ...withAheadBehind(0, 3),
+      ...withConflicts(),
+    });
+
+    // Repository state should show 'merge' (conflict state)
+    const conflictFile = page.locator('lv-file-status').getByRole('listitem', { name: /CONFLICT/ });
+    await expect(conflictFile).toBeVisible();
+  });
+});
+
+// ============================================================================
+// Fetch followed by Badge Update Tests
+// ============================================================================
+
+test.describe('Remote Operation Sequences', () => {
+  let app: AppPage;
+
+  test('fetch should refresh remote status after completion', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(2, 3));
+
+    await startCommandCapture(page);
+
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+
+    await waitForCommand(page, 'get_remote_status');
+
+    const remoteStatusCommands = await findCommand(page, 'get_remote_status');
+    expect(remoteStatusCommands.length).toBeGreaterThan(0);
+  });
+});
+
+// ============================================================================
+// UI Outcome Verification Tests
+// ============================================================================
+
+test.describe('Remote Operations - UI Outcome Verification', () => {
+  let app: AppPage;
+
+  test('push success: verify ahead badge disappears after push', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(5, 0));
+
+    // Verify the push badge initially shows 5
+    const pushBadge = page.locator('.badge.push');
+    await expect(pushBadge).toBeVisible();
+    await expect(pushBadge).toHaveText('5');
+
+    await startCommandCapture(page);
+
+    // Click push -- the mock sets ahead to 0 on push
+    const pushButton = page.getByRole('button', { name: /Push/i });
+    await pushButton.click();
+
+    await waitForCommand(page, 'push');
+
+    // After successful push, the ahead badge should disappear (ahead = 0)
+    await expect(pushBadge).not.toBeVisible();
+  });
+
+  test('pull success: verify behind badge disappears after pull', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(0, 4));
+
+    // Verify the pull badge initially shows 4
+    const pullBadge = page.locator('.badge.pull');
+    await expect(pullBadge).toBeVisible();
+    await expect(pullBadge).toHaveText('4');
+
+    await startCommandCapture(page);
+
+    // Click pull -- the mock sets behind to 0 on pull
+    const pullButton = page.getByRole('button', { name: /Pull/i });
+    await pullButton.click();
+
+    await waitForCommand(page, 'pull');
+
+    // After successful pull, the behind badge should disappear (behind = 0)
+    await expect(pullBadge).not.toBeVisible();
+  });
+
+  test('push failure: verify ahead badge remains unchanged', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(3, 0));
+
+    // Verify the push badge initially shows 3
+    const pushBadge = page.locator('.badge.push');
+    await expect(pushBadge).toBeVisible();
+    await expect(pushBadge).toHaveText('3');
+
+    // Inject a push error
+    await injectCommandError(page, 'push', 'Push rejected: non-fast-forward');
+
+    const pushButton = page.getByRole('button', { name: /Push/i });
+    await pushButton.click();
+
+    // Error toast should appear
+    const toast = page.locator('.toast');
+    await expect(toast).toBeVisible({ timeout: 5000 });
+
+    // The push badge should still show 3 (unchanged because push failed)
+    await expect(pushBadge).toBeVisible();
+    await expect(pushBadge).toHaveText('3');
+  });
+
+  test('pull failure: verify behind badge remains unchanged', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(0, 7));
+
+    // Verify the pull badge initially shows 7
+    const pullBadge = page.locator('.badge.pull');
+    await expect(pullBadge).toBeVisible();
+    await expect(pullBadge).toHaveText('7');
+
+    // Inject a pull error
+    await injectCommandError(page, 'pull', 'Pull failed: merge conflict');
+
+    const pullButton = page.getByRole('button', { name: /Pull/i });
+    await pullButton.click();
+
+    // Error toast should appear
+    const toast = page.locator('.toast');
+    await expect(toast).toBeVisible({ timeout: 5000 });
+
+    // The pull badge should still show 7 (unchanged because pull failed)
+    await expect(pullBadge).toBeVisible();
+    await expect(pullBadge).toHaveText('7');
   });
 });

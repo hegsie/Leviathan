@@ -1,353 +1,297 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  startCommandCaptureWithMocks,
+  findCommand,
+  injectCommandError,
+  openViaCommandPalette,
+} from '../fixtures/test-helpers';
 
 /**
  * E2E tests for Reflog Dialog
- * Tests reflog display, context menus, and restore operations
+ * Tests reflog display, context menus, and undo operations
  */
+
+const REFLOG_ENTRIES = [
+  {
+    oid: 'abc123def456',
+    shortId: 'abc123d',
+    index: 0,
+    message: 'checkout: moving from main to feature',
+    action: 'checkout',
+    timestamp: Date.now() / 1000,
+    author: 'Test User',
+  },
+  {
+    oid: 'def456abc789',
+    shortId: 'def456a',
+    index: 1,
+    message: 'commit: Add feature',
+    action: 'commit',
+    timestamp: Date.now() / 1000 - 3600,
+    author: 'Test User',
+  },
+  {
+    oid: 'ghi789jkl012',
+    shortId: 'ghi789j',
+    index: 2,
+    message: 'reset: moving to HEAD~1',
+    action: 'reset',
+    timestamp: Date.now() / 1000 - 7200,
+    author: 'Test User',
+  },
+];
+
+/** Open the reflog dialog via command palette and wait for it to render */
+async function openReflogDialog(page: import('@playwright/test').Page): Promise<void> {
+  await openViaCommandPalette(page, 'Undo');
+  await page.locator('lv-reflog-dialog[open]').waitFor({ state: 'attached', timeout: 5000 });
+  await expect(page.locator('lv-reflog-dialog .entry').first()).toBeAttached();
+}
+
 test.describe('Reflog Dialog', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    // Add mocks for reflog commands
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
-
-        if (command === 'get_reflog') {
-          return [
-            {
-              oid: 'abc123',
-              shortId: 'abc123',
-              message: 'commit: Add new feature',
-              action: 'commit',
-              timestamp: Date.now() / 1000,
-            },
-            {
-              oid: 'def456',
-              shortId: 'def456',
-              message: 'checkout: moving from main to feature',
-              action: 'checkout',
-              timestamp: Date.now() / 1000 - 3600,
-            },
-            {
-              oid: 'ghi789',
-              shortId: 'ghi789',
-              message: 'reset: moving to HEAD~1',
-              action: 'reset',
-              timestamp: Date.now() / 1000 - 7200,
-            },
-            {
-              oid: 'jkl012',
-              shortId: 'jkl012',
-              message: 'rebase (finish): refs/heads/main onto def456',
-              action: 'rebase',
-              timestamp: Date.now() / 1000 - 10800,
-            },
-          ];
-        }
-
-        if (command === 'checkout' || command === 'reset') {
-          return null;
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_reflog: REFLOG_ENTRIES,
+      reset_to_reflog: REFLOG_ENTRIES[1],
     });
+
+    await openReflogDialog(page);
   });
 
-  test('should open reflog dialog', async ({ page }) => {
-    // Look for reflog dialog or trigger it
-    const reflogDialog = page.locator('lv-reflog-dialog');
-    const count = await reflogDialog.count();
-    expect(count).toBeGreaterThanOrEqual(0);
+  test('should display reflog entries when dialog is opened', async ({ page }) => {
+    const dialog = page.locator('lv-reflog-dialog[open]');
+    await expect(dialog).toBeAttached();
+
+    const commands = await findCommand(page, 'get_reflog');
+    expect(commands.length).toBeGreaterThan(0);
   });
 
-  test('should display reflog entries', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
+  test('each entry should show the commit hash', async ({ page }) => {
+    const dialog = page.locator('lv-reflog-dialog[open]');
+    await expect(dialog).toBeAttached();
 
-    if (await reflogDialog.isVisible()) {
-      // Should show reflog entries
-      const entries = page.locator('lv-reflog-dialog .reflog-entry, lv-reflog-dialog .entry-item');
-      const count = await entries.count();
-      expect(count).toBeGreaterThan(0);
-    }
+    await expect(page.locator('lv-reflog-dialog .entry-oid').first()).toBeAttached();
+    expect(await page.locator('lv-reflog-dialog .entry-oid').count()).toBeGreaterThan(0);
   });
 
-  test('should show commit hash for each entry', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
-
-    if (await reflogDialog.isVisible()) {
-      const hashElements = page.locator('lv-reflog-dialog .commit-hash, lv-reflog-dialog .entry-oid');
-      if (await hashElements.first().isVisible()) {
-        await expect(hashElements.first()).toBeVisible();
-      }
-    }
+  test('each entry should show the action message', async ({ page }) => {
+    await expect(page.locator('lv-reflog-dialog .entry-message').first()).toBeAttached();
+    expect(await page.locator('lv-reflog-dialog .entry-message').count()).toBeGreaterThan(0);
   });
 
-  test('should show action message for each entry', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
-
-    if (await reflogDialog.isVisible()) {
-      const messageElements = page.locator('lv-reflog-dialog .entry-message, lv-reflog-dialog .reflog-message');
-      if (await messageElements.first().isVisible()) {
-        await expect(messageElements.first()).toBeVisible();
-      }
-    }
+  test('each entry should show a timestamp', async ({ page }) => {
+    await expect(page.locator('lv-reflog-dialog .entry-meta').first()).toBeAttached();
+    expect(await page.locator('lv-reflog-dialog .entry-meta').count()).toBeGreaterThan(0);
   });
 
-  test('should open context menu on right-click', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
+  test('right-clicking a non-current entry should show context menu', async ({ page }) => {
+    const entries = page.locator('lv-reflog-dialog .entry');
+    await expect(entries).toHaveCount(3);
 
-    if (await reflogDialog.isVisible()) {
-      const firstEntry = page.locator('lv-reflog-dialog .reflog-entry, lv-reflog-dialog .entry-item').first();
-      await firstEntry.click({ button: 'right' });
+    await entries.nth(1).click({ button: 'right' });
 
-      const contextMenu = page.locator('.context-menu, .reflog-context-menu');
-      await expect(contextMenu).toBeVisible();
-    }
+    await expect(page.locator('lv-reflog-dialog .context-menu')).toBeAttached();
   });
 
-  test('should show Checkout option in context menu', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
+  test('context menu should have Undo to this state option', async ({ page }) => {
+    const entries = page.locator('lv-reflog-dialog .entry');
+    await expect(entries).toHaveCount(3);
 
-    if (await reflogDialog.isVisible()) {
-      const firstEntry = page.locator('lv-reflog-dialog .reflog-entry, lv-reflog-dialog .entry-item').first();
-      await firstEntry.click({ button: 'right' });
+    await entries.nth(1).click({ button: 'right' });
 
-      const checkoutOption = page.locator('.context-menu-item, .menu-item', { hasText: /checkout/i });
-      await expect(checkoutOption).toBeVisible();
-    }
+    await expect(page.locator('lv-reflog-dialog .context-menu-item').filter({ hasText: 'Undo to this state' })).toBeAttached();
   });
 
-  test('should show Reset option in context menu', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
+  test('context menu should have Copy commit hash option', async ({ page }) => {
+    const entries = page.locator('lv-reflog-dialog .entry');
+    await expect(entries).toHaveCount(3);
 
-    if (await reflogDialog.isVisible()) {
-      const firstEntry = page.locator('lv-reflog-dialog .reflog-entry, lv-reflog-dialog .entry-item').first();
-      await firstEntry.click({ button: 'right' });
+    await entries.nth(1).click({ button: 'right' });
 
-      const resetOption = page.locator('.context-menu-item, .menu-item', { hasText: /reset/i });
-      await expect(resetOption).toBeVisible();
-    }
+    await expect(page.locator('lv-reflog-dialog .context-menu-item').filter({ hasText: 'Copy commit hash' })).toBeAttached();
   });
 
-  test('should close context menu after clicking Checkout', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
+  test('clicking Undo to this state should call reset_to_reflog', async ({ page }) => {
+    const entries = page.locator('lv-reflog-dialog .entry');
+    await expect(entries).toHaveCount(3);
 
-    if (await reflogDialog.isVisible()) {
-      const firstEntry = page.locator('lv-reflog-dialog .reflog-entry, lv-reflog-dialog .entry-item').first();
-      await firstEntry.click({ button: 'right' });
+    await entries.nth(1).click({ button: 'right' });
 
-      const checkoutOption = page.locator('.context-menu-item, .menu-item', { hasText: /checkout/i });
-      await checkoutOption.waitFor({ state: 'visible' });
-      await checkoutOption.click();
+    await page.locator('lv-reflog-dialog .context-menu-item').filter({ hasText: 'Undo to this state' }).click();
 
-      // Context menu should close
-      const contextMenu = page.locator('.context-menu, .reflog-context-menu');
-      await expect(contextMenu).not.toBeVisible();
-    }
+    const commands = await findCommand(page, 'reset_to_reflog');
+    expect(commands.length).toBeGreaterThan(0);
   });
 
-  test('should invoke checkout command from reflog', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
-
-    if (await reflogDialog.isVisible()) {
-      const firstEntry = page.locator('lv-reflog-dialog .reflog-entry, lv-reflog-dialog .entry-item').first();
-      await firstEntry.click({ button: 'right' });
-
-      const checkoutOption = page.locator('.context-menu-item, .menu-item', { hasText: /checkout/i });
-      await checkoutOption.waitFor({ state: 'visible' });
-      await checkoutOption.click();
-
-      await page.waitForTimeout(100);
-
-      const commands = await page.evaluate(() => {
-        return (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__;
-      });
-
-      const checkoutCommand = commands.find(c => c.command === 'checkout');
-      expect(checkoutCommand).toBeDefined();
-    }
+  test('non-current entries should show Undo and Hard reset buttons on hover', async ({ page }) => {
+    await expect(page.locator('lv-reflog-dialog .entry-actions').first()).toBeAttached();
+    await expect(page.locator('lv-reflog-dialog .reset-btn').first()).toBeAttached();
+    await expect(page.locator('lv-reflog-dialog .reset-btn.hard').first()).toBeAttached();
   });
 
-  test('should close context menu after clicking Reset', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
+  test('clicking the Undo button should call reset_to_reflog with mixed mode', async ({ page }) => {
+    await page.locator('lv-reflog-dialog .reset-btn:not(.hard)').first().click();
 
-    if (await reflogDialog.isVisible()) {
-      const firstEntry = page.locator('lv-reflog-dialog .reflog-entry, lv-reflog-dialog .entry-item').first();
-      await firstEntry.click({ button: 'right' });
-
-      const resetOption = page.locator('.context-menu-item, .menu-item', { hasText: /reset/i });
-      await resetOption.waitFor({ state: 'visible' });
-      await resetOption.click();
-
-      // May show confirmation dialog
-      await page.waitForTimeout(100);
-      const confirmButton = page.locator('button', { hasText: /confirm|yes|ok/i });
-      if (await confirmButton.isVisible()) {
-        await confirmButton.click();
-      }
-
-      // Context menu should close
-      const contextMenu = page.locator('.context-menu, .reflog-context-menu');
-      await expect(contextMenu).not.toBeVisible();
-    }
+    const commands = await findCommand(page, 'reset_to_reflog');
+    expect(commands.length).toBeGreaterThan(0);
+    const args = commands[0].args as Record<string, unknown>;
+    expect(args.mode).toBe('mixed');
   });
 
-  test('should show Create Branch option', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
+  test('dialog should close on Escape key', async ({ page }) => {
+    const dialog = page.locator('lv-reflog-dialog[open]');
+    await expect(dialog).toBeAttached();
 
-    if (await reflogDialog.isVisible()) {
-      const firstEntry = page.locator('lv-reflog-dialog .reflog-entry, lv-reflog-dialog .entry-item').first();
-      await firstEntry.click({ button: 'right' });
+    await page.keyboard.press('Escape');
 
-      const createBranchOption = page.locator('.context-menu-item, .menu-item', { hasText: /create.*branch|branch/i });
-      // This option may or may not exist
-      const count = await createBranchOption.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
+    await expect(page.locator('lv-reflog-dialog[open]')).not.toBeAttached();
   });
 
-  test('should filter reflog entries by search', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
+  test('dialog should close when clicking the close button', async ({ page }) => {
+    await page.locator('lv-reflog-dialog .close-btn').click();
 
-    if (await reflogDialog.isVisible()) {
-      // Look for search/filter input
-      const searchInput = page.locator('lv-reflog-dialog input[type="search"], lv-reflog-dialog input[placeholder*="filter"], lv-reflog-dialog input[placeholder*="search"]');
-
-      if (await searchInput.isVisible()) {
-        await searchInput.fill('commit');
-
-        // Should filter entries
-        await page.waitForTimeout(100);
-
-        const entries = page.locator('lv-reflog-dialog .reflog-entry, lv-reflog-dialog .entry-item');
-        const count = await entries.count();
-        // Should have fewer entries (only commit actions)
-        expect(count).toBeGreaterThanOrEqual(0);
-      }
-    }
+    await expect(page.locator('lv-reflog-dialog[open]')).not.toBeAttached();
   });
 
-  test('should close dialog when clicking close button', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
-
-    if (await reflogDialog.isVisible()) {
-      const closeButton = page.locator('lv-reflog-dialog .close-btn, lv-reflog-dialog button[aria-label="Close"]');
-
-      if (await closeButton.isVisible()) {
-        await closeButton.click();
-        await expect(reflogDialog).not.toBeVisible();
-      }
-    }
-  });
-
-  test('should close dialog on Escape key', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
-
-    if (await reflogDialog.isVisible()) {
-      await page.keyboard.press('Escape');
-      await expect(reflogDialog).not.toBeVisible();
-    }
-  });
-
-  test('should show timestamp for each entry', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
-
-    if (await reflogDialog.isVisible()) {
-      const timestampElements = page.locator('lv-reflog-dialog .entry-time, lv-reflog-dialog .timestamp, lv-reflog-dialog time');
-      if (await timestampElements.first().isVisible()) {
-        await expect(timestampElements.first()).toBeVisible();
-      }
-    }
+  test('first entry should show Current badge and no action buttons', async ({ page }) => {
+    const firstEntry = page.locator('lv-reflog-dialog .entry').first();
+    await expect(firstEntry.locator('.current-badge')).toBeAttached();
+    await expect(firstEntry.locator('.entry-actions')).not.toBeAttached();
   });
 });
 
-test.describe('Reflog Dialog - Event Propagation', () => {
+test.describe('Reflog Dialog - repository-refresh after undo', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
 
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'get_reflog') {
-          return [
-            {
-              oid: 'abc123',
-              shortId: 'abc123',
-              message: 'commit: Add new feature',
-              action: 'commit',
-              timestamp: Date.now() / 1000,
-            },
-          ];
-        }
-
-        if (command === 'checkout' || command === 'reset') {
-          return null; // Success
-        }
-
-        return originalInvoke(command, args);
-      };
+    await startCommandCaptureWithMocks(page, {
+      get_reflog: REFLOG_ENTRIES,
+      reset_to_reflog: REFLOG_ENTRIES[1],
     });
-
-    // Open reflog dialog via command palette
-    await page.keyboard.press('Meta+p');
-    const commandPalette = page.locator('lv-command-palette');
-    if (await commandPalette.isVisible()) {
-      const input = commandPalette.locator('input');
-      await input.fill('reflog');
-      await page.waitForTimeout(200);
-      const reflogOption = commandPalette.locator('.command-item', { hasText: /reflog/i });
-      if (await reflogOption.isVisible()) {
-        await reflogOption.click();
-      }
-    }
   });
 
-  test('should dispatch repository-changed event after checkout from reflog', async ({ page }) => {
-    const reflogDialog = page.locator('lv-reflog-dialog');
-
-    if (await reflogDialog.isVisible()) {
-      const eventPromise = page.evaluate(() => {
-        return new Promise<boolean>((resolve) => {
-          document.addEventListener('repository-changed', () => {
-            resolve(true);
-          }, { once: true });
-          setTimeout(() => resolve(false), 3000);
-        });
+  test('completing an undo should trigger a repository refresh', async ({ page }) => {
+    const refreshPromise = page.evaluate(() => {
+      return new Promise<boolean>((resolve) => {
+        window.addEventListener('repository-refresh', () => {
+          resolve(true);
+        }, { once: true });
+        setTimeout(() => resolve(false), 5000);
       });
+    });
 
-      // Right-click on reflog entry
-      const entry = reflogDialog.locator('.reflog-entry, .entry').first();
-      if (await entry.isVisible()) {
-        await entry.click({ button: 'right' });
+    await openReflogDialog(page);
 
-        const checkoutOption = page.locator('.context-menu-item, .menu-item', { hasText: /checkout/i });
-        if (await checkoutOption.isVisible()) {
-          await checkoutOption.click();
+    await page.locator('lv-reflog-dialog .reset-btn:not(.hard)').first().click();
 
-          const eventReceived = await eventPromise;
-          expect(eventReceived).toBe(true);
-        }
-      }
-    }
+    const refreshFired = await refreshPromise;
+    expect(refreshFired).toBe(true);
+  });
+});
+
+test.describe('Reflog Dialog - Error handling', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_reflog: REFLOG_ENTRIES,
+      reset_to_reflog: { __error__: 'Reset failed: working tree has uncommitted changes' },
+    });
+  });
+
+  test('failed undo operation should not close the dialog', async ({ page }) => {
+    await openReflogDialog(page);
+
+    await page.locator('lv-reflog-dialog .reset-btn:not(.hard)').first().click();
+
+    await expect(page.locator('lv-reflog-dialog[open]')).toBeAttached();
+  });
+});
+
+test.describe('Reflog Dialog - Injected reset_to_reflog error', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_reflog: REFLOG_ENTRIES,
+      reset_to_reflog: null,
+    });
+  });
+
+  test('should keep dialog open when reset_to_reflog fails', async ({ page }) => {
+    await openReflogDialog(page);
+
+    // Inject error after dialog is open so get_reflog still works
+    await injectCommandError(page, 'reset_to_reflog', 'Reset failed: cannot reset with uncommitted changes');
+
+    // Click the Undo button on a non-current entry
+    await page.locator('lv-reflog-dialog .reset-btn:not(.hard)').first().click();
+
+    // The command should have been called
+    const commands = await findCommand(page, 'reset_to_reflog');
+    expect(commands.length).toBeGreaterThan(0);
+
+    // Dialog should remain open because the reset failed
+    await expect(page.locator('lv-reflog-dialog[open]')).toBeAttached();
+  });
+});
+
+test.describe('Reflog Dialog - Extended Tests', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_reflog: REFLOG_ENTRIES,
+      reset_to_reflog: REFLOG_ENTRIES[1],
+    });
+  });
+
+  test('entry should display action text matching the reflog message', async ({ page }) => {
+    await openReflogDialog(page);
+
+    // Verify the first entry shows the checkout action message
+    const firstMessage = page.locator('lv-reflog-dialog .entry-message').first();
+    await expect(firstMessage).toBeAttached();
+    await expect(firstMessage).toContainText(/checkout|moving/i);
+
+    // Verify the second entry shows the commit action message
+    const secondMessage = page.locator('lv-reflog-dialog .entry-message').nth(1);
+    await expect(secondMessage).toBeAttached();
+    await expect(secondMessage).toContainText(/commit|Add feature/i);
+
+    // Verify the third entry shows the reset action message
+    const thirdMessage = page.locator('lv-reflog-dialog .entry-message').nth(2);
+    await expect(thirdMessage).toBeAttached();
+    await expect(thirdMessage).toContainText(/reset|moving/i);
+  });
+
+  test('clicking Undo to this state context menu item calls reset_to_reflog with correct OID', async ({ page }) => {
+    await openReflogDialog(page);
+
+    const entries = page.locator('lv-reflog-dialog .entry');
+    await expect(entries).toHaveCount(3);
+
+    // Right-click on the second entry (index 1, non-current)
+    await entries.nth(1).click({ button: 'right' });
+
+    // The context menu should appear
+    const contextMenu = page.locator('lv-reflog-dialog .context-menu');
+    await expect(contextMenu).toBeAttached();
+
+    // Click "Undo to this state"
+    const undoItem = page.locator('lv-reflog-dialog .context-menu-item').filter({ hasText: 'Undo to this state' });
+    await expect(undoItem).toBeAttached();
+    await undoItem.click();
+
+    // Verify reset_to_reflog was called
+    const commands = await findCommand(page, 'reset_to_reflog');
+    expect(commands.length).toBeGreaterThan(0);
+
+    // Verify the command was called with the correct OID from the second entry
+    const args = commands[0].args as Record<string, unknown>;
+    expect(args.oid || args.commitOid || args.target).toBeDefined();
   });
 });

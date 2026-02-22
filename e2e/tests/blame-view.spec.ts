@@ -1,262 +1,274 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  startCommandCaptureWithMocks,
+  injectCommandError,
+} from '../fixtures/test-helpers';
 
 /**
  * E2E tests for Blame View
- * Tests blame display, context menus, and line group interactions
+ * Tests blame display, context menus, line groups, and keyboard interactions.
+ *
+ * The blame view is conditionally rendered by app-shell when showBlame is true.
+ * We open it by setting app-shell state and mocking the get_file_blame command
+ * to return deterministic blame data.
  */
+
+const BLAME_MOCK_DATA = {
+  path: 'src/main.ts',
+  lines: [
+    {
+      lineNumber: 1,
+      content: 'import { app } from "./app";',
+      commitOid: 'abc123def456',
+      commitShortId: 'abc123d',
+      authorName: 'Alice',
+      authorEmail: 'alice@example.com',
+      timestamp: Math.floor(Date.now() / 1000) - 86400,
+      summary: 'Initial commit',
+      isBoundary: false,
+    },
+    {
+      lineNumber: 2,
+      content: '',
+      commitOid: 'abc123def456',
+      commitShortId: 'abc123d',
+      authorName: 'Alice',
+      authorEmail: 'alice@example.com',
+      timestamp: Math.floor(Date.now() / 1000) - 86400,
+      summary: 'Initial commit',
+      isBoundary: false,
+    },
+    {
+      lineNumber: 3,
+      content: 'const config = { debug: true };',
+      commitOid: 'def456abc789',
+      commitShortId: 'def456a',
+      authorName: 'Bob',
+      authorEmail: 'bob@example.com',
+      timestamp: Math.floor(Date.now() / 1000) - 43200,
+      summary: 'Add configuration',
+      isBoundary: false,
+    },
+    {
+      lineNumber: 4,
+      content: 'app.run(config);',
+      commitOid: 'ghi789000111',
+      commitShortId: 'ghi7890',
+      authorName: 'Charlie',
+      authorEmail: 'charlie@example.com',
+      timestamp: Math.floor(Date.now() / 1000),
+      summary: 'Run app with config',
+      isBoundary: false,
+    },
+  ],
+  totalLines: 4,
+};
+
+/**
+ * Open the blame view by setting app-shell state and providing mock blame data.
+ * Also intercepts get_file_blame so the component receives data.
+ */
+async function openBlameView(page: import('@playwright/test').Page): Promise<void> {
+  // Set up command capture with mock for blame data
+  await startCommandCaptureWithMocks(page, {
+    get_file_blame: BLAME_MOCK_DATA,
+  });
+
+  // Set app-shell properties to show the blame view
+  await page.evaluate(() => {
+    const appShell = document.querySelector('lv-app-shell') as HTMLElement & {
+      showBlame: boolean;
+      blameFile: string | null;
+      blameCommitOid: string | null;
+    };
+    if (appShell) {
+      appShell.blameFile = 'src/main.ts';
+      appShell.blameCommitOid = null;
+      appShell.showBlame = true;
+    }
+  });
+
+  // Wait for the blame view to become visible
+  await page.locator('lv-blame-view').waitFor({ state: 'visible', timeout: 5000 });
+
+  // Wait for blame data to load and render (the groups appear after loadBlame completes)
+  await page.locator('lv-blame-view .blame-group').first().waitFor({ state: 'visible', timeout: 5000 });
+}
+
 test.describe('Blame View', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+  });
 
-    // Add mocks for blame commands
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
+  test('renders blame lines with content after being opened', async ({ page }) => {
+    await openBlameView(page);
 
-      (window as unknown as {
-        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
-      }).__INVOKED_COMMANDS__ = [];
+    const blameLines = page.locator('lv-blame-view .blame-line');
+    const count = await blameLines.count();
+    // We have 4 lines in the mock data
+    expect(count).toBe(4);
 
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
-          .__INVOKED_COMMANDS__.push({ command, args });
+    // Verify line content is rendered
+    const firstLineContent = page.locator('lv-blame-view .blame-line .line-content').first();
+    await expect(firstLineContent).toBeVisible();
+    await expect(firstLineContent).toContainText('import');
+  });
 
-        if (command === 'get_blame') {
-          return {
-            path: 'src/main.ts',
-            lines: [
-              {
-                lineNumber: 1,
-                content: 'import { app } from "./app";',
-                commit: {
-                  oid: 'abc123',
-                  shortId: 'abc123',
-                  summary: 'Initial commit',
-                  author: { name: 'Alice', email: 'alice@example.com', timestamp: Date.now() / 1000 - 86400 },
-                },
-              },
-              {
-                lineNumber: 2,
-                content: '',
-                commit: {
-                  oid: 'abc123',
-                  shortId: 'abc123',
-                  summary: 'Initial commit',
-                  author: { name: 'Alice', email: 'alice@example.com', timestamp: Date.now() / 1000 - 86400 },
-                },
-              },
-              {
-                lineNumber: 3,
-                content: 'const config = { debug: true };',
-                commit: {
-                  oid: 'def456',
-                  shortId: 'def456',
-                  summary: 'Add configuration',
-                  author: { name: 'Bob', email: 'bob@example.com', timestamp: Date.now() / 1000 - 43200 },
-                },
-              },
-              {
-                lineNumber: 4,
-                content: 'app.run(config);',
-                commit: {
-                  oid: 'ghi789',
-                  shortId: 'ghi789',
-                  summary: 'Run app with config',
-                  author: { name: 'Charlie', email: 'charlie@example.com', timestamp: Date.now() / 1000 },
-                },
-              },
-            ],
-          };
-        }
+  test('shows author info per blame group', async ({ page }) => {
+    await openBlameView(page);
 
-        return originalInvoke(command, args);
-      };
+    // There should be 3 groups: Alice (lines 1-2), Bob (line 3), Charlie (line 4)
+    const groups = page.locator('lv-blame-view .blame-group');
+    const groupCount = await groups.count();
+    expect(groupCount).toBe(3);
+
+    // Check author names are visible
+    const authorNames = page.locator('lv-blame-view .author-name');
+    await expect(authorNames.nth(0)).toContainText('Alice');
+    await expect(authorNames.nth(1)).toContainText('Bob');
+    await expect(authorNames.nth(2)).toContainText('Charlie');
+  });
+
+  test('shows commit hash for each group', async ({ page }) => {
+    await openBlameView(page);
+
+    const commitHashes = page.locator('lv-blame-view .commit-hash');
+    await expect(commitHashes.first()).toBeVisible();
+    await expect(commitHashes.nth(0)).toContainText('abc123d');
+    await expect(commitHashes.nth(1)).toContainText('def456a');
+    await expect(commitHashes.nth(2)).toContainText('ghi7890');
+  });
+
+  test('shows line numbers for each blame line', async ({ page }) => {
+    await openBlameView(page);
+
+    const lineNumbers = page.locator('lv-blame-view .line-number');
+    const count = await lineNumbers.count();
+    expect(count).toBe(4);
+
+    await expect(lineNumbers.nth(0)).toContainText('1');
+    await expect(lineNumbers.nth(1)).toContainText('2');
+    await expect(lineNumbers.nth(2)).toContainText('3');
+    await expect(lineNumbers.nth(3)).toContainText('4');
+  });
+
+  test('opens context menu on right-click of a blame line', async ({ page }) => {
+    await openBlameView(page);
+
+    const firstLine = page.locator('lv-blame-view .blame-line').first();
+    await firstLine.click({ button: 'right' });
+
+    const contextMenu = page.locator('lv-blame-view .context-menu');
+    await contextMenu.waitFor({ state: 'visible' });
+    await expect(contextMenu).toBeVisible();
+  });
+
+  test('context menu contains "Show commit details" option', async ({ page }) => {
+    await openBlameView(page);
+
+    const firstLine = page.locator('lv-blame-view .blame-line').first();
+    await firstLine.click({ button: 'right' });
+
+    const contextMenu = page.locator('lv-blame-view .context-menu');
+    await contextMenu.waitFor({ state: 'visible' });
+
+    const showCommitOption = page.locator('lv-blame-view .context-menu-item', {
+      hasText: 'Show commit details',
     });
+    await expect(showCommitOption).toBeVisible();
   });
 
-  test('should display blame view component', async ({ page }) => {
+  test('Escape key closes the blame view', async ({ page }) => {
+    await openBlameView(page);
+
     const blameView = page.locator('lv-blame-view');
-    const count = await blameView.count();
-    expect(count).toBeGreaterThanOrEqual(0);
+    await expect(blameView).toBeVisible();
+
+    // Press Escape - app-shell handles Escape to close blame
+    await page.keyboard.press('Escape');
+
+    // The blame view should no longer be visible (app-shell removes it from the DOM)
+    await expect(blameView).not.toBeVisible();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Error Scenarios
+// --------------------------------------------------------------------------
+test.describe('Blame View - Error Scenarios', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
   });
 
-  test('should show blame lines with content', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
+  test('get_file_blame failure should show error state or toast', async ({ page }) => {
+    // Set up command capture with a valid initial response so the view opens
+    await startCommandCaptureWithMocks(page, {
+      get_file_blame: BLAME_MOCK_DATA,
+    });
 
-    if (await blameView.isVisible()) {
-      const lines = page.locator('lv-blame-view .blame-line, lv-blame-view .line');
-      const count = await lines.count();
-      expect(count).toBeGreaterThan(0);
-    }
-  });
+    // Now inject the error so the next call to get_file_blame will fail
+    await injectCommandError(page, 'get_file_blame', 'Failed to get blame');
 
-  test('should show author information for each blame group', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      const authorElements = page.locator('lv-blame-view .blame-author, lv-blame-view .author-name');
-      if (await authorElements.first().isVisible()) {
-        await expect(authorElements.first()).toBeVisible();
+    // Set app-shell properties to show the blame view (triggers get_file_blame)
+    await page.evaluate(() => {
+      const appShell = document.querySelector('lv-app-shell') as HTMLElement & {
+        showBlame: boolean;
+        blameFile: string | null;
+        blameCommitOid: string | null;
+      };
+      if (appShell) {
+        appShell.blameFile = 'src/main.ts';
+        appShell.blameCommitOid = null;
+        appShell.showBlame = true;
       }
-    }
+    });
+
+    // Wait for the blame view to appear in the DOM
+    await page.locator('lv-blame-view').waitFor({ state: 'attached', timeout: 5000 });
+
+    // The error should be displayed — either an error element in the blame view or a toast
+    await expect(
+      page.locator('.error, .error-banner, .toast, lv-blame-view .error-message').first()
+    ).toBeVisible({ timeout: 5000 });
   });
 
-  test('should show commit hash for blame groups', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
+  test('empty blame data should show empty state', async ({ page }) => {
+    // Mock get_file_blame to return empty lines
+    await startCommandCaptureWithMocks(page, {
+      get_file_blame: { path: 'src/main.ts', lines: [], totalLines: 0 },
+    });
 
-    if (await blameView.isVisible()) {
-      const hashElements = page.locator('lv-blame-view .blame-hash, lv-blame-view .commit-hash');
-      if (await hashElements.first().isVisible()) {
-        await expect(hashElements.first()).toBeVisible();
+    // Set app-shell properties to show the blame view
+    await page.evaluate(() => {
+      const appShell = document.querySelector('lv-app-shell') as HTMLElement & {
+        showBlame: boolean;
+        blameFile: string | null;
+        blameCommitOid: string | null;
+      };
+      if (appShell) {
+        appShell.blameFile = 'src/main.ts';
+        appShell.blameCommitOid = null;
+        appShell.showBlame = true;
       }
-    }
-  });
+    });
 
-  test('should show commit summary on hover or inline', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
+    // Wait for the blame view to appear
+    await page.locator('lv-blame-view').waitFor({ state: 'attached', timeout: 5000 });
 
-    if (await blameView.isVisible()) {
-      const summaryElements = page.locator('lv-blame-view .blame-summary, lv-blame-view .commit-summary');
-      if (await summaryElements.first().isVisible()) {
-        await expect(summaryElements.first()).toBeVisible();
-      }
-    }
-  });
+    // Should show no blame groups since there are no lines
+    await expect(page.locator('lv-blame-view .blame-group')).toHaveCount(0);
 
-  test('should open context menu on right-click', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
+    // Should show an empty state message or at least no blame lines
+    const emptyState = page.locator('lv-blame-view .empty, lv-blame-view .empty-state, lv-blame-view .no-data');
+    const blameLines = page.locator('lv-blame-view .blame-line');
 
-    if (await blameView.isVisible()) {
-      const firstLine = page.locator('lv-blame-view .blame-line, lv-blame-view .line').first();
-      await firstLine.click({ button: 'right' });
-
-      const contextMenu = page.locator('.context-menu, .blame-context-menu');
-      await expect(contextMenu).toBeVisible();
-    }
-  });
-
-  test('should show "View Commit" option in context menu', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      const firstLine = page.locator('lv-blame-view .blame-line, lv-blame-view .line').first();
-      await firstLine.click({ button: 'right' });
-
-      const viewCommitOption = page.locator('.context-menu-item, .menu-item', { hasText: /view.*commit|show.*commit/i });
-      await expect(viewCommitOption).toBeVisible();
-    }
-  });
-
-  test('should show "Copy Commit Hash" option in context menu', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      const firstLine = page.locator('lv-blame-view .blame-line, lv-blame-view .line').first();
-      await firstLine.click({ button: 'right' });
-
-      const copyOption = page.locator('.context-menu-item, .menu-item', { hasText: /copy.*hash/i });
-      // This option may or may not exist
-      const count = await copyOption.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  test('should close context menu after clicking option', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      const firstLine = page.locator('lv-blame-view .blame-line, lv-blame-view .line').first();
-      await firstLine.click({ button: 'right' });
-
-      const contextMenu = page.locator('.context-menu, .blame-context-menu');
-      await contextMenu.waitFor({ state: 'visible' });
-
-      const firstOption = page.locator('.context-menu-item, .menu-item').first();
-      await firstOption.click();
-
-      // Context menu should close
-      await expect(contextMenu).not.toBeVisible();
-    }
-  });
-
-  test('should highlight blame group on hover', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      const blameGroup = page.locator('lv-blame-view .blame-group, lv-blame-view .commit-group').first();
-
-      if (await blameGroup.isVisible()) {
-        await blameGroup.hover();
-        // Group should be highlighted (hard to test CSS changes, but interaction should work)
-        expect(true).toBe(true);
-      }
-    }
-  });
-
-  test('should show line numbers', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      const lineNumbers = page.locator('lv-blame-view .line-number, lv-blame-view .line-num');
-      if (await lineNumbers.first().isVisible()) {
-        await expect(lineNumbers.first()).toBeVisible();
-      }
-    }
-  });
-
-  test('should color-code authors differently', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      // Authors should have different colors - this is hard to test directly
-      // but we can verify that author elements exist
-      const authorElements = page.locator('lv-blame-view .blame-author, lv-blame-view .author-name');
-      const count = await authorElements.count();
-      expect(count).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  test('should show timestamp for blame groups', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      const timestamps = page.locator('lv-blame-view .blame-time, lv-blame-view .timestamp, lv-blame-view time');
-      if (await timestamps.first().isVisible()) {
-        await expect(timestamps.first()).toBeVisible();
-      }
-    }
-  });
-
-  test('should close blame view with Escape key', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      await page.keyboard.press('Escape');
-      // Blame view may close or not depending on implementation
-      expect(true).toBe(true);
-    }
-  });
-
-  test('should jump to commit when clicking View Commit', async ({ page }) => {
-    const blameView = page.locator('lv-blame-view');
-
-    if (await blameView.isVisible()) {
-      const firstLine = page.locator('lv-blame-view .blame-line, lv-blame-view .line').first();
-      await firstLine.click({ button: 'right' });
-
-      const viewCommitOption = page.locator('.context-menu-item, .menu-item', { hasText: /view.*commit|show.*commit/i });
-
-      if (await viewCommitOption.isVisible()) {
-        await viewCommitOption.click();
-
-        // Should dispatch event or navigate to commit
-        // Hard to verify without knowing the exact behavior
-        expect(true).toBe(true);
-      }
+    // Either an explicit empty state element is visible, or there are simply no blame lines
+    const hasEmptyState = await emptyState.count() > 0;
+    if (hasEmptyState) {
+      await expect(emptyState.first()).toBeVisible();
+    } else {
+      await expect(blameLines).toHaveCount(0);
     }
   });
 });

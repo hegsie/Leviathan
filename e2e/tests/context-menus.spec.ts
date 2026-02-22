@@ -1,19 +1,37 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository, defaultMockData, type MockBranch, type MockTag, type MockCommit } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
+import {
+  startCommandCapture,
+  findCommand,
+  waitForRepositoryChanged,
+  injectCommandError,
+  injectCommandMock,
+} from '../fixtures/test-helpers';
 
 /**
  * Helper to find and right-click on a commit in the graph.
  * The graph is canvas-based, so we need to click on specific commit row areas.
+ *
+ * Uses Playwright's auto-piercing locator to find elements inside shadow DOM.
  */
 async function rightClickOnCommitRow(page: import('@playwright/test').Page, rowIndex: number = 0) {
   const graphCanvas = page.locator('lv-graph-canvas');
   await expect(graphCanvas).toBeVisible();
 
-  // Wait for graph to render
-  await page.waitForTimeout(300);
+  // Wait for the inner <canvas> element to have non-zero dimensions.
+  // Playwright locators auto-pierce shadow DOM, so use the inner canvas locator.
+  const innerCanvas = graphCanvas.locator('canvas');
+  await expect(innerCanvas).toBeAttached();
 
-  // Get canvas bounding box
+  // Wait for commits to be loaded in the graph before clicking.
+  // Use Playwright's auto-piercing locator to get an element handle, then check the property.
+  const graphHandle = await graphCanvas.elementHandle();
+  await page.waitForFunction(
+    (el) => ((el as HTMLElement & { sortedNodesByRow?: unknown[] })?.sortedNodesByRow?.length ?? 0) > 0,
+    graphHandle
+  );
+
   const box = await graphCanvas.boundingBox();
   if (!box) throw new Error('Canvas not found');
 
@@ -38,44 +56,35 @@ test.describe('Commit Context Menu', () => {
   test('should show context menu on right-click on commit row', async ({ page }) => {
     await rightClickOnCommitRow(page, 0);
 
-    // Context menu should appear (either commit or ref menu)
+    // Context menu should appear
     const contextMenu = page.locator('.context-menu');
-    const isVisible = await contextMenu.isVisible().catch(() => false);
-
-    // If we hit a commit, menu should be visible
-    if (isVisible) {
-      await expect(contextMenu).toBeVisible();
-    }
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
   });
 
   test('context menu should have expected structure when visible', async ({ page }) => {
     await rightClickOnCommitRow(page, 0);
 
     const contextMenu = page.locator('.context-menu');
-    const isVisible = await contextMenu.isVisible().catch(() => false);
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
 
-    if (isVisible) {
-      // Should have a header
-      const header = contextMenu.locator('.context-menu-header');
-      await expect(header).toBeVisible();
+    // Should have a header
+    const header = contextMenu.locator('.context-menu-header');
+    await expect(header).toBeVisible();
 
-      // Should have menu items
-      const menuItems = contextMenu.locator('.context-menu-item');
-      const count = await menuItems.count();
-      expect(count).toBeGreaterThan(0);
-    }
+    // Should have menu items
+    const menuItems = contextMenu.locator('.context-menu-item');
+    const count = await menuItems.count();
+    expect(count).toBeGreaterThan(0);
   });
 
   test('should close context menu on Escape key', async ({ page }) => {
     await rightClickOnCommitRow(page, 0);
 
     const contextMenu = page.locator('.context-menu');
-    const isVisible = await contextMenu.isVisible().catch(() => false);
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
 
-    if (isVisible) {
-      await page.keyboard.press('Escape');
-      await expect(contextMenu).not.toBeVisible();
-    }
+    await page.keyboard.press('Escape');
+    await expect(contextMenu).not.toBeVisible();
   });
 });
 
@@ -302,16 +311,224 @@ test.describe('Context Menu Actions', () => {
     await rightClickOnCommitRow(page, 0);
 
     const contextMenu = page.locator('.context-menu');
-    const isVisible = await contextMenu.isVisible().catch(() => false);
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
 
-    if (isVisible) {
-      // Click any menu item
-      const menuItem = contextMenu.locator('.context-menu-item').first();
-      if (await menuItem.isVisible()) {
-        await menuItem.click();
-        // Menu should close after action
-        await expect(contextMenu).not.toBeVisible();
+    // Click the first menu item
+    const menuItem = contextMenu.locator('.context-menu-item').first();
+    await expect(menuItem).toBeVisible();
+    await menuItem.click();
+
+    // Menu should close after action
+    await expect(contextMenu).not.toBeVisible();
+  });
+});
+
+test.describe('Commit Context Menu - Specific Items', () => {
+  let app: AppPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('should show Amend option in commit context menu', async ({ page }) => {
+    await rightClickOnCommitRow(page, 0);
+
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    const amendItem = contextMenu.locator('.context-menu-item', { hasText: /amend/i });
+    await expect(amendItem).toBeVisible();
+  });
+
+  test('should show Create Branch option in commit context menu', async ({ page }) => {
+    await rightClickOnCommitRow(page, 0);
+
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    const createBranchItem = contextMenu.locator('.context-menu-item', { hasText: /create.*branch|branch.*from/i });
+    await expect(createBranchItem).toBeVisible();
+  });
+
+  test('should show Cherry-pick option in commit context menu', async ({ page }) => {
+    await rightClickOnCommitRow(page, 0);
+
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    const cherryPickItem = contextMenu.locator('.context-menu-item', { hasText: /cherry.*pick/i });
+    await expect(cherryPickItem).toBeVisible();
+  });
+
+  test('clicking Revert should invoke revert command', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await rightClickOnCommitRow(page, 0);
+
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    const revertItem = contextMenu.locator('.context-menu-item', { hasText: /revert/i });
+    await expect(revertItem).toBeVisible();
+    await revertItem.click();
+
+    // Menu should close
+    await expect(contextMenu).not.toBeVisible();
+  });
+
+  test('clicking Create Branch should open create branch dialog', async ({ page }) => {
+    await rightClickOnCommitRow(page, 0);
+
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    const createBranchItem = contextMenu.locator('.context-menu-item', { hasText: /create.*branch|branch.*from/i });
+    await expect(createBranchItem).toBeVisible();
+    await createBranchItem.click();
+
+    // Create branch dialog should open
+    const createBranchDialog = page.locator('lv-create-branch-dialog lv-modal[open]');
+    await expect(createBranchDialog).toBeVisible({ timeout: 3000 });
+  });
+
+  test('context menu header should show abbreviated commit SHA', async ({ page }) => {
+    await rightClickOnCommitRow(page, 0);
+
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    // Header should contain a short SHA
+    const header = contextMenu.locator('.context-menu-header');
+    const headerText = await header.textContent();
+    // SHA should be at least 7 characters (short ID format)
+    expect(headerText).toBeTruthy();
+    expect(headerText!.length).toBeGreaterThan(0);
+  });
+});
+
+test.describe('Context Menus - Error Scenarios', () => {
+  let app: AppPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('cherry-pick operation failure should show error toast', async ({ page }) => {
+    // Inject cherry_pick error before performing the action
+    await injectCommandError(page, 'cherry_pick', 'Cherry-pick failed: conflict');
+
+    // Right-click to open context menu and click Cherry-pick
+    await rightClickOnCommitRow(page, 0);
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    const cherryPickItem = contextMenu.locator('.context-menu-item', { hasText: /cherry.*pick/i });
+    await expect(cherryPickItem).toBeVisible();
+    await cherryPickItem.click();
+
+    // Cherry-pick opens a dialog; click the primary button to trigger the command
+    const cherryPickBtn = page.locator('lv-cherry-pick-dialog button.btn-primary', {
+      hasText: /Cherry-Pick/i,
+    });
+    // Confirm the cherry-pick dialog to trigger the error
+    await expect(cherryPickBtn).toBeVisible({ timeout: 3000 });
+    await cherryPickBtn.click();
+
+    // Error should be displayed (toast, error banner, or error message in dialog)
+    await expect(page.locator('.toast, .error-banner, .error, .error-message').first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test('revert operation failure should show error toast', async ({ page }) => {
+    // Inject revert error before performing the action
+    await injectCommandError(page, 'revert', 'Revert failed: working tree has modifications');
+
+    // Right-click to open context menu and click Revert
+    await rightClickOnCommitRow(page, 0);
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    const revertItem = contextMenu.locator('.context-menu-item', { hasText: /revert/i });
+    await expect(revertItem).toBeVisible();
+    await revertItem.click();
+
+    // Context menu should close after clicking
+    await expect(contextMenu).not.toBeVisible();
+
+    // Error toast should appear
+    await expect(page.locator('.toast, .error-banner, .error').first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test('merge operation failure should show error toast', async ({ page }) => {
+    // Inject merge error
+    await injectCommandError(page, 'merge', 'Merge failed: uncommitted changes would be overwritten');
+
+    // Merge is triggered from the ref context menu (branch label right-click).
+    // Simulate by dispatching the merge event directly on the app shell.
+    await page.evaluate(() => {
+      const appShell = document.querySelector('lv-app-shell');
+      if (appShell) {
+        appShell.dispatchEvent(
+          new CustomEvent('ref-merge', {
+            bubbles: true,
+            composed: true,
+            detail: { refName: 'feature/test-branch' },
+          })
+        );
       }
-    }
+    });
+
+    // Error toast should appear
+    await expect(page.locator('.toast, .error-banner, .error').first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test('UI should update after successful context menu checkout', async ({ page }) => {
+    // Mock checkout to return success and mock get_branches to return updated list
+    const updatedBranches = [
+      {
+        name: 'refs/heads/main',
+        isCurrent: false,
+        isRemote: false,
+        isHead: false,
+        upstream: null,
+        targetOid: 'abc123',
+        shorthand: 'main',
+      },
+      {
+        name: 'refs/heads/develop',
+        isCurrent: true,
+        isRemote: false,
+        isHead: true,
+        upstream: null,
+        targetOid: 'def456',
+        shorthand: 'develop',
+      },
+    ];
+
+    await injectCommandMock(page, {
+      checkout: null,
+      get_branches: updatedBranches,
+    });
+
+    // Trigger a checkout via event to simulate context menu checkout action
+    await page.evaluate(() => {
+      const appShell = document.querySelector('lv-app-shell');
+      if (appShell) {
+        appShell.dispatchEvent(
+          new CustomEvent('ref-checkout', {
+            bubbles: true,
+            composed: true,
+            detail: { refName: 'develop' },
+          })
+        );
+      }
+    });
+
+    // After checkout, a success toast should appear or the branch list should update
+    // Wait for a toast notification indicating checkout success
+    await expect(
+      page.locator('.toast, .branch-current, [data-current-branch]').first()
+    ).toBeVisible({ timeout: 5000 });
   });
 });

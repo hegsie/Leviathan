@@ -2,6 +2,14 @@ import { test, expect } from '@playwright/test';
 import { setupOpenRepository, withStagedFiles } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { RightPanelPage } from '../pages/panels.page';
+import {
+  startCommandCapture,
+  findCommand,
+  injectCommandError,
+  injectCommandMock,
+  waitForRepositoryChanged,
+  waitForCommand,
+} from '../fixtures/test-helpers';
 
 test.describe('Commit Workflow', () => {
   let app: AppPage;
@@ -10,7 +18,6 @@ test.describe('Commit Workflow', () => {
   test.beforeEach(async ({ page }) => {
     app = new AppPage(page);
     rightPanel = new RightPanelPage(page);
-    // Setup with staged files
     await setupOpenRepository(
       page,
       withStagedFiles([
@@ -28,7 +35,6 @@ test.describe('Commit Workflow', () => {
 
   test('should enable commit button when message is entered and files are staged', async () => {
     await rightPanel.commitMessage.fill('feat: add new feature');
-    // Note: Commit button enablement depends on component implementation
     await expect(rightPanel.commitButton).toBeVisible();
   });
 
@@ -38,27 +44,6 @@ test.describe('Commit Workflow', () => {
     await expect(rightPanel.commitMessage).toHaveValue(message);
   });
 
-  test('should clear commit message after successful commit', async ({ page }) => {
-    // Mock successful commit
-    await page.addInitScript(() => {
-      const originalInvoke = (window as Record<string, unknown>).__TAURI_INTERNALS__;
-      (window as Record<string, unknown>).__TAURI_INTERNALS__ = {
-        ...originalInvoke,
-        invoke: async (command: string, args?: Record<string, unknown>) => {
-          if (command === 'create_commit') {
-            return 'new-commit-sha';
-          }
-          return (originalInvoke as { invoke: (cmd: string, args?: unknown) => Promise<unknown> }).invoke(command, args);
-        },
-      };
-    });
-
-    await rightPanel.commitMessage.fill('test commit');
-    await rightPanel.commitButton.click();
-
-    // After commit, message should be cleared (depends on implementation)
-    // This is a behavioral test that verifies the expected flow
-  });
 });
 
 test.describe('Commit Message Validation', () => {
@@ -102,7 +87,6 @@ test.describe('Commit Without Staged Files', () => {
   test.beforeEach(async ({ page }) => {
     app = new AppPage(page);
     rightPanel = new RightPanelPage(page);
-    // Setup with no staged files
     await setupOpenRepository(page, {
       status: { staged: [], unstaged: [{ path: 'file.ts', status: 'modified', isStaged: false, isConflicted: false }] },
     });
@@ -160,7 +144,6 @@ test.describe('Commit Details Tab', () => {
 
   test('should switch to Details tab when clicked', async () => {
     await rightPanel.switchToDetails();
-    // The commit details panel should be visible when a commit is selected
     await expect(rightPanel.commitDetails).toBeVisible();
   });
 
@@ -183,21 +166,7 @@ test.describe('Commit - Event Propagation', () => {
       ])
     );
 
-    // Mock successful commit
-    await page.evaluate(() => {
-      const originalInvoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-
-      (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command === 'create_commit') {
-          return 'new-commit-sha-123';
-        }
-        return originalInvoke(command, args);
-      };
-    });
+    await injectCommandMock(page, { create_commit: 'new-commit-sha-123' });
   });
 
   test('should dispatch repository-changed event after successful commit', async ({ page }) => {
@@ -215,5 +184,171 @@ test.describe('Commit - Event Propagation', () => {
 
     const eventReceived = await eventPromise;
     expect(eventReceived).toBe(true);
+  });
+});
+
+test.describe('Commit - Error Handling', () => {
+  let rightPanel: RightPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withStagedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: true, isConflicted: false },
+      ])
+    );
+  });
+
+  test('should NOT clear commit message after failed commit', async ({ page }) => {
+    await injectCommandError(page, 'create_commit', 'Commit failed: empty tree');
+
+    // Verify initial staged file count
+    const initialStaged = await rightPanel.getStagedCount();
+    expect(initialStaged).toBe(1);
+
+    await rightPanel.commitMessage.fill('test: should persist after failure');
+    await rightPanel.commitButton.click();
+
+    // Verify commit message is preserved
+    await expect(rightPanel.commitMessage).toHaveValue('test: should persist after failure');
+
+    // Verify staged files are still present after failed commit
+    const finalStaged = await rightPanel.getStagedCount();
+    expect(finalStaged).toBe(1);
+  });
+
+  test('should not dispatch repository-changed event on failed commit', async ({ page }) => {
+    await injectCommandError(page, 'create_commit', 'Commit failed: nothing to commit');
+
+    const eventReceived = await waitForRepositoryChanged(page, async () => {
+      await rightPanel.commitMessage.fill('test: should fail');
+      await rightPanel.commitButton.click();
+    }, 1500);
+
+    expect(eventReceived).toBe(false);
+  });
+});
+
+test.describe('Commit - Button State', () => {
+  let rightPanel: RightPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withStagedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: true, isConflicted: false },
+      ])
+    );
+  });
+
+  test('should disable commit button when message is empty', async () => {
+    await rightPanel.commitMessage.fill('');
+
+    await expect(rightPanel.commitButton).toBeDisabled();
+  });
+
+  test('should enable commit button when message is entered with staged files', async () => {
+    await rightPanel.commitMessage.fill('feat: add new feature');
+
+    await expect(rightPanel.commitButton).toBeEnabled();
+  });
+
+  test('should invoke create_commit with correct message', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await rightPanel.commitMessage.fill('feat: test commit message');
+    await rightPanel.commitButton.click();
+
+    await waitForCommand(page, 'create_commit');
+
+    const commitCommands = await findCommand(page, 'create_commit');
+    expect(commitCommands.length).toBeGreaterThan(0);
+    expect((commitCommands[0].args as { message?: string })?.message).toContain('feat: test commit message');
+
+    const stagedCount = await rightPanel.getStagedCount();
+    expect(stagedCount).toBe(0);
+
+    await expect(rightPanel.commitMessage).toHaveValue('');
+  });
+});
+
+test.describe('Commit - UI Outcome Verification', () => {
+  let rightPanel: RightPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withStagedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: true, isConflicted: false },
+        { path: 'src/utils.ts', status: 'added', isStaged: true, isConflicted: false },
+      ])
+    );
+  });
+
+  test('should reset staged files and clear message after successful commit', async ({ page }) => {
+    // Verify initial staged files
+    const initialStaged = await rightPanel.getStagedCount();
+    expect(initialStaged).toBe(2);
+
+    // Fill in a commit message and commit
+    await rightPanel.commitMessage.fill('feat: add utility module');
+    await rightPanel.commitButton.click();
+
+    // Wait for commit to complete (staged files should clear)
+    await page.waitForFunction(() => {
+      const stagedHeader = document.querySelector('lv-file-status .section-header');
+      // Either the staged section is gone or the count reads 0
+      if (!stagedHeader) return true;
+      const countEl = stagedHeader.querySelector('.section-count');
+      return countEl?.textContent?.trim() === '0' || !countEl;
+    });
+
+    // Verify staged files list is empty
+    const finalStaged = await rightPanel.getStagedCount();
+    expect(finalStaged).toBe(0);
+
+    // Verify commit message textarea is cleared
+    await expect(rightPanel.commitMessage).toHaveValue('');
+  });
+
+  test('should populate previous commit message when amend is toggled on', async ({ page }) => {
+    // The amend checkbox is inside lv-commit-panel
+    const amendCheckbox = page.locator('lv-commit-panel .amend-toggle input[type="checkbox"]');
+    await expect(amendCheckbox).toBeVisible();
+
+    // Toggle amend on
+    await amendCheckbox.check();
+
+    // After toggling amend, the summary field should be populated with the last commit's summary.
+    // The mock's get_commit_history returns commits with summary "Initial commit" as the first entry.
+    await expect(rightPanel.commitMessage).not.toHaveValue('');
+
+    // Now perform the amend commit
+    await rightPanel.commitButton.click();
+
+    // After successful amend, the amend checkbox should be unchecked
+    await expect(amendCheckbox).not.toBeChecked();
+
+    // The commit message area should be cleared after successful commit
+    await expect(rightPanel.commitMessage).toHaveValue('');
+  });
+
+  test('should disable commit button when message is empty', async () => {
+    // Ensure the message field is empty
+    await rightPanel.commitMessage.fill('');
+
+    // Verify the commit button is disabled
+    await expect(rightPanel.commitButton).toBeDisabled();
+  });
+
+  test('should keep commit button disabled for whitespace-only message', async () => {
+    // Try committing with whitespace-only message
+    await rightPanel.commitMessage.fill('   ');
+
+    // Verify the commit button is disabled (empty/whitespace messages should not be committable)
+    await expect(rightPanel.commitButton).toBeDisabled();
   });
 });

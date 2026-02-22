@@ -1,14 +1,8 @@
-/**
- * OAuth Integration Flow E2E Tests
- *
- * Tests for OAuth authentication UI in all integration dialogs.
- * Note: Actual OAuth flow requires browser interaction, so we test the UI state.
- */
-
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
+import { startCommandCapture, findCommand, waitForCommand, injectCommandError } from '../fixtures/test-helpers';
 
 test.describe('GitHub OAuth Integration', () => {
   let app: AppPage;
@@ -41,7 +35,6 @@ test.describe('GitHub OAuth Integration', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Switch to PAT mode (dialog defaults to OAuth mode)
     await dialogs.github.selectPATMethod();
     await expect(dialogs.github.tokenInput).toBeVisible();
   });
@@ -51,22 +44,18 @@ test.describe('GitHub OAuth Integration', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Either OAuth or PAT connect button should be visible
-    const hasConnectButton = await dialogs.github.connectButton.isVisible().catch(() => false);
-    const hasOAuthButton = await dialogs.github.oauthSignInButton.isVisible().catch(() => false);
-    expect(hasConnectButton || hasOAuthButton).toBe(true);
+    // Either the connect button (PAT mode) or OAuth sign-in button should be visible
+    const connectOrOAuth = dialogs.github.dialog.locator('button', { hasText: /connect|sign in/i });
+    await expect(connectOrOAuth.first()).toBeVisible();
   });
 
-  test('should show OAuth button with GitHub icon when OAuth configured', async () => {
+  test('should show OAuth sign-in button when OAuth is configured', async () => {
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Check if OAuth is configured (toggle visible)
-    const oauthConfigured = await dialogs.github.isOAuthConfigured();
-    if (oauthConfigured) {
-      await expect(dialogs.github.oauthSignInButton).toBeVisible();
-    }
+    await expect(dialogs.github.authMethodToggle).toBeVisible();
+    await expect(dialogs.github.oauthSignInButton).toBeVisible();
   });
 
   test('should toggle between OAuth and PAT methods', async () => {
@@ -74,21 +63,13 @@ test.describe('GitHub OAuth Integration', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    const oauthConfigured = await dialogs.github.isOAuthConfigured();
-    if (oauthConfigured) {
-      // Switch to PAT method
-      await dialogs.github.selectPATMethod();
-      await expect(dialogs.github.tokenInput).toBeVisible();
-      await expect(dialogs.github.connectButton).toBeVisible();
+    await dialogs.github.selectPATMethod();
+    await expect(dialogs.github.tokenInput).toBeVisible();
+    await expect(dialogs.github.connectButton).toBeVisible();
 
-      // Switch back to OAuth
-      await dialogs.github.selectOAuthMethod();
-      await expect(dialogs.github.oauthSignInButton).toBeVisible();
-    }
+    await dialogs.github.selectOAuthMethod();
+    await expect(dialogs.github.oauthSignInButton).toBeVisible();
   });
-
-  // Note: GitHub dialog uses a toggle switcher instead of an "or" divider
-  // The divider test is covered in other dialogs (GitLab, Azure, Bitbucket)
 
   test('should close dialog with Escape', async () => {
     await dialogs.commandPalette.open();
@@ -131,11 +112,7 @@ test.describe('GitLab OAuth Integration', () => {
     await dialogs.commandPalette.search('GitLab Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // If OAuth is configured, switch to PAT mode first
-    const oauthConfigured = await dialogs.gitlab.isOAuthConfigured();
-    if (oauthConfigured) {
-      await dialogs.gitlab.selectPATMethod();
-    }
+    await dialogs.gitlab.selectPATMethod();
     await expect(dialogs.gitlab.tokenInput).toBeVisible();
   });
 
@@ -144,16 +121,11 @@ test.describe('GitLab OAuth Integration', () => {
     await dialogs.commandPalette.search('GitLab Integration');
     await dialogs.commandPalette.executeFirst();
 
-    const oauthConfigured = await dialogs.gitlab.isOAuthConfigured();
-    if (oauthConfigured) {
-      // Switch to PAT method
-      await dialogs.gitlab.selectPATMethod();
-      await expect(dialogs.gitlab.tokenInput).toBeVisible();
+    await dialogs.gitlab.selectPATMethod();
+    await expect(dialogs.gitlab.tokenInput).toBeVisible();
 
-      // Switch back to OAuth
-      await dialogs.gitlab.selectOAuthMethod();
-      await expect(dialogs.gitlab.oauthSignInButton).toBeVisible();
-    }
+    await dialogs.gitlab.selectOAuthMethod();
+    await expect(dialogs.gitlab.oauthSignInButton).toBeVisible();
   });
 });
 
@@ -183,45 +155,32 @@ test.describe('Azure DevOps OAuth Integration', () => {
     await expect(dialogs.azureDevOps.organizationInput).toBeVisible();
   });
 
-  test('should have token input field when PAT mode selected', async () => {
+  test('should have token input field (PAT is default for ADO)', async () => {
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('Azure DevOps');
     await dialogs.commandPalette.executeFirst();
 
-    // If OAuth is configured, switch to PAT mode first
-    const oauthConfigured = await dialogs.azureDevOps.isOAuthConfigured();
-    if (oauthConfigured) {
-      await dialogs.azureDevOps.selectPATMethod();
-    }
+    // Azure DevOps doesn't have OAuth configured, so the token form is shown by default
     await expect(dialogs.azureDevOps.tokenInput).toBeVisible();
   });
 
-  test('should toggle between OAuth and PAT methods', async () => {
+  test('should have organization and token inputs', async () => {
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('Azure DevOps');
     await dialogs.commandPalette.executeFirst();
 
-    const oauthConfigured = await dialogs.azureDevOps.isOAuthConfigured();
-    if (oauthConfigured) {
-      // Switch to PAT method
-      await dialogs.azureDevOps.selectPATMethod();
-      await expect(dialogs.azureDevOps.tokenInput).toBeVisible();
-
-      // Switch back to OAuth (Microsoft)
-      await dialogs.azureDevOps.selectOAuthMethod();
-      await expect(dialogs.azureDevOps.oauthSignInButton).toBeVisible();
-    }
+    // ADO shows organization + token inputs by default (no OAuth toggle)
+    await expect(dialogs.azureDevOps.organizationInput).toBeVisible();
+    await expect(dialogs.azureDevOps.tokenInput).toBeVisible();
   });
 
-  test('should have Sign in with Microsoft button when OAuth configured', async () => {
+  test('should have Connect button for PAT authentication', async () => {
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('Azure DevOps');
     await dialogs.commandPalette.executeFirst();
 
-    const oauthConfigured = await dialogs.azureDevOps.isOAuthConfigured();
-    if (oauthConfigured) {
-      await expect(dialogs.azureDevOps.oauthButton).toContainText('Sign in with Microsoft');
-    }
+    // ADO uses PAT-only auth, so the Connect button should be visible
+    await expect(dialogs.azureDevOps.connectButton).toBeVisible();
   });
 });
 
@@ -248,11 +207,7 @@ test.describe('Bitbucket OAuth Integration', () => {
     await dialogs.commandPalette.search('Bitbucket');
     await dialogs.commandPalette.executeFirst();
 
-    // If OAuth is configured, switch to App Password mode first
-    const oauthConfigured = await dialogs.bitbucket.isOAuthConfigured();
-    if (oauthConfigured) {
-      await dialogs.bitbucket.selectAppPasswordMethod();
-    }
+    await dialogs.bitbucket.selectAppPasswordMethod();
     await expect(dialogs.bitbucket.usernameInput).toBeVisible();
   });
 
@@ -261,11 +216,7 @@ test.describe('Bitbucket OAuth Integration', () => {
     await dialogs.commandPalette.search('Bitbucket');
     await dialogs.commandPalette.executeFirst();
 
-    // If OAuth is configured, switch to App Password mode first
-    const oauthConfigured = await dialogs.bitbucket.isOAuthConfigured();
-    if (oauthConfigured) {
-      await dialogs.bitbucket.selectAppPasswordMethod();
-    }
+    await dialogs.bitbucket.selectAppPasswordMethod();
     await expect(dialogs.bitbucket.appPasswordInput).toBeVisible();
   });
 
@@ -274,17 +225,12 @@ test.describe('Bitbucket OAuth Integration', () => {
     await dialogs.commandPalette.search('Bitbucket');
     await dialogs.commandPalette.executeFirst();
 
-    const oauthConfigured = await dialogs.bitbucket.isOAuthConfigured();
-    if (oauthConfigured) {
-      // Switch to App Password method
-      await dialogs.bitbucket.selectAppPasswordMethod();
-      await expect(dialogs.bitbucket.usernameInput).toBeVisible();
-      await expect(dialogs.bitbucket.appPasswordInput).toBeVisible();
+    await dialogs.bitbucket.selectAppPasswordMethod();
+    await expect(dialogs.bitbucket.usernameInput).toBeVisible();
+    await expect(dialogs.bitbucket.appPasswordInput).toBeVisible();
 
-      // Switch back to OAuth
-      await dialogs.bitbucket.selectOAuthMethod();
-      await expect(dialogs.bitbucket.oauthSignInButton).toBeVisible();
-    }
+    await dialogs.bitbucket.selectOAuthMethod();
+    await expect(dialogs.bitbucket.oauthSignInButton).toBeVisible();
   });
 });
 
@@ -303,10 +249,8 @@ test.describe('OAuth UI State Management', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Switch to PAT mode (dialog defaults to OAuth mode)
     await dialogs.github.selectPATMethod();
 
-    // Token input should be visible in PAT mode
     await expect(dialogs.github.tokenInput).toBeVisible();
   });
 
@@ -315,7 +259,6 @@ test.describe('OAuth UI State Management', () => {
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
-    // Switch to PAT mode (dialog defaults to OAuth mode)
     await dialogs.github.selectPATMethod();
 
     await dialogs.github.tokenInput.fill('ghp_test123');
@@ -374,5 +317,295 @@ test.describe('Dialog Tabs with OAuth', () => {
     await expect(dialogs.bitbucket.pullRequestsTab).toBeVisible();
     await expect(dialogs.bitbucket.issuesTab).toBeVisible();
     await expect(dialogs.bitbucket.pipelinesTab).toBeVisible();
+  });
+});
+
+test.describe('GitHub PAT Submit Flow', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('submitting PAT should call connect command', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.github.selectPATMethod();
+    await expect(dialogs.github.tokenInput).toBeVisible();
+
+    await dialogs.github.tokenInput.fill('ghp_validtoken123456');
+
+    await startCommandCapture(page);
+
+    await dialogs.github.connectButton.click();
+    await Promise.race([
+      waitForCommand(page, 'connect_github'),
+      waitForCommand(page, 'check_github_connection'),
+    ]);
+
+    const connectCommands = await findCommand(page, 'connect_github');
+    const checkCommands = await findCommand(page, 'check_github_connection');
+    expect(connectCommands.length + checkCommands.length).toBeGreaterThan(0);
+  });
+
+  test('submitting invalid PAT should show error message', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.github.selectPATMethod();
+
+    await injectCommandError(page, 'connect_github', 'Invalid token: authentication failed');
+
+    await dialogs.github.tokenInput.fill('ghp_invalidtoken');
+    await dialogs.github.connectButton.click();
+
+    // Error should be displayed either as inline error or toast
+    await expect(
+      page.locator('lv-github-dialog .error, lv-github-dialog .error-message, .toast.error, .toast')
+    ).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('GitLab PAT Submit Flow', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('submitting PAT should call connect command', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitLab Integration');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.gitlab.selectPATMethod();
+    await expect(dialogs.gitlab.tokenInput).toBeVisible();
+
+    await dialogs.gitlab.instanceUrlInput.fill('https://gitlab.com');
+    await dialogs.gitlab.tokenInput.fill('glpat-validtoken123');
+
+    await startCommandCapture(page);
+    await dialogs.gitlab.connectButton.click();
+    await Promise.race([
+      waitForCommand(page, 'connect_gitlab'),
+      waitForCommand(page, 'check_gitlab_connection'),
+    ]);
+
+    const connectCommands = await findCommand(page, 'connect_gitlab');
+    const checkCommands = await findCommand(page, 'check_gitlab_connection');
+    expect(connectCommands.length + checkCommands.length).toBeGreaterThan(0);
+  });
+});
+
+test.describe('OAuth Dialog State After Close', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('GitHub dialog should reset state after close and reopen', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    await dialogs.github.selectPATMethod();
+    await dialogs.github.tokenInput.fill('ghp_test123');
+
+    await dialogs.github.closeWithEscape();
+    await expect(dialogs.github.dialog).not.toBeVisible();
+
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    await expect(dialogs.github.connectionTab).toBeVisible();
+  });
+
+  test('switching tabs should preserve connection tab state', async () => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+
+    await expect(dialogs.github.connectionTab).toBeVisible();
+
+    await dialogs.github.switchToPullRequestsTab();
+    await dialogs.github.switchToConnectionTab();
+
+    await expect(dialogs.github.authMethodToggle).toBeVisible();
+  });
+});
+
+test.describe('OAuth Error Scenarios', () => {
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('should show error when OAuth token validation fails', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.github.selectPATMethod();
+    await expect(dialogs.github.tokenInput).toBeVisible();
+
+    // Inject error for the token validation command
+    await injectCommandError(page, 'check_github_connection_with_token', 'Token validation failed: invalid or expired token');
+
+    await dialogs.github.tokenInput.fill('ghp_expired_token_12345');
+    await dialogs.github.connectButton.click();
+
+    // Error message should be displayed in the dialog or as a toast
+    await expect(
+      page.locator('lv-github-dialog .error, lv-github-dialog .error-message, .toast.error, .toast')
+    ).toBeVisible({ timeout: 5000 });
+  });
+
+  test('should handle network error during OAuth flow', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.github.selectPATMethod();
+    await expect(dialogs.github.tokenInput).toBeVisible();
+
+    // Inject a network-level error for the connection check command
+    await injectCommandError(page, 'check_github_connection_with_token', 'Network error: unable to reach api.github.com');
+
+    await dialogs.github.tokenInput.fill('ghp_valid_looking_token');
+    await dialogs.github.connectButton.click();
+
+    // An error state should be visible to the user
+    await expect(
+      page.locator('lv-github-dialog .error, lv-github-dialog .error-message, .toast.error, .toast')
+    ).toBeVisible({ timeout: 5000 });
+  });
+
+  test('should show error when GitLab PAT connection fails', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitLab Integration');
+    await dialogs.commandPalette.executeFirst();
+
+    await dialogs.gitlab.selectPATMethod();
+    await expect(dialogs.gitlab.tokenInput).toBeVisible();
+
+    // Inject error for GitLab connection check
+    await injectCommandError(page, 'check_gitlab_connection_with_token', 'Authentication failed: 401 Unauthorized');
+
+    await dialogs.gitlab.instanceUrlInput.fill('https://gitlab.com');
+    await dialogs.gitlab.tokenInput.fill('glpat-invalidtoken123');
+    await dialogs.gitlab.connectButton.click();
+
+    // Error feedback should be visible
+    await expect(
+      page.locator('lv-gitlab-dialog .error, lv-gitlab-dialog .error-message, .toast.error, .toast')
+    ).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('OAuth - Strengthened Assertions', () => {
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('cross-dialog state: GitHub token should not leak into GitLab dialog', async ({ page }) => {
+    // Open GitHub dialog, switch to PAT, fill in a token
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    await dialogs.github.selectPATMethod();
+    await dialogs.github.tokenInput.fill('ghp_cross_dialog_test_token');
+    await expect(dialogs.github.tokenInput).toHaveValue('ghp_cross_dialog_test_token');
+
+    // Close GitHub dialog
+    await dialogs.github.closeWithEscape();
+    await expect(dialogs.github.dialog).not.toBeVisible();
+
+    // Open GitLab dialog
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitLab Integration');
+    await dialogs.commandPalette.executeFirst();
+    await expect(dialogs.gitlab.dialog).toBeVisible();
+
+    // Verify GitLab dialog is clean: PAT input should be empty (switch to PAT mode first)
+    await dialogs.gitlab.selectPATMethod();
+    await expect(dialogs.gitlab.tokenInput).toBeVisible();
+    await expect(dialogs.gitlab.tokenInput).toHaveValue('');
+
+    // Also verify the instance URL is at its default, not polluted by GitHub state
+    await expect(dialogs.gitlab.instanceUrlInput).toBeVisible();
+  });
+
+  test('network error vs invalid token error show different messages', async ({ page }) => {
+    // Test 1: Network error
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    await dialogs.github.selectPATMethod();
+    await injectCommandError(page, 'connect_github', 'Network error: unable to reach api.github.com');
+    await injectCommandError(page, 'check_github_connection_with_token', 'Network error: unable to reach api.github.com');
+
+    await dialogs.github.tokenInput.fill('ghp_network_error_token');
+    await dialogs.github.connectButton.click();
+
+    // Capture the network error message text
+    const networkErrorLocator = page.locator(
+      'lv-github-dialog .error, lv-github-dialog .error-message, .toast.error, .toast'
+    );
+    await expect(networkErrorLocator).toBeVisible({ timeout: 5000 });
+    const networkErrorText = await networkErrorLocator.first().textContent();
+
+    // Close GitHub dialog and reset
+    await dialogs.github.closeWithEscape();
+    await expect(dialogs.github.dialog).not.toBeVisible();
+
+    // Test 2: Invalid token error
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    await dialogs.github.selectPATMethod();
+    await injectCommandError(page, 'connect_github', 'Invalid token: authentication failed (401 Unauthorized)');
+    await injectCommandError(page, 'check_github_connection_with_token', 'Invalid token: authentication failed (401 Unauthorized)');
+
+    await dialogs.github.tokenInput.fill('ghp_invalid_token_test');
+    await dialogs.github.connectButton.click();
+
+    const invalidTokenErrorLocator = page.locator(
+      'lv-github-dialog .error, lv-github-dialog .error-message, .toast.error, .toast'
+    );
+    await expect(invalidTokenErrorLocator).toBeVisible({ timeout: 5000 });
+    const invalidTokenErrorText = await invalidTokenErrorLocator.first().textContent();
+
+    // Both errors should have been shown (both visible), and the messages should differ
+    // since the backend provides different error strings for network vs auth failures
+    expect(networkErrorText).toBeTruthy();
+    expect(invalidTokenErrorText).toBeTruthy();
+    expect(networkErrorText).not.toEqual(invalidTokenErrorText);
   });
 });

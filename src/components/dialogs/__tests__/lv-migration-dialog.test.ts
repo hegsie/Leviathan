@@ -1,380 +1,865 @@
-import { expect } from '@open-wc/testing';
-import type {
-  MigrationPreview,
-  MigrationPreviewProfile,
-  MigrationPreviewAccount,
-  UnmatchedAccount,
-  UnifiedMigrationResult,
-} from '../../../types/unified-profile.types.ts';
+/**
+ * Migration Dialog Tests
+ *
+ * Tests dialog rendering, view mode transitions (intro -> preview -> migrating -> complete),
+ * account assignment, migration execution, error handling, empty state, and open/close behavior.
+ */
 
-// Mock Tauri API
-const mockInvoke = (command: string): Promise<unknown> => {
-  switch (command) {
-    case 'needs_unified_profiles_migration':
-      return Promise.resolve({ success: true, data: false });
-    case 'preview_unified_profiles_migration':
-      return Promise.resolve({ success: true, data: { profiles: [], unmatchedAccounts: [] } });
-    case 'execute_unified_profiles_migration':
-      return Promise.resolve({
-        success: true,
-        data: { success: true, profilesMigrated: 0, accountsMigrated: 0, unmatchedAccounts: [], errors: [] },
-      });
-    default:
-      return Promise.resolve({ success: true, data: null });
-  }
-};
+// -- Tauri mock (must be set before any imports) --
+type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
+
+let cbId = 0;
+const invokeHistory: Array<{ command: string; args?: unknown }> = [];
+let mockInvoke: MockInvoke = () => Promise.resolve(null);
 
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
-  invoke: mockInvoke,
+  invoke: (command: string, args?: unknown) => {
+    invokeHistory.push({ command, args });
+    return mockInvoke(command, args);
+  },
+  transformCallback: () => cbId++,
 };
 
-describe('Migration Dialog Data Structures', () => {
-  describe('MigrationPreview', () => {
-    it('should have correct structure for empty migration', () => {
-      const preview: MigrationPreview = {
-        profiles: [],
-        unmatchedAccounts: [],
-      };
+// -- Imports (after Tauri mock) --
+import { expect, fixture, html } from '@open-wc/testing';
+import type { MigrationPreview } from '../../../types/unified-profile.types.ts';
 
-      expect(preview.profiles).to.deep.equal([]);
-      expect(preview.unmatchedAccounts).to.deep.equal([]);
-    });
+// Import the actual component -- registers <lv-migration-dialog> custom element
+import '../lv-migration-dialog.ts';
+import type { LvMigrationDialog } from '../lv-migration-dialog.ts';
 
-    it('should have correct structure with matched accounts', () => {
-      const preview: MigrationPreview = {
-        profiles: [
-          {
-            profileId: 'profile-1',
-            profileName: 'Work',
-            gitEmail: 'john@company.com',
-            matchedAccounts: [
-              {
-                accountId: 'account-1',
-                accountName: 'Work GitHub',
-                integrationType: 'github',
-              },
-              {
-                accountId: 'account-2',
-                accountName: 'Work GitLab',
-                integrationType: 'gitlab',
-              },
-            ],
-          },
-        ],
-        unmatchedAccounts: [],
-      };
+// -- Test data --
 
-      expect(preview.profiles).to.have.lengthOf(1);
-      expect(preview.profiles[0].matchedAccounts).to.have.lengthOf(2);
-    });
+const PREVIEW_WITH_PROFILES: MigrationPreview = {
+  profiles: [
+    {
+      profileId: 'profile-1',
+      profileName: 'Work',
+      gitEmail: 'dev@work.com',
+      matchedAccounts: [
+        { accountId: 'acc-1', accountName: 'Work GitHub', integrationType: 'github' },
+        { accountId: 'acc-2', accountName: 'Work GitLab', integrationType: 'gitlab' },
+      ],
+    },
+    {
+      profileId: 'profile-2',
+      profileName: 'Personal',
+      gitEmail: 'me@personal.com',
+      matchedAccounts: [],
+    },
+  ],
+  unmatchedAccounts: [
+    {
+      accountId: 'acc-3',
+      accountName: 'Side Project GitHub',
+      integrationType: 'github',
+      suggestedProfileId: 'profile-2',
+    },
+  ],
+};
 
-    it('should have correct structure with unmatched accounts', () => {
-      const preview: MigrationPreview = {
-        profiles: [
-          {
-            profileId: 'profile-1',
-            profileName: 'Work',
-            gitEmail: 'john@company.com',
-            matchedAccounts: [],
-          },
-        ],
-        unmatchedAccounts: [
-          {
-            accountId: 'orphan-1',
-            accountName: 'Old Account',
-            integrationType: 'github',
-            suggestedProfileId: 'profile-1',
-          },
-          {
-            accountId: 'orphan-2',
-            accountName: 'No Match Account',
-            integrationType: 'azure-devops',
-            suggestedProfileId: null,
-          },
-        ],
-      };
+const PREVIEW_EMPTY: MigrationPreview = {
+  profiles: [],
+  unmatchedAccounts: [],
+};
 
-      expect(preview.unmatchedAccounts).to.have.lengthOf(2);
-      expect(preview.unmatchedAccounts[0].suggestedProfileId).to.equal('profile-1');
-      expect(preview.unmatchedAccounts[1].suggestedProfileId).to.be.null;
-    });
-  });
+const PREVIEW_NO_UNMATCHED: MigrationPreview = {
+  profiles: [
+    {
+      profileId: 'profile-1',
+      profileName: 'Work',
+      gitEmail: 'dev@work.com',
+      matchedAccounts: [
+        { accountId: 'acc-1', accountName: 'Work GitHub', integrationType: 'github' },
+      ],
+    },
+  ],
+  unmatchedAccounts: [],
+};
 
-  describe('MigrationPreviewProfile', () => {
-    it('should contain profile info and matched accounts', () => {
-      const profile: MigrationPreviewProfile = {
-        profileId: 'test-id',
-        profileName: 'Personal',
-        gitEmail: 'user@gmail.com',
-        matchedAccounts: [
-          {
-            accountId: 'gh-1',
-            accountName: 'Personal GitHub',
-            integrationType: 'github',
-          },
-        ],
-      };
+const MIGRATION_SUCCESS = {
+  success: true,
+  profilesMigrated: 2,
+  accountsMigrated: 3,
+  unmatchedAccounts: [],
+  errors: [],
+};
 
-      expect(profile.profileId).to.equal('test-id');
-      expect(profile.profileName).to.equal('Personal');
-      expect(profile.gitEmail).to.equal('user@gmail.com');
-      expect(profile.matchedAccounts).to.have.lengthOf(1);
-    });
-  });
+// -- Helpers --
 
-  describe('MigrationPreviewAccount', () => {
-    it('should have account identification info', () => {
-      const account: MigrationPreviewAccount = {
-        accountId: 'acc-123',
-        accountName: 'Enterprise GitHub',
-        integrationType: 'github',
-      };
+function clearHistory(): void {
+  invokeHistory.length = 0;
+}
 
-      expect(account.accountId).to.equal('acc-123');
-      expect(account.accountName).to.equal('Enterprise GitHub');
-      expect(account.integrationType).to.equal('github');
-    });
+function findCommands(name: string): Array<{ command: string; args?: unknown }> {
+  return invokeHistory.filter((h) => h.command === name);
+}
 
-    it('should support all integration types', () => {
-      const types: Array<'github' | 'gitlab' | 'azure-devops'> = ['github', 'gitlab', 'azure-devops'];
+async function renderDialog(open = true): Promise<LvMigrationDialog> {
+  const el = await fixture<LvMigrationDialog>(
+    html`<lv-migration-dialog ?open=${open}></lv-migration-dialog>`,
+  );
+  await el.updateComplete;
+  return el;
+}
 
-      types.forEach((type) => {
-        const account: MigrationPreviewAccount = {
-          accountId: `${type}-1`,
-          accountName: `${type} Account`,
-          integrationType: type,
-        };
-        expect(account.integrationType).to.equal(type);
-      });
-    });
-  });
+async function waitForUpdate(el: LvMigrationDialog, ms = 50): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms));
+  await el.updateComplete;
+}
 
-  describe('UnmatchedAccount', () => {
-    it('should have suggestion for possible profile', () => {
-      const account: UnmatchedAccount = {
-        accountId: 'unmatched-1',
-        accountName: 'Orphan Account',
-        integrationType: 'gitlab',
-        suggestedProfileId: 'suggested-profile',
-      };
+function clickButton(el: LvMigrationDialog, text: string): void {
+  const buttons = el.shadowRoot!.querySelectorAll('button');
+  const btn = Array.from(buttons).find((b) => b.textContent?.trim().includes(text));
+  expect(btn, `Button with text "${text}" should exist`).to.not.be.null;
+  btn!.click();
+}
 
-      expect(account.suggestedProfileId).to.equal('suggested-profile');
-    });
+// -- Tests --
 
-    it('should allow null suggestion when no match possible', () => {
-      const account: UnmatchedAccount = {
-        accountId: 'unmatched-1',
-        accountName: 'No Match Account',
-        integrationType: 'azure-devops',
-        suggestedProfileId: null,
-      };
-
-      expect(account.suggestedProfileId).to.be.null;
-    });
-  });
-
-  describe('UnifiedMigrationResult', () => {
-    it('should have correct structure for successful migration', () => {
-      const result: UnifiedMigrationResult = {
-        success: true,
-        profilesMigrated: 2,
-        accountsMigrated: 5,
-        unmatchedAccounts: [],
-        errors: [],
-      };
-
-      expect(result.success).to.be.true;
-      expect(result.profilesMigrated).to.equal(2);
-      expect(result.accountsMigrated).to.equal(5);
-      expect(result.unmatchedAccounts).to.deep.equal([]);
-      expect(result.errors).to.deep.equal([]);
-    });
-
-    it('should have correct structure for partial migration', () => {
-      const result: UnifiedMigrationResult = {
-        success: true,
-        profilesMigrated: 2,
-        accountsMigrated: 3,
-        unmatchedAccounts: [
-          {
-            accountId: 'orphan-1',
-            accountName: 'Old Account',
-            integrationType: 'github',
-            suggestedProfileId: null,
-          },
-        ],
-        errors: [],
-      };
-
-      expect(result.success).to.be.true;
-      expect(result.unmatchedAccounts).to.have.lengthOf(1);
-    });
-
-    it('should have correct structure for failed migration', () => {
-      const result: UnifiedMigrationResult = {
-        success: false,
-        profilesMigrated: 0,
-        accountsMigrated: 0,
-        unmatchedAccounts: [],
-        errors: ['Failed to read config file', 'Permission denied'],
-      };
-
-      expect(result.success).to.be.false;
-      expect(result.errors).to.have.lengthOf(2);
-    });
-  });
-
-  describe('Account assignments', () => {
-    it('should be a mapping of account ID to profile ID', () => {
-      const assignments: Record<string, string> = {
-        'account-1': 'profile-1',
-        'account-2': 'profile-1',
-        'account-3': 'profile-2',
-      };
-
-      expect(Object.keys(assignments)).to.have.lengthOf(3);
-      expect(assignments['account-1']).to.equal('profile-1');
-    });
-
-    it('should handle multiple accounts assigned to same profile', () => {
-      const assignments: Record<string, string> = {
-        'github-work': 'work-profile',
-        'gitlab-work': 'work-profile',
-        'azure-work': 'work-profile',
-      };
-
-      const profileCounts = Object.values(assignments).reduce(
-        (acc, profileId) => {
-          acc[profileId] = (acc[profileId] || 0) + 1;
-          return acc;
-        },
-        {} as Record<string, number>
-      );
-
-      expect(profileCounts['work-profile']).to.equal(3);
-    });
-  });
-
-  describe('Migration workflow', () => {
-    it('should process assignment changes correctly', () => {
-      // Initial assignments from preview
-      const initialAssignments: Record<string, string> = {
-        'account-1': 'profile-1', // Suggested by system
-        'account-2': 'profile-1',
-      };
-
-      // User changes assignment for account-1
-      const updatedAssignments: Record<string, string> = {
-        ...initialAssignments,
-        'account-1': 'profile-2',
-      };
-
-      expect(updatedAssignments['account-1']).to.equal('profile-2');
-      expect(updatedAssignments['account-2']).to.equal('profile-1');
-    });
-
-    it('should initialize assignments from unmatched accounts with suggestions', () => {
-      const unmatchedAccounts: UnmatchedAccount[] = [
-        {
-          accountId: 'acc-1',
-          accountName: 'Account 1',
-          integrationType: 'github',
-          suggestedProfileId: 'profile-1',
-        },
-        {
-          accountId: 'acc-2',
-          accountName: 'Account 2',
-          integrationType: 'gitlab',
-          suggestedProfileId: null,
-        },
-      ];
-
-      const defaultProfileId = 'default-profile';
-
-      // Build initial assignments
-      const assignments: Record<string, string> = {};
-      for (const account of unmatchedAccounts) {
-        assignments[account.accountId] = account.suggestedProfileId ?? defaultProfileId;
+describe('lv-migration-dialog', () => {
+  beforeEach(() => {
+    clearHistory();
+    mockInvoke = async (command: string) => {
+      switch (command) {
+        case 'preview_unified_profiles_migration':
+          return PREVIEW_WITH_PROFILES;
+        case 'execute_unified_profiles_migration':
+          return MIGRATION_SUCCESS;
+        case 'get_unified_profiles_config':
+          return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+        case 'plugin:notification|is_permission_granted':
+          return false;
+        default:
+          return null;
       }
+    };
+  });
 
-      expect(assignments['acc-1']).to.equal('profile-1');
-      expect(assignments['acc-2']).to.equal('default-profile');
+  // ======================================================================
+  // Rendering
+  // ======================================================================
+
+  describe('Rendering', () => {
+    it('renders the dialog overlay when open', async () => {
+      const el = await renderDialog(true);
+      const overlay = el.shadowRoot!.querySelector('.dialog-overlay');
+      expect(overlay).to.not.be.null;
+    });
+
+    it('does not render when closed', async () => {
+      const el = await renderDialog(false);
+      const overlay = el.shadowRoot!.querySelector('.dialog-overlay');
+      expect(overlay).to.be.null;
+    });
+
+    it('renders the intro view by default', async () => {
+      const el = await renderDialog(true);
+
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title).to.not.be.null;
+      expect(title!.textContent).to.include('Upgrade to Unified Profiles');
+
+      const introContent = el.shadowRoot!.querySelector('.intro-content');
+      expect(introContent).to.not.be.null;
+    });
+
+    it('shows intro title and description', async () => {
+      const el = await renderDialog(true);
+
+      const introTitle = el.shadowRoot!.querySelector('.intro-title');
+      expect(introTitle).to.not.be.null;
+      expect(introTitle!.textContent).to.include('Unified Profiles Are Here');
+
+      const introDesc = el.shadowRoot!.querySelector('.intro-description');
+      expect(introDesc).to.not.be.null;
+    });
+
+    it('shows feature list in intro', async () => {
+      const el = await renderDialog(true);
+
+      const featureItems = el.shadowRoot!.querySelectorAll('.feature-item');
+      expect(featureItems.length).to.equal(3);
+    });
+
+    it('shows Skip and Continue buttons in intro footer', async () => {
+      const el = await renderDialog(true);
+
+      const buttons = el.shadowRoot!.querySelectorAll('.dialog-footer button');
+      const buttonTexts = Array.from(buttons).map((b) => b.textContent?.trim());
+      expect(buttonTexts).to.include('Skip for now');
+      expect(buttonTexts).to.include('Continue');
     });
   });
 
-  describe('Migration state transitions', () => {
-    it('should track step progression', () => {
-      type MigrationStep = 'loading' | 'preview' | 'migrating' | 'complete' | 'error';
+  // ======================================================================
+  // Workflow steps: State transitions
+  // ======================================================================
 
-      let currentStep: MigrationStep = 'loading';
+  describe('Workflow steps', () => {
+    it('transitions from intro to preview when Continue is clicked', async () => {
+      const el = await renderDialog(true);
 
-      // Load preview
-      currentStep = 'preview';
-      expect(currentStep).to.equal('preview');
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
 
-      // Start migration
-      currentStep = 'migrating';
-      expect(currentStep).to.equal('migrating');
-
-      // Complete
-      currentStep = 'complete';
-      expect(currentStep).to.equal('complete');
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Review Migration');
     });
 
-    it('should handle error state', () => {
-      type MigrationStep = 'loading' | 'preview' | 'migrating' | 'complete' | 'error';
+    it('calls preview_unified_profiles_migration when loading preview', async () => {
+      const el = await renderDialog(true);
+      clearHistory();
 
-      let currentStep: MigrationStep = 'loading';
-      let errorMessage: string | null = null;
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
 
-      // Simulate error during loading
-      currentStep = 'error';
-      errorMessage = 'Failed to load migration preview';
+      const previewCalls = findCommands('preview_unified_profiles_migration');
+      expect(previewCalls.length).to.equal(1);
+    });
 
-      expect(currentStep).to.equal('error');
-      expect(errorMessage).to.not.be.null;
+    it('shows profiles in preview mode', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const profilePreviews = el.shadowRoot!.querySelectorAll('.profile-preview');
+      expect(profilePreviews.length).to.equal(2);
+    });
+
+    it('shows profile names and emails in preview', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const profileNames = el.shadowRoot!.querySelectorAll('.profile-name');
+      expect(profileNames.length).to.equal(2);
+      expect(profileNames[0].textContent).to.equal('Work');
+      expect(profileNames[1].textContent).to.equal('Personal');
+
+      const profileEmails = el.shadowRoot!.querySelectorAll('.profile-email');
+      expect(profileEmails[0].textContent).to.equal('dev@work.com');
+    });
+
+    it('shows matched accounts for profiles', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const accountTags = el.shadowRoot!.querySelectorAll('.account-tag');
+      expect(accountTags.length).to.equal(2); // Work profile has 2 matched accounts
+    });
+
+    it('shows "No accounts matched" for profiles with no accounts', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const noAccounts = el.shadowRoot!.querySelectorAll('.no-accounts');
+      expect(noAccounts.length).to.equal(1);
+      expect(noAccounts[0].textContent).to.include('No accounts matched');
+    });
+
+    it('transitions from preview to migrating when Start Migration is clicked', async () => {
+      let resolveExecution: ((value: unknown) => void) | null = null;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_WITH_PROFILES;
+          case 'execute_unified_profiles_migration':
+            return new Promise((resolve) => {
+              resolveExecution = resolve;
+            });
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 10);
+
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Migrating');
+
+      // Clean up
+      if (resolveExecution) {
+        (resolveExecution as (value: unknown) => void)(MIGRATION_SUCCESS);
+        await waitForUpdate(el, 100);
+      }
+    });
+
+    it('transitions to complete after successful migration', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Migration Complete');
+    });
+
+    it('shows success content after migration completes', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      const completeContent = el.shadowRoot!.querySelector('.complete-content');
+      expect(completeContent).to.not.be.null;
+
+      const doneTitle = el.shadowRoot!.querySelector('.intro-title');
+      expect(doneTitle!.textContent).to.include('All Done');
+    });
+
+    it('shows migration stats after completion', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      const statValues = el.shadowRoot!.querySelectorAll('.stat-value');
+      expect(statValues.length).to.equal(2);
+      expect(statValues[0].textContent).to.equal('2'); // profilesMigrated
+      expect(statValues[1].textContent).to.equal('3'); // accountsMigrated
     });
   });
 
-  describe('Empty state handling', () => {
-    it('should detect when no profiles exist', () => {
-      const preview: MigrationPreview = {
-        profiles: [],
-        unmatchedAccounts: [
-          {
-            accountId: 'acc-1',
-            accountName: 'Account 1',
-            integrationType: 'github',
-            suggestedProfileId: null,
-          },
-        ],
-      };
+  // ======================================================================
+  // Account assignment
+  // ======================================================================
 
-      const hasProfiles = preview.profiles.length > 0;
-      const hasUnmatchedAccounts = preview.unmatchedAccounts.length > 0;
+  describe('Account assignment', () => {
+    it('shows unmatched accounts section when there are unmatched accounts', async () => {
+      const el = await renderDialog(true);
 
-      expect(hasProfiles).to.be.false;
-      expect(hasUnmatchedAccounts).to.be.true;
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const unmatchedSection = el.shadowRoot!.querySelector('.unmatched-section');
+      expect(unmatchedSection).to.not.be.null;
     });
 
-    it('should detect when no accounts need migration', () => {
-      const preview: MigrationPreview = {
-        profiles: [
-          {
-            profileId: 'p1',
-            profileName: 'Work',
-            gitEmail: 'work@example.com',
-            matchedAccounts: [],
-          },
-        ],
-        unmatchedAccounts: [],
+    it('renders unmatched account names', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const unmatchedNames = el.shadowRoot!.querySelectorAll('.unmatched-account-name');
+      expect(unmatchedNames.length).to.equal(1);
+      expect(unmatchedNames[0].textContent).to.equal('Side Project GitHub');
+    });
+
+    it('renders profile select dropdowns for unmatched accounts', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const selects = el.shadowRoot!.querySelectorAll('.profile-select');
+      expect(selects.length).to.equal(1);
+    });
+
+    it('pre-selects the suggested profile for unmatched accounts', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const select = el.shadowRoot!.querySelector('.profile-select') as HTMLSelectElement;
+      expect(select).to.not.be.null;
+      expect(select.value).to.equal('profile-2'); // suggestedProfileId
+    });
+
+    it('allows changing the profile assignment via dropdown', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const select = el.shadowRoot!.querySelector('.profile-select') as HTMLSelectElement;
+      select.value = 'profile-1';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await waitForUpdate(el);
+
+      // The assignment should be updated - verify by starting migration
+      clearHistory();
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      const migrationCalls = findCommands('execute_unified_profiles_migration');
+      expect(migrationCalls.length).to.equal(1);
+      const args = migrationCalls[0].args as Record<string, unknown>;
+      const assignments = args.accountAssignments as Record<string, string>;
+      expect(assignments['acc-3']).to.equal('profile-1');
+    });
+
+    it('does not show unmatched section when all accounts are matched', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_NO_UNMATCHED;
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
       };
 
-      const totalAccounts =
-        preview.profiles.reduce((sum, p) => sum + p.matchedAccounts.length, 0) +
-        preview.unmatchedAccounts.length;
+      const el = await renderDialog(true);
 
-      expect(totalAccounts).to.equal(0);
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const unmatchedSection = el.shadowRoot!.querySelector('.unmatched-section');
+      expect(unmatchedSection).to.be.null;
+    });
+  });
+
+  // ======================================================================
+  // Execute migration
+  // ======================================================================
+
+  describe('Execute migration', () => {
+    it('calls execute_unified_profiles_migration with account assignments', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+      clearHistory();
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      const migrationCalls = findCommands('execute_unified_profiles_migration');
+      expect(migrationCalls.length).to.equal(1);
+
+      const args = migrationCalls[0].args as Record<string, unknown>;
+      const assignments = args.accountAssignments as Record<string, string>;
+      expect(assignments['acc-3']).to.equal('profile-2'); // suggestedProfileId default
+    });
+
+    it('shows Done button after successful migration', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      const buttons = el.shadowRoot!.querySelectorAll('.dialog-footer button');
+      const doneBtn = Array.from(buttons).find((b) => b.textContent?.trim() === 'Done');
+      expect(doneBtn).to.not.be.null;
+    });
+
+    it('closes dialog when Done is clicked after migration', async () => {
+      const el = await renderDialog(true);
+
+      let closeDispatched = false;
+      el.addEventListener('close', () => {
+        closeDispatched = true;
+      });
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      clickButton(el, 'Done');
+      await waitForUpdate(el);
+
+      expect(closeDispatched).to.be.true;
+    });
+  });
+
+  // ======================================================================
+  // Error handling
+  // ======================================================================
+
+  describe('Error handling', () => {
+    it('goes back to preview on migration failure', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_WITH_PROFILES;
+          case 'execute_unified_profiles_migration':
+            throw new Error('Migration failed: disk full');
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      // Should go back to preview on error
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Review Migration');
+
+      // Preview content should still be visible
+      const profilePreviews = el.shadowRoot!.querySelectorAll('.profile-preview');
+      expect(profilePreviews.length).to.equal(2);
+    });
+
+    it('allows retrying migration after failure', async () => {
+      let callCount = 0;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_WITH_PROFILES;
+          case 'execute_unified_profiles_migration':
+            callCount++;
+            if (callCount === 1) {
+              throw new Error('Temporary failure');
+            }
+            return MIGRATION_SUCCESS;
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      // First attempt fails
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      // Should be back on preview
+      let title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Review Migration');
+
+      // Second attempt succeeds
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Migration Complete');
+    });
+
+    it('handles preview loading failure gracefully', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            throw new Error('Network error');
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      // Should still be on intro (or show error) since preview load failed
+      // The component catches the error and shows a toast but doesn't transition
+      // viewMode stays at 'intro' because the preview load failed
+      const introContent = el.shadowRoot!.querySelector('.intro-content');
+      expect(introContent).to.not.be.null;
+    });
+  });
+
+  // ======================================================================
+  // Empty state
+  // ======================================================================
+
+  describe('Empty state', () => {
+    it('shows empty preview when no profiles or accounts to migrate', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_EMPTY;
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const emptyPreview = el.shadowRoot!.querySelector('.empty-preview');
+      expect(emptyPreview).to.not.be.null;
+      expect(emptyPreview!.textContent).to.include('No profiles or accounts to migrate');
+    });
+
+    it('shows Open Profile Manager button in empty state', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_EMPTY;
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const buttons = el.shadowRoot!.querySelectorAll('.empty-preview button');
+      const profileManagerBtn = Array.from(buttons).find(
+        (b) => b.textContent?.trim() === 'Open Profile Manager',
+      );
+      expect(profileManagerBtn).to.not.be.null;
+    });
+
+    it('dispatches open-profile-manager event from empty state', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_EMPTY;
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      let eventFired = false;
+      el.addEventListener('open-profile-manager', () => {
+        eventFired = true;
+      });
+
+      clickButton(el, 'Open Profile Manager');
+      await waitForUpdate(el);
+
+      expect(eventFired).to.be.true;
+    });
+
+    it('shows Refresh button in empty state', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_EMPTY;
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      const buttons = el.shadowRoot!.querySelectorAll('.empty-preview button');
+      const refreshBtn = Array.from(buttons).find(
+        (b) => b.textContent?.trim() === 'Refresh',
+      );
+      expect(refreshBtn).to.not.be.null;
+    });
+  });
+
+  // ======================================================================
+  // Dialog open/close behavior
+  // ======================================================================
+
+  describe('Dialog open/close behavior', () => {
+    it('dispatches close event when Skip is clicked', async () => {
+      const el = await renderDialog(true);
+
+      let closeDispatched = false;
+      el.addEventListener('close', () => {
+        closeDispatched = true;
+      });
+
+      clickButton(el, 'Skip for now');
+      await waitForUpdate(el);
+
+      expect(closeDispatched).to.be.true;
+    });
+
+    it('dispatches close event when Cancel is clicked in preview', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      let closeDispatched = false;
+      el.addEventListener('close', () => {
+        closeDispatched = true;
+      });
+
+      clickButton(el, 'Cancel');
+      await waitForUpdate(el);
+
+      expect(closeDispatched).to.be.true;
+    });
+
+    it('resets state when dialog is re-opened', async () => {
+      const el = await renderDialog(true);
+
+      // Navigate to preview
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      let title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Review Migration');
+
+      // Close the dialog
+      el.open = false;
+      await el.updateComplete;
+      await waitForUpdate(el);
+
+      // Re-open - this triggers updated() which calls resetState()
+      el.open = true;
+      await el.updateComplete;
+      await waitForUpdate(el);
+
+      // Should be back to intro
+      title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Upgrade to Unified Profiles');
+    });
+
+    it('shows disabled Migrating button during migration', async () => {
+      let resolveExecution: ((value: unknown) => void) | null = null;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_WITH_PROFILES;
+          case 'execute_unified_profiles_migration':
+            // Hang until we manually resolve
+            return new Promise((resolve) => {
+              resolveExecution = resolve;
+            });
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 10);
+
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Migrating');
+
+      const buttons = el.shadowRoot!.querySelectorAll('.dialog-footer button');
+      const migratingBtn = Array.from(buttons).find(
+        (b) => b.textContent?.trim() === 'Migrating...',
+      );
+      expect(migratingBtn).to.not.be.null;
+      expect((migratingBtn as HTMLButtonElement).disabled).to.be.true;
+
+      // Clean up by resolving the pending promise
+      if (resolveExecution) {
+        (resolveExecution as (value: unknown) => void)(MIGRATION_SUCCESS);
+        await waitForUpdate(el, 100);
+      }
+    });
+
+    it('shows migrating content with spinner during migration', async () => {
+      let resolveExecution: ((value: unknown) => void) | null = null;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_WITH_PROFILES;
+          case 'execute_unified_profiles_migration':
+            return new Promise((resolve) => {
+              resolveExecution = resolve;
+            });
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 10);
+
+      const spinner = el.shadowRoot!.querySelector('.spinner');
+      expect(spinner).to.not.be.null;
+
+      const migratingContent = el.shadowRoot!.querySelector('.migrating-content');
+      expect(migratingContent).to.not.be.null;
+      expect(migratingContent!.textContent).to.include('Migrating Your Data');
+
+      // Clean up
+      if (resolveExecution) {
+        (resolveExecution as (value: unknown) => void)(MIGRATION_SUCCESS);
+        await waitForUpdate(el, 100);
+      }
     });
   });
 });

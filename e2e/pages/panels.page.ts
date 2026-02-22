@@ -79,48 +79,33 @@ export class LeftPanelPage {
    * Expand a remote group (e.g., 'origin')
    */
   async expandRemote(remoteName: string): Promise<void> {
-    // First, wait for the branch list to be visible
+    // Wait for branch list to be visible
     await this.branchList.waitFor({ state: 'visible' });
 
-    // Directly manipulate the component's expandedGroups state
-    await this.page.evaluate((name) => {
-      // The lv-branch-list may be nested within other shadow DOMs
-      function findElementInShadowDom(root: Document | ShadowRoot, selector: string): Element | null {
-        let result = root.querySelector(selector);
-        if (result) return result;
+    // Wait for branches to be loaded by checking that the "Loading branches..." text is gone.
+    // Use Playwright locators which auto-pierce shadow DOM.
+    const loadingIndicator = this.branchList.locator('.loading');
+    await loadingIndicator.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {
+      // If loading indicator was never present (already loaded), that's fine
+    });
 
-        const elements = root.querySelectorAll('*');
-        for (const el of elements) {
-          if (el.shadowRoot) {
-            result = findElementInShadowDom(el.shadowRoot, selector);
-            if (result) return result;
-          }
-        }
-        return null;
+    // The component auto-expands remote groups in loadBranches().
+    // Check if remote branch items are already visible using Playwright locators.
+    const remoteBranchItems = this.branchList.locator(`li.branch-item[title^="refs/remotes/${remoteName}/"]`);
+    const itemCount = await remoteBranchItems.count().catch(() => 0);
+
+    if (itemCount === 0) {
+      // Try clicking the group header that contains the remote name
+      // Group headers have class .group-name containing the remote name text
+      const groupHeader = this.branchList.locator('.group-header', { has: this.page.locator(`.group-name:text("${remoteName}")`) });
+      const headerCount = await groupHeader.count();
+      if (headerCount > 0) {
+        await groupHeader.first().click();
       }
 
-      // Find the branch list component
-      const branchList = findElementInShadowDom(document, 'lv-branch-list') as HTMLElement & {
-        expandedGroups: Set<string>;
-        requestUpdate: () => void;
-      };
-      if (!branchList) {
-        throw new Error('Could not find lv-branch-list');
-      }
-
-      // Add the remote group to expandedGroups
-      const groupId = `remote-${name}`;
-      if (!branchList.expandedGroups) {
-        branchList.expandedGroups = new Set();
-      }
-      branchList.expandedGroups.add(groupId);
-
-      // Trigger a re-render
-      branchList.requestUpdate();
-    }, remoteName);
-
-    // Wait for the component to re-render
-    await this.page.waitForTimeout(100);
+      // Wait for remote branch items to appear
+      await remoteBranchItems.first().waitFor({ state: 'visible', timeout: 10000 });
+    }
   }
 
   /**
@@ -245,9 +230,9 @@ export class RightPanelPage {
     this.stagedFiles = page.locator('lv-file-status').getByRole('listitem');
     this.unstagedFiles = page.locator('lv-file-status').getByRole('listitem');
 
-    // Stage/unstage buttons - use accessible roles
-    this.stageAllButton = page.getByRole('button', { name: 'Stage all' });
-    this.unstageAllButton = page.getByRole('button', { name: 'Unstage all' });
+    // Stage/unstage buttons - use accessible roles with exact match to avoid ambiguity
+    this.stageAllButton = page.getByRole('button', { name: 'Stage all', exact: true });
+    this.unstageAllButton = page.getByRole('button', { name: 'Unstage all', exact: true });
 
     // Commit panel - use getByRole for accessible elements
     this.commitPanel = page.locator('lv-commit-panel');
@@ -282,16 +267,16 @@ export class RightPanelPage {
    * Get an unstaged file by path
    */
   getUnstagedFile(path: string): Locator {
-    // File items are listitem elements containing file names within lv-file-status
-    return this.page.locator('lv-file-status').getByRole('listitem', { name: new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
+    // File items are <li> elements with title="<path>" within lv-file-status
+    return this.page.locator(`lv-file-status li.file-item[title="${path}"]`);
   }
 
   /**
    * Get a staged file by path
    */
   getStagedFile(path: string): Locator {
-    // File items are listitem elements containing file names within lv-file-status
-    return this.page.locator('lv-file-status').getByRole('listitem', { name: new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
+    // File items are <li> elements with title="<path>" within lv-file-status
+    return this.page.locator(`lv-file-status li.file-item[title="${path}"]`);
   }
 
   /**
@@ -299,7 +284,9 @@ export class RightPanelPage {
    */
   async stageFile(path: string): Promise<void> {
     const file = this.getUnstagedFile(path);
-    await file.locator('.stage-btn, button[title*="Stage"]').click();
+    // Hover first to reveal the file action buttons (hidden until hover)
+    await file.hover();
+    await file.locator('.stage-btn, button[title="Stage"]').click();
   }
 
   /**
@@ -307,7 +294,9 @@ export class RightPanelPage {
    */
   async unstageFile(path: string): Promise<void> {
     const file = this.getStagedFile(path);
-    await file.locator('.unstage-btn, button[title*="Unstage"]').click();
+    // Hover first to reveal the file action buttons (hidden until hover)
+    await file.hover();
+    await file.locator('.unstage-btn, button[title="Unstage"]').click();
   }
 
   /**

@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository, setupTauriMocks } from '../fixtures/tauri-mock';
+import { startCommandCapture, startCommandCaptureWithMocks, findCommand, waitForCommand, injectCommandError, injectCommandMock } from '../fixtures/test-helpers';
 
 /**
  * E2E tests for Toolbar
@@ -121,13 +122,9 @@ test.describe('Toolbar Init Dialog', () => {
     await expect(initDialog).toBeVisible({ timeout: 3000 });
 
     // Should have Browse button or Initialize button (page-level selectors)
-    const browseButton = page.getByRole('button', { name: /browse/i });
-    const initializeButton = page.getByRole('button', { name: /^init/i });
-
-    const browseVisible = await browseButton.isVisible().catch(() => false);
-    const initVisible = await initializeButton.isVisible().catch(() => false);
-
-    expect(browseVisible || initVisible).toBe(true);
+    await expect(
+      page.getByRole('button', { name: /browse|init/i }).first()
+    ).toBeVisible();
   });
 });
 
@@ -148,10 +145,9 @@ test.describe('Toolbar Repository Tabs', () => {
 
   test('repository tab should have close button', async ({ page }) => {
     const repoTab = page.locator('button', { hasText: 'test-repo' });
+    // Close icon should exist within the tab (usually an svg icon)
     const closeIcon = repoTab.locator('img, svg').last();
-    // Close icon should exist (usually the last icon in the tab)
-    const iconCount = await repoTab.locator('img, svg').count();
-    expect(iconCount).toBeGreaterThanOrEqual(1);
+    await expect(closeIcon).toBeVisible();
   });
 });
 
@@ -236,33 +232,22 @@ test.describe('Toolbar Keyboard Shortcuts Dialog', () => {
     await page.click('body');
     await page.keyboard.press('?');
 
-    const shortcutsDialog = page.locator('lv-keyboard-shortcuts-dialog');
-    // Dialog may or may not open depending on focus state
-    const isVisible = await shortcutsDialog.isVisible().catch(() => false);
-    // Test passes either way - we verify the shortcut mechanism exists
-    expect(typeof isVisible).toBe('boolean');
+    const shortcutsDialog = page.locator('lv-keyboard-shortcuts-dialog[open]');
+    await expect(shortcutsDialog).toBeVisible();
   });
 
   test('keyboard shortcuts dialog should list shortcuts', async ({ page }) => {
     const shortcutsButton = page.locator('button[title*="Keyboard Shortcuts"]');
     await shortcutsButton.click();
 
-    // Wait for dialog to open - it may be a modal or have open attribute
-    await page.waitForTimeout(500);
+    // Wait for dialog to open
+    const shortcutsDialog = page.locator('lv-keyboard-shortcuts-dialog[open]');
+    await expect(shortcutsDialog).toBeVisible();
 
-    // The dialog should show shortcuts content
-    const shortcutsDialog = page.locator('lv-keyboard-shortcuts-dialog');
-    const dialogContent = await shortcutsDialog.textContent();
-
-    // Should contain some shortcut-related content
-    if (dialogContent && dialogContent.length > 0) {
-      expect(dialogContent).toMatch(/⌘|⇧|Esc|navigation|commit|diff|Toggle|Close|Vim/i);
-    } else {
-      // Dialog may render content differently - check for visible elements
-      const keyElements = page.locator('lv-keyboard-shortcuts-dialog kbd, lv-keyboard-shortcuts-dialog .shortcut, lv-keyboard-shortcuts-dialog .key');
-      const keyCount = await keyElements.count();
-      expect(keyCount).toBeGreaterThanOrEqual(0);
-    }
+    // The dialog should show shortcuts content with shortcut rows
+    const shortcutRows = page.locator('lv-keyboard-shortcuts-dialog[open] .shortcut-row');
+    const rowCount = await shortcutRows.count();
+    expect(rowCount).toBeGreaterThanOrEqual(5);
   });
 });
 
@@ -296,10 +281,252 @@ test.describe('Toolbar without Repository', () => {
   test('should not show search button without repo', async ({ page }) => {
     // Search button should not be visible when no repo is open
     const searchButton = page.locator('button[title*="Search commits"]');
-    const count = await searchButton.count();
-    // Either not visible or not present
-    if (count > 0) {
-      await expect(searchButton).not.toBeVisible();
+    await expect(searchButton).not.toBeVisible();
+  });
+});
+
+test.describe('Toolbar Clone Dialog - Full Flow', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('fill URL and click Clone should call clone_repository command', async ({ page }) => {
+    const cloneButton = page.locator('button[title="Clone Repository"]');
+    await cloneButton.click();
+
+    const cloneDialog = page.getByRole('dialog', { name: /clone/i });
+    await expect(cloneDialog).toBeVisible({ timeout: 3000 });
+
+    // Fill the URL
+    const urlInput = page.getByRole('textbox', { name: /url/i });
+    await urlInput.fill('https://github.com/test/repo.git');
+
+    await startCommandCapture(page);
+
+    // Click Clone button
+    const dialogCloneButton = page.locator('lv-clone-dialog').getByRole('button', { name: 'Clone', exact: true });
+    await dialogCloneButton.click();
+
+    await waitForCommand(page, 'clone_repository');
+
+    const cloneCommands = await findCommand(page, 'clone_repository');
+    expect(cloneCommands.length).toBeGreaterThan(0);
+  });
+
+  test('clone failure should show error in dialog', async ({ page }) => {
+    const cloneButton = page.locator('button[title="Clone Repository"]');
+    await cloneButton.click();
+
+    const cloneDialog = page.getByRole('dialog', { name: /clone/i });
+    await expect(cloneDialog).toBeVisible({ timeout: 3000 });
+
+    // Inject error for clone_repository
+    await injectCommandError(page, 'clone_repository', 'Repository not found');
+
+    // Fill the URL
+    const urlInput = page.getByRole('textbox', { name: /url/i });
+    await urlInput.fill('https://github.com/nonexistent/repo.git');
+
+    // Click Clone
+    const dialogCloneButton = page.locator('lv-clone-dialog').getByRole('button', { name: 'Clone', exact: true });
+    await dialogCloneButton.click();
+
+    // Error toast or inline error should appear
+    const toast = page.locator('.toast');
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText(/error|fail|not found/i);
+  });
+});
+
+test.describe('Toolbar Close Repository Tab', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('closing repository tab should remove it from the toolbar', async ({ page }) => {
+    const repoTab = page.locator('button', { hasText: 'test-repo' });
+    await expect(repoTab).toBeVisible();
+
+    // Click the close icon on the tab (last svg/img in the tab button)
+    const closeIcon = repoTab.locator('img, svg').last();
+    await closeIcon.click();
+
+    // The tab should be removed
+    await expect(repoTab).not.toBeVisible();
+  });
+
+  test('closing last tab should show welcome screen', async ({ page }) => {
+    const repoTab = page.locator('button', { hasText: 'test-repo' });
+    await expect(repoTab).toBeVisible();
+
+    // Click the close icon
+    const closeIcon = repoTab.locator('img, svg').last();
+    await closeIcon.click();
+
+    // Welcome screen should appear
+    const welcomeScreen = page.locator('lv-welcome');
+    await expect(welcomeScreen).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('Toolbar Init Dialog - Full Flow', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('init dialog should close on Escape', async ({ page }) => {
+    const initButton = page.locator('button[title="Init Repository"]');
+    await initButton.click();
+
+    const initDialog = page.getByRole('dialog', { name: /init/i });
+    await expect(initDialog).toBeVisible({ timeout: 3000 });
+
+    await page.keyboard.press('Escape');
+    await expect(initDialog).not.toBeVisible();
+  });
+});
+
+test.describe('Toolbar Error Scenarios', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('should show error toast when fetch fails', async ({ page }) => {
+    // Inject error for the fetch command
+    await injectCommandError(page, 'fetch', 'Network error: could not resolve host');
+
+    // Click the Fetch button
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+
+    // Error toast should appear
+    const toast = page.locator('.toast, .error-message, .notification').first();
+    await expect(toast).toBeVisible({ timeout: 5000 });
+  });
+
+  test('should show error toast when push fails', async ({ page }) => {
+    // Inject error for the push command
+    await injectCommandError(page, 'push', 'Push rejected: non-fast-forward update');
+
+    // Click the Push button
+    const pushButton = page.getByRole('button', { name: /Push/i });
+    await pushButton.click();
+
+    // Error toast should appear
+    const toast = page.locator('.toast, .error-message, .notification').first();
+    await expect(toast).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('Toolbar - Extended Tests', () => {
+  test('error toast appears with correct message content after fetch failure', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    // Inject a specific error for the fetch command
+    await injectCommandError(page, 'fetch', 'Network error: could not resolve host');
+
+    // Click the Fetch button
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+
+    // Error toast should appear within a reasonable time and contain the error message
+    const toast = page.locator('.toast, .error-message, .notification').first();
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText(/error|network|resolve/i);
+  });
+
+  test('toolbar shows new repository name after successful clone', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    // Mock clone_repository to succeed and return a new repository
+    await startCommandCaptureWithMocks(page, {
+      clone_repository: '/tmp/new-cloned-repo',
+      open_repository: {
+        path: '/tmp/new-cloned-repo',
+        name: 'new-cloned-repo',
+        isValid: true,
+        isBare: false,
+        headRef: 'refs/heads/main',
+        state: 'clean',
+      },
+      get_repository_info: {
+        path: '/tmp/new-cloned-repo',
+        name: 'new-cloned-repo',
+        isValid: true,
+        isBare: false,
+        headRef: 'refs/heads/main',
+        state: 'clean',
+      },
+    });
+
+    // Open clone dialog
+    const cloneButton = page.locator('button[title="Clone Repository"]');
+    await cloneButton.click();
+
+    const cloneDialog = page.getByRole('dialog', { name: /clone/i });
+    await expect(cloneDialog).toBeVisible({ timeout: 3000 });
+
+    // Fill the URL
+    const urlInput = page.getByRole('textbox', { name: /url/i });
+    await urlInput.fill('https://github.com/test/new-cloned-repo.git');
+
+    // Click Clone button
+    const dialogCloneButton = page.locator('lv-clone-dialog').getByRole('button', { name: 'Clone', exact: true });
+    await dialogCloneButton.click();
+
+    // Wait for the clone command to be invoked
+    await waitForCommand(page, 'clone_repository');
+
+    // Verify clone_repository was called
+    const cloneCommands = await findCommand(page, 'clone_repository');
+    expect(cloneCommands.length).toBeGreaterThan(0);
+
+    // After a successful clone, the toolbar tab should eventually show the new repo name
+    // The app opens the repository after cloning, so look for the new tab
+    const newRepoTab = page.locator('button', { hasText: 'new-cloned-repo' });
+    await expect(newRepoTab).toBeVisible({ timeout: 5000 });
+  });
+
+  test('toolbar shows new repository name after successful init', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    // Mock init_repository to succeed and return a new repository
+    await injectCommandMock(page, {
+      init_repository: '/tmp/new-init-repo',
+      open_repository: {
+        path: '/tmp/new-init-repo',
+        name: 'new-init-repo',
+        isValid: true,
+        isBare: false,
+        headRef: null,
+        state: 'clean',
+      },
+      get_repository_info: {
+        path: '/tmp/new-init-repo',
+        name: 'new-init-repo',
+        isValid: true,
+        isBare: false,
+        headRef: null,
+        state: 'clean',
+      },
+      'plugin:dialog|open': '/tmp/new-init-repo',
+    });
+
+    // Open init dialog
+    const initButton = page.locator('button[title="Init Repository"]');
+    await initButton.click();
+
+    const initDialog = page.getByRole('dialog', { name: /init/i });
+    await expect(initDialog).toBeVisible({ timeout: 3000 });
+
+    // Click Initialize/Init button (the dialog may have "Browse" + "Initialize")
+    const initializeButton = page.getByRole('button', { name: /^init/i });
+    if (await initializeButton.count() > 0) {
+      await initializeButton.click();
     }
+
+    // After successful init, the toolbar should show the new repo name
+    const newRepoTab = page.locator('button', { hasText: 'new-init-repo' });
+    await expect(newRepoTab).toBeVisible({ timeout: 5000 });
   });
 });
