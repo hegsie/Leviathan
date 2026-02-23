@@ -41,7 +41,7 @@
     "@playwright/test": "^1.58.2",
     "@tauri-apps/cli": "^2.10.0",
     "@types/mocha": "^10.0.10",
-    "@typescript-eslint/eslint-plugin": "^8.55.0",
+    "@typescript-eslint/eslint-plugin": "^8.56.0",
     "@typescript-eslint/parser": "^8.50.1",
     "@web/dev-server-esbuild": "^1.0.5",
     "@web/test-runner": "^0.20.2",
