@@ -291,6 +291,7 @@ export class LvAccountSelector extends LitElement {
 
   private handleSelectAccount(account: IntegrationAccount): void {
     this.isOpen = false;
+    if (account.id === this.selectedAccountId) return;
     this.dispatchEvent(
       new CustomEvent('account-change', {
         detail: { account },

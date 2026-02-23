@@ -600,6 +600,7 @@ export class LvGitLabDialog extends LitElement {
   private unsubscribeStore?: () => void;
   private oauthCompleteHandler?: EventListener;
   private oauthStateUnsubscribe?: () => void;
+  private loadGeneration = 0;
 
   // Create MR form
   @state() private createMrTitle = '';
@@ -633,6 +634,10 @@ export class LvGitLabDialog extends LitElement {
     // Subscribe to unified profile store - get global accounts
     this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
       this.accounts = getAccountsByType('gitlab');
+      // If selected account was deleted, reset to null
+      if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
+        this.selectedAccountId = null;
+      }
       // If no account selected, try to select the default one
       if (!this.selectedAccountId && this.accounts.length > 0) {
         const defaultAccount = getDefaultGlobalAccount('gitlab');
@@ -686,16 +691,19 @@ export class LvGitLabDialog extends LitElement {
   }
 
   private async loadInitialData(): Promise<void> {
+    const generation = ++this.loadGeneration;
     this.isLoading = true;
     this.error = null;
 
     try {
       // Ensure unified profiles are loaded
       await unifiedProfileService.loadUnifiedProfiles();
+      if (generation !== this.loadGeneration) return;
 
       // Load the profile for this repository to set activeProfile
       if (this.repositoryPath) {
         await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+        if (generation !== this.loadGeneration) return;
       }
 
       // Re-sync local state with store after loading
@@ -707,14 +715,18 @@ export class LvGitLabDialog extends LitElement {
 
       if (this.repositoryPath) {
         await this.detectRepo();
+        if (generation !== this.loadGeneration) return;
       }
       if (this.detectedRepo?.instanceUrl || this.instanceUrlInput) {
         await this.checkConnection();
       }
     } catch (err) {
+      if (generation !== this.loadGeneration) return;
       this.error = err instanceof Error ? err.message : 'Failed to load data';
     } finally {
-      this.isLoading = false;
+      if (generation === this.loadGeneration) {
+        this.isLoading = false;
+      }
     }
   }
 

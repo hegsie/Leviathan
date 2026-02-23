@@ -750,6 +750,7 @@ export class LvGitHubDialog extends LitElement {
   @state() private selectedAccountId: string | null = null;
 
   private unsubscribeStore?: () => void;
+  private loadGeneration = 0;
 
   // Create PR form
   @state() private createPrTitle = '';
@@ -790,6 +791,10 @@ export class LvGitHubDialog extends LitElement {
     // Subscribe to unified profile store - get global accounts
     this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
       this.accounts = getAccountsByType('github');
+      // If selected account was deleted, reset to null
+      if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
+        this.selectedAccountId = null;
+      }
       // If no account selected, try to select the default one
       if (!this.selectedAccountId && this.accounts.length > 0) {
         const defaultAccount = getDefaultGlobalAccount('github');
@@ -826,6 +831,7 @@ export class LvGitHubDialog extends LitElement {
   }
 
   private async loadInitialData(): Promise<void> {
+    const generation = ++this.loadGeneration;
     this.isLoading = true;
     this.error = null;
 
@@ -834,10 +840,12 @@ export class LvGitHubDialog extends LitElement {
 
       // Ensure unified profiles are loaded
       await unifiedProfileService.loadUnifiedProfiles();
+      if (generation !== this.loadGeneration) return;
 
       // Load the profile for this repository to set activeProfile
       if (this.repositoryPath) {
         await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+        if (generation !== this.loadGeneration) return;
       }
 
       // Re-sync local state with store after loading
@@ -858,13 +866,17 @@ export class LvGitHubDialog extends LitElement {
       }
 
       await this.checkConnection();
+      if (generation !== this.loadGeneration) return;
       if (this.repositoryPath) {
         await this.detectRepo();
       }
     } catch (err) {
+      if (generation !== this.loadGeneration) return;
       this.error = err instanceof Error ? err.message : 'Failed to load data';
     } finally {
-      this.isLoading = false;
+      if (generation === this.loadGeneration) {
+        this.isLoading = false;
+      }
     }
   }
 

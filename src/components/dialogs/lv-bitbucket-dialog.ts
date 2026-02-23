@@ -578,6 +578,7 @@ export class LvBitbucketDialog extends LitElement {
   private oauthCompleteHandler?: EventListener;
   private oauthStateUnsubscribe?: () => void;
   private unsubscribeStore?: () => void;
+  private loadGeneration = 0;
 
   // Create PR form
   @state() private createPrTitle = '';
@@ -606,6 +607,10 @@ export class LvBitbucketDialog extends LitElement {
     // Subscribe to unified profile store - get global accounts
     this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
       this.accounts = getAccountsByType('bitbucket');
+      // If selected account was deleted, reset to null
+      if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
+        this.selectedAccountId = null;
+      }
       // If no account selected, try to select the default one
       if (!this.selectedAccountId && this.accounts.length > 0) {
         const defaultAccount = getDefaultGlobalAccount('bitbucket');
@@ -652,16 +657,19 @@ export class LvBitbucketDialog extends LitElement {
   }
 
   private async loadInitialData(): Promise<void> {
+    const generation = ++this.loadGeneration;
     this.isLoading = true;
     this.error = null;
 
     try {
       // Ensure unified profiles are loaded
       await unifiedProfileService.loadUnifiedProfiles();
+      if (generation !== this.loadGeneration) return;
 
       // Load the profile for this repository to set activeProfile
       if (this.repositoryPath) {
         await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+        if (generation !== this.loadGeneration) return;
       }
 
       // Re-sync local state with store after loading
@@ -674,6 +682,7 @@ export class LvBitbucketDialog extends LitElement {
       // Load OAuth token for selected account
       if (this.selectedAccountId) {
         const token = await this.getSelectedAccountToken();
+        if (generation !== this.loadGeneration) return;
         if (token) {
           this.oauthToken = token;
         }
@@ -681,12 +690,16 @@ export class LvBitbucketDialog extends LitElement {
 
       if (this.repositoryPath) {
         await this.detectRepo();
+        if (generation !== this.loadGeneration) return;
       }
       await this.checkConnection();
     } catch (err) {
+      if (generation !== this.loadGeneration) return;
       this.error = err instanceof Error ? err.message : 'Failed to load data';
     } finally {
-      this.isLoading = false;
+      if (generation === this.loadGeneration) {
+        this.isLoading = false;
+      }
     }
   }
 
@@ -867,6 +880,36 @@ export class LvBitbucketDialog extends LitElement {
       await this.checkConnection();
 
       if (this.connectionStatus?.connected) {
+        const user = this.connectionStatus.user;
+        const workspace = this.detectedRepo?.workspace || this.usernameInput;
+
+        // Create or update a global account for app-password connections
+        if (this.selectedAccountId) {
+          await credentialService.storeAccountToken('bitbucket', this.selectedAccountId, this.appPasswordInput);
+        } else {
+          const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
+          const newAccount: IntegrationAccount = {
+            ...createEmptyIntegrationAccount('bitbucket', workspace),
+            id: generateId(),
+            name: user?.username ? `Bitbucket (${user.username})` : `Bitbucket (${this.usernameInput})`,
+            isDefault: this.accounts.length === 0,
+            cachedUser: user ? {
+              username: user.username,
+              displayName: user.displayName ?? null,
+              email: null,
+              avatarUrl: user.avatarUrl ?? null,
+            } : null,
+          };
+
+          const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
+          await credentialService.storeAccountToken('bitbucket', savedAccount.id, this.appPasswordInput);
+          this.selectedAccountId = savedAccount.id;
+
+          // Refresh accounts list
+          await unifiedProfileService.loadUnifiedProfiles();
+          this.accounts = getAccountsByType('bitbucket');
+        }
+
         this.usernameInput = '';
         this.appPasswordInput = '';
         if (this.detectedRepo) {
@@ -886,8 +929,14 @@ export class LvBitbucketDialog extends LitElement {
     this.isLoading = true;
 
     try {
+      // Delete account-specific token if available
+      if (this.selectedAccountId) {
+        await credentialService.deleteAccountToken('bitbucket', this.selectedAccountId);
+      }
+      // Also delete legacy credentials
       await gitService.deleteBitbucketCredentials();
       this.connectionStatus = null;
+      this.oauthToken = null;
       this.pullRequests = [];
       this.issues = [];
       this.pipelines = [];

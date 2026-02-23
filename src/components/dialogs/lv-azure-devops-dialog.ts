@@ -564,6 +564,7 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private selectedAccountId: string | null = null;
 
   private unsubscribeStore?: () => void;
+  private loadGeneration = 0;
 
   // Create PR form
   @state() private createPrTitle = '';
@@ -578,6 +579,10 @@ export class LvAzureDevOpsDialog extends LitElement {
     // Subscribe to unified profile store - get global accounts
     this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
       this.accounts = getAccountsByType('azure-devops');
+      // If selected account was deleted, reset to null
+      if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
+        this.selectedAccountId = null;
+      }
       // If no account selected, try to select the default one
       if (!this.selectedAccountId && this.accounts.length > 0) {
         const defaultAccount = getDefaultGlobalAccount('azure-devops');
@@ -625,16 +630,19 @@ export class LvAzureDevOpsDialog extends LitElement {
   }
 
   private async loadInitialData(): Promise<void> {
+    const generation = ++this.loadGeneration;
     this.isLoading = true;
     this.error = null;
 
     try {
       // Ensure unified profiles are loaded
       await unifiedProfileService.loadUnifiedProfiles();
+      if (generation !== this.loadGeneration) return;
 
       // Load the profile for this repository to set activeProfile
       if (this.repositoryPath) {
         await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+        if (generation !== this.loadGeneration) return;
       }
 
       // Re-sync local state with store after loading
@@ -646,19 +654,24 @@ export class LvAzureDevOpsDialog extends LitElement {
 
       // Check if selected account has a stored token
       await this.checkStoredToken();
+      if (generation !== this.loadGeneration) return;
 
       // Try to detect repo first to get organization
       if (this.repositoryPath) {
         await this.detectRepo();
+        if (generation !== this.loadGeneration) return;
       }
       // Check connection if we have an organization
       if (this.detectedRepo?.organization || this.organizationInput) {
         await this.checkConnection();
       }
     } catch (err) {
+      if (generation !== this.loadGeneration) return;
       this.error = err instanceof Error ? err.message : 'Failed to load data';
     } finally {
-      this.isLoading = false;
+      if (generation === this.loadGeneration) {
+        this.isLoading = false;
+      }
     }
   }
 
