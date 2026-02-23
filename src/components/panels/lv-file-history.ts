@@ -107,6 +107,15 @@ export class LvFileHistory extends LitElement {
         font-size: var(--font-size-sm);
       }
 
+      .error {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: var(--spacing-xl);
+        color: var(--color-error);
+        font-size: var(--font-size-sm);
+      }
+
       .commit-list {
         display: flex;
         flex-direction: column;
@@ -255,6 +264,7 @@ export class LvFileHistory extends LitElement {
 
   @state() private commits: Commit[] = [];
   @state() private loading = false;
+  @state() private error: string | null = null;
   @state() private selectedCommit: string | null = null;
   @state() private contextMenu: HistoryContextMenuState = { visible: false, x: 0, y: 0, commit: null };
 
@@ -284,6 +294,7 @@ export class LvFileHistory extends LitElement {
 
   private async loadHistory(): Promise<void> {
     this.loading = true;
+    this.error = null;
     this.commits = [];
 
     try {
@@ -296,8 +307,11 @@ export class LvFileHistory extends LitElement {
 
       if (result.success && result.data) {
         this.commits = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load file history';
       }
     } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load file history';
       console.error('Failed to load file history:', err);
     } finally {
       this.loading = false;
@@ -420,6 +434,8 @@ export class LvFileHistory extends LitElement {
       <div class="content">
         ${this.loading
           ? html`<div class="loading">Loading history...</div>`
+          : this.error
+            ? html`<div class="error">${this.error}</div>`
           : this.commits.length === 0
             ? html`<div class="empty">No history found for this file</div>`
             : html`

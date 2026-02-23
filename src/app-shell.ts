@@ -1569,6 +1569,8 @@ export class AppShell extends LitElement {
       const result = await gitService.openRepository({ path: this.activeRepository.repository.path });
       if (result.success && result.data) {
         repositoryStore.getState().updateActiveRepository(result.data);
+      } else if (!result.success) {
+        showToast(result.error?.message ?? 'Failed to refresh repository', 'error');
       }
     }
     // Trigger refresh of the graph

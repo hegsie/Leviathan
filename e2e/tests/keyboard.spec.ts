@@ -221,11 +221,11 @@ test.describe('Vim Mode Navigation', () => {
 
 test.describe('Staging Shortcuts', () => {
   let app: AppPage;
-  let rightPanel: RightPanelPage;
+  let dialogs: DialogsPage;
 
   test.beforeEach(async ({ page }) => {
     app = new AppPage(page);
-    rightPanel = new RightPanelPage(page);
+    dialogs = new DialogsPage(page);
     await setupOpenRepository(page, {
       status: {
         staged: [],
@@ -234,14 +234,17 @@ test.describe('Staging Shortcuts', () => {
     });
   });
 
-  test('Cmd+Shift+A should call stage_all command', async ({ page }) => {
+  test('Stage all command via command palette should call stage_files', async ({ page }) => {
     await startCommandCapture(page);
-    await page.keyboard.press('Meta+Shift+a');
 
-    await waitForCommand(page, 'stage_all');
+    await app.openCommandPalette();
+    await dialogs.commandPalette.search('Stage all');
+    await dialogs.commandPalette.executeFirst();
 
-    const stageAllCommands = await findCommand(page, 'stage_all');
-    expect(stageAllCommands.length).toBeGreaterThan(0);
+    await waitForCommand(page, 'stage_files');
+
+    const stageFilesCommands = await findCommand(page, 'stage_files');
+    expect(stageFilesCommands.length).toBeGreaterThan(0);
   });
 });
 
@@ -275,17 +278,17 @@ test.describe('Refresh Command', () => {
     await expect(dialogs.commandPalette.palette).not.toBeVisible();
   });
 
-  test('Refresh command should trigger get_status reload', async ({ page }) => {
+  test('Refresh command should trigger open_repository reload', async ({ page }) => {
     await startCommandCapture(page);
 
     await app.openCommandPalette();
     await dialogs.commandPalette.search('Refresh');
     await dialogs.commandPalette.executeFirst();
 
-    await waitForCommand(page, 'get_status');
+    await waitForCommand(page, 'open_repository');
 
-    const statusCommands = await findCommand(page, 'get_status');
-    expect(statusCommands.length).toBeGreaterThan(0);
+    const repoCommands = await findCommand(page, 'open_repository');
+    expect(repoCommands.length).toBeGreaterThan(0);
   });
 });
 
@@ -374,12 +377,14 @@ test.describe('Keyboard - Error Scenarios', () => {
     });
   });
 
-  test('stage_all failure via keyboard shortcut should show error toast', async ({ page }) => {
-    // Inject error for stage_all command
-    await injectCommandError(page, 'stage_all', 'Staging failed: permission denied');
+  test('stage_files failure via command palette should show error toast', async ({ page }) => {
+    // Inject error for stage_files command
+    await injectCommandError(page, 'stage_files', 'Staging failed: permission denied');
 
-    // Trigger stage_all via keyboard shortcut
-    await page.keyboard.press('Meta+Shift+a');
+    // Trigger stage_all via command palette
+    await app.openCommandPalette();
+    await dialogs.commandPalette.search('Stage all');
+    await dialogs.commandPalette.executeFirst();
 
     // The error should be surfaced to the user via a toast or error indicator
     const errorIndicator = page.locator('lv-toast-container .toast.error, .error-message, .error-banner').first();
@@ -387,8 +392,8 @@ test.describe('Keyboard - Error Scenarios', () => {
   });
 
   test('refresh failure via command palette should show error feedback', async ({ page }) => {
-    // Inject error for get_status (triggered by refresh)
-    await injectCommandError(page, 'get_status', 'Repository not found');
+    // Inject error for open_repository (triggered by refresh)
+    await injectCommandError(page, 'open_repository', 'Repository not found');
 
     // Execute refresh via command palette
     await app.openCommandPalette();

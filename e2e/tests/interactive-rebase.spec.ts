@@ -364,7 +364,7 @@ test.describe('Interactive Rebase - Error Handling', () => {
     await expect(errorInDialog.or(toastError).first()).toBeVisible();
   });
 
-  test('should keep dialog open when rebase fails', async ({ page }) => {
+  test('should keep dialog open with entries when rebase fails', async ({ page }) => {
     // Open dialog
     const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
     await developBranch.click({ button: 'right' });
@@ -377,8 +377,12 @@ test.describe('Interactive Rebase - Error Handling', () => {
     const startButton = page.locator('lv-interactive-rebase-dialog .btn-primary', { hasText: 'Start Rebase' }).first();
     await startButton.click();
 
-    const dialogOrToast = page.locator('lv-interactive-rebase-dialog lv-modal[open], lv-toast, .toast');
-    await expect(dialogOrToast.first()).toBeVisible();
+    // Dialog should remain open (not just toast visible)
+    await expect(dialog).toBeVisible();
+
+    // Commit rows should still be displayed so user can adjust and retry
+    const commitRows = page.locator('lv-interactive-rebase-dialog .commit-row');
+    await expect(commitRows).toHaveCount(2);
   });
 
   test('should not dispatch repository-changed event on failed rebase', async ({ page }) => {
@@ -487,7 +491,15 @@ test.describe('Interactive Rebase - Injected Error on Execute', () => {
     await expect(errorInDialog.or(toastError).first()).toBeVisible();
 
     // Dialog should remain open so the user can adjust and retry
-    const dialogOrToast = page.locator('lv-interactive-rebase-dialog lv-modal[open], lv-toast, .toast');
-    await expect(dialogOrToast.first()).toBeVisible();
+    await expect(dialog).toBeVisible();
+
+    // Verify the rebase entries are still shown (commit rows preserved)
+    const commitRows = page.locator('lv-interactive-rebase-dialog .commit-row');
+    await expect(commitRows).toHaveCount(2);
+
+    // Verify action selects are still interactable (user can adjust and retry)
+    const firstSelect = page.locator('lv-interactive-rebase-dialog .action-select').first();
+    await expect(firstSelect).toBeVisible();
+    await expect(firstSelect).toBeEnabled();
   });
 });

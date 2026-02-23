@@ -638,6 +638,8 @@ export class LvFileStatus extends LitElement {
     const result = await gitService.stageFiles(this.repositoryPath, { paths });
     if (result.success) {
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage files', 'error');
     }
   }
 
@@ -656,6 +658,8 @@ export class LvFileStatus extends LitElement {
     });
     if (result.success) {
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage files', 'error');
     }
   }
 
@@ -679,6 +683,8 @@ export class LvFileStatus extends LitElement {
     const result = await gitService.discardChanges(this.repositoryPath, paths);
     if (result.success) {
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
     }
   }
 
@@ -1076,6 +1082,8 @@ export class LvFileStatus extends LitElement {
     });
     if (result.success) {
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage file', 'error');
     }
   }
 
@@ -1093,6 +1101,8 @@ export class LvFileStatus extends LitElement {
     });
     if (result.success) {
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage file', 'error');
     }
   }
 
@@ -1118,6 +1128,8 @@ export class LvFileStatus extends LitElement {
     ]);
     if (result.success) {
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
     }
   }
 
@@ -1128,6 +1140,8 @@ export class LvFileStatus extends LitElement {
     const result = await gitService.stageFiles(this.repositoryPath, { paths });
     if (result.success) {
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage files', 'error');
     }
   }
 
@@ -1140,6 +1154,8 @@ export class LvFileStatus extends LitElement {
     });
     if (result.success) {
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage files', 'error');
     }
   }
 
@@ -1208,6 +1224,8 @@ export class LvFileStatus extends LitElement {
       paths.forEach((p) => newSelected.delete(p));
       this.selectedFiles = newSelected;
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage files', 'error');
     }
   }
 
@@ -1225,6 +1243,8 @@ export class LvFileStatus extends LitElement {
       paths.forEach((p) => newSelected.delete(p));
       this.selectedFiles = newSelected;
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage files', 'error');
     }
   }
 
@@ -1247,6 +1267,8 @@ export class LvFileStatus extends LitElement {
       paths.forEach((p) => newSelected.delete(p));
       this.selectedFiles = newSelected;
       await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
     }
   }
 
@@ -1274,7 +1296,11 @@ export class LvFileStatus extends LitElement {
     const result = await gitService.stageFiles(this.repositoryPath, {
       paths: [file.path],
     });
-    if (result.success) await this.loadStatus();
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage file', 'error');
+    }
   }
 
   private async handleContextUnstage(): Promise<void> {
@@ -1284,7 +1310,11 @@ export class LvFileStatus extends LitElement {
     const result = await gitService.unstageFiles(this.repositoryPath, {
       paths: [file.path],
     });
-    if (result.success) await this.loadStatus();
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage file', 'error');
+    }
   }
 
   private handleContextViewDiff(): void {
@@ -1352,7 +1382,11 @@ export class LvFileStatus extends LitElement {
     const result = await gitService.discardChanges(this.repositoryPath, [
       file.path,
     ]);
-    if (result.success) await this.loadStatus();
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+    }
   }
 
   private getFileNameAndDir(path: string): { name: string; dir: string } {

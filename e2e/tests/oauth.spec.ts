@@ -39,13 +39,13 @@ test.describe('GitHub OAuth Integration', () => {
     await expect(dialogs.github.tokenInput).toBeVisible();
   });
 
-  test('should have connect button', async () => {
+  test('should have connect button', async ({ page }) => {
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('GitHub Integration');
     await dialogs.commandPalette.executeFirst();
 
     // Either the connect button (PAT mode) or OAuth sign-in button should be visible
-    const connectOrOAuth = dialogs.github.dialog.locator('button', { hasText: /connect|sign in/i });
+    const connectOrOAuth = page.locator('lv-github-dialog button', { hasText: /connect|sign in/i });
     await expect(connectOrOAuth.first()).toBeVisible();
   });
 
@@ -343,14 +343,10 @@ test.describe('GitHub PAT Submit Flow', () => {
     await startCommandCapture(page);
 
     await dialogs.github.connectButton.click();
-    await Promise.race([
-      waitForCommand(page, 'connect_github'),
-      waitForCommand(page, 'check_github_connection'),
-    ]);
+    await waitForCommand(page, 'check_github_connection');
 
-    const connectCommands = await findCommand(page, 'connect_github');
     const checkCommands = await findCommand(page, 'check_github_connection');
-    expect(connectCommands.length + checkCommands.length).toBeGreaterThan(0);
+    expect(checkCommands.length).toBeGreaterThan(0);
   });
 
   test('submitting invalid PAT should show error message', async ({ page }) => {
@@ -360,7 +356,7 @@ test.describe('GitHub PAT Submit Flow', () => {
 
     await dialogs.github.selectPATMethod();
 
-    await injectCommandError(page, 'connect_github', 'Invalid token: authentication failed');
+    await injectCommandError(page, 'check_github_connection', 'Invalid token: authentication failed');
 
     await dialogs.github.tokenInput.fill('ghp_invalidtoken');
     await dialogs.github.connectButton.click();
@@ -395,14 +391,10 @@ test.describe('GitLab PAT Submit Flow', () => {
 
     await startCommandCapture(page);
     await dialogs.gitlab.connectButton.click();
-    await Promise.race([
-      waitForCommand(page, 'connect_gitlab'),
-      waitForCommand(page, 'check_gitlab_connection'),
-    ]);
+    await waitForCommand(page, 'check_gitlab_connection');
 
-    const connectCommands = await findCommand(page, 'connect_gitlab');
     const checkCommands = await findCommand(page, 'check_gitlab_connection');
-    expect(connectCommands.length + checkCommands.length).toBeGreaterThan(0);
+    expect(checkCommands.length).toBeGreaterThan(0);
   });
 });
 
@@ -467,7 +459,7 @@ test.describe('OAuth Error Scenarios', () => {
     await expect(dialogs.github.tokenInput).toBeVisible();
 
     // Inject error for the token validation command
-    await injectCommandError(page, 'check_github_connection_with_token', 'Token validation failed: invalid or expired token');
+    await injectCommandError(page, 'check_github_connection', 'Token validation failed: invalid or expired token');
 
     await dialogs.github.tokenInput.fill('ghp_expired_token_12345');
     await dialogs.github.connectButton.click();
@@ -487,7 +479,7 @@ test.describe('OAuth Error Scenarios', () => {
     await expect(dialogs.github.tokenInput).toBeVisible();
 
     // Inject a network-level error for the connection check command
-    await injectCommandError(page, 'check_github_connection_with_token', 'Network error: unable to reach api.github.com');
+    await injectCommandError(page, 'check_github_connection', 'Network error: unable to reach api.github.com');
 
     await dialogs.github.tokenInput.fill('ghp_valid_looking_token');
     await dialogs.github.connectButton.click();
@@ -507,7 +499,7 @@ test.describe('OAuth Error Scenarios', () => {
     await expect(dialogs.gitlab.tokenInput).toBeVisible();
 
     // Inject error for GitLab connection check
-    await injectCommandError(page, 'check_gitlab_connection_with_token', 'Authentication failed: 401 Unauthorized');
+    await injectCommandError(page, 'check_gitlab_connection', 'Authentication failed: 401 Unauthorized');
 
     await dialogs.gitlab.instanceUrlInput.fill('https://gitlab.com');
     await dialogs.gitlab.tokenInput.fill('glpat-invalidtoken123');
@@ -566,8 +558,8 @@ test.describe('OAuth - Strengthened Assertions', () => {
     await expect(dialogs.github.dialog).toBeVisible();
 
     await dialogs.github.selectPATMethod();
-    await injectCommandError(page, 'connect_github', 'Network error: unable to reach api.github.com');
-    await injectCommandError(page, 'check_github_connection_with_token', 'Network error: unable to reach api.github.com');
+    // The actual command used is check_github_connection (not connect_github or check_github_connection_with_token)
+    await injectCommandError(page, 'check_github_connection', 'Network error: unable to reach api.github.com');
 
     await dialogs.github.tokenInput.fill('ghp_network_error_token');
     await dialogs.github.connectButton.click();
@@ -590,8 +582,7 @@ test.describe('OAuth - Strengthened Assertions', () => {
     await expect(dialogs.github.dialog).toBeVisible();
 
     await dialogs.github.selectPATMethod();
-    await injectCommandError(page, 'connect_github', 'Invalid token: authentication failed (401 Unauthorized)');
-    await injectCommandError(page, 'check_github_connection_with_token', 'Invalid token: authentication failed (401 Unauthorized)');
+    await injectCommandError(page, 'check_github_connection', 'Invalid token: authentication failed (401 Unauthorized)');
 
     await dialogs.github.tokenInput.fill('ghp_invalid_token_test');
     await dialogs.github.connectButton.click();

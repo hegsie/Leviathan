@@ -209,6 +209,41 @@ test.describe('Cherry-Pick Dialog', () => {
   });
 });
 
+test.describe('Cherry-Pick Dialog - Error Scenarios', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('cherry_pick failure with merge conflict should show error feedback and keep dialog open', async ({
+    page,
+  }) => {
+    await injectCommandError(page, 'cherry_pick', 'Cherry-pick failed: uncommitted changes prevent operation');
+
+    await openCherryPickDialog(page);
+
+    const cherryPickBtn = page.locator('lv-cherry-pick-dialog button.btn-primary', {
+      hasText: /Cherry-Pick/,
+    });
+    await cherryPickBtn.click();
+
+    // Verify error feedback appears (inline error message in dialog)
+    const errorMessage = page.locator('lv-cherry-pick-dialog .error-message');
+    await expect(errorMessage).toBeVisible();
+    await expect(errorMessage).toContainText('uncommitted changes');
+
+    // Verify the dialog remains open so the user can see the error
+    const modal = page.locator('lv-cherry-pick-dialog lv-modal[open]');
+    await expect(modal).toBeVisible();
+
+    // Verify the commit info is still displayed (dialog state preserved)
+    const commitSha = page.locator('lv-cherry-pick-dialog .commit-sha');
+    await expect(commitSha).toContainText('abc123d');
+
+    // Verify the cherry-pick button is re-enabled after error (not stuck in loading state)
+    await expect(cherryPickBtn).toBeEnabled();
+  });
+});
+
 test.describe('Cherry-pick Dialog - UI Outcome Verification', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);

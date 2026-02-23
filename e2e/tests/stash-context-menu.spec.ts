@@ -263,15 +263,6 @@ test.describe('Stash Context Menu - Error Handling', () => {
   test('should show error toast when apply_stash fails', async ({ page }) => {
     await injectCommandError(page, 'apply_stash', 'Apply failed: conflicts detected');
 
-    const toastPromise = page.evaluate(() => {
-      return new Promise<string>((resolve) => {
-        document.addEventListener('show-toast', ((e: CustomEvent) => {
-          resolve(e.detail.message || e.detail.toString());
-        }) as EventListener, { once: true });
-        setTimeout(() => resolve(''), 3000);
-      });
-    });
-
     await leftPanel.expandStashes();
     const stash = leftPanel.getStash(0);
     await stash.click({ button: 'right' });
@@ -280,21 +271,13 @@ test.describe('Stash Context Menu - Error Handling', () => {
     await expect(applyOption).toBeVisible();
     await applyOption.click();
 
-    const toastMessage = await toastPromise;
-    expect(toastMessage).toContain('Apply failed');
+    const errorToast = page.locator('lv-toast-container .toast.error').first();
+    await expect(errorToast).toBeVisible({ timeout: 5000 });
+    await expect(errorToast).toContainText('Apply failed');
   });
 
   test('should show error toast when pop_stash fails', async ({ page }) => {
     await injectCommandError(page, 'pop_stash', 'Pop failed: working directory not clean');
-
-    const toastPromise = page.evaluate(() => {
-      return new Promise<string>((resolve) => {
-        document.addEventListener('show-toast', ((e: CustomEvent) => {
-          resolve(e.detail.message || e.detail.toString());
-        }) as EventListener, { once: true });
-        setTimeout(() => resolve(''), 3000);
-      });
-    });
 
     await leftPanel.expandStashes();
     const stash = leftPanel.getStash(0);
@@ -304,8 +287,9 @@ test.describe('Stash Context Menu - Error Handling', () => {
     await expect(popOption).toBeVisible();
     await popOption.click();
 
-    const toastMessage = await toastPromise;
-    expect(toastMessage).toContain('Pop failed');
+    const errorToast = page.locator('lv-toast-container .toast.error').first();
+    await expect(errorToast).toBeVisible({ timeout: 5000 });
+    await expect(errorToast).toContainText('Pop failed');
   });
 
   test('should show error toast when drop_stash fails', async ({ page }) => {
@@ -316,15 +300,6 @@ test.describe('Stash Context Menu - Error Handling', () => {
 
     await injectCommandError(page, 'drop_stash', 'Drop failed: stash not found');
 
-    const toastPromise = page.evaluate(() => {
-      return new Promise<string>((resolve) => {
-        document.addEventListener('show-toast', ((e: CustomEvent) => {
-          resolve(e.detail.message || e.detail.toString());
-        }) as EventListener, { once: true });
-        setTimeout(() => resolve(''), 3000);
-      });
-    });
-
     await leftPanel.expandStashes();
     const stash = leftPanel.getStash(0);
     await stash.click({ button: 'right' });
@@ -333,8 +308,9 @@ test.describe('Stash Context Menu - Error Handling', () => {
     await expect(dropOption).toBeVisible();
     await dropOption.click();
 
-    const toastMessage = await toastPromise;
-    expect(toastMessage).toContain('Drop failed');
+    const errorToast = page.locator('lv-toast-container .toast.error').first();
+    await expect(errorToast).toBeVisible({ timeout: 5000 });
+    await expect(errorToast).toContainText('Drop failed');
   });
 
   test('should keep stash list unchanged after apply failure', async ({ page }) => {
@@ -391,15 +367,6 @@ test.describe('Stash Context Menu - Extended Tests', () => {
 
     await injectCommandError(page, 'apply_stash', 'CONFLICT (content): Merge conflict in src/main.ts');
 
-    const toastPromise = page.evaluate(() => {
-      return new Promise<string>((resolve) => {
-        document.addEventListener('show-toast', ((e: CustomEvent) => {
-          resolve(e.detail.message || e.detail.toString());
-        }) as EventListener, { once: true });
-        setTimeout(() => resolve(''), 5000);
-      });
-    });
-
     await leftPanel.expandStashes();
     const stash = leftPanel.getStash(0);
     await stash.click({ button: 'right' });
@@ -408,8 +375,9 @@ test.describe('Stash Context Menu - Extended Tests', () => {
     await expect(applyOption).toBeVisible();
     await applyOption.click();
 
-    const toastMessage = await toastPromise;
-    expect(toastMessage).toContain('CONFLICT');
+    const errorToast = page.locator('lv-toast-container .toast.error').first();
+    await expect(errorToast).toBeVisible({ timeout: 5000 });
+    await expect(errorToast).toContainText('CONFLICT');
 
     // Stash list should remain unchanged after a failed apply
     const stashCount = await leftPanel.getStashCount();

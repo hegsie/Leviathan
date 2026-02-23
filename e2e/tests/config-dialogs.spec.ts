@@ -19,7 +19,8 @@ import {
 /** Open the config dialog via the command palette and wait for it to appear */
 async function openConfigDialog(page: import('@playwright/test').Page): Promise<void> {
   await openViaCommandPalette(page, 'Git Configuration');
-  await page.locator('lv-config-dialog[open]').waitFor({ state: 'attached', timeout: 5000 });
+  // Wait for the modal inside to be visible (the custom element itself has no :host display style)
+  await page.locator('lv-config-dialog lv-modal[open]').waitFor({ state: 'visible', timeout: 5000 });
 }
 
 // --------------------------------------------------------------------------
@@ -51,7 +52,7 @@ test.describe('Config Dialog - Identity Tab', () => {
   });
 
   test('should display the dialog with Identity tab active by default', async ({ page }) => {
-    await expect(page.locator('lv-config-dialog[open]')).toBeVisible();
+    await expect(page.locator('lv-config-dialog lv-modal[open]')).toBeVisible();
     await expect(page.locator('lv-config-dialog .tab.active')).toHaveText('Identity');
   });
 
@@ -76,6 +77,12 @@ test.describe('Config Dialog - Identity Tab', () => {
 
     const commands = await findCommand(page, 'set_user_identity');
     expect(commands.length).toBeGreaterThan(0);
+
+    // Verify UI: no error banner should be visible after successful save
+    await expect(page.locator('lv-config-dialog .error-banner')).not.toBeVisible();
+
+    // Verify UI: the dialog should still be open (identity save does not close the dialog)
+    await expect(page.locator('lv-config-dialog lv-modal[open]')).toBeVisible();
   });
 
   test('should show error banner when save fails', async ({ page }) => {
@@ -133,6 +140,12 @@ test.describe('Config Dialog - Settings Tab', () => {
 
     const commands = await findCommand(page, 'set_config_value');
     expect(commands.length).toBeGreaterThan(0);
+
+    // Verify UI: no error banner should appear after successful save
+    await expect(page.locator('lv-config-dialog .error-banner')).not.toBeVisible();
+
+    // Verify UI: the input should reflect the updated value
+    await expect(input).toHaveValue('true');
   });
 
   test('should show error banner when setting save fails', async ({ page }) => {
@@ -226,15 +239,25 @@ test.describe('Config Dialog - Aliases Tab', () => {
 
     const commands = await findCommand(page, 'set_alias');
     expect(commands.length).toBeGreaterThan(0);
+
+    // Verify UI: no error banner should appear after successful add
+    await expect(page.locator('lv-config-dialog .error-banner')).not.toBeVisible();
   });
 
   test('clicking delete button on alias should call delete_alias', async ({ page }) => {
-    await autoConfirmDialogs(page);
+    // Mock native confirm() since the component uses it directly
+    await page.evaluate(() => { window.confirm = () => true; });
+
+    // Verify initial alias count before deletion
+    await expect(page.locator('lv-config-dialog .alias-item')).toHaveCount(2);
 
     await page.locator('lv-config-dialog .btn-icon.danger').first().click();
 
     const commands = await findCommand(page, 'delete_alias');
     expect(commands.length).toBeGreaterThan(0);
+
+    // Verify UI: no error banner should appear after successful deletion
+    await expect(page.locator('lv-config-dialog .error-banner')).not.toBeVisible();
   });
 
   test('should show error banner when adding alias fails', async ({ page }) => {
@@ -352,5 +375,10 @@ test.describe('Config Dialog - Loading State', () => {
     expect(identityCmds.length).toBeGreaterThan(0);
     expect(settingsCmds.length).toBeGreaterThan(0);
     expect(aliasesCmds.length).toBeGreaterThan(0);
+
+    // Verify UI: the dialog should be visible and populated with identity data
+    await expect(page.locator('lv-config-dialog lv-modal[open]')).toBeVisible();
+    await expect(page.locator('lv-config-dialog .form-group input').first()).toHaveValue('Test');
+    await expect(page.locator('lv-config-dialog .form-group input').nth(1)).toHaveValue('test@test.com');
   });
 });

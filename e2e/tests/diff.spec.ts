@@ -658,11 +658,11 @@ test.describe('Diff Error Scenarios', () => {
     // The diff overlay should appear, but with an error or empty state
     await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
 
-    // The UI must show explicit error feedback: either an inline error/empty state or a toast.
-    // Simply having no diff lines is not sufficient — the user needs to see what went wrong.
-    await expect(
-      page.locator('.error, .error-banner, .empty, .no-diff, .toast, lv-diff-view .error-message').first()
-    ).toBeVisible({ timeout: 5000 });
+    // The diff view component renders errors as <div class="error"> inside its shadow DOM.
+    // Use a scoped locator to avoid matching unrelated .empty elements from other components.
+    const errorDiv = page.locator('lv-diff-view .error');
+    await expect(errorDiv).toBeVisible();
+    await expect(errorDiv).toContainText('Failed to read file: permission denied');
   });
 
   test('should handle empty diff gracefully', async ({ page }) => {

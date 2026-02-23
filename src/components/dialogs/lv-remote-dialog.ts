@@ -675,10 +675,12 @@ export class LvRemoteDialog extends LitElement {
             Add a remote to push and pull changes
           </div>
         </div>
+        ${this.error ? html`<div class="error">${this.error}</div>` : nothing}
       `;
     }
 
     return html`
+      ${this.error ? html`<div class="error">${this.error}</div>` : nothing}
       <div class="remote-list">
         ${this.remotes.map(remote => html`
           <div class="remote-item">

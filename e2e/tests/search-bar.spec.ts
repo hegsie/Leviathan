@@ -287,9 +287,14 @@ test.describe('Search Query Filtering', () => {
     await expect(graph).toBeVisible();
   });
 
-  test('search with no matches should show empty state or no results', async ({ page }) => {
+  test('search with no matches should show empty state and keep search bar functional', async ({ page }) => {
     const searchButton = page.locator('button[title*="Search commits"]');
     await searchButton.click();
+
+    // Mock get_commit_history to return empty array for the non-matching search
+    await injectCommandMock(page, {
+      get_commit_history: [],
+    });
 
     const searchInput = page.locator('lv-search-bar input[type="text"]').first();
     await searchInput.fill('zzzznonexistentquery12345');
@@ -297,9 +302,17 @@ test.describe('Search Query Filtering', () => {
 
     await expect(searchInput).toHaveValue('zzzznonexistentquery12345');
 
-    // Graph canvas should still be visible (may show empty state or filtered to zero)
+    // Graph canvas should still be visible (not crashed) even with zero results
     const graph = page.locator('lv-graph-canvas');
     await expect(graph).toBeVisible();
+
+    // Search bar should remain visible and functional for a new search
+    const searchBar = page.locator('lv-search-bar');
+    await expect(searchBar).toBeVisible();
+
+    // Clear button should be visible since there is a query
+    const clearButton = page.locator('lv-search-bar .clear-btn, lv-search-bar button[title*="Clear"]');
+    await expect(clearButton).toBeVisible();
   });
 
   test('search should trigger get_commit_history command with search params', async ({ page }) => {
@@ -358,7 +371,7 @@ test.describe('Search Bar - Error Scenarios', () => {
     });
   });
 
-  test('get_commit_history failure should show error feedback', async ({ page }) => {
+  test('get_commit_history failure should show error feedback and preserve search bar state', async ({ page }) => {
     // Open search bar
     const searchButton = page.locator('button[title*="Search commits"]');
     await searchButton.click();
@@ -370,9 +383,21 @@ test.describe('Search Bar - Error Scenarios', () => {
     await searchInput.fill('fix');
     await searchInput.press('Enter');
 
-    // The app should show an error toast or error indicator rather than crashing
-    const errorIndicator = page.locator('lv-toast-container .toast.error, .error-message, .error-banner').first();
+    // The app should show an error indicator (the graph renders errors in an .info-panel)
+    // or a toast notification rather than crashing
+    const errorIndicator = page.locator('lv-graph-canvas .info-panel, lv-toast-container .toast.error, .error-message, .error-banner').first();
     await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+
+    // Search bar should remain visible and functional after the error
+    const searchBar = page.locator('lv-search-bar');
+    await expect(searchBar).toBeVisible();
+
+    // Search input should still contain the query so the user can retry
+    await expect(searchInput).toHaveValue('fix');
+
+    // The search input should still be interactable (not frozen)
+    await searchInput.fill('new query');
+    await expect(searchInput).toHaveValue('new query');
   });
 
   test('invalid filter values should be handled gracefully without crash', async ({ page }) => {

@@ -469,6 +469,14 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
     expect((commands[0].args as { refName?: string })?.refName).toBe(
       'refs/remotes/origin/feature/remote-feature'
     );
+
+    // Verify UI: the active branch should now reflect the checked-out remote branch
+    const activeBranch = page.locator('lv-branch-list .branch-item.active');
+    await expect(activeBranch).toContainText('feature/remote-feature');
+
+    // Verify UI: main should no longer be the active branch
+    const mainBranch = leftPanel.getBranch('main');
+    await expect(mainBranch).not.toHaveClass(/active/);
   });
 
   test('should checkout remote branch with nested prefix (copilot/) correctly', async ({ page }) => {
@@ -496,6 +504,14 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
     expect((commands[0].args as { refName?: string })?.refName).toBe(
       'refs/remotes/origin/copilot/ai-generated-branch'
     );
+
+    // Verify UI: the active branch should now reflect the checked-out copilot branch
+    const activeBranch = page.locator('lv-branch-list .branch-item.active');
+    await expect(activeBranch).toContainText('copilot/ai-generated-branch');
+
+    // Verify UI: main should no longer be the active branch
+    const mainBranch = leftPanel.getBranch('main');
+    await expect(mainBranch).not.toHaveClass(/active/);
   });
 
   test('should show error toast when remote branch checkout fails', async ({ page }) => {
@@ -669,6 +685,34 @@ test.describe('Branch Delete via Context Menu', () => {
 
     expect(eventReceived).toBe(true);
   });
+
+  test('should show error and keep branch in list when delete_branch fails', async ({ page }) => {
+    // Inject delete_branch failure simulating attempt to delete current HEAD
+    await injectCommandError(page, 'delete_branch', 'Cannot delete branch: it is the current HEAD');
+
+    // Auto-confirm the delete confirmation dialog
+    await autoConfirmDialogs(page);
+
+    // Verify the branch is visible before attempting deletion
+    await expect(leftPanel.getBranch('feature/to-delete')).toBeVisible();
+
+    // Attempt to delete the branch via context menu
+    await leftPanel.openBranchContextMenu('feature/to-delete');
+    const deleteItem = page.locator('.context-menu-item', { hasText: /delete/i });
+    await deleteItem.waitFor({ state: 'visible' });
+    await deleteItem.click();
+
+    // Verify error toast appears with the specific error message
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toBeVisible();
+    await expect(toastMessage).toContainText('Cannot delete branch: it is the current HEAD');
+
+    // Verify the branch is still visible in the list (delete failed, branch remains)
+    await expect(leftPanel.getBranch('feature/to-delete')).toBeVisible();
+
+    // Verify main is still the current HEAD (unchanged)
+    await expect(leftPanel.currentBranch).toBeVisible();
+  });
 });
 
 test.describe('Branch Create via Context Menu', () => {
@@ -732,6 +776,36 @@ test.describe('Branch Create via Context Menu', () => {
     });
 
     expect(eventReceived).toBe(true);
+  });
+
+  test('should show error and keep dialog open when create_branch fails with duplicate name', async ({ page }) => {
+    // Inject create_branch failure simulating a duplicate branch name
+    await injectCommandError(page, 'create_branch', "A branch named 'feature/existing' already exists");
+
+    // Open create branch dialog
+    await leftPanel.openBranchContextMenu('main');
+    const createMenuItem = page.locator('.context-menu-item', { hasText: 'Create branch from here' });
+    await createMenuItem.waitFor({ state: 'visible' });
+    await createMenuItem.click();
+
+    await page.locator('lv-create-branch-dialog lv-modal[open]').waitFor({ state: 'visible' });
+
+    // Fill in branch name and attempt to create
+    await dialogs.createBranch.fillName('feature/existing');
+    await dialogs.createBranch.createButton.click();
+
+    // Verify error is shown (toast or inline error within dialog)
+    const errorIndicator = page.locator(
+      'lv-toast-container .toast.error .toast-message, lv-create-branch-dialog .error-message, lv-create-branch-dialog .error'
+    );
+    await expect(errorIndicator).toBeVisible();
+    await expect(errorIndicator).toContainText('already exists');
+
+    // Verify the dialog remains open (not dismissed on error)
+    await expect(page.locator('lv-create-branch-dialog lv-modal[open]')).toBeVisible();
+
+    // Verify the branch was NOT added to the branch list
+    await expect(leftPanel.getBranch('feature/existing')).not.toBeVisible();
   });
 });
 

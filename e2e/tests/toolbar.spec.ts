@@ -301,6 +301,10 @@ test.describe('Toolbar Clone Dialog - Full Flow', () => {
     const urlInput = page.getByRole('textbox', { name: /url/i });
     await urlInput.fill('https://github.com/test/repo.git');
 
+    // Fill the destination path (required for Clone button to be enabled)
+    const pathInput = page.getByRole('textbox', { name: /clone to/i });
+    await pathInput.fill('/tmp/clone-dest');
+
     await startCommandCapture(page);
 
     // Click Clone button
@@ -327,14 +331,18 @@ test.describe('Toolbar Clone Dialog - Full Flow', () => {
     const urlInput = page.getByRole('textbox', { name: /url/i });
     await urlInput.fill('https://github.com/nonexistent/repo.git');
 
+    // Fill the destination path (required for Clone button to be enabled)
+    const pathInput = page.getByRole('textbox', { name: /clone to/i });
+    await pathInput.fill('/tmp/clone-dest');
+
     // Click Clone
     const dialogCloneButton = page.locator('lv-clone-dialog').getByRole('button', { name: 'Clone', exact: true });
     await dialogCloneButton.click();
 
-    // Error toast or inline error should appear
-    const toast = page.locator('.toast');
-    await expect(toast).toBeVisible({ timeout: 5000 });
-    await expect(toast).toContainText(/error|fail|not found/i);
+    // Error inline message should appear in the clone dialog
+    const errorMessage = page.locator('lv-clone-dialog .error-message');
+    await expect(errorMessage).toBeVisible({ timeout: 5000 });
+    await expect(errorMessage).toContainText(/error|fail|not found/i);
   });
 });
 
@@ -344,11 +352,11 @@ test.describe('Toolbar Close Repository Tab', () => {
   });
 
   test('closing repository tab should remove it from the toolbar', async ({ page }) => {
-    const repoTab = page.locator('button', { hasText: 'test-repo' });
+    const repoTab = page.locator('lv-toolbar .tab', { hasText: 'test-repo' });
     await expect(repoTab).toBeVisible();
 
-    // Click the close icon on the tab (last svg/img in the tab button)
-    const closeIcon = repoTab.locator('img, svg').last();
+    // Click the close icon on the tab (the .tab-close span inside the tab)
+    const closeIcon = repoTab.locator('.tab-close');
     await closeIcon.click();
 
     // The tab should be removed
@@ -356,11 +364,11 @@ test.describe('Toolbar Close Repository Tab', () => {
   });
 
   test('closing last tab should show welcome screen', async ({ page }) => {
-    const repoTab = page.locator('button', { hasText: 'test-repo' });
+    const repoTab = page.locator('lv-toolbar .tab', { hasText: 'test-repo' });
     await expect(repoTab).toBeVisible();
 
-    // Click the close icon
-    const closeIcon = repoTab.locator('img, svg').last();
+    // Click the close icon (the .tab-close span inside the tab)
+    const closeIcon = repoTab.locator('.tab-close');
     await closeIcon.click();
 
     // Welcome screen should appear
@@ -438,25 +446,20 @@ test.describe('Toolbar - Extended Tests', () => {
   test('toolbar shows new repository name after successful clone', async ({ page }) => {
     await setupOpenRepository(page);
 
-    // Mock clone_repository to succeed and return a new repository
+    // Mock clone_repository to succeed and return a Repository object
+    // (clone_repository returns a Repository, not a path string)
+    const clonedRepo = {
+      path: '/tmp/new-cloned-repo',
+      name: 'new-cloned-repo',
+      isValid: true,
+      isBare: false,
+      headRef: 'refs/heads/main',
+      state: 'clean',
+    };
     await startCommandCaptureWithMocks(page, {
-      clone_repository: '/tmp/new-cloned-repo',
-      open_repository: {
-        path: '/tmp/new-cloned-repo',
-        name: 'new-cloned-repo',
-        isValid: true,
-        isBare: false,
-        headRef: 'refs/heads/main',
-        state: 'clean',
-      },
-      get_repository_info: {
-        path: '/tmp/new-cloned-repo',
-        name: 'new-cloned-repo',
-        isValid: true,
-        isBare: false,
-        headRef: 'refs/heads/main',
-        state: 'clean',
-      },
+      clone_repository: clonedRepo,
+      open_repository: clonedRepo,
+      get_repository_info: clonedRepo,
     });
 
     // Open clone dialog
@@ -469,6 +472,10 @@ test.describe('Toolbar - Extended Tests', () => {
     // Fill the URL
     const urlInput = page.getByRole('textbox', { name: /url/i });
     await urlInput.fill('https://github.com/test/new-cloned-repo.git');
+
+    // Fill the destination path (required for Clone button to be enabled)
+    const pathInput = page.getByRole('textbox', { name: /clone to/i });
+    await pathInput.fill('/tmp');
 
     // Click Clone button
     const dialogCloneButton = page.locator('lv-clone-dialog').getByRole('button', { name: 'Clone', exact: true });
@@ -483,7 +490,7 @@ test.describe('Toolbar - Extended Tests', () => {
 
     // After a successful clone, the toolbar tab should eventually show the new repo name
     // The app opens the repository after cloning, so look for the new tab
-    const newRepoTab = page.locator('button', { hasText: 'new-cloned-repo' });
+    const newRepoTab = page.locator('lv-toolbar .tab', { hasText: 'new-cloned-repo' });
     await expect(newRepoTab).toBeVisible({ timeout: 5000 });
   });
 
@@ -492,7 +499,14 @@ test.describe('Toolbar - Extended Tests', () => {
 
     // Mock init_repository to succeed and return a new repository
     await injectCommandMock(page, {
-      init_repository: '/tmp/new-init-repo',
+      init_repository: {
+        path: '/tmp/new-init-repo',
+        name: 'new-init-repo',
+        isValid: true,
+        isBare: false,
+        headRef: null,
+        state: 'clean',
+      },
       open_repository: {
         path: '/tmp/new-init-repo',
         name: 'new-init-repo',
@@ -519,14 +533,17 @@ test.describe('Toolbar - Extended Tests', () => {
     const initDialog = page.getByRole('dialog', { name: /init/i });
     await expect(initDialog).toBeVisible({ timeout: 3000 });
 
-    // Click Initialize/Init button (the dialog may have "Browse" + "Initialize")
-    const initializeButton = page.getByRole('button', { name: /^init/i });
-    if (await initializeButton.count() > 0) {
-      await initializeButton.click();
-    }
+    // Fill the path input (required for Initialize button to be enabled)
+    const pathInput = page.getByRole('textbox', { name: /repository location/i });
+    await pathInput.fill('/tmp/new-init-repo');
+
+    // Click Initialize button
+    const initializeButton = page.getByRole('button', { name: /initialize/i });
+    await expect(initializeButton).toBeEnabled();
+    await initializeButton.click();
 
     // After successful init, the toolbar should show the new repo name
-    const newRepoTab = page.locator('button', { hasText: 'new-init-repo' });
+    const newRepoTab = page.locator('lv-toolbar .tab', { hasText: 'new-init-repo' });
     await expect(newRepoTab).toBeVisible({ timeout: 5000 });
   });
 });

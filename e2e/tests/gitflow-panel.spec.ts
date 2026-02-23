@@ -3,6 +3,7 @@ import { setupOpenRepository } from '../fixtures/tauri-mock';
 import {
   startCommandCaptureWithMocks,
   findCommand,
+  injectCommandMock,
 } from '../fixtures/test-helpers';
 
 /**
@@ -125,6 +126,21 @@ test.describe('GitFlow Panel - Not Initialized', () => {
   });
 
   test('after initialization, section headers should appear', async ({ page }) => {
+    // After init_gitflow succeeds, loadConfig() re-fetches get_gitflow_config.
+    // Override get_gitflow_config to return initialized config so sections render.
+    await injectCommandMock(page, {
+      get_gitflow_config: {
+        initialized: true,
+        masterBranch: 'main',
+        developBranch: 'develop',
+        featurePrefix: 'feature/',
+        releasePrefix: 'release/',
+        hotfixPrefix: 'hotfix/',
+        supportPrefix: 'support/',
+        versionTagPrefix: 'v',
+      },
+    });
+
     await page.locator('lv-gitflow-panel .init-section .btn-primary').click();
 
     // Wait for section headers to appear (Feature, Release, Hotfix)

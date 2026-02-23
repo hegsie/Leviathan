@@ -209,7 +209,7 @@ test.describe('GitLab Dialog - Extended Scenarios', () => {
     await expect(dialogs.gitlab.dialog).toBeVisible();
 
     // Verify the error is shown within the dialog
-    const errorText = page.locator('lv-gitlab-dialog .error, lv-gitlab-dialog .error-message, lv-gitlab-dialog .toast-error');
-    await expect(errorText.or(dialogs.gitlab.dialog)).toBeVisible();
+    const errorText = page.locator('lv-gitlab-dialog .error');
+    await expect(errorText).toBeVisible({ timeout: 5000 });
   });
 });

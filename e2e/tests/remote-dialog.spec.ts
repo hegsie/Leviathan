@@ -245,8 +245,8 @@ test.describe('Remote Dialog - Add Remote E2E', () => {
     const addButton = remoteDialog.locator('button', { hasText: /add.*remote/i });
     await addButton.click();
 
-    const nameInput = remoteDialog.locator('input[placeholder*="name" i], input[name*="name"]').first();
-    const urlInput = remoteDialog.locator('input[placeholder*="url" i], input[placeholder*="github"], input[name*="url"]').first();
+    const nameInput = remoteDialog.locator('input[placeholder*="origin"], input[placeholder*="name" i], input[name*="name"]').first();
+    const urlInput = remoteDialog.locator('input[placeholder*="github"], input[placeholder*="url" i], input[name*="url"]').first();
 
     await nameInput.fill('fork');
     await urlInput.fill('https://github.com/fork/repo.git');
@@ -281,8 +281,8 @@ test.describe('Remote Dialog - Add Remote E2E', () => {
     const addButton = remoteDialog.locator('button', { hasText: /add.*remote/i });
     await addButton.click();
 
-    const nameInput = remoteDialog.locator('input[placeholder*="name" i], input[name*="name"]').first();
-    const urlInput = remoteDialog.locator('input[placeholder*="url" i], input[placeholder*="github"], input[name*="url"]').first();
+    const nameInput = remoteDialog.locator('input[placeholder*="origin"], input[placeholder*="name" i], input[name*="name"]').first();
+    const urlInput = remoteDialog.locator('input[placeholder*="github"], input[placeholder*="url" i], input[name*="url"]').first();
 
     await nameInput.fill('origin');
     await urlInput.fill('https://github.com/duplicate/repo.git');
@@ -378,8 +378,8 @@ test.describe('Remote Dialog Error Scenarios', () => {
     const addButton = remoteDialog.locator('button', { hasText: /add.*remote/i });
     await addButton.click();
 
-    const nameInput = remoteDialog.locator('input[placeholder*="name" i], input[name*="name"]').first();
-    const urlInput = remoteDialog.locator('input[placeholder*="url" i], input[placeholder*="github"], input[name*="url"]').first();
+    const nameInput = remoteDialog.locator('input[placeholder*="origin"], input[placeholder*="name" i], input[name*="name"]').first();
+    const urlInput = remoteDialog.locator('input[placeholder*="github"], input[placeholder*="url" i], input[name*="url"]').first();
 
     await nameInput.fill('upstream');
     await urlInput.fill('https://github.com/upstream/repo.git');
@@ -522,8 +522,8 @@ test.describe('Remote Dialog - Extended Tests', () => {
     await addButton.click();
 
     // Fill in the form
-    const nameInput = remoteDialog.locator('input[placeholder*="name" i], input[name*="name"]').first();
-    const urlInput = remoteDialog.locator('input[placeholder*="url" i], input[placeholder*="github"], input[name*="url"]').first();
+    const nameInput = remoteDialog.locator('input[placeholder*="origin"], input[placeholder*="name" i], input[name*="name"]').first();
+    const urlInput = remoteDialog.locator('input[placeholder*="github"], input[placeholder*="url" i], input[name*="url"]').first();
 
     await nameInput.fill('fork');
     await urlInput.fill('https://github.com/fork/repo.git');

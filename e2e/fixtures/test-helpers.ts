@@ -100,6 +100,12 @@ export async function injectCommandError(
         __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
       }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
         if (command === cmd) {
+          // Record the command for waitForCommand/findCommand if capture is active
+          const captured = (window as unknown as { __INVOKED_COMMANDS__?: { command: string; args: unknown }[] })
+            .__INVOKED_COMMANDS__;
+          if (captured) {
+            captured.push({ command, args });
+          }
           throw new Error(msg);
         }
         return originalInvoke(command, args);
@@ -126,6 +132,13 @@ export async function injectCommandMock(
       __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
     }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
       if (command in mocks) {
+        // Record the command for waitForCommand/findCommand if capture is active,
+        // since we short-circuit and don't call originalInvoke which may have its own recording
+        const captured = (window as unknown as { __INVOKED_COMMANDS__?: { command: string; args: unknown }[] })
+          .__INVOKED_COMMANDS__;
+        if (captured) {
+          captured.push({ command, args });
+        }
         const val = mocks[command];
         if (val instanceof Error || (typeof val === 'object' && val !== null && '__error__' in val)) {
           throw new Error(

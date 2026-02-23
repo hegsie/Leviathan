@@ -45,7 +45,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should open context menu on right-click on unstaged file', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const contextMenu = page.locator('.context-menu, .file-context-menu');
@@ -53,7 +53,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should show Stage option for unstaged files', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i });
@@ -61,7 +61,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should show Discard option for unstaged files', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const discardOption = page.locator('.context-menu-item, .menu-item', { hasText: /discard|revert/i });
@@ -69,7 +69,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should close context menu after clicking Stage', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
@@ -81,7 +81,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should invoke stage_files command for single file', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
@@ -93,7 +93,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should close context menu after clicking Discard', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const discardOption = page.locator('.context-menu-item, .menu-item', { hasText: /discard|revert/i });
@@ -105,7 +105,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should show Unstage option for staged files', async ({ page }) => {
-    const stagedFile = rightPanel.getStagedFile('staged-file.ts');
+    const stagedFile = rightPanel.getStagedFile('src/staged-file.ts');
     await stagedFile.click({ button: 'right' });
 
     const unstageOption = page.locator('.context-menu-item, .menu-item', { hasText: /unstage/i });
@@ -113,7 +113,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should close context menu after clicking Unstage', async ({ page }) => {
-    const stagedFile = rightPanel.getStagedFile('staged-file.ts');
+    const stagedFile = rightPanel.getStagedFile('src/staged-file.ts');
     await stagedFile.click({ button: 'right' });
 
     const unstageOption = page.locator('.context-menu-item, .menu-item', { hasText: /unstage/i });
@@ -125,7 +125,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should invoke unstage_files command', async ({ page }) => {
-    const stagedFile = rightPanel.getStagedFile('staged-file.ts');
+    const stagedFile = rightPanel.getStagedFile('src/staged-file.ts');
     await stagedFile.click({ button: 'right' });
 
     const unstageOption = page.locator('.context-menu-item, .menu-item', { hasText: /unstage/i });
@@ -137,7 +137,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should show Open in Editor option', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const contextMenu = page.locator('.context-menu, .file-context-menu');
@@ -148,7 +148,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should show Copy Path option', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const contextMenu = page.locator('.context-menu, .file-context-menu');
@@ -159,7 +159,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('context menu should close when clicking elsewhere', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const contextMenu = page.locator('.context-menu, .file-context-menu');
@@ -171,7 +171,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should handle new file status correctly', async ({ page }) => {
-    const newFile = rightPanel.getUnstagedFile('new-file.ts');
+    const newFile = rightPanel.getUnstagedFile('src/new-file.ts');
     await newFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
@@ -182,7 +182,7 @@ test.describe('File Status Context Menu', () => {
   });
 
   test('should handle deleted file status correctly', async ({ page }) => {
-    const deletedFile = rightPanel.getUnstagedFile('deleted-file.ts');
+    const deletedFile = rightPanel.getUnstagedFile('src/deleted-file.ts');
     await deletedFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
@@ -217,7 +217,7 @@ test.describe('File Status Context Menu - Command Execution', () => {
   });
 
   test('should invoke stage_files and reload status after staging', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
@@ -230,13 +230,13 @@ test.describe('File Status Context Menu - Command Execution', () => {
     const statusCommands = await findCommand(page, 'get_status');
     expect(statusCommands.length).toBeGreaterThanOrEqual(1);
 
-    await expect(rightPanel.getStagedFile('modified-file.ts')).toBeVisible();
+    await expect(rightPanel.getStagedFile('src/modified-file.ts')).toBeVisible();
     const stagedCount = await rightPanel.getStagedCount();
     expect(stagedCount).toBe(2);
   });
 
   test('should invoke unstage_files and reload status after unstaging', async ({ page }) => {
-    const stagedFile = rightPanel.getStagedFile('staged-file.ts');
+    const stagedFile = rightPanel.getStagedFile('src/staged-file.ts');
     await stagedFile.click({ button: 'right' });
 
     const unstageOption = page.locator('.context-menu-item, .menu-item', { hasText: /unstage/i }).first();
@@ -249,13 +249,13 @@ test.describe('File Status Context Menu - Command Execution', () => {
     const statusCommands = await findCommand(page, 'get_status');
     expect(statusCommands.length).toBeGreaterThanOrEqual(1);
 
-    await expect(rightPanel.getUnstagedFile('staged-file.ts')).toBeVisible();
+    await expect(rightPanel.getUnstagedFile('src/staged-file.ts')).toBeVisible();
     const unstagedCount = await rightPanel.getUnstagedCount();
     expect(unstagedCount).toBe(2);
   });
 
   test('should invoke discard_changes and reload status after discarding', async ({ page }) => {
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const discardOption = page.locator('.context-menu-item, .menu-item', { hasText: /discard/i }).first();
@@ -290,37 +290,29 @@ test.describe('File Status Context Menu - Error Handling', () => {
   test('should show error toast when stage fails', async ({ page }) => {
     await injectCommandError(page, 'stage_files', 'Failed to stage: permission denied');
 
-    const toastPromise = page.evaluate(() => {
-      return new Promise<string>((resolve) => {
-        document.addEventListener('show-toast', ((e: CustomEvent) => {
-          resolve(e.detail.message || e.detail.toString());
-        }) as EventListener, { once: true });
-        setTimeout(() => resolve(''), 3000);
-      });
-    });
-
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
     await expect(stageOption).toBeVisible();
     await stageOption.click();
 
-    const toastMessage = await toastPromise;
-    expect(toastMessage).toContain('permission denied');
+    const errorToast = page.locator('lv-toast-container .toast.error').first();
+    await expect(errorToast).toBeVisible({ timeout: 5000 });
+    await expect(errorToast).toContainText('permission denied');
   });
 
   test('should keep file in unstaged section after stage failure', async ({ page }) => {
     await injectCommandError(page, 'stage_files', 'Failed to stage');
 
-    const modifiedFile = rightPanel.getUnstagedFile('modified-file.ts');
+    const modifiedFile = rightPanel.getUnstagedFile('src/modified-file.ts');
     await modifiedFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
     await expect(stageOption).toBeVisible();
     await stageOption.click();
 
-    await expect(rightPanel.getUnstagedFile('modified-file.ts')).toBeVisible();
+    await expect(rightPanel.getUnstagedFile('src/modified-file.ts')).toBeVisible();
     const unstagedCount = await rightPanel.getUnstagedCount();
     expect(unstagedCount).toBe(1);
   });
@@ -347,7 +339,7 @@ test.describe('File Status Context Menu - Stage/Unstage DOM Updates', () => {
   test('should invoke stage_files with correct file path', async ({ page }) => {
     await startCommandCapture(page);
 
-    const unstagedFile = rightPanel.getUnstagedFile('unstaged-file.ts');
+    const unstagedFile = rightPanel.getUnstagedFile('src/unstaged-file.ts');
     await unstagedFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
@@ -364,7 +356,7 @@ test.describe('File Status Context Menu - Stage/Unstage DOM Updates', () => {
   test('should invoke unstage_files with correct file path', async ({ page }) => {
     await startCommandCapture(page);
 
-    const stagedFile = rightPanel.getStagedFile('staged-file.ts');
+    const stagedFile = rightPanel.getStagedFile('src/staged-file.ts');
     await stagedFile.click({ button: 'right' });
 
     const unstageOption = page.locator('.context-menu-item, .menu-item', { hasText: /unstage/i }).first();
@@ -378,30 +370,38 @@ test.describe('File Status Context Menu - Stage/Unstage DOM Updates', () => {
     expect(paths.some((p: string) => p.includes('staged-file.ts'))).toBe(true);
   });
 
-  test('should dispatch repository-changed event after staging', async ({ page }) => {
-    const eventReceived = await waitForRepositoryChanged(page, async () => {
-      const unstagedFile = rightPanel.getUnstagedFile('unstaged-file.ts');
-      await unstagedFile.click({ button: 'right' });
+  test('should reload status after staging via context menu', async ({ page }) => {
+    await startCommandCapture(page);
 
-      const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
-      await expect(stageOption).toBeVisible();
-      await stageOption.click();
-    });
+    const unstagedFile = rightPanel.getUnstagedFile('src/unstaged-file.ts');
+    await unstagedFile.click({ button: 'right' });
 
-    expect(eventReceived).toBe(true);
+    const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
+    await expect(stageOption).toBeVisible();
+    await stageOption.click();
+
+    // Verify stage_files was called and then status was reloaded
+    const stageCommands = await findCommand(page, 'stage_files');
+    expect(stageCommands.length).toBeGreaterThan(0);
+    const statusCommands = await findCommand(page, 'get_status');
+    expect(statusCommands.length).toBeGreaterThan(0);
   });
 
-  test('should dispatch repository-changed event after unstaging', async ({ page }) => {
-    const eventReceived = await waitForRepositoryChanged(page, async () => {
-      const stagedFile = rightPanel.getStagedFile('staged-file.ts');
-      await stagedFile.click({ button: 'right' });
+  test('should reload status after unstaging via context menu', async ({ page }) => {
+    await startCommandCapture(page);
 
-      const unstageOption = page.locator('.context-menu-item, .menu-item', { hasText: /unstage/i }).first();
-      await expect(unstageOption).toBeVisible();
-      await unstageOption.click();
-    });
+    const stagedFile = rightPanel.getStagedFile('src/staged-file.ts');
+    await stagedFile.click({ button: 'right' });
 
-    expect(eventReceived).toBe(true);
+    const unstageOption = page.locator('.context-menu-item, .menu-item', { hasText: /unstage/i }).first();
+    await expect(unstageOption).toBeVisible();
+    await unstageOption.click();
+
+    // Verify unstage_files was called and then status was reloaded
+    const unstageCommands = await findCommand(page, 'unstage_files');
+    expect(unstageCommands.length).toBeGreaterThan(0);
+    const statusCommands = await findCommand(page, 'get_status');
+    expect(statusCommands.length).toBeGreaterThan(0);
   });
 });
 
@@ -437,7 +437,7 @@ test.describe('File Status Context Menu - Extended Tests', () => {
     expect(initialStagedCount).toBe(1);
 
     // Right-click on the unstaged file and stage it
-    const unstagedFile = rightPanel.getUnstagedFile('to-be-staged.ts');
+    const unstagedFile = rightPanel.getUnstagedFile('src/to-be-staged.ts');
     await unstagedFile.click({ button: 'right' });
 
     const stageOption = page.locator('.context-menu-item, .menu-item', { hasText: /stage/i }).first();
@@ -446,7 +446,7 @@ test.describe('File Status Context Menu - Extended Tests', () => {
 
     // After staging, the file should move from unstaged to staged
     // Verify the staged file is now visible in the staged section
-    await expect(rightPanel.getStagedFile('to-be-staged.ts')).toBeVisible();
+    await expect(rightPanel.getStagedFile('src/to-be-staged.ts')).toBeVisible();
 
     // Verify the staged count increased
     const newStagedCount = await rightPanel.getStagedCount();
@@ -459,7 +459,7 @@ test.describe('File Status Context Menu - Extended Tests', () => {
 
   test('clicking Copy Path calls the appropriate command or clipboard action', async ({ page }) => {
     // Right-click on a file to open context menu
-    const unstagedFile = rightPanel.getUnstagedFile('to-be-staged.ts');
+    const unstagedFile = rightPanel.getUnstagedFile('src/to-be-staged.ts');
     await unstagedFile.click({ button: 'right' });
 
     const contextMenu = page.locator('.context-menu, .file-context-menu');

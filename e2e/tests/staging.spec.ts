@@ -7,6 +7,7 @@ import {
   injectCommandError,
   startCommandCaptureWithMocks,
   waitForCommand,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 test.describe('File Staging', () => {
@@ -653,24 +654,29 @@ test.describe('Staging - UI Outcome Verification', () => {
     const initialStagedCount = await rightPanel.getStagedCount();
     expect(initialStagedCount).toBe(2);
 
+    // After commit, the component re-fetches status. Mock get_status to return empty
+    // so the staged file list clears and the clean working tree message appears.
+    // get_status returns a flat array of StatusEntry[] (not an object with staged/unstaged).
     await startCommandCaptureWithMocks(page, {
       create_commit: { oid: 'commit-abc123', shortId: 'commit-', summary: 'feat: test' },
+      get_status: [],
     });
 
     // Enter commit message and commit
     await rightPanel.commitMessage.fill('feat: test commit');
     await rightPanel.commitButton.click();
 
-    // Wait for commit to complete
+    // Wait for commit to complete and subsequent status refresh
     await waitForCommand(page, 'create_commit');
+    await waitForCommand(page, 'get_status');
+
+    // Clean working tree message should appear (auto-retrying assertion handles DOM update timing)
+    const cleanState = page.locator('lv-file-status .clean-state');
+    await expect(cleanState).toBeVisible();
 
     // After successful commit, staged file list should be empty
     const stagedCountAfter = await rightPanel.getStagedCount();
     expect(stagedCountAfter).toBe(0);
-
-    // Clean working tree message should appear
-    const cleanState = page.locator('lv-file-status .clean-state');
-    await expect(cleanState).toBeVisible();
   });
 });
 
@@ -817,5 +823,124 @@ test.describe('Staging Error Toasts and UI Outcome Verification', () => {
     expect(updatedStaged).toBe(2);
     const updatedUnstaged = await rightPanel.getUnstagedCount();
     expect(updatedUnstaged).toBe(1);
+  });
+});
+
+test.describe('Staging - Error Handling', () => {
+  let rightPanel: RightPanelPage;
+
+  test('stage_files failure should show error feedback and preserve file state', async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: false, isConflicted: false },
+        { path: 'README.md', status: 'modified', isStaged: false, isConflicted: false },
+      ])
+    );
+
+    // Verify initial state: 2 unstaged, 0 staged
+    const initialUnstaged = await rightPanel.getUnstagedCount();
+    expect(initialUnstaged).toBe(2);
+    const initialStaged = await rightPanel.getStagedCount();
+    expect(initialStaged).toBe(0);
+
+    // Inject error for stage_files command
+    await injectCommandError(page, 'stage_files', 'Permission denied');
+
+    // Try to stage a file
+    await rightPanel.stageFile('src/main.ts');
+
+    // Error toast/banner should appear
+    const errorIndicator = page
+      .locator('.toast.error, .error-banner, .error-message, lv-toast-container .toast')
+      .first();
+    await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+
+    // The file should remain in the unstaged section since the operation failed
+    await expect(rightPanel.getUnstagedFile('src/main.ts')).toBeVisible();
+
+    // Both files should still be unstaged (counts unchanged)
+    const unstagedAfter = await rightPanel.getUnstagedCount();
+    expect(unstagedAfter).toBe(2);
+    const stagedAfter = await rightPanel.getStagedCount();
+    expect(stagedAfter).toBe(0);
+  });
+
+  test('unstage_files failure should show error feedback and preserve file state', async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withStagedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: true, isConflicted: false },
+        { path: 'README.md', status: 'modified', isStaged: true, isConflicted: false },
+      ])
+    );
+
+    // Verify initial state: 0 unstaged, 2 staged
+    const initialStaged = await rightPanel.getStagedCount();
+    expect(initialStaged).toBe(2);
+    const initialUnstaged = await rightPanel.getUnstagedCount();
+    expect(initialUnstaged).toBe(0);
+
+    // Inject error for unstage_files command
+    await injectCommandError(page, 'unstage_files', 'Permission denied');
+
+    // Try to unstage a file
+    await rightPanel.unstageFile('src/main.ts');
+
+    // Error toast/banner should appear
+    const errorIndicator = page
+      .locator('.toast.error, .error-banner, .error-message, lv-toast-container .toast')
+      .first();
+    await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+
+    // The file should remain in the staged section since the operation failed
+    await expect(rightPanel.getStagedFile('src/main.ts')).toBeVisible();
+
+    // Both files should still be staged (counts unchanged)
+    const stagedAfter = await rightPanel.getStagedCount();
+    expect(stagedAfter).toBe(2);
+    const unstagedAfter = await rightPanel.getUnstagedCount();
+    expect(unstagedAfter).toBe(0);
+  });
+
+  test('discard_changes failure should show error feedback', async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: false, isConflicted: false },
+        { path: 'README.md', status: 'modified', isStaged: false, isConflicted: false },
+      ])
+    );
+
+    // Verify initial state: 2 unstaged files
+    const initialUnstaged = await rightPanel.getUnstagedCount();
+    expect(initialUnstaged).toBe(2);
+
+    // Inject error for discard_changes command
+    await injectCommandError(page, 'discard_changes', 'File is locked');
+
+    // Auto-confirm the discard confirmation dialog
+    await autoConfirmDialogs(page);
+
+    // Trigger discard via the discard button on a file (hover to reveal, then click)
+    const file = rightPanel.getUnstagedFile('src/main.ts');
+    await file.hover();
+    await file.locator('button[title="Discard changes"]').click();
+
+    // Error toast/banner should appear
+    const errorIndicator = page
+      .locator('.toast.error, .error-banner, .error-message, lv-toast-container .toast')
+      .first();
+    await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+
+    // The file should remain in the unstaged section since discard failed
+    await expect(rightPanel.getUnstagedFile('src/main.ts')).toBeVisible();
+
+    // File counts should be unchanged
+    const unstagedAfter = await rightPanel.getUnstagedCount();
+    expect(unstagedAfter).toBe(2);
   });
 });

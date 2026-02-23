@@ -416,8 +416,10 @@ test.describe('Submodule Error Scenarios', () => {
 
     await openSubmoduleDialog(page);
 
-    // Auto-accept the native confirm() dialog
-    await autoConfirmDialogs(page);
+    // Auto-accept the native confirm() dialog via Playwright's dialog handler
+    page.on('dialog', async (dialog) => {
+      await dialog.accept();
+    });
 
     const dialog = page.locator('lv-submodule-dialog .dialog');
 

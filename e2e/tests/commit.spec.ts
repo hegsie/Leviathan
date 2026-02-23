@@ -228,6 +228,28 @@ test.describe('Commit - Error Handling', () => {
 
     expect(eventReceived).toBe(false);
   });
+
+  test('should show error feedback when commit fails due to hook', async ({ page }) => {
+    await injectCommandError(page, 'create_commit', 'pre-commit hook failed: linting errors found');
+
+    await rightPanel.commitMessage.fill('feat: add new module');
+    await rightPanel.commitButton.click();
+
+    // Verify error feedback is visible in the commit panel
+    const inlineError = page.locator('lv-commit-panel .error');
+    const toast = page.locator('.toast.error, .toast-error, .toast');
+    await expect(inlineError.or(toast).first()).toBeVisible({ timeout: 5000 });
+
+    // Verify the error contains the hook failure reason
+    await expect(inlineError.or(toast).first()).toContainText(/pre-commit hook failed|linting errors/i);
+
+    // Verify the commit message is preserved so the user can retry after fixing the hook issue
+    await expect(rightPanel.commitMessage).toHaveValue('feat: add new module');
+
+    // Verify staged files are still present (not cleared on failure)
+    const stagedCount = await rightPanel.getStagedCount();
+    expect(stagedCount).toBe(1);
+  });
 });
 
 test.describe('Commit - Button State', () => {

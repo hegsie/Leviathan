@@ -272,7 +272,7 @@ test.describe('GitHub Dialog - Extended Scenarios', () => {
     await expect(dialogs.github.dialog).toBeVisible();
 
     // Verify the error message is shown in the dialog
-    const errorText = page.locator('lv-github-dialog .error, lv-github-dialog .error-message, lv-github-dialog .toast-error');
-    await expect(errorText.or(dialogs.github.dialog)).toBeVisible();
+    const errorText = page.locator('lv-github-dialog .error-message');
+    await expect(errorText).toBeVisible({ timeout: 5000 });
   });
 });

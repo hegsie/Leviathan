@@ -814,6 +814,18 @@ test.describe('Profile CRUD Operations', () => {
 
     dialogs = new DialogsPage(page);
 
+    // The dialog calls loadProfiles() on open, which invokes get_unified_profiles_config.
+    // The default mock returns empty profiles, so inject a mock that returns our test data.
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work, testProfiles.personal],
+        accounts: [testAccounts.githubWork],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+
     await dialogs.commandPalette.open();
     await dialogs.commandPalette.search('Git Profiles');
     await dialogs.commandPalette.executeFirst();
@@ -822,18 +834,19 @@ test.describe('Profile CRUD Operations', () => {
 
     // Start capturing commands with mock for delete
     await startCommandCaptureWithMocks(page, {
-      delete_profile: null,
-      'plugin:dialog|confirm': true,
-      'plugin:dialog|ask': true,
+      delete_unified_profile: null,
     });
 
-    // Click on the Personal profile to select it, then look for delete button
-    const deleteButton = page.getByRole('button', { name: /delete/i });
+    // Auto-accept native window.confirm() dialog used by handleDelete
+    page.on('dialog', (dialog) => dialog.accept());
+
+    // Click the delete button on the Personal profile (second profile card)
+    const deleteButton = page.getByRole('button', { name: 'Delete profile' }).last();
     await expect(deleteButton).toBeVisible({ timeout: 3000 });
     await deleteButton.click();
 
     await expect.poll(async () => {
-      const cmds = await findCommand(page, 'delete_profile');
+      const cmds = await findCommand(page, 'delete_unified_profile');
       return cmds.length;
     }).toBeGreaterThan(0);
   });
@@ -1089,28 +1102,22 @@ test.describe('Profiles - UI Outcome Verification', () => {
     await expect(page.getByText(/johnd@personal\.com/)).toBeVisible();
     await expect(page.getByText(/john\.doe@company\.com/).first()).toBeVisible();
 
-    // Mock delete command and confirm dialog; after delete, return only the Work profile
+    // Mock delete command; after delete, the store removes the profile reactively
     await startCommandCaptureWithMocks(page, {
-      delete_profile: null,
-      'plugin:dialog|confirm': true,
-      'plugin:dialog|ask': true,
-      get_unified_profiles_config: {
-        version: 3,
-        profiles: [testProfiles.work],
-        accounts: [testAccounts.githubWork],
-        repositoryAssignments: {},
-      },
-      get_migration_backup_info: { hasBackup: false },
+      delete_unified_profile: null,
     });
 
-    // Click delete button (visible in the profile list view for each profile card)
-    const deleteButton = page.getByRole('button', { name: /delete/i });
+    // Auto-accept native window.confirm() dialog used by handleDelete
+    page.on('dialog', (dialog) => dialog.accept());
+
+    // Click the delete button on the Personal profile (second profile card)
+    const deleteButton = page.getByRole('button', { name: 'Delete profile' }).last();
     await expect(deleteButton).toBeVisible({ timeout: 3000 });
     await deleteButton.click();
 
     // Wait for the delete command to be invoked
     await expect.poll(async () => {
-      const cmds = await findCommand(page, 'delete_profile');
+      const cmds = await findCommand(page, 'delete_unified_profile');
       return cmds.length;
     }).toBeGreaterThan(0);
 

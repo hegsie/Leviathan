@@ -622,7 +622,10 @@ test.describe('Commit Panel - UI Outcome Verification', () => {
     await expect(page.locator('lv-commit-panel .generate-btn')).toContainText('Generate with AI');
 
     // Inject error for generate_commit_message
-    await injectCommandError(page, 'generate_commit_message', 'AI unavailable');
+    await injectCommandError(page, 'generate_commit_message', 'AI service unavailable: rate limit exceeded');
+
+    // Enter a pre-existing message to verify it is preserved after the error
+    await rightPanel.commitMessage.fill('existing draft message');
 
     await rightPanel.aiGenerateButton.click();
 
@@ -632,7 +635,11 @@ test.describe('Commit Panel - UI Outcome Verification', () => {
 
     await expect(inlineError.or(toast).first()).toBeVisible({ timeout: 5000 });
 
-    // Verify the message textarea was NOT populated (stays empty)
-    await expect(rightPanel.commitMessage).toHaveValue('');
+    // Verify the error feedback contains the failure reason
+    const errorElement = inlineError.or(toast).first();
+    await expect(errorElement).toContainText(/AI service unavailable|rate limit|error/i);
+
+    // Verify the commit message textarea remains unchanged (pre-existing text preserved)
+    await expect(rightPanel.commitMessage).toHaveValue('existing draft message');
   });
 });

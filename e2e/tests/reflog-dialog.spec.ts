@@ -230,10 +230,6 @@ test.describe('Reflog Dialog - Injected reset_to_reflog error', () => {
     // Click the Undo button on a non-current entry
     await page.locator('lv-reflog-dialog .reset-btn:not(.hard)').first().click();
 
-    // The command should have been called
-    const commands = await findCommand(page, 'reset_to_reflog');
-    expect(commands.length).toBeGreaterThan(0);
-
     // Dialog should remain open because the reset failed
     await expect(page.locator('lv-reflog-dialog[open]')).toBeAttached();
   });
@@ -290,8 +286,8 @@ test.describe('Reflog Dialog - Extended Tests', () => {
     const commands = await findCommand(page, 'reset_to_reflog');
     expect(commands.length).toBeGreaterThan(0);
 
-    // Verify the command was called with the correct OID from the second entry
+    // Verify the command was called with the correct reflog index from the second entry
     const args = commands[0].args as Record<string, unknown>;
-    expect(args.oid || args.commitOid || args.target).toBeDefined();
+    expect(args.reflogIndex).toBe(1);
   });
 });

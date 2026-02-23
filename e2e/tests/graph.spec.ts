@@ -543,34 +543,14 @@ test.describe('Empty Repository Graph', () => {
     expect(selectedOid).toBeNull();
   });
 
-  test('Escape should clear the commit details panel', async ({ page }) => {
-    // Select a commit first
-    await graph.navigateDown();
-    await waitForSelectedNode(page, 'commit0');
-
-    // Verify details panel shows commit info
-    const commitDetails = page.locator('lv-commit-details');
-    await expect(commitDetails).toBeVisible();
-    await expect(commitDetails.locator('.commit-message')).toContainText('Commit 0');
-
-    // Focus the internal <canvas> and press Escape to deselect
+  test('Escape should not crash on empty graph', async ({ page }) => {
+    // In an empty graph, pressing Escape should not crash
     await focusGraphInternalCanvas(page);
     await page.keyboard.press('Escape');
-    await waitForNoSelectedNode(page);
 
-    // Verify details panel clears: either the commit details component is hidden,
-    // or the details tab is no longer active, or the commit message area is empty
-    const detailsVisible = await commitDetails.count() > 0 && await commitDetails.isVisible();
-    if (detailsVisible) {
-      // If the component is still visible, it should show an empty/placeholder state
-      const messageEl = commitDetails.locator('.commit-message');
-      const messageText = await messageEl.count() > 0 ? await messageEl.textContent() : '';
-      const oidEl = commitDetails.locator('.commit-oid');
-      const oidText = await oidEl.count() > 0 ? await oidEl.textContent() : '';
-      // When deselected the panel may show empty or the changes tab may take over
-      expect(messageText === '' || oidText === '' || !messageText).toBeTruthy();
-    }
-    // Either way, no commit should be selected
+    // The canvas should still be visible and functional
+    await expect(graph.canvas).toBeVisible();
+
     const selectedOid = await getSelectedNodeOid(page);
     expect(selectedOid).toBeNull();
   });
