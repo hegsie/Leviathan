@@ -865,4 +865,111 @@ describe('lv-branch-list', () => {
       }
     });
   });
+
+  // ── 13. operationInProgress guard ─────────────────────────────────────
+  describe('operationInProgress guard', () => {
+    it('prevents concurrent checkout operations', async () => {
+      let checkoutCallCount = 0;
+      let resolveCheckout: (() => void) | null = null;
+
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_branches':
+            return allBranches;
+          case 'get_remotes':
+            return [];
+          case 'checkout_with_autostash':
+            checkoutCallCount++;
+            // First call blocks
+            if (checkoutCallCount === 1) {
+              await new Promise<void>((r) => { resolveCheckout = r; });
+            }
+            return { success: true, stashed: false, stashApplied: false, stashConflict: false, message: 'ok' };
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderBranchList();
+
+      // Trigger first checkout (will block)
+      const branchItems = el.shadowRoot!.querySelectorAll('.branch-item');
+      const nonHeadItem = Array.from(branchItems).find(
+        (item) => !item.classList.contains('active') && item.textContent?.includes('feature-x')
+      ) as HTMLElement;
+      nonHeadItem.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+
+      // Give the first call time to start
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Trigger second checkout (should be blocked by guard)
+      nonHeadItem.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Only one checkout_with_autostash should have been called
+      expect(checkoutCallCount).to.equal(1);
+
+      // Unblock the first checkout
+      (resolveCheckout as (() => void) | null)?.();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+    });
+
+    it('context menu items are disabled during operation', async () => {
+      let resolveCheckout: (() => void) | null = null;
+
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_branches':
+            return allBranches;
+          case 'get_remotes':
+            return [];
+          case 'checkout_with_autostash':
+            await new Promise<void>((r) => { resolveCheckout = r; });
+            return { success: true, stashed: false, stashApplied: false, stashConflict: false, message: 'ok' };
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderBranchList();
+
+      // Start a checkout to set operationInProgress
+      const branchItems = el.shadowRoot!.querySelectorAll('.branch-item');
+      const nonHeadItem = Array.from(branchItems).find(
+        (item) => !item.classList.contains('active') && item.textContent?.includes('feature-x')
+      ) as HTMLElement;
+      nonHeadItem.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      // Open context menu on another branch
+      const trackedItem = Array.from(el.shadowRoot!.querySelectorAll('.branch-item')).find(
+        (item) => item.textContent?.includes('tracked-branch')
+      ) as HTMLElement;
+      trackedItem.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
+      await el.updateComplete;
+
+      // Check that async action buttons are disabled
+      const menuItems = el.shadowRoot!.querySelectorAll('.context-menu-item');
+      const checkoutBtn = Array.from(menuItems).find(
+        (item) => item.textContent?.trim() === 'Checkout'
+      ) as HTMLButtonElement;
+      if (checkoutBtn) {
+        expect(checkoutBtn.disabled).to.be.true;
+      }
+
+      const mergeBtn = Array.from(menuItems).find(
+        (item) => item.textContent?.trim().includes('Merge')
+      ) as HTMLButtonElement;
+      if (mergeBtn) {
+        expect(mergeBtn.disabled).to.be.true;
+      }
+
+      // Unblock
+      (resolveCheckout as (() => void) | null)?.();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+    });
+  });
 });

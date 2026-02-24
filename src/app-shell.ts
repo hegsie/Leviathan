@@ -63,6 +63,7 @@ import { settingsStore } from './stores/settings.store.ts';
 import { workspaceStore } from './stores/workspace.store.ts';
 import * as workspaceService from './services/workspace.service.ts';
 import { listenToEvent } from './services/tauri-api.ts';
+import { showConfirm } from './services/dialog.service.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { searchIndexService } from './services/search-index.service.ts';
@@ -1159,6 +1160,13 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    const confirmed = await showConfirm(
+      'Revert Commit',
+      `Are you sure you want to revert "${commit.summary}"?\n\nThis will create a new commit that undoes the changes.`,
+      'warning'
+    );
+    if (!confirmed) return;
+
     const result = await import('./services/git.service.ts').then((m) =>
       m.revert({
         path: this.activeRepository!.repository.path,
@@ -1253,10 +1261,18 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    // Confirm for hard reset
     if (mode === 'hard') {
-      const confirmed = confirm(
-        `Are you sure you want to hard reset to "${commit.summary}"?\n\nThis will discard all uncommitted changes.`
+      const confirmed = await showConfirm(
+        'Hard Reset',
+        `Are you sure you want to hard reset to "${commit.summary}"?\n\nThis will discard all uncommitted changes.`,
+        'warning'
+      );
+      if (!confirmed) return;
+    } else {
+      const confirmed = await showConfirm(
+        `${mode.charAt(0).toUpperCase() + mode.slice(1)} Reset`,
+        `Reset HEAD to "${commit.summary}" using ${mode} mode?`,
+        'info'
       );
       if (!confirmed) return;
     }
@@ -1271,6 +1287,7 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       this.graphCanvas?.refresh?.();
+      showToast(`Reset to ${commit.oid.substring(0, 7)} (${mode})`, 'success');
     } else {
       log.error('Reset failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Reset failed');
@@ -1626,6 +1643,34 @@ export class AppShell extends LitElement {
     // Open blame
     this.blameFile = e.detail.filePath;
     this.blameCommitOid = e.detail.commitOid ?? null;
+    this.showBlame = true;
+  }
+
+  private async handleOpenRepoFile(e: CustomEvent<{ repoPath: string; filePath: string; lineNumber: number }>): Promise<void> {
+    const { repoPath, filePath } = e.detail;
+
+    // Close workspace manager
+    this.showWorkspaceManager = false;
+
+    // If different repo, open it first
+    const store = repositoryStore.getState();
+    const activeRepo = store.getActiveRepository();
+    if (!activeRepo || activeRepo.repository.path !== repoPath) {
+      const result = await gitService.openRepository({ path: repoPath });
+      if (result.success && result.data) {
+        store.addRepository(result.data);
+      } else {
+        showToast(result.error?.message ?? 'Failed to open repository', 'error');
+        return;
+      }
+    }
+
+    // Show blame view for the file
+    this.showDiff = false;
+    this.diffFile = null;
+    this.diffCommitFile = null;
+    this.blameFile = filePath;
+    this.blameCommitOid = null;
     this.showBlame = true;
   }
 
@@ -2225,7 +2270,7 @@ export class AppShell extends LitElement {
                   style="width: ${this.leftPanelWidth}px"
                   @tag-selected=${this.handleTagSelected}
                   @branch-selected=${this.handleBranchSelected}
-                  @repository-changed=${() => this.handleRefresh()}
+                  @repository-refresh=${() => this.handleRefresh()}
                   @create-tag=${() => this.createTagDialog?.open()}
                 >
                   <lv-left-panel></lv-left-panel>
@@ -2354,7 +2399,7 @@ export class AppShell extends LitElement {
                   @commit-file-selected=${this.handleCommitFileSelected}
                   @show-blame=${this.handleShowBlame}
                   @show-file-history=${this.handleShowFileHistory}
-                  @repository-changed=${() => this.handleRefresh()}
+                  @repository-refresh=${() => this.handleRefresh()}
                 >
                   <lv-right-panel
                     .commit=${this.selectedCommit}
@@ -2778,6 +2823,7 @@ export class AppShell extends LitElement {
       <lv-workspace-manager-dialog
         ?open=${this.showWorkspaceManager}
         @close=${() => { this.showWorkspaceManager = false; }}
+        @open-repo-file=${this.handleOpenRepoFile}
       ></lv-workspace-manager-dialog>
 
       ${this.activeRepository ? html`

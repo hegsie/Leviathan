@@ -55,12 +55,10 @@ test.describe('Diff View', () => {
 });
 
 test.describe('Diff View Content', () => {
-  let app: AppPage;
   let rightPanel: RightPanelPage;
   let graph: GraphPanelPage;
 
   test.beforeEach(async ({ page }) => {
-    app = new AppPage(page);
     rightPanel = new RightPanelPage(page);
     graph = new GraphPanelPage(page);
     // Setup with a file that has diff content
@@ -68,9 +66,39 @@ test.describe('Diff View Content', () => {
       page,
       withModifiedFiles([{ path: 'src/main.ts', status: 'modified', isStaged: false, isConflicted: false }])
     );
+
+    // Inject specific diff data with known additions and deletions
+    await injectCommandMock(page, {
+      get_file_diff: {
+        path: 'src/main.ts',
+        oldPath: null,
+        status: 'modified',
+        hunks: [
+          {
+            header: '@@ -1,4 +1,5 @@',
+            oldStart: 1,
+            oldLines: 4,
+            newStart: 1,
+            newLines: 5,
+            lines: [
+              { content: 'import { html } from "lit";', origin: 'context', oldLineNo: 1, newLineNo: 1 },
+              { content: 'const removed = true;', origin: 'deletion', oldLineNo: 2, newLineNo: null },
+              { content: 'const added = true;', origin: 'addition', oldLineNo: null, newLineNo: 2 },
+              { content: 'const alsoAdded = false;', origin: 'addition', oldLineNo: null, newLineNo: 3 },
+              { content: 'export {};', origin: 'context', oldLineNo: 3, newLineNo: 4 },
+            ],
+          },
+        ],
+        isBinary: false,
+        isImage: false,
+        imageType: null,
+        additions: 2,
+        deletions: 1,
+      },
+    });
   });
 
-  test('should display diff with additions and deletions', async () => {
+  test('should display diff with additions and deletions', async ({ page }) => {
     // Click on the file to open diff
     const file = rightPanel.getUnstagedFile('src/main.ts');
     await expect(file).toBeVisible();
@@ -78,6 +106,20 @@ test.describe('Diff View Content', () => {
 
     // Wait for diff overlay to appear
     await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    // Verify addition lines are rendered
+    const additionLines = page.locator('lv-diff-view .line.code-addition');
+    await expect(additionLines.first()).toBeVisible({ timeout: 5000 });
+    expect(await additionLines.count()).toBe(2);
+
+    // Verify deletion lines are rendered
+    const deletionLines = page.locator('lv-diff-view .line.code-deletion');
+    expect(await deletionLines.count()).toBe(1);
+
+    // Verify actual content text is rendered
+    const diffView = page.locator('lv-diff-view');
+    await expect(diffView).toContainText('const added = true;');
+    await expect(diffView).toContainText('const removed = true;');
   });
 });
 

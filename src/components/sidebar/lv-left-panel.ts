@@ -5,6 +5,7 @@ import { repositoryStore } from '../../stores/index.ts';
 import './lv-branch-list.ts';
 import './lv-stash-list.ts';
 import './lv-tag-list.ts';
+import './lv-gitflow-panel.ts';
 
 /**
  * Left panel container component
@@ -168,6 +169,7 @@ export class LvLeftPanel extends LitElement {
     const branchesExpanded = this.expandedSections.has('branches');
     const stashesExpanded = this.expandedSections.has('stashes');
     const tagsExpanded = this.expandedSections.has('tags');
+    const gitflowExpanded = this.expandedSections.has('gitflow');
 
     return html`
       <!-- Branches Section -->
@@ -249,34 +251,47 @@ export class LvLeftPanel extends LitElement {
           ></lv-tag-list>
         `}
       </section>
+
+      <!-- Git Flow Section -->
+      <section class="section refs-section ${gitflowExpanded ? '' : 'collapsed'}">
+        <header class="section-header" @click=${() => this.toggleSection('gitflow')}>
+          ${this.renderChevron(gitflowExpanded)}
+          <span class="title">Git Flow</span>
+        </header>
+        <div class="section-content">
+          <lv-gitflow-panel
+            .repositoryPath=${this.repositoryPath}
+          ></lv-gitflow-panel>
+        </div>
+      </section>
     `;
   }
 
   private handleStashApplied(): void {
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent('repository-refresh', { bubbles: true, composed: true }));
   }
 
   private handleStashDropped(): void {
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent('repository-refresh', { bubbles: true, composed: true }));
   }
 
   private handleTagCheckout(): void {
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent('repository-refresh', { bubbles: true, composed: true }));
   }
 
   private handleBranchCheckout(): void {
     // Refresh repository state after branch checkout
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent('repository-refresh', { bubbles: true, composed: true }));
   }
 
   private handleBranchesChanged(): void {
     // Refresh repository state after branches changed
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent('repository-refresh', { bubbles: true, composed: true }));
   }
 
   private handleTagsChanged(): void {
     // Refresh repository state after tags changed
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent('repository-refresh', { bubbles: true, composed: true }));
   }
 
   private toggleSection(section: string): void {

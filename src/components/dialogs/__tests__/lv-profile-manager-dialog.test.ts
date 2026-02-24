@@ -480,9 +480,12 @@ describe('lv-profile-manager-dialog', () => {
     });
 
     it('calls delete_unified_profile when delete is confirmed', async () => {
-      // Stub confirm to return true
-      const originalConfirm = window.confirm;
-      window.confirm = () => true;
+      // showConfirm uses Tauri dialog plugin — mock it to return true
+      const prevInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|confirm') return true;
+        return prevInvoke(command, args);
+      };
 
       const el = await renderDialog();
       const deleteButtons = el.shadowRoot!.querySelectorAll('.action-btn.delete');
@@ -496,13 +499,16 @@ describe('lv-profile-manager-dialog', () => {
       expect(deleteCalls.length).to.equal(1);
       expect((deleteCalls[0].args as { profileId: string }).profileId).to.equal('profile-1');
 
-      window.confirm = originalConfirm;
+      mockInvoke = prevInvoke;
     });
 
     it('does NOT call delete_unified_profile when delete is cancelled', async () => {
-      // Stub confirm to return false
-      const originalConfirm = window.confirm;
-      window.confirm = () => false;
+      // showConfirm uses Tauri dialog plugin — mock it to return false
+      const prevInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|confirm') return false;
+        return prevInvoke(command, args);
+      };
 
       const el = await renderDialog();
       const deleteButtons = el.shadowRoot!.querySelectorAll('.action-btn.delete');
@@ -515,7 +521,7 @@ describe('lv-profile-manager-dialog', () => {
       const deleteCalls = findCommands('delete_unified_profile');
       expect(deleteCalls.length).to.equal(0);
 
-      window.confirm = originalConfirm;
+      mockInvoke = prevInvoke;
     });
   });
 
@@ -875,9 +881,6 @@ describe('lv-profile-manager-dialog', () => {
     });
 
     it('handles delete failure gracefully', async () => {
-      const originalConfirm = window.confirm;
-      window.confirm = () => true;
-
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_unified_profiles_config':
@@ -886,6 +889,8 @@ describe('lv-profile-manager-dialog', () => {
             return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
           case 'delete_unified_profile':
             throw new Error('Delete failed!');
+          case 'plugin:dialog|confirm':
+            return true;
           default:
             return null;
         }
@@ -900,14 +905,9 @@ describe('lv-profile-manager-dialog', () => {
       // Component should still be rendered
       const dialog = el.shadowRoot!.querySelector('.dialog');
       expect(dialog).to.not.be.null;
-
-      window.confirm = originalConfirm;
     });
 
     it('handles account removal failure gracefully', async () => {
-      const originalConfirm = window.confirm;
-      window.confirm = () => true;
-
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_unified_profiles_config':
@@ -916,6 +916,8 @@ describe('lv-profile-manager-dialog', () => {
             return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
           case 'delete_global_account':
             throw new Error('Account removal failed!');
+          case 'plugin:dialog|confirm':
+            return true;
           default:
             return null;
         }
@@ -938,8 +940,6 @@ describe('lv-profile-manager-dialog', () => {
       // Component should still be rendered
       const dialog = el.shadowRoot!.querySelector('.dialog');
       expect(dialog).to.not.be.null;
-
-      window.confirm = originalConfirm;
     });
   });
 

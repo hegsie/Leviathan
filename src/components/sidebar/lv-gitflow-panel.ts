@@ -7,6 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles, buttonStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showPrompt } from '../../services/dialog.service.ts';
 import type { GitFlowConfig } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
 
@@ -331,7 +332,11 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleStartFeature(): Promise<void> {
-    const name = prompt('Enter feature name:');
+    const name = await showPrompt({
+      title: 'Start Feature',
+      message: 'Enter feature name:',
+      placeholder: 'feature-name',
+    });
     if (!name || !name.trim()) return;
 
     this.operationInProgress = true;
@@ -385,7 +390,11 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleStartRelease(): Promise<void> {
-    const version = prompt('Enter release version:');
+    const version = await showPrompt({
+      title: 'Start Release',
+      message: 'Enter release version:',
+      placeholder: '1.0.0',
+    });
     if (!version || !version.trim()) return;
 
     this.operationInProgress = true;
@@ -411,7 +420,11 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishRelease(item: ActiveItem): Promise<void> {
-    const tagMessage = prompt(`Enter tag message for release ${item.name}:`, `Release ${item.name}`);
+    const tagMessage = await showPrompt({
+      title: 'Finish Release',
+      message: `Enter tag message for release ${item.name}:`,
+      defaultValue: `Release ${item.name}`,
+    });
     if (tagMessage === null) return;
 
     this.operationInProgress = true;
@@ -442,7 +455,11 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleStartHotfix(): Promise<void> {
-    const version = prompt('Enter hotfix version:');
+    const version = await showPrompt({
+      title: 'Start Hotfix',
+      message: 'Enter hotfix version:',
+      placeholder: '1.0.1',
+    });
     if (!version || !version.trim()) return;
 
     this.operationInProgress = true;
@@ -468,7 +485,11 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishHotfix(item: ActiveItem): Promise<void> {
-    const tagMessage = prompt(`Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
+    const tagMessage = await showPrompt({
+      title: 'Finish Hotfix',
+      message: `Enter tag message for hotfix ${item.name}:`,
+      defaultValue: `Hotfix ${item.name}`,
+    });
     if (tagMessage === null) return;
 
     this.operationInProgress = true;

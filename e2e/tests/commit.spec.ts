@@ -47,11 +47,9 @@ test.describe('Commit Workflow', () => {
 });
 
 test.describe('Commit Message Validation', () => {
-  let app: AppPage;
   let rightPanel: RightPanelPage;
 
   test.beforeEach(async ({ page }) => {
-    app = new AppPage(page);
     rightPanel = new RightPanelPage(page);
     await setupOpenRepository(
       page,
@@ -59,59 +57,62 @@ test.describe('Commit Message Validation', () => {
     );
   });
 
-  test('should allow conventional commit format', async () => {
+  test('should enable commit button with conventional commit format', async () => {
     await rightPanel.commitMessage.fill('feat(scope): add new feature');
-    await expect(rightPanel.commitMessage).toHaveValue('feat(scope): add new feature');
+    await expect(rightPanel.commitButton).toBeEnabled();
   });
 
-  test('should allow fix commit type', async () => {
+  test('should send conventional commit message to create_commit', async ({ page }) => {
+    await startCommandCapture(page);
+
     await rightPanel.commitMessage.fill('fix: resolve bug in parser');
-    await expect(rightPanel.commitMessage).toHaveValue('fix: resolve bug in parser');
+    await rightPanel.commitButton.click();
+
+    await waitForCommand(page, 'create_commit');
+
+    const commitCommands = await findCommand(page, 'create_commit');
+    expect(commitCommands.length).toBeGreaterThan(0);
+    expect((commitCommands[0].args as { message?: string })?.message).toBe('fix: resolve bug in parser');
   });
 
-  test('should allow chore commit type', async () => {
+  test('should clear message and reset staged files after conventional commit', async ({ page }) => {
     await rightPanel.commitMessage.fill('chore: update dependencies');
-    await expect(rightPanel.commitMessage).toHaveValue('chore: update dependencies');
-  });
+    await rightPanel.commitButton.click();
 
-  test('should allow docs commit type', async () => {
-    await rightPanel.commitMessage.fill('docs: update README');
-    await expect(rightPanel.commitMessage).toHaveValue('docs: update README');
+    // Staged files should be cleared after successful commit
+    await expect(rightPanel.commitMessage).toHaveValue('');
+    const stagedCount = await rightPanel.getStagedCount();
+    expect(stagedCount).toBe(0);
   });
 });
 
 test.describe('Commit Without Staged Files', () => {
-  let app: AppPage;
   let rightPanel: RightPanelPage;
 
   test.beforeEach(async ({ page }) => {
-    app = new AppPage(page);
     rightPanel = new RightPanelPage(page);
     await setupOpenRepository(page, {
       status: { staged: [], unstaged: [{ path: 'file.ts', status: 'modified', isStaged: false, isConflicted: false }] },
     });
   });
 
-  test('should show commit panel', async () => {
+  test('should show commit panel with no staged files and disabled commit button', async () => {
     await expect(rightPanel.commitPanel).toBeVisible();
-  });
-
-  test('should show commit message area', async () => {
     await expect(rightPanel.commitMessage).toBeVisible();
-  });
 
-  test('should have no staged files', async () => {
     const count = await rightPanel.getStagedCount();
     expect(count).toBe(0);
+
+    // Even with a message, commit should be disabled when nothing is staged
+    await rightPanel.commitMessage.fill('feat: should not be committable');
+    await expect(rightPanel.commitButton).toBeDisabled();
   });
 });
 
 test.describe('AI Commit Message Generation', () => {
-  let app: AppPage;
   let rightPanel: RightPanelPage;
 
   test.beforeEach(async ({ page }) => {
-    app = new AppPage(page);
     rightPanel = new RightPanelPage(page);
     await setupOpenRepository(
       page,
@@ -119,12 +120,45 @@ test.describe('AI Commit Message Generation', () => {
     );
   });
 
-  test('should have AI generate button visible', async () => {
+  test('should invoke generate_commit_message and populate textarea', async ({ page }) => {
+    // Mock AI availability and generate response
+    await injectCommandMock(page, {
+      is_ai_available: true,
+      get_ai_model_status: { available: true, downloading: false },
+      generate_commit_message: { summary: 'feat: auto-generated message', body: null },
+    });
+
+    await startCommandCapture(page);
+
     await expect(rightPanel.aiGenerateButton).toBeVisible();
+    await rightPanel.aiGenerateButton.click();
+
+    await waitForCommand(page, 'generate_commit_message');
+
+    const genCommands = await findCommand(page, 'generate_commit_message');
+    expect(genCommands.length).toBeGreaterThan(0);
+
+    // Verify the commit message textarea is populated with the generated message
+    await expect(rightPanel.commitMessage).toHaveValue('feat: auto-generated message');
   });
 
-  test('AI button should be clickable', async () => {
-    await expect(rightPanel.aiGenerateButton).toBeEnabled();
+  test('should show error feedback when AI generation fails', async ({ page }) => {
+    // Mock AI as available but inject error on generate
+    await injectCommandMock(page, {
+      is_ai_available: true,
+      get_ai_model_status: { available: true, downloading: false },
+    });
+    await injectCommandError(page, 'generate_commit_message', 'AI model not loaded');
+
+    await expect(rightPanel.aiGenerateButton).toBeVisible();
+    await rightPanel.aiGenerateButton.click();
+
+    // Error feedback should appear
+    const errorIndicator = page.locator('lv-toast-container .toast.error, lv-commit-panel .error').first();
+    await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+
+    // Textarea should remain empty (not populated with error text)
+    await expect(rightPanel.commitMessage).toHaveValue('');
   });
 });
 
@@ -372,5 +406,74 @@ test.describe('Commit - UI Outcome Verification', () => {
 
     // Verify the commit button is disabled (empty/whitespace messages should not be committable)
     await expect(rightPanel.commitButton).toBeDisabled();
+  });
+});
+
+test.describe('Commit - Graph Update Verification', () => {
+  let rightPanel: RightPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withStagedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: true, isConflicted: false },
+      ])
+    );
+  });
+
+  test('should refresh graph after successful commit', async ({ page }) => {
+    // Wait for graph canvas to be visible
+    await expect(page.locator('lv-graph-canvas')).toBeVisible({ timeout: 10000 });
+
+    // Start capturing commands after initial load
+    await startCommandCapture(page);
+
+    // Perform a commit
+    await rightPanel.commitMessage.fill('feat: graph test commit');
+    await rightPanel.commitButton.click();
+
+    // Verify create_commit was called
+    await waitForCommand(page, 'create_commit');
+
+    // Verify get_commit_history was called (graph refresh triggered)
+    await waitForCommand(page, 'get_commit_history');
+    const historyCommands = await findCommand(page, 'get_commit_history');
+    expect(historyCommands.length).toBeGreaterThan(0);
+
+    // Verify commit message cleared and staged files reset
+    await expect(rightPanel.commitMessage).toHaveValue('');
+    const stagedCount = await rightPanel.getStagedCount();
+    expect(stagedCount).toBe(0);
+
+    // Verify graph canvas still visible (not broken by refresh)
+    await expect(page.locator('lv-graph-canvas')).toBeVisible();
+  });
+
+  test('should not refresh graph after failed commit', async ({ page }) => {
+    await injectCommandError(page, 'create_commit', 'Commit failed: empty tree');
+
+    // Wait for graph canvas to be visible
+    await expect(page.locator('lv-graph-canvas')).toBeVisible({ timeout: 10000 });
+
+    // Start capturing commands after initial load
+    await startCommandCapture(page);
+
+    // Attempt a commit
+    await rightPanel.commitMessage.fill('feat: should fail');
+    await rightPanel.commitButton.click();
+
+    // Wait a moment for any potential refresh
+    await page.waitForTimeout(1000);
+
+    // Verify get_commit_history was NOT called (no graph refresh on failure)
+    const historyCommands = await findCommand(page, 'get_commit_history');
+    expect(historyCommands.length).toBe(0);
+
+    // Verify commit message preserved
+    await expect(rightPanel.commitMessage).toHaveValue('feat: should fail');
+
+    // Verify graph canvas still visible
+    await expect(page.locator('lv-graph-canvas')).toBeVisible();
   });
 });

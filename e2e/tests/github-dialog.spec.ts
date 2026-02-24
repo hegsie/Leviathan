@@ -165,6 +165,10 @@ test.describe('GitHub Dialog - Connection Flow', () => {
     // Should show an error state - the dialog should still be visible
     // The error is caught and displayed, so just verify the dialog remains open
     await expect(dialogs.github.dialog).toBeVisible();
+
+    const errorElement = page.locator('lv-github-dialog .error, lv-github-dialog .error-message, .toast.error').first();
+    await expect(errorElement).toBeVisible({ timeout: 5000 });
+    await expect(errorElement).toContainText('Invalid token');
   });
 });
 
@@ -274,5 +278,6 @@ test.describe('GitHub Dialog - Extended Scenarios', () => {
     // Verify the error message is shown in the dialog
     const errorText = page.locator('lv-github-dialog .error-message');
     await expect(errorText).toBeVisible({ timeout: 5000 });
+    await expect(errorText).toContainText('Rate limit exceeded');
   });
 });

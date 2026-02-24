@@ -489,6 +489,7 @@ test.describe('Interactive Rebase - Injected Error on Execute', () => {
     const errorInDialog = page.locator('lv-interactive-rebase-dialog .error-message, lv-interactive-rebase-dialog .error');
     const toastError = page.locator('lv-toast, .toast');
     await expect(errorInDialog.or(toastError).first()).toBeVisible();
+    await expect(errorInDialog.or(toastError).first()).toContainText(/rebase failed/i);
 
     // Dialog should remain open so the user can adjust and retry
     await expect(dialog).toBeVisible();

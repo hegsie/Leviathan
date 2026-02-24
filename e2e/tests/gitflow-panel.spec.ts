@@ -14,12 +14,42 @@ import {
  * - Feature / Release / Hotfix sections with active items when initialized
  * - A configuration summary at the bottom
  *
- * NOTE: This component is not yet integrated into the app shell's sidebar.
- * It uses direct DOM injection because no parent component renders it in
- * the app layout. When the component is added to the sidebar (e.g., as a
- * tab in lv-left-panel), these tests should be updated to use the real
- * app flow instead of injection.
+ * The component is integrated into the left panel sidebar as a collapsible
+ * "Git Flow" section. Some tests below use direct DOM injection for isolated
+ * component testing, while the sidebar integration tests verify the real
+ * app layout.
  */
+
+// --------------------------------------------------------------------------
+// Sidebar Integration
+// --------------------------------------------------------------------------
+test.describe('GitFlow Panel - Sidebar Integration', () => {
+  test('should show Git Flow section header in left panel', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    // The left panel should contain a "Git Flow" section header
+    const gitflowHeader = page.locator('lv-left-panel .section-header', { hasText: 'Git Flow' });
+    await expect(gitflowHeader).toBeVisible();
+  });
+
+  test('Git Flow section should be collapsed by default', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    // The gitflow section should have the collapsed class by default
+    const gitflowSection = page.locator('lv-left-panel .section', { has: page.locator('.title', { hasText: 'Git Flow' }) });
+    await expect(gitflowSection).toHaveClass(/collapsed/);
+  });
+
+  test('clicking Git Flow header should expand to show gitflow panel', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    const gitflowHeader = page.locator('lv-left-panel .section-header', { hasText: 'Git Flow' });
+    await gitflowHeader.click();
+
+    // After expanding, the gitflow panel should be visible
+    await expect(page.locator('lv-left-panel lv-gitflow-panel')).toBeVisible();
+  });
+});
 
 /** Inject the gitflow panel component into the page and wait for it to render */
 async function injectGitflowPanel(page: import('@playwright/test').Page): Promise<void> {

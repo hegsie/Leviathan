@@ -430,20 +430,22 @@ export interface ConflictDetails {
   markers: ConflictMarker[];
 }
 
+export type SubmoduleStatus =
+  | 'current'
+  | 'modified'
+  | 'uninitialized'
+  | 'missing'
+  | 'dirty';
+
 export interface Submodule {
   name: string;
   path: string;
-  url: string;
-  headId: string | null;
+  url: string | null;
+  headOid: string | null;
+  branch: string | null;
+  initialized: boolean;
   status: SubmoduleStatus;
 }
-
-export type SubmoduleStatus =
-  | 'clean'
-  | 'dirty'
-  | 'uninitialized'
-  | 'modified'
-  | 'untracked';
 
 /**
  * Avatar info returned from the backend
@@ -589,4 +591,444 @@ export interface WorkspaceSearchResult {
   lineContent: string;
   matchStart: number;
   matchEnd: number;
+}
+
+/**
+ * Checkout with auto-stash result
+ */
+export interface CheckoutWithStashResult {
+  success: boolean;
+  stashed: boolean;
+  stashApplied: boolean;
+  stashConflict: boolean;
+  message: string;
+}
+
+/**
+ * Shortlog types
+ */
+export interface ShortlogOptions {
+  range?: string;
+  all?: boolean;
+  numbered?: boolean;
+  summary?: boolean;
+  email?: boolean;
+  group?: 'author' | 'committer';
+}
+
+export interface ShortlogEntry {
+  name: string;
+  email: string | null;
+  count: number;
+  commits: string[];
+}
+
+export interface ShortlogResult {
+  entries: ShortlogEntry[];
+  totalCommits: number;
+  totalContributors: number;
+}
+
+/**
+ * Clean operation types
+ */
+export interface CleanEntry {
+  path: string;
+  isDirectory: boolean;
+  isIgnored: boolean;
+  size: number | null;
+}
+
+/**
+ * Bisect operation types
+ */
+export interface BisectLogEntry {
+  commitOid: string;
+  action: string;
+  message: string | null;
+}
+
+export interface BisectStatus {
+  active: boolean;
+  currentCommit: string | null;
+  badCommit: string | null;
+  goodCommit: string | null;
+  remaining: number | null;
+  totalSteps: number | null;
+  currentStep: number | null;
+  log: BisectLogEntry[];
+}
+
+export interface CulpritCommit {
+  oid: string;
+  summary: string;
+  author: string;
+  email: string;
+}
+
+export interface BisectStepResult {
+  status: BisectStatus;
+  culprit: CulpritCommit | null;
+  message: string;
+}
+
+/**
+ * Worktree types
+ */
+export interface Worktree {
+  path: string;
+  headOid: string | null;
+  branch: string | null;
+  isMain: boolean;
+  isLocked: boolean;
+  lockReason: string | null;
+  isBare: boolean;
+  isPrunable: boolean;
+}
+
+/**
+ * Git LFS types
+ */
+export interface LfsPattern {
+  pattern: string;
+}
+
+export interface LfsFile {
+  path: string;
+  oid: string | null;
+  size: number | null;
+  downloaded: boolean;
+}
+
+export interface LfsStatus {
+  installed: boolean;
+  version: string | null;
+  enabled: boolean;
+  patterns: LfsPattern[];
+  fileCount: number;
+  totalSize: number;
+}
+
+/**
+ * GPG types
+ */
+export interface GpgKey {
+  keyId: string;
+  keyIdLong: string;
+  userId: string;
+  email: string;
+  created: string | null;
+  expires: string | null;
+  isSigningKey: boolean;
+  keyType: string;
+  keySize: number;
+  trust: string;
+}
+
+export interface GpgConfig {
+  gpgAvailable: boolean;
+  gpgVersion: string | null;
+  signingKey: string | null;
+  signCommits: boolean;
+  signTags: boolean;
+  gpgProgram: string | null;
+}
+
+export interface CommitSignature {
+  signed: boolean;
+  status: string | null;
+  keyId: string | null;
+  signer: string | null;
+  valid: boolean;
+  trust: string | null;
+}
+
+/**
+ * Signing status
+ * NOTE: SigningStatus is defined in api.types.ts to avoid duplicate export
+ */
+
+/**
+ * SSH types
+ */
+export interface SshKey {
+  name: string;
+  path: string;
+  publicPath: string;
+  keyType: string;
+  fingerprint: string | null;
+  comment: string | null;
+  publicKey: string | null;
+}
+
+export interface SshConfig {
+  sshAvailable: boolean;
+  sshVersion: string | null;
+  sshDir: string;
+  gitSshCommand: string | null;
+}
+
+export interface SshTestResult {
+  success: boolean;
+  host: string;
+  message: string;
+  username: string | null;
+}
+
+/**
+ * Git configuration types
+ */
+export interface ConfigEntry {
+  key: string;
+  value: string;
+  scope: string;
+}
+
+export interface GitAlias {
+  name: string;
+  command: string;
+  isGlobal: boolean;
+}
+
+export interface UserIdentity {
+  name: string | null;
+  email: string | null;
+  nameIsGlobal: boolean;
+  emailIsGlobal: boolean;
+}
+
+export interface LineEndingConfig {
+  coreAutocrlf: string | null;
+  coreEol: string | null;
+  coreSafecrlf: string | null;
+}
+
+export interface GitConfig {
+  key: string;
+  value: string;
+  scope: string;
+}
+
+/**
+ * Credential types
+ */
+export interface CredentialHelper {
+  name: string;
+  command: string;
+  scope: string;
+  urlPattern: string | null;
+}
+
+export interface CredentialTestResult {
+  success: boolean;
+  host: string;
+  protocol: string;
+  username: string | null;
+  message: string;
+}
+
+export interface AvailableHelper {
+  name: string;
+  description: string;
+  available: boolean;
+}
+
+/**
+ * Commit template types
+ */
+export interface CommitTemplate {
+  id: string;
+  name: string;
+  content: string;
+  isConventional: boolean;
+  createdAt: number;
+}
+
+export interface ConventionalType {
+  typeName: string;
+  description: string;
+  emoji?: string;
+}
+
+/**
+ * PR template types
+ */
+export interface PrTemplate {
+  name: string;
+  path: string;
+  isDefault: boolean;
+}
+
+/**
+ * GitFlow configuration
+ * NOTE: GitFlowConfig is defined in workflow.types.ts to avoid duplicate export
+ */
+
+/**
+ * Git hook types
+ */
+export interface GitHook {
+  name: string;
+  path: string;
+  exists: boolean;
+  enabled: boolean;
+  content: string | null;
+  description: string;
+}
+
+/**
+ * File operation result
+ */
+export interface OpenResult {
+  success: boolean;
+  message?: string;
+}
+
+/**
+ * Editor configuration
+ */
+export interface EditorConfig {
+  editor?: string;
+  visual?: string;
+}
+
+/**
+ * Search types
+ */
+export interface SearchResult {
+  filePath: string;
+  lineNumber: number;
+  lineContent: string;
+  matchStart: number;
+  matchEnd: number;
+}
+
+export interface SearchFileResult {
+  filePath: string;
+  matches: SearchResult[];
+  matchCount: number;
+}
+
+export interface DiffSearchResult {
+  commitId: string;
+  author: string;
+  date: number;
+  message: string;
+  filePath: string;
+  lineContent: string;
+}
+
+/**
+ * Repository bookmark
+ */
+export interface RepoBookmark {
+  path: string;
+  name: string;
+  group: string | null;
+  pinned: boolean;
+  lastOpened: number;
+  color: string | null;
+}
+
+/**
+ * Branch protection rules
+ */
+export interface BranchRule {
+  pattern: string;
+  preventDeletion: boolean;
+  preventForcePush: boolean;
+  requirePullRequest: boolean;
+  preventDirectPush: boolean;
+}
+
+/**
+ * Diff tool types
+ */
+export interface AvailableDiffTool {
+  name: string;
+  command: string;
+  available: boolean;
+}
+
+export interface DiffToolResult {
+  success: boolean;
+  message: string;
+}
+
+/**
+ * Merge tool types
+ */
+export interface MergeToolInfo {
+  name: string;
+  displayName: string;
+  command: string;
+  available: boolean;
+}
+
+export interface MergeToolResult {
+  success: boolean;
+  message: string;
+}
+
+/**
+ * Enhanced repository statistics
+ */
+export interface EnhancedMonthActivity {
+  year: number;
+  month: number;
+  commits: number;
+  authors: number;
+}
+
+export interface WeekdayActivity {
+  day: string;
+  commits: number;
+}
+
+export interface EnhancedHourActivity {
+  hour: number;
+  commits: number;
+}
+
+export interface EnhancedContributorStats {
+  name: string;
+  email: string;
+  commits: number;
+  linesAdded: number;
+  linesDeleted: number;
+  firstCommit: number;
+  lastCommit: number;
+}
+
+export interface FileTypeStats {
+  extension: string;
+  fileCount: number;
+  totalLines: number;
+}
+
+export interface RepoStatistics {
+  totalCommits: number;
+  totalBranches: number;
+  totalTags: number;
+  totalContributors: number;
+  totalFiles: number;
+  repoSizeBytes: number;
+  firstCommitDate: number | null;
+  lastCommitDate: number | null;
+  repoAgeDays: number;
+  activityByMonth: EnhancedMonthActivity[] | null;
+  activityByWeekday: WeekdayActivity[] | null;
+  activityByHour: EnhancedHourActivity[] | null;
+  topContributors: EnhancedContributorStats[] | null;
+  fileTypes: FileTypeStats[] | null;
+  totalLinesAdded: number;
+  totalLinesDeleted: number;
+}
+
+export interface GetRepoStatisticsOptions {
+  includeActivity?: boolean;
+  includeContributors?: boolean;
+  includeFileTypes?: boolean;
+  since?: string;
+  until?: string;
 }

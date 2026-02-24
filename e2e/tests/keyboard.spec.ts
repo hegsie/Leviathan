@@ -143,20 +143,22 @@ test.describe('Graph Navigation', () => {
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('Home');
 
-    // Commit details should show the first commit
+    // Commit details should show the first commit's message
     const rightPanel = new RightPanelPage(page);
     await rightPanel.switchToDetails();
     await expect(rightPanel.commitDetails).toBeVisible();
+    await expect(rightPanel.commitDetails).toContainText('First');
   });
 
   test('should go to last commit with End', async ({ page }) => {
     await graph.canvas.click();
     await page.keyboard.press('End');
 
-    // Commit details should show the last commit
+    // Commit details should show the last commit's message
     const rightPanel = new RightPanelPage(page);
     await rightPanel.switchToDetails();
     await expect(rightPanel.commitDetails).toBeVisible();
+    await expect(rightPanel.commitDetails).toContainText('Second');
   });
 });
 
@@ -245,6 +247,13 @@ test.describe('Staging Shortcuts', () => {
 
     const stageFilesCommands = await findCommand(page, 'stage_files');
     expect(stageFilesCommands.length).toBeGreaterThan(0);
+
+    // Verify file moved to staged
+    const rightPanel = new RightPanelPage(page);
+    const stagedCount = await rightPanel.getStagedCount();
+    expect(stagedCount).toBe(1);
+    const unstagedCount = await rightPanel.getUnstagedCount();
+    expect(unstagedCount).toBe(0);
   });
 });
 
@@ -289,6 +298,10 @@ test.describe('Refresh Command', () => {
 
     const repoCommands = await findCommand(page, 'open_repository');
     expect(repoCommands.length).toBeGreaterThan(0);
+
+    // Verify UI components still visible after refresh
+    await expect(page.locator('lv-graph-canvas')).toBeVisible();
+    await expect(page.locator('lv-left-panel')).toBeVisible();
   });
 });
 
@@ -338,7 +351,7 @@ test.describe('Graph Selection Keyboard', () => {
     });
   });
 
-  test('Arrow Down twice should navigate past the first commit', async ({ page }) => {
+  test('Arrow Down twice should navigate to the third commit', async ({ page }) => {
     await graph.canvas.click();
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
@@ -346,6 +359,7 @@ test.describe('Graph Selection Keyboard', () => {
     const rightPanel = new RightPanelPage(page);
     await rightPanel.switchToDetails();
     await expect(rightPanel.commitDetails).toBeVisible();
+    await expect(rightPanel.commitDetails).toContainText('Third commit');
   });
 
   test('Home key should reliably select first commit after navigation', async ({ page }) => {
@@ -359,6 +373,7 @@ test.describe('Graph Selection Keyboard', () => {
     const rightPanel = new RightPanelPage(page);
     await rightPanel.switchToDetails();
     await expect(rightPanel.commitDetails).toBeVisible();
+    await expect(rightPanel.commitDetails).toContainText('First commit');
   });
 });
 
@@ -389,6 +404,7 @@ test.describe('Keyboard - Error Scenarios', () => {
     // The error should be surfaced to the user via a toast or error indicator
     const errorIndicator = page.locator('lv-toast-container .toast.error, .error-message, .error-banner').first();
     await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+    await expect(errorIndicator).toContainText(/staging failed|permission denied/i);
   });
 
   test('refresh failure via command palette should show error feedback', async ({ page }) => {
@@ -406,5 +422,6 @@ test.describe('Keyboard - Error Scenarios', () => {
     // Error should be displayed to user
     const errorIndicator = page.locator('lv-toast-container .toast.error, .error-message, .error-banner').first();
     await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+    await expect(errorIndicator).toContainText(/repository not found/i);
   });
 });

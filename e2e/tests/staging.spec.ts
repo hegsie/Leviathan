@@ -710,6 +710,7 @@ test.describe('Staging Error Toasts and UI Outcome Verification', () => {
       'lv-toast-container .toast.error, .toast.error, lv-file-status .error, .error-banner'
     ).first();
     await expect(errorIndicator).toBeVisible({ timeout: 5000 });
+    await expect(errorIndicator).toContainText('Permission denied');
 
     // The file should remain in the unstaged section since the operation failed
     await expect(rightPanel.getUnstagedFile('src/main.ts')).toBeVisible();

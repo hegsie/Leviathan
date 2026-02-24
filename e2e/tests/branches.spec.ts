@@ -1131,3 +1131,303 @@ test.describe('Branches - UI Outcome Verification', () => {
     await expect(leftPanel.getBranch('develop')).toBeVisible();
   });
 });
+
+test.describe('Merge via Branch Context Menu', () => {
+  let leftPanel: LeftPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+    await setupOpenRepository(page, {
+      branches: [
+        {
+          name: 'refs/heads/main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: 'refs/remotes/origin/main',
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'refs/heads/feature/merge-test',
+          shorthand: 'feature/merge-test',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+        {
+          name: 'refs/remotes/origin/main',
+          shorthand: 'origin/main',
+          isHead: false,
+          isRemote: true,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+      ],
+    });
+  });
+
+  test('should show Merge option in context menu for non-HEAD branch', async ({ page }) => {
+    await leftPanel.openBranchContextMenu('feature/merge-test');
+    const mergeItem = page.locator('.context-menu-item', { hasText: 'Merge into current branch' });
+    await expect(mergeItem).toBeVisible();
+  });
+
+  test('should NOT show Merge option for current HEAD branch', async ({ page }) => {
+    await leftPanel.openBranchContextMenu('main');
+    await page.locator('.context-menu').waitFor({ state: 'visible' });
+    const mergeItem = page.locator('.context-menu-item', { hasText: 'Merge into current branch' });
+    await expect(mergeItem).not.toBeVisible();
+  });
+
+  test('should invoke merge command on successful merge', async ({ page }) => {
+    await autoConfirmDialogs(page);
+    await startCommandCapture(page);
+
+    await leftPanel.openBranchContextMenu('feature/merge-test');
+    const mergeItem = page.locator('.context-menu-item', { hasText: 'Merge into current branch' });
+    await mergeItem.waitFor({ state: 'visible' });
+    await mergeItem.click();
+
+    await waitForCommand(page, 'merge');
+
+    const mergeCommands = await findCommand(page, 'merge');
+    expect(mergeCommands.length).toBeGreaterThan(0);
+    const args = mergeCommands[0].args as { path?: string; sourceRef?: string };
+    expect(args.path).toBe('/tmp/test-repo');
+    expect(args.sourceRef).toBe('feature/merge-test');
+
+    // Verify branches were refreshed after merge
+    await waitForCommand(page, 'get_branches');
+    const branchCommands = await findCommand(page, 'get_branches');
+    expect(branchCommands.length).toBeGreaterThan(0);
+  });
+
+  test('should show error toast when merge fails', async ({ page }) => {
+    await autoConfirmDialogs(page);
+    await injectCommandError(page, 'merge', 'Merge failed: uncommitted changes');
+
+    await leftPanel.openBranchContextMenu('feature/merge-test');
+    const mergeItem = page.locator('.context-menu-item', { hasText: 'Merge into current branch' });
+    await mergeItem.waitFor({ state: 'visible' });
+    await mergeItem.click();
+
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toBeVisible();
+    await expect(toastMessage).toContainText('Merge failed');
+  });
+
+  test('should invoke abort_merge on merge conflict when user confirms abort', async ({ page }) => {
+    // Auto-confirm all dialogs (initial merge confirm + abort confirm)
+    await autoConfirmDialogs(page);
+
+    // Inject a merge conflict error (plain object, not Error, so code propagates)
+    await page.evaluate(() => {
+      const originalInvoke = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke;
+
+      (window as unknown as {
+        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
+      }).__INVOKED_COMMANDS__ = [];
+
+      (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
+        const captured = (window as unknown as { __INVOKED_COMMANDS__?: { command: string; args: unknown }[] })
+          .__INVOKED_COMMANDS__;
+        if (captured) {
+          captured.push({ command, args });
+        }
+        if (command === 'merge') {
+          throw { code: 'MERGE_CONFLICT', message: 'Merge conflict detected' };
+        }
+        return originalInvoke(command, args);
+      };
+    });
+
+    await leftPanel.openBranchContextMenu('feature/merge-test');
+    const mergeItem = page.locator('.context-menu-item', { hasText: 'Merge into current branch' });
+    await mergeItem.waitFor({ state: 'visible' });
+    await mergeItem.click();
+
+    await waitForCommand(page, 'abort_merge');
+
+    const abortCommands = await findCommand(page, 'abort_merge');
+    expect(abortCommands.length).toBeGreaterThan(0);
+  });
+
+  test('should not invoke merge when confirmation is cancelled', async ({ page }) => {
+    // Mock confirmation dialog to return false (user cancels)
+    await injectCommandMock(page, {
+      'plugin:dialog|confirm': false,
+      'plugin:dialog|ask': false,
+    });
+    await startCommandCapture(page);
+
+    await leftPanel.openBranchContextMenu('feature/merge-test');
+    const mergeItem = page.locator('.context-menu-item', { hasText: 'Merge into current branch' });
+    await mergeItem.waitFor({ state: 'visible' });
+    await mergeItem.click();
+
+    // Wait a moment for any potential calls
+    await page.waitForTimeout(500);
+
+    // Verify merge was NOT invoked
+    const mergeCommands = await findCommand(page, 'merge');
+    expect(mergeCommands.length).toBe(0);
+  });
+});
+
+test.describe('Rebase via Branch Context Menu', () => {
+  let leftPanel: LeftPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+    await setupOpenRepository(page, {
+      branches: [
+        {
+          name: 'refs/heads/main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: 'refs/remotes/origin/main',
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'refs/heads/feature/rebase-test',
+          shorthand: 'feature/rebase-test',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+        {
+          name: 'refs/remotes/origin/main',
+          shorthand: 'origin/main',
+          isHead: false,
+          isRemote: true,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+      ],
+    });
+  });
+
+  test('should show Rebase option in context menu for non-HEAD branch', async ({ page }) => {
+    await leftPanel.openBranchContextMenu('feature/rebase-test');
+    const rebaseItem = page.locator('.context-menu-item', { hasText: 'Rebase current onto this' });
+    await expect(rebaseItem).toBeVisible();
+  });
+
+  test('should NOT show Rebase option for current HEAD branch', async ({ page }) => {
+    await leftPanel.openBranchContextMenu('main');
+    await page.locator('.context-menu').waitFor({ state: 'visible' });
+    const rebaseItem = page.locator('.context-menu-item', { hasText: 'Rebase current onto this' });
+    await expect(rebaseItem).not.toBeVisible();
+  });
+
+  test('should invoke rebase command on successful rebase', async ({ page }) => {
+    await autoConfirmDialogs(page);
+    await startCommandCapture(page);
+
+    await leftPanel.openBranchContextMenu('feature/rebase-test');
+    const rebaseItem = page.locator('.context-menu-item', { hasText: 'Rebase current onto this' });
+    await rebaseItem.waitFor({ state: 'visible' });
+    await rebaseItem.click();
+
+    await waitForCommand(page, 'rebase');
+
+    const rebaseCommands = await findCommand(page, 'rebase');
+    expect(rebaseCommands.length).toBeGreaterThan(0);
+    const args = rebaseCommands[0].args as { path?: string; onto?: string };
+    expect(args.path).toBe('/tmp/test-repo');
+    expect(args.onto).toBe('feature/rebase-test');
+
+    // Verify branches were refreshed after rebase
+    await waitForCommand(page, 'get_branches');
+    const branchCommands = await findCommand(page, 'get_branches');
+    expect(branchCommands.length).toBeGreaterThan(0);
+  });
+
+  test('should show error toast when rebase fails', async ({ page }) => {
+    await autoConfirmDialogs(page);
+    await injectCommandError(page, 'rebase', 'Rebase failed: uncommitted changes');
+
+    await leftPanel.openBranchContextMenu('feature/rebase-test');
+    const rebaseItem = page.locator('.context-menu-item', { hasText: 'Rebase current onto this' });
+    await rebaseItem.waitFor({ state: 'visible' });
+    await rebaseItem.click();
+
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toBeVisible();
+    await expect(toastMessage).toContainText('Rebase failed');
+  });
+
+  test('should invoke abort_rebase on rebase conflict when user confirms abort', async ({ page }) => {
+    // Auto-confirm all dialogs (initial rebase confirm + abort confirm)
+    await autoConfirmDialogs(page);
+
+    // Inject a rebase conflict error (plain object, not Error, so code propagates)
+    await page.evaluate(() => {
+      const originalInvoke = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke;
+
+      (window as unknown as {
+        __INVOKED_COMMANDS__: { command: string; args: unknown }[];
+      }).__INVOKED_COMMANDS__ = [];
+
+      (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
+        const captured = (window as unknown as { __INVOKED_COMMANDS__?: { command: string; args: unknown }[] })
+          .__INVOKED_COMMANDS__;
+        if (captured) {
+          captured.push({ command, args });
+        }
+        if (command === 'rebase') {
+          throw { code: 'REBASE_CONFLICT', message: 'Rebase conflict detected' };
+        }
+        return originalInvoke(command, args);
+      };
+    });
+
+    await leftPanel.openBranchContextMenu('feature/rebase-test');
+    const rebaseItem = page.locator('.context-menu-item', { hasText: 'Rebase current onto this' });
+    await rebaseItem.waitFor({ state: 'visible' });
+    await rebaseItem.click();
+
+    await waitForCommand(page, 'abort_rebase');
+
+    const abortCommands = await findCommand(page, 'abort_rebase');
+    expect(abortCommands.length).toBeGreaterThan(0);
+  });
+
+  test('should not invoke rebase when confirmation is cancelled', async ({ page }) => {
+    // Mock confirmation dialog to return false (user cancels)
+    await injectCommandMock(page, {
+      'plugin:dialog|confirm': false,
+      'plugin:dialog|ask': false,
+    });
+    await startCommandCapture(page);
+
+    await leftPanel.openBranchContextMenu('feature/rebase-test');
+    const rebaseItem = page.locator('.context-menu-item', { hasText: 'Rebase current onto this' });
+    await rebaseItem.waitFor({ state: 'visible' });
+    await rebaseItem.click();
+
+    // Wait a moment for any potential calls
+    await page.waitForTimeout(500);
+
+    // Verify rebase was NOT invoked
+    const rebaseCommands = await findCommand(page, 'rebase');
+    expect(rebaseCommands.length).toBe(0);
+  });
+});

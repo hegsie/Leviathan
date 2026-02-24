@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { Worktree } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 
 type DialogMode = 'list' | 'add';
 
@@ -438,9 +439,7 @@ export class LvWorktreeDialog extends LitElement {
       return;
     }
 
-    const confirmed = confirm(
-      `Are you sure you want to remove the worktree at "${worktree.path}"?`
-    );
+    const confirmed = await showConfirm('Remove Worktree', `Are you sure you want to remove the worktree at "${worktree.path}"?`, 'warning');
 
     if (!confirmed) return;
 

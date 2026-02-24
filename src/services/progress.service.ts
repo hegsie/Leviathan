@@ -36,13 +36,10 @@ class ProgressService {
   private unlistenFns: UnlistenFn[] = [];
   private operationCounter = 0;
   private cancelledOperations: Set<string> = new Set();
+  readonly ready: Promise<void>;
 
   constructor() {
-    // Note: setupListeners is async but we don't await it here.
-    // This is intentional - the service is usable immediately for local operations,
-    // and backend events will be captured once the listeners are ready.
-    // In practice, the listeners initialize within milliseconds.
-    this.setupListeners();
+    this.ready = this.setupListeners();
   }
 
   private async setupListeners(): Promise<void> {

@@ -836,6 +836,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
       );
 
       if (result.success) {
+        showToast('Rebase completed', 'success');
         this.dispatchEvent(new CustomEvent('rebase-complete', {
           bubbles: true,
           composed: true,

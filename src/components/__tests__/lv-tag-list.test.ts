@@ -545,4 +545,113 @@ describe('lv-tag-list', () => {
       expect(loading!.textContent?.trim()).to.include('Loading');
     });
   });
+
+  // ── 11. operationInProgress guard ─────────────────────────────────────
+  describe('operationInProgress guard', () => {
+    it('prevents concurrent tag operations', async () => {
+      let pushCallCount = 0;
+      let resolvePush: (() => void) | null = null;
+
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_tags':
+            return mockTags;
+          case 'push_tag':
+            pushCallCount++;
+            if (pushCallCount === 1) {
+              await new Promise<void>((r) => { resolvePush = r; });
+            }
+            return null;
+          case 'plugin:dialog|confirm':
+            return true;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderTagList();
+
+      // Open context menu on first tag
+      const tagItem = el.shadowRoot!.querySelector('.tag-item') as HTMLElement;
+      tagItem.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
+      await el.updateComplete;
+
+      // Click Push to Remote (starts blocking operation)
+      const menuItems = el.shadowRoot!.querySelectorAll('.context-menu-item');
+      const pushBtn = Array.from(menuItems).find(
+        (item) => item.textContent?.trim() === 'Push to Remote'
+      ) as HTMLElement;
+      pushBtn.click();
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Try to push again via context menu — should be blocked
+      tagItem.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
+      await el.updateComplete;
+
+      const menuItems2 = el.shadowRoot!.querySelectorAll('.context-menu-item');
+      const pushBtn2 = Array.from(menuItems2).find(
+        (item) => item.textContent?.trim() === 'Push to Remote'
+      ) as HTMLElement;
+      pushBtn2.click();
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(pushCallCount).to.equal(1);
+
+      // Unblock
+      (resolvePush as (() => void) | null)?.();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+    });
+
+    it('context menu items are disabled during operation', async () => {
+      let resolvePush: (() => void) | null = null;
+
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_tags':
+            return mockTags;
+          case 'push_tag':
+            await new Promise<void>((r) => { resolvePush = r; });
+            return null;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderTagList();
+
+      // Open context menu and start push
+      const tagItem = el.shadowRoot!.querySelector('.tag-item') as HTMLElement;
+      tagItem.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
+      await el.updateComplete;
+
+      const menuItems = el.shadowRoot!.querySelectorAll('.context-menu-item');
+      const pushBtn = Array.from(menuItems).find(
+        (item) => item.textContent?.trim() === 'Push to Remote'
+      ) as HTMLElement;
+      pushBtn.click();
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      // Re-open context menu
+      tagItem.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
+      await el.updateComplete;
+
+      // Check disabled state
+      const checkoutBtn = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).find(
+        (item) => item.textContent?.trim() === 'Checkout'
+      ) as HTMLButtonElement;
+      expect(checkoutBtn.disabled).to.be.true;
+
+      const deleteBtn = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).find(
+        (item) => item.textContent?.trim() === 'Delete'
+      ) as HTMLButtonElement;
+      expect(deleteBtn.disabled).to.be.true;
+
+      // Unblock
+      (resolvePush as (() => void) | null)?.();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+    });
+  });
 });

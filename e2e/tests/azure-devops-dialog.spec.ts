@@ -286,6 +286,10 @@ test.describe('Azure DevOps Dialog - Connection Tab', () => {
     await dialogs.azureDevOps.connectButton.click();
 
     await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    const errorElement = page.locator('lv-azure-devops-dialog .error, lv-azure-devops-dialog .error-message, .toast.error').first();
+    await expect(errorElement).toBeVisible({ timeout: 5000 });
+    await expect(errorElement).toContainText('Invalid Personal Access Token');
   });
 });
 
@@ -500,6 +504,8 @@ test.describe('Azure DevOps Dialog - Extended Scenarios', () => {
     await expect(dialogs.azureDevOps.dialog).toBeVisible();
 
     // Verify the error is shown within the dialog
-    await expect(page.locator('lv-azure-devops-dialog .error, lv-azure-devops-dialog .error-message, .toast.error').first()).toBeVisible({ timeout: 5000 });
+    const errorElement = page.locator('lv-azure-devops-dialog .error, lv-azure-devops-dialog .error-message, .toast.error').first();
+    await expect(errorElement).toBeVisible({ timeout: 5000 });
+    await expect(errorElement).toContainText('organization not found');
   });
 });

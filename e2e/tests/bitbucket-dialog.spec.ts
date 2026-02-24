@@ -141,7 +141,9 @@ test.describe('Bitbucket Dialog - Connection Flow', () => {
 
     // Should still show the dialog with an error indicator
     await expect(dialogs.bitbucket.dialog).toBeVisible();
-    await expect(page.locator('lv-bitbucket-dialog .error, lv-bitbucket-dialog .error-message, .toast.error').first()).toBeVisible({ timeout: 5000 });
+    const errorElement = page.locator('lv-bitbucket-dialog .error, lv-bitbucket-dialog .error-message, .toast.error').first();
+    await expect(errorElement).toBeVisible({ timeout: 5000 });
+    await expect(errorElement).toContainText('Invalid credentials');
   });
 });
 
@@ -215,6 +217,8 @@ test.describe('Bitbucket Dialog - Extended Scenarios', () => {
     await expect(dialogs.bitbucket.dialog).toBeVisible();
 
     // Verify the error is shown within the dialog
-    await expect(page.locator('lv-bitbucket-dialog .error, lv-bitbucket-dialog .error-message, .toast.error').first()).toBeVisible({ timeout: 5000 });
+    const errorElement = page.locator('lv-bitbucket-dialog .error, lv-bitbucket-dialog .error-message, .toast.error').first();
+    await expect(errorElement).toBeVisible({ timeout: 5000 });
+    await expect(errorElement).toContainText('authentication failed');
   });
 });

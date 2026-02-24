@@ -49,6 +49,47 @@ import type {
   SortDirection,
   CloneFilterInfo,
   CleanupCandidate,
+  CheckoutWithStashResult,
+  ShortlogOptions,
+  ShortlogResult,
+  CleanEntry,
+  BisectStatus,
+  BisectStepResult,
+  Submodule,
+  Worktree,
+  LfsFile,
+  LfsStatus,
+  GpgKey,
+  GpgConfig,
+  CommitSignature,
+  SshKey,
+  SshConfig,
+  SshTestResult,
+  ConfigEntry,
+  GitAlias,
+  UserIdentity,
+  LineEndingConfig,
+  GitConfig,
+  CredentialHelper,
+  CredentialTestResult,
+  AvailableHelper,
+  CommitTemplate,
+  ConventionalType,
+  PrTemplate,
+  GitHook,
+  OpenResult,
+  EditorConfig,
+  SearchResult,
+  SearchFileResult,
+  DiffSearchResult,
+  RepoBookmark,
+  BranchRule,
+  AvailableDiffTool,
+  DiffToolResult,
+  MergeToolInfo,
+  MergeToolResult,
+  RepoStatistics,
+  GetRepoStatisticsOptions,
 } from "../types/git.types.ts";
 import type { CommitGraphData } from "../types/graph.types.ts";
 import type {
@@ -115,7 +156,65 @@ import type {
   RunPruneCommand,
   MaintenanceResult,
   CommandResult,
+  SigningStatus,
 } from "../types/api.types.ts";
+
+// Re-export types for backward compatibility
+export type {
+  CheckoutWithStashResult,
+  ShortlogOptions,
+  ShortlogEntry,
+  ShortlogResult,
+  CleanEntry,
+  BisectLogEntry,
+  BisectStatus,
+  CulpritCommit,
+  BisectStepResult,
+  Submodule,
+  SubmoduleStatus,
+  Worktree,
+  LfsPattern,
+  LfsFile,
+  LfsStatus,
+  GpgKey,
+  GpgConfig,
+  CommitSignature,
+  SshKey,
+  SshConfig,
+  SshTestResult,
+  ConfigEntry,
+  GitAlias,
+  UserIdentity,
+  LineEndingConfig,
+  GitConfig,
+  CredentialHelper,
+  CredentialTestResult,
+  AvailableHelper,
+  CommitTemplate,
+  ConventionalType,
+  PrTemplate,
+  GitHook,
+  OpenResult,
+  EditorConfig,
+  SearchResult,
+  SearchFileResult,
+  DiffSearchResult,
+  RepoBookmark,
+  BranchRule,
+  AvailableDiffTool,
+  DiffToolResult,
+  MergeToolInfo,
+  MergeToolResult,
+  EnhancedMonthActivity,
+  WeekdayActivity,
+  EnhancedHourActivity,
+  EnhancedContributorStats,
+  FileTypeStats,
+  RepoStatistics,
+  GetRepoStatisticsOptions,
+} from "../types/git.types.ts";
+
+export type { SigningStatus } from "../types/api.types.ts";
 
 /**
  * Repository operations
@@ -270,17 +369,6 @@ export async function getBranchTrackingInfo(
     path,
     branch,
   });
-}
-
-/**
- * Result of checkout with auto-stash
- */
-export interface CheckoutWithStashResult {
-  success: boolean;
-  stashed: boolean;
-  stashApplied: boolean;
-  stashConflict: boolean;
-  message: string;
 }
 
 /**
@@ -1447,32 +1535,7 @@ export async function getRefsByCommit(
 }
 
 /**
- * Shortlog operations - contributor commit summaries
- */
-export interface ShortlogOptions {
-  range?: string;
-  all?: boolean;
-  numbered?: boolean;
-  summary?: boolean;
-  email?: boolean;
-  group?: "author" | "committer";
-}
-
-export interface ShortlogEntry {
-  name: string;
-  email: string | null;
-  count: number;
-  commits: string[];
-}
-
-export interface ShortlogResult {
-  entries: ShortlogEntry[];
-  totalCommits: number;
-  totalContributors: number;
-}
-
-/**
- * Get shortlog - contributor commit summaries
+ * Shortlog / Get shortlog - contributor commit summaries
  * Similar to `git shortlog`
  */
 export async function getShortlog(
@@ -1547,12 +1610,6 @@ export async function recordAction(
 /**
  * Clean operations
  */
-export interface CleanEntry {
-  path: string;
-  isDirectory: boolean;
-  isIgnored: boolean;
-  size: number | null;
-}
 
 export async function getCleanableFiles(
   repoPath: string,
@@ -1591,35 +1648,6 @@ export async function cleanAll(
 /**
  * Bisect operations
  */
-export interface BisectLogEntry {
-  commitOid: string;
-  action: string;
-  message: string | null;
-}
-
-export interface BisectStatus {
-  active: boolean;
-  currentCommit: string | null;
-  badCommit: string | null;
-  goodCommit: string | null;
-  remaining: number | null;
-  totalSteps: number | null;
-  currentStep: number | null;
-  log: BisectLogEntry[];
-}
-
-export interface CulpritCommit {
-  oid: string;
-  summary: string;
-  author: string;
-  email: string;
-}
-
-export interface BisectStepResult {
-  status: BisectStatus;
-  culprit: CulpritCommit | null;
-  message: string;
-}
 
 export async function getBisectStatus(
   repoPath: string,
@@ -1678,22 +1706,6 @@ export async function bisectReset(
 /**
  * Submodule operations
  */
-export type SubmoduleStatus =
-  | "current"
-  | "modified"
-  | "uninitialized"
-  | "missing"
-  | "dirty";
-
-export interface Submodule {
-  name: string;
-  path: string;
-  url: string | null;
-  headOid: string | null;
-  branch: string | null;
-  initialized: boolean;
-  status: SubmoduleStatus;
-}
 
 export async function getSubmodules(
   repoPath: string,
@@ -1786,16 +1798,6 @@ export async function removeSubmodule(
 /**
  * Worktree operations
  */
-export interface Worktree {
-  path: string;
-  headOid: string | null;
-  branch: string | null;
-  isMain: boolean;
-  isLocked: boolean;
-  lockReason: string | null;
-  isBare: boolean;
-  isPrunable: boolean;
-}
 
 export async function getWorktrees(
   repoPath: string,
@@ -1872,25 +1874,6 @@ export async function unlockWorktree(
 /**
  * Git LFS operations
  */
-export interface LfsPattern {
-  pattern: string;
-}
-
-export interface LfsFile {
-  path: string;
-  oid: string | null;
-  size: number | null;
-  downloaded: boolean;
-}
-
-export interface LfsStatus {
-  installed: boolean;
-  version: string | null;
-  enabled: boolean;
-  patterns: LfsPattern[];
-  fileCount: number;
-  totalSize: number;
-}
 
 export async function getLfsStatus(
   repoPath: string,
@@ -1947,36 +1930,6 @@ export async function lfsPrune(
 /**
  * GPG operations
  */
-export interface GpgKey {
-  keyId: string;
-  keyIdLong: string;
-  userId: string;
-  email: string;
-  created: string | null;
-  expires: string | null;
-  isSigningKey: boolean;
-  keyType: string;
-  keySize: number;
-  trust: string;
-}
-
-export interface GpgConfig {
-  gpgAvailable: boolean;
-  gpgVersion: string | null;
-  signingKey: string | null;
-  signCommits: boolean;
-  signTags: boolean;
-  gpgProgram: string | null;
-}
-
-export interface CommitSignature {
-  signed: boolean;
-  status: string | null;
-  keyId: string | null;
-  signer: string | null;
-  valid: boolean;
-  trust: string | null;
-}
 
 export async function getGpgConfig(
   repoPath: string,
@@ -2023,16 +1976,6 @@ export async function setTagSigning(
     path: repoPath,
     enabled,
     global,
-  });
-}
-
-export async function getCommitSignature(
-  repoPath: string,
-  commitOid: string,
-): Promise<CommandResult<CommitSignature>> {
-  return invokeCommand<CommitSignature>("get_commit_signature", {
-    path: repoPath,
-    commitOid,
   });
 }
 
@@ -2090,20 +2033,6 @@ export async function getCommitsSignatures(
 }
 
 /**
- * Signing status for a repository - indicates if signing is configured and available
- */
-export interface SigningStatus {
-  /** Whether commit signing is enabled (commit.gpgsign = true) */
-  gpgSignEnabled: boolean;
-  /** The configured signing key (user.signingkey) */
-  signingKey: string | null;
-  /** The configured GPG program (gpg.program) */
-  gpgProgram: string | null;
-  /** Whether signing is possible (GPG available and key configured) */
-  canSign: boolean;
-}
-
-/**
  * Get signing status for a repository
  * @param repoPath Repository path
  * @returns SigningStatus indicating if signing is enabled and possible
@@ -2117,30 +2046,6 @@ export async function getSigningStatus(
 // ============================================================================
 // SSH Key Management
 // ============================================================================
-
-export interface SshKey {
-  name: string;
-  path: string;
-  publicPath: string;
-  keyType: string;
-  fingerprint: string | null;
-  comment: string | null;
-  publicKey: string | null;
-}
-
-export interface SshConfig {
-  sshAvailable: boolean;
-  sshVersion: string | null;
-  sshDir: string;
-  gitSshCommand: string | null;
-}
-
-export interface SshTestResult {
-  success: boolean;
-  host: string;
-  message: string;
-  username: string | null;
-}
 
 export async function getSshConfig(): Promise<CommandResult<SshConfig>> {
   return invokeCommand<SshConfig>("get_ssh_config", {});
@@ -2195,25 +2100,6 @@ export async function deleteSshKey(
 // ============================================================================
 // Git Configuration
 // ============================================================================
-
-export interface ConfigEntry {
-  key: string;
-  value: string;
-  scope: string;
-}
-
-export interface GitAlias {
-  name: string;
-  command: string;
-  isGlobal: boolean;
-}
-
-export interface UserIdentity {
-  name: string | null;
-  email: string | null;
-  nameIsGlobal: boolean;
-  emailIsGlobal: boolean;
-}
 
 export async function getConfigValue(
   path: string | null,
@@ -2304,18 +2190,6 @@ export async function getCommonSettings(
 // Line Ending & Encoding Configuration
 // ============================================================================
 
-export interface LineEndingConfig {
-  coreAutocrlf: string | null;
-  coreEol: string | null;
-  coreSafecrlf: string | null;
-}
-
-export interface GitConfig {
-  key: string;
-  value: string;
-  scope: string;
-}
-
 export async function getLineEndingConfig(
   path: string,
 ): Promise<CommandResult<LineEndingConfig>> {
@@ -2369,27 +2243,6 @@ export async function unsetGitConfig(
 // ============================================================================
 // Credential Management
 // ============================================================================
-
-export interface CredentialHelper {
-  name: string;
-  command: string;
-  scope: string;
-  urlPattern: string | null;
-}
-
-export interface CredentialTestResult {
-  success: boolean;
-  host: string;
-  protocol: string;
-  username: string | null;
-  message: string;
-}
-
-export interface AvailableHelper {
-  name: string;
-  description: string;
-  available: boolean;
-}
 
 export async function getCredentialHelpers(
   path: string,
@@ -3833,20 +3686,6 @@ export async function listBitbucketPipelines(
 // Commit Templates
 // ============================================================================
 
-export interface CommitTemplate {
-  id: string;
-  name: string;
-  content: string;
-  isConventional: boolean;
-  createdAt: number;
-}
-
-export interface ConventionalType {
-  typeName: string;
-  description: string;
-  emoji?: string;
-}
-
 /**
  * Get commit template from git config or .gitmessage file
  */
@@ -3895,16 +3734,6 @@ export async function getConventionalTypes(): Promise<
 // ============================================================================
 // PR/MR Templates
 // ============================================================================
-
-/** A detected pull request / merge request template */
-export interface PrTemplate {
-  /** Display name derived from the file name */
-  name: string;
-  /** Relative path to the template from the repo root */
-  path: string;
-  /** Whether this is the default template */
-  isDefault: boolean;
-}
 
 /**
  * Detect PR/MR templates in a repository.
@@ -4762,14 +4591,6 @@ export async function getCommonAttributes(): Promise<
 /**
  * Git Hooks management
  */
-export interface GitHook {
-  name: string;
-  path: string;
-  exists: boolean;
-  enabled: boolean;
-  content: string | null;
-  description: string;
-}
 
 export async function getHooks(
   repoPath: string,
@@ -4831,18 +4652,6 @@ export async function openInEditor(
 /**
  * File operations
  */
-
-/** Result of file open/reveal operations */
-export interface OpenResult {
-  success: boolean;
-  message?: string;
-}
-
-/** Editor configuration from git config */
-export interface EditorConfig {
-  editor?: string;
-  visual?: string;
-}
 
 /**
  * Reveal a file or folder in the system file manager
@@ -4917,146 +4726,6 @@ export async function setEditorConfig(
   });
 }
 
-/**
- * Repository statistics
- */
-export interface ContributorStats {
-  name: string;
-  email: string;
-  commitCount: number;
-  firstCommit: number;
-  latestCommit: number;
-  linesAdded: number;
-  linesDeleted: number;
-}
-
-export interface MonthActivity {
-  year: number;
-  month: number;
-  commitCount: number;
-}
-
-export interface DayOfWeekActivity {
-  day: string;
-  dayIndex: number;
-  commitCount: number;
-}
-
-export interface HourActivity {
-  hour: number;
-  commitCount: number;
-}
-
-export interface RepoStats {
-  totalCommits: number;
-  totalBranches: number;
-  totalTags: number;
-  totalContributors: number;
-  firstCommitDate: number | null;
-  latestCommitDate: number | null;
-  contributors: ContributorStats[];
-  activityByMonth: MonthActivity[];
-  activityByDayOfWeek: DayOfWeekActivity[];
-  activityByHour: HourActivity[];
-  filesCount: number;
-  totalLinesAdded: number;
-  totalLinesDeleted: number;
-}
-
-export async function getRepoStats(
-  repoPath: string,
-  maxCommits?: number,
-): Promise<CommandResult<RepoStats>> {
-  return invokeCommand<RepoStats>("get_repo_stats", {
-    path: repoPath,
-    maxCommits,
-  });
-}
-
-export async function getContributorStats(
-  repoPath: string,
-  maxCommits?: number,
-): Promise<CommandResult<ContributorStats[]>> {
-  return invokeCommand<ContributorStats[]>("get_contributor_stats", {
-    path: repoPath,
-    maxCommits,
-  });
-}
-
-/**
- * Enhanced repository statistics for dashboard
- */
-export interface EnhancedMonthActivity {
-  year: number;
-  month: number;
-  commits: number;
-  authors: number;
-}
-
-export interface WeekdayActivity {
-  day: string;
-  commits: number;
-}
-
-export interface EnhancedHourActivity {
-  hour: number;
-  commits: number;
-}
-
-export interface EnhancedContributorStats {
-  name: string;
-  email: string;
-  commits: number;
-  linesAdded: number;
-  linesDeleted: number;
-  firstCommit: number;
-  lastCommit: number;
-}
-
-export interface FileTypeStats {
-  extension: string;
-  fileCount: number;
-  totalLines: number;
-}
-
-export interface RepoStatistics {
-  // Basics
-  totalCommits: number;
-  totalBranches: number;
-  totalTags: number;
-  totalContributors: number;
-  totalFiles: number;
-  repoSizeBytes: number;
-
-  // First/Last commits
-  firstCommitDate: number | null;
-  lastCommitDate: number | null;
-  repoAgeDays: number;
-
-  // Activity breakdown (if includeActivity)
-  activityByMonth: EnhancedMonthActivity[] | null;
-  activityByWeekday: WeekdayActivity[] | null;
-  activityByHour: EnhancedHourActivity[] | null;
-
-  // Contributor breakdown (if includeContributors)
-  topContributors: EnhancedContributorStats[] | null;
-
-  // File type breakdown (if includeFileTypes)
-  fileTypes: FileTypeStats[] | null;
-
-  // Code stats
-  totalLinesAdded: number;
-  totalLinesDeleted: number;
-}
-
-export interface GetRepoStatisticsOptions {
-  includeActivity?: boolean;
-  includeContributors?: boolean;
-  includeFileTypes?: boolean;
-  since?: string; // ISO 8601 date
-  until?: string; // ISO 8601 date
-}
-
 export async function getRepoStatistics(
   repoPath: string,
   options?: GetRepoStatisticsOptions,
@@ -5074,28 +4743,6 @@ export async function getRepoStatistics(
 /**
  * Search / Grep operations
  */
-export interface SearchResult {
-  filePath: string;
-  lineNumber: number;
-  lineContent: string;
-  matchStart: number;
-  matchEnd: number;
-}
-
-export interface SearchFileResult {
-  filePath: string;
-  matches: SearchResult[];
-  matchCount: number;
-}
-
-export interface DiffSearchResult {
-  commitId: string;
-  author: string;
-  date: number;
-  message: string;
-  filePath: string;
-  lineContent: string;
-}
 
 export async function searchInFiles(
   repoPath: string,
@@ -5372,18 +5019,6 @@ export async function getAvatarUrls(
  */
 
 /**
- * Repository bookmark
- */
-export interface RepoBookmark {
-  path: string;
-  name: string;
-  group: string | null;
-  pinned: boolean;
-  lastOpened: number;
-  color: string | null;
-}
-
-/**
  * Get all bookmarks
  */
 export async function getBookmarks(): Promise<CommandResult<RepoBookmark[]>> {
@@ -5447,22 +5082,6 @@ export async function recordRepoOpened(
 /**
  * Branch Protection Rules
  */
-
-/**
- * A local branch protection rule
- */
-export interface BranchRule {
-  /** Branch name or glob pattern (e.g., "main", "release/*") */
-  pattern: string;
-  /** Prevent the branch from being deleted */
-  preventDeletion: boolean;
-  /** Prevent force-pushing to the branch */
-  preventForcePush: boolean;
-  /** Require changes to go through a pull request */
-  requirePullRequest: boolean;
-  /** Prevent direct commits/pushes to the branch */
-  preventDirectPush: boolean;
-}
 
 /**
  * Get all branch protection rules for a repository
@@ -5870,28 +5489,6 @@ export interface DiffToolConfig {
 }
 
 /**
- * Information about an available diff tool
- */
-export interface AvailableDiffTool {
-  /** Tool identifier name */
-  name: string;
-  /** Command used to launch the tool */
-  command: string;
-  /** Whether the tool is available on the system */
-  available: boolean;
-}
-
-/**
- * Result of launching a diff tool
- */
-export interface DiffToolResult {
-  /** Whether the diff tool exited successfully */
-  success: boolean;
-  /** Output or error message from the diff tool */
-  message: string;
-}
-
-/**
  * Get the current diff tool configuration
  * @param path Repository path
  * @param global Whether to read from global config instead of local
@@ -5975,30 +5572,6 @@ export interface MergeToolConfig {
   toolName: string | null;
   /** Custom command for the merge tool */
   toolCmd: string | null;
-}
-
-/**
- * Information about a known merge tool
- */
-export interface MergeToolInfo {
-  /** Tool identifier name */
-  name: string;
-  /** Human-readable display name */
-  displayName: string;
-  /** Command used to launch the tool */
-  command: string;
-  /** Whether the tool is available on the system */
-  available: boolean;
-}
-
-/**
- * Result of launching a merge tool
- */
-export interface MergeToolResult {
-  /** Whether the merge tool exited successfully */
-  success: boolean;
-  /** Output or error message from the merge tool */
-  message: string;
 }
 
 /**
@@ -6265,11 +5838,7 @@ export async function getRepositoryStats(
   );
 
   if (!result.success) {
-    // Return sensible defaults if command not available
-    return {
-      success: true,
-      data: { count: 0, loose: 0, sizeKb: 0 },
-    };
+    return result;
   }
 
   return result;
@@ -6287,11 +5856,7 @@ export async function getPackInfo(
   );
 
   if (!result.success) {
-    // Return sensible defaults if command not available
-    return {
-      success: true,
-      data: { packCount: 0, packSizeKb: 0 },
-    };
+    return result;
   }
 
   return result;

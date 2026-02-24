@@ -9,9 +9,25 @@
  */
 
 // Re-export common types and constants from integration accounts
-export type { IntegrationType, IntegrationConfig, CachedUser } from './integration-accounts.types';
-export { ACCOUNT_COLORS } from './integration-accounts.types';
-import type { IntegrationType, IntegrationConfig, CachedUser } from './integration-accounts.types';
+export type { IntegrationType, IntegrationConfig, CachedUser, IntegrationAccount } from './integration-accounts.types';
+export {
+  ACCOUNT_COLORS,
+  createEmptyGitHubAccount,
+  createEmptyGitLabAccount,
+  createEmptyAzureDevOpsAccount,
+  createEmptyBitbucketAccount,
+  INTEGRATION_TYPE_NAMES,
+} from './integration-accounts.types';
+import {
+  type IntegrationType,
+  type IntegrationConfig,
+  type CachedUser,
+  type IntegrationAccount,
+  createEmptyGitHubAccount,
+  createEmptyGitLabAccount,
+  createEmptyAzureDevOpsAccount,
+  createEmptyBitbucketAccount,
+} from './integration-accounts.types';
 
 /**
  * Current version of the unified profiles config format
@@ -32,32 +48,6 @@ export const PROFILE_COLORS = [
   '#06b6d4', // cyan
   '#f97316', // orange
 ] as const;
-
-/**
- * Global integration account (v3)
- *
- * Accounts are now global - not owned by profiles. Any account can be used
- * regardless of which profile is active. Profiles only reference accounts
- * via their defaultAccounts preferences.
- */
-export interface IntegrationAccount {
-  /** Unique identifier (UUID) */
-  id: string;
-  /** Display name (e.g., "Work GitHub", "GitHub Enterprise SSO") */
-  name: string;
-  /** Integration type */
-  integrationType: IntegrationType;
-  /** Integration-specific configuration */
-  config: IntegrationConfig;
-  /** Optional color for UI display */
-  color: string | null;
-  /** Cached user info (updated on connection check) */
-  cachedUser: CachedUser | null;
-  /** URL patterns for auto-detection (e.g., "github.com/mycompany/*") */
-  urlPatterns: string[];
-  /** Whether this is the default account for this integration type globally */
-  isDefault: boolean;
-}
 
 /**
  * @deprecated Use IntegrationAccount instead. This type is kept for migration from v2.
@@ -250,72 +240,6 @@ export function createEmptyUnifiedProfile(): Omit<UnifiedProfile, 'id'> {
 }
 
 /**
- * Create an empty GitHub account (global)
- */
-export function createEmptyGitHubAccount(): Omit<IntegrationAccount, 'id'> {
-  return {
-    name: '',
-    integrationType: 'github',
-    config: { type: 'github' },
-    color: null,
-    cachedUser: null,
-    urlPatterns: [],
-    isDefault: false,
-  };
-}
-
-/**
- * Create an empty GitLab account (global)
- */
-export function createEmptyGitLabAccount(
-  instanceUrl: string = 'https://gitlab.com'
-): Omit<IntegrationAccount, 'id'> {
-  return {
-    name: '',
-    integrationType: 'gitlab',
-    config: { type: 'gitlab', instanceUrl },
-    color: null,
-    cachedUser: null,
-    urlPatterns: [],
-    isDefault: false,
-  };
-}
-
-/**
- * Create an empty Azure DevOps account (global)
- */
-export function createEmptyAzureDevOpsAccount(
-  organization: string = ''
-): Omit<IntegrationAccount, 'id'> {
-  return {
-    name: '',
-    integrationType: 'azure-devops',
-    config: { type: 'azure-devops', organization },
-    color: null,
-    cachedUser: null,
-    urlPatterns: [],
-    isDefault: false,
-  };
-}
-
-/**
- * Create an empty Bitbucket account (global)
- */
-export function createEmptyBitbucketAccount(
-  workspace: string = ''
-): Omit<IntegrationAccount, 'id'> {
-  return {
-    name: '',
-    integrationType: 'bitbucket',
-    config: { type: 'bitbucket', workspace },
-    color: null,
-    cachedUser: null,
-    urlPatterns: [],
-    isDefault: false,
-  };
-}
-
-/**
  * Create an empty integration account of any type (global)
  * This is a generic factory that calls the type-specific factory functions
  */
@@ -491,12 +415,3 @@ export function getAccountCount(profile: UnifiedProfileV2): number {
   return profile.integrationAccounts.length;
 }
 
-/**
- * Integration type display names
- */
-export const INTEGRATION_TYPE_NAMES: Record<IntegrationType, string> = {
-  github: 'GitHub',
-  gitlab: 'GitLab',
-  'azure-devops': 'Azure DevOps',
-  bitbucket: 'Bitbucket',
-};

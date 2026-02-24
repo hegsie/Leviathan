@@ -8,230 +8,103 @@ Comprehensive code review covering broken/incomplete features, UX issues, event 
 
 These are confirmed broken behaviors where dispatched events have no listener, or event names are mismatched.
 
-### 1.1 `clean-complete` vs `files-cleaned` Event Name Mismatch
+### 1.1 ~~`clean-complete` vs `files-cleaned` Event Name Mismatch~~ RESOLVED
+
+Event names now match in the current codebase.
+
+### 1.2 ~~`show-commit` from Reflog Dialog is Unhandled~~ RESOLVED
+
+`app-shell.ts` now has `this.addEventListener('show-commit', this.handleShowCommitEvent)` which handles this via event bubbling.
+
+### 1.3 ~~`show-toast` Events from 3 Components Are Unhandled~~ RESOLVED
+
+These components now use `showToast()` from `notification.service.ts` directly.
+
+### 1.4 ~~`merge-conflict` from Branch List is Unhandled~~ RESOLVED
+
+`app-shell.ts` now has `this.addEventListener('merge-conflict', this.handleMergeConflictEvent)` which handles this via event bubbling.
+
+### 1.5 Gitflow Panel Never Rendered in UI — FIXED
 
 **Severity: BUG**
 
-The clean dialog dispatches `clean-complete` but the app-shell listens for `files-cleaned`. The post-clean repository refresh never fires.
+`lv-gitflow-panel` is a fully implemented component with gitflow init, feature/release/hotfix start/finish. `app-shell.ts` already had listeners for `gitflow-initialized` and `gitflow-operation` events, but the component was never imported or rendered anywhere — it was completely inaccessible from the UI.
 
-- `src/components/dialogs/lv-clean-dialog.ts:425` dispatches `clean-complete`
-- `src/app-shell.ts:2611` listens for `@files-cleaned`
+**Fix:** Added `lv-gitflow-panel` as a collapsible "Git Flow" section in `lv-left-panel.ts`. Events bubble up through the left panel to `app-shell` where existing handlers trigger `handleRefresh()`.
 
-**Fix:** Change one to match the other.
-
-### 1.2 `show-commit` from Reflog Dialog is Unhandled
+### 1.6 `open-repo-file` from Workspace Manager Was Unhandled — FIXED
 
 **Severity: BUG**
 
-The reflog dialog's "Show in graph" context menu action dispatches `show-commit`, but no parent component listens for it. Clicking "Show in graph" does nothing.
+The workspace manager dispatches `open-repo-file` when clicking a cross-repository search result, but no handler existed. Clicking did nothing.
 
-- `src/components/dialogs/lv-reflog-dialog.ts:461` dispatches `show-commit`
-- No listener in `src/app-shell.ts`
+**Fix:** Added `@open-repo-file` handler on the workspace manager dialog in `app-shell.ts`. The handler closes the workspace manager, opens the target repository if needed, and shows the file in the blame view.
 
-**Fix:** Add a `@show-commit` handler on the reflog dialog in app-shell that calls `this.graphCanvas?.selectCommit(e.detail.oid)`.
+### 1.7 ~~Repository Health Dialog Title Not Displayed~~ NOT A BUG
 
-### 1.3 `show-toast` Events from 3 Components Are Unhandled
+The Repository Health dialog uses `modalTitle` correctly. The `lv-modal` component properly renders the title passed via the `modalTitle` property.
 
-**Severity: BUG**
+### 1.8 ~~File History Commit Selection Doesn't Navigate Graph~~ RESOLVED
 
-Three components dispatch `show-toast` custom events that nobody listens for. Toasts from these components silently fail to display.
-
-- `src/components/panels/lv-diff-view.ts` (lines 1065, 1070, 1076)
-- `src/components/panels/lv-merge-editor.ts` (lines 547, 553, 559, 821, 827)
-- `src/components/dialogs/lv-conflict-resolution-dialog.ts` (lines 423, 428, 434)
-
-**Fix:** Replace `this.dispatchEvent(new CustomEvent('show-toast', ...))` with direct calls to `showToast()` from `notification.service.ts`, which is the pattern used everywhere else.
-
-### 1.4 `merge-conflict` from Branch List is Unhandled
-
-**Severity: BUG**
-
-When a merge results in conflicts from the branch list sidebar, `merge-conflict` is dispatched but no parent listens for it. The conflict resolution dialog won't open automatically after a merge conflict.
-
-- `src/components/sidebar/lv-branch-list.ts:1440,1504` dispatches `merge-conflict`
-- No listener in the parent hierarchy
-
-Note: `open-conflict-dialog` (for rebase conflicts) IS handled. Only the merge case is broken.
-
-**Fix:** Add a `merge-conflict` handler that opens the conflict resolution dialog, or consolidate with `open-conflict-dialog`.
-
-### 1.5 Gitflow Events Are Unhandled - No Refresh After Operations
-
-**Severity: BUG**
-
-All gitflow operations dispatch `gitflow-initialized` or `gitflow-operation` events, but nothing in the component hierarchy listens for them. After starting/finishing a feature, release, or hotfix, the graph and repository state are not refreshed.
-
-- `src/components/sidebar/lv-gitflow-panel.ts` (lines 318, 343, 371, 397, 428, 454, 485)
-- No listener in any parent component
-
-**Fix:** Handle these events in the left panel or app-shell to trigger a repository refresh.
-
-### 1.6 `open-repo-file` from Workspace Manager is Unhandled
-
-**Severity: BUG**
-
-The workspace manager dispatches `open-repo-file` when clicking a cross-repository search result, but nobody listens for it. The file cannot be opened.
-
-- `src/components/dialogs/lv-workspace-manager-dialog.ts:1191` dispatches `open-repo-file`
-- No listener anywhere
-
-### 1.7 Repository Health Dialog Title Not Displayed
-
-**Severity: BUG**
-
-The `lv-modal` component uses the `modalTitle` property (defined at `src/components/dialogs/lv-modal.ts:114`), but the app-shell passes `title` instead of `modalTitle` for the Repository Health dialog.
-
-- `src/app-shell.ts:2617` uses `title="Repository Health"`
-- Should be `modalTitle="Repository Health"`
-
-### 1.8 File History Commit Selection Doesn't Navigate Graph
-
-**Severity: BUG**
-
-When selecting a commit in the file history panel, `selectedCommit` is set directly but the graph is NOT scrolled/highlighted. Compare with the blame view which correctly calls `this.graphCanvas?.selectCommit(oid)`.
-
-- `src/app-shell.ts` `handleFileHistoryCommitSelected` sets `this.selectedCommit` but doesn't call `graphCanvas.selectCommit()`
-- `handleBlameCommitClick` correctly navigates the graph
+Already fixed — `handleFileHistoryCommitSelected` calls `graphCanvas.selectCommit()`.
 
 ---
 
-## 2. BUGS - Snake_case Tauri Parameters
+## 2. ~~BUGS - Snake_case Tauri Parameters~~ RESOLVED
 
-Per the CLAUDE.md instructions, Tauri automatically converts between Rust's `snake_case` and TypeScript's `camelCase`. These methods pass snake_case keys which won't match Rust parameter names.
-
-### 2.1 `searchCommits()` - 3 snake_case parameters
-
-**File:** `src/services/git.service.ts:335-337`
-
-```typescript
-date_from: options.dateFrom,   // Should be: dateFrom
-date_to: options.dateTo,       // Should be: dateTo
-file_path: options.filePath,   // Should be: filePath
-```
-
-### 2.2 `resolveConflict()` - 1 snake_case parameter
-
-**File:** `src/services/git.service.ts:989`
-
-```typescript
-file_path: filePath,   // Should be: filePath
-```
-
-### 2.3 `detectConflictMarkers()` - 1 snake_case parameter
-
-**File:** `src/services/git.service.ts:1007`
-
-```typescript
-file_path: filePath,   // Should be: filePath
-```
-
-### 2.4 `getConflictDetails()` - 1 snake_case parameter
-
-**File:** `src/services/git.service.ts:1024`
-
-```typescript
-file_path: filePath,   // Should be: filePath
-```
+All Tauri IPC parameters now use camelCase correctly. Tauri's automatic conversion handles the mapping to Rust's snake_case.
 
 ---
 
 ## 3. Architectural Inconsistencies
 
-### 3.1 `workflowStore` Duplicates `unifiedProfileStore`
+### 3.1 ~~`workflowStore` Duplicates `unifiedProfileStore`~~ NOT DEAD CODE
 
-**Severity: HIGH**
+`workflowStore` has 12 active references in `git.service.ts` and serves a distinct role. Not a duplicate.
 
-`src/stores/workflow.store.ts` is a near-exact duplicate of the profile management portion of `src/stores/unified-profile.store.ts`. Both manage:
-- `profiles` array, `activeProfile`, `currentRepositoryPath`, `isLoading`, error state
-- Identical CRUD actions (`addProfile`, `updateProfile`, `removeProfile`)
-- Identical helpers (`getProfileById` vs `getUnifiedProfileById`)
+### 3.2 ~~Recent Repositories Tracked in Two Stores~~ NOT APPLICABLE
 
-The `workflowStore` appears to be a legacy version that was superseded by `unifiedProfileStore` but never removed.
+`settingsStore` has no `recentRepositories` field. Only `repositoryStore` tracks recent repos.
 
-### 3.2 Recent Repositories Tracked in Two Stores
+### 3.3 ~~`IntegrationAccount` Type Defined Three Times~~ FIXED
 
-**Severity: HIGH**
+`unified-profile.types.ts` now re-exports `IntegrationAccount` from `integration-accounts.types.ts` instead of defining its own copy. Factory functions (`createEmpty*Account`), `INTEGRATION_TYPE_NAMES`, and `ACCOUNT_COLORS` are also re-exported. The inferior `getAccountDisplayLabel()` (without try/catch) was removed from `integration-accounts.types.ts`; the robust version remains in `unified-profile.types.ts`.
 
-- `src/stores/repository.store.ts`: `recentRepositories: RecentRepository[]` with `addRecentRepository(path, name)`
-- `src/stores/settings.store.ts`: `recentRepositories: string[]` with `addRecentRepository(path)`
+### 3.4 ~~`uiStore` Modal System Entirely Unused~~ NOT APPLICABLE
 
-These maintain completely independent lists persisted under different localStorage keys. Only `repositoryStore` is actively used; the `settingsStore` version is vestigial.
+No `openModal`/`closeModal` exists in the codebase. The described modal system was never implemented.
 
-### 3.3 `IntegrationAccount` Type Defined Three Times
+### 3.5 ~~Factory Functions Duplicated Across Type Files~~ FIXED
 
-**Severity: HIGH**
+Resolved as part of 3.3 — `unified-profile.types.ts` re-exports from `integration-accounts.types.ts`.
 
-The `IntegrationAccount` interface is independently defined in:
-1. `src/types/integration-accounts.types.ts` (lines 39-56)
-2. `src/types/unified-profile.types.ts` (lines 43-60)
-3. `src/types/unified-profile.types.ts` (lines 66-81 as `ProfileIntegrationAccount`)
+### 3.6 ~~Duplicate Maintenance Functions in git.service.ts~~ RESOLVED
 
-These are not re-exports -- they're independent definitions that could diverge.
+Old duplicate functions have been removed. Only `runGc()` and `runFsck()` remain.
 
-### 3.4 `uiStore` Modal System Entirely Unused
+### 3.7 ~~Two Incompatible Toast Notification Patterns~~ RESOLVED
 
-**Severity: HIGH**
+No `show-toast` custom events remain. All components use `showToast()` from `notification.service.ts`.
 
-`src/stores/ui.store.ts` defines a centralized modal system with `activeModal: ModalId`, `openModal()`, `closeModal()`. The `ModalId` type only covers 6 modals.
-
-No component calls `openModal()` or `closeModal()`. Instead, the app-shell manages 23+ individual boolean `@state()` properties for each dialog. The store's modal system is dead code.
-
-### 3.5 Factory Functions Duplicated Across Type Files
+### 3.8 Tauri IPC Wrapper Bypassed by 5 Services — MOSTLY RESOLVED
 
 **Severity: MEDIUM**
 
-`createEmpty*Account()` functions, `getAccountDisplayLabel()`, `generateAccountId()`/`generateId()`, and `INTEGRATION_TYPE_NAMES` exist in both:
-- `src/types/integration-accounts.types.ts`
-- `src/types/unified-profile.types.ts`
+~~These services use raw `invoke()` from `@tauri-apps/api/core` instead of the standardized `invokeCommand()` from `tauri-api.ts`, bypassing consistent error handling:~~
 
-Components import from different files inconsistently.
+`search-index.service.ts` migrated to `invokeCommand()`. The remaining 4 services intentionally use raw `invoke()`:
+- `watcher.service.ts` — fire-and-forget, no return value needed
+- `progress.service.ts` — fire-and-forget with intentional `.catch(() => {})`
+- `credential.service.ts` — uses Stronghold plugin ecosystem with its own error handling
+- `oauth.service.ts` — multi-step OAuth flow with specific error handling at each step
 
-### 3.6 Duplicate Maintenance Functions in git.service.ts
+### 3.9 ~~Window Events vs Component Events for Same Concept~~ FIXED
 
-**Severity: MEDIUM**
+All events now use `repository-refresh`. Child components dispatch DOM-bubbling `repository-refresh` events, and `app-shell` re-broadcasts on `window` for non-parent listeners.
 
-| Old Function | New Function | Difference |
-|---|---|---|
-| `runGarbageCollection()` (line 6350) | `runGc()` (line 6705) | New one has toast notifications |
-| `verifyRepository()` (line 6390) | `runFsck()` (line 6723) | New one has toast notifications |
+### 3.10 ~~Error Masking in git.service.ts~~ FIXED
 
-The old versions call different Tauri commands but accomplish the same thing.
-
-### 3.7 Two Incompatible Toast Notification Patterns
-
-**Severity: MEDIUM**
-
-- **Pattern A** (correct): `showToast('message', 'success')` from `notification.service.ts`
-- **Pattern B** (broken): `this.dispatchEvent(new CustomEvent('show-toast', ...))` from components
-
-Pattern B is used in 3 components (see Bug 1.3) and no parent ever handles it.
-
-### 3.8 Tauri IPC Wrapper Bypassed by 5 Services
-
-**Severity: MEDIUM**
-
-These services use raw `invoke()` from `@tauri-apps/api/core` instead of the standardized `invokeCommand()` from `tauri-api.ts`, bypassing consistent error handling:
-- `watcher.service.ts`
-- `progress.service.ts`
-- `credential.service.ts`
-- `search-index.service.ts`
-- `oauth.service.ts`
-
-### 3.9 Window Events vs Component Events for Same Concept
-
-**Severity: MEDIUM**
-
-"Repository changed, please refresh" is dispatched as both:
-- `window.dispatchEvent(new CustomEvent('repository-refresh'))` (in app-shell, commit-panel, file-status)
-- `this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }))` (in left-panel, right-panel)
-
-Different event names for the same semantic concept.
-
-### 3.10 Error Masking in git.service.ts
-
-**Severity: MEDIUM**
-
-`getRepositoryStats()` (line 6307-6316) and `getPackInfo()` (line 6329-6338) return `success: true` with zeroed data when the actual backend command fails. Callers cannot distinguish between "the repo has 0 objects" and "the command failed."
+`getRepositoryStats()` and `getPackInfo()` now propagate backend failures (`return result`) instead of masking them with `success: true` and zeroed data. The caller (`lv-repository-health-dialog.ts`) already guards with `if (result.success && result.data)`.
 
 ### 3.11 Legacy + Multi-Account Credential Dual Systems
 
@@ -243,173 +116,142 @@ Different event names for the same semantic concept.
 
 ## 4. UX Usability Issues
 
-### 4.1 Silent Error Failures (~25 instances)
+### 4.1 ~~Silent Error Failures (~25 instances)~~ RESOLVED
 
-**Severity: HIGH**
+All branch, tag, stash, file-status, and clean-dialog error paths already have `showToast` calls. The only remaining silent failure was `fetchLastCommitMessage` in `lv-commit-panel.ts`, now fixed with an error toast.
 
-Numerous operations log errors to `console.error` but show no user-visible feedback. The user performs an action and nothing visibly happens.
-
-**lv-branch-list.ts:**
-- Checkout failure (line 952)
-- Rename failure (line 996)
-- Delete failure (line 1032)
-- Merge failure (line 1073)
-- Rebase failure (line 1115)
-- Remote checkout failure (line 1481)
-
-**lv-tag-list.ts:**
-- Load tags failure (line 371)
-- Checkout tag failure (line 478)
-- Delete tag failure (line 508)
-- Push tag failure (line 557)
-
-**lv-stash-list.ts:**
-- Load stashes failure (line 190)
-- Create stash failure (line 215)
-- Apply stash failure (line 255)
-- Pop stash failure (line 277)
-- Drop stash failure (line 308)
-
-**lv-commit-panel.ts:**
-- Fetch last commit message failure (line 778)
-
-**lv-file-status.ts:**
-- Open in editor failure (line 1310)
-- Reveal in finder failure (line 1323)
-- Copy path failure (line 1334)
-
-**lv-clean-dialog.ts:**
-- Load files failure (line 359)
-- Clean failure (line 433)
-
-### 4.2 Native `confirm()`/`prompt()` Instead of Themed Dialogs (~20 instances)
+### ~~4.2 Native `confirm()`/`prompt()` Instead of Themed Dialogs (~20 instances)~~ FIXED
 
 **Severity: MEDIUM**
 
-The app has a custom `showConfirm` dialog service but many places use the browser's native `confirm()` and `prompt()`, creating a jarring UX inconsistency.
+~~The app has a custom `showConfirm` dialog service but many places use the browser's native `confirm()` and `prompt()`, creating a jarring UX inconsistency.~~
 
 **Native `confirm()` usage:**
-- `src/app-shell.ts:1230` -- Hard reset confirmation
-- `src/components/dialogs/lv-credentials-dialog.ts:479,529` -- Remove/erase credentials
-- `src/components/dialogs/lv-submodule-dialog.ts:458` -- Remove submodule
-- `src/components/dialogs/lv-ssh-dialog.ts:481` -- Delete SSH key
-- `src/components/dialogs/lv-reflog-dialog.ts:389` -- Hard reset from reflog
-- `src/components/dialogs/lv-worktree-dialog.ts:441` -- Remove worktree
-- `src/components/dialogs/lv-profile-manager-dialog.ts:658,687,810,921`
-- `src/components/dialogs/lv-hooks-dialog.ts:757,942,965`
-- `src/components/dialogs/lv-config-dialog.ts:491` -- Delete alias
-- `src/components/panels/lv-merge-editor.ts:892`
+- ~~`src/app-shell.ts:1230` -- Hard reset confirmation~~ — FIXED (migrated to `showConfirm`)
+- ~~`src/components/dialogs/lv-credentials-dialog.ts:479,529` -- Remove/erase credentials~~ — FIXED
+- ~~`src/components/dialogs/lv-submodule-dialog.ts:458` -- Remove submodule~~ — FIXED
+- ~~`src/components/dialogs/lv-ssh-dialog.ts:481` -- Delete SSH key~~ — FIXED
+- ~~`src/components/dialogs/lv-reflog-dialog.ts:389` -- Hard reset from reflog~~ — FIXED (all reset modes now confirm via `showConfirm`)
+- ~~`src/components/dialogs/lv-worktree-dialog.ts:441` -- Remove worktree~~ — FIXED
+- ~~`src/components/dialogs/lv-profile-manager-dialog.ts:658,687,810,921`~~ — FIXED
+- ~~`src/components/dialogs/lv-hooks-dialog.ts:757,942,965`~~ — FIXED
+- ~~`src/components/dialogs/lv-config-dialog.ts:491` -- Delete alias~~ — FIXED
+- ~~`src/components/panels/lv-merge-editor.ts:892`~~ — FIXED
 
 **Native `prompt()` usage:**
-- `src/components/sidebar/lv-branch-list.ts:979` -- Rename branch
-- `src/components/sidebar/lv-branch-list.ts:1190` -- Set upstream
-- `src/components/sidebar/lv-commit-panel.ts:675` -- Save template name
-- `src/components/sidebar/lv-gitflow-panel.ts:334,388,414,445,471` -- Feature/release/hotfix names
-- `src/components/toolbar/lv-search-bar.ts:331` -- Save search preset
+- ~~`src/components/sidebar/lv-branch-list.ts` -- Rename branch~~ — FIXED (migrated to `showPrompt`)
+- ~~`src/components/sidebar/lv-branch-list.ts` -- Set upstream~~ — FIXED (migrated to `showPrompt`)
+- ~~`src/components/sidebar/lv-commit-panel.ts` -- Save template name~~ — FIXED (migrated to `showPrompt`)
+- ~~`src/components/sidebar/lv-gitflow-panel.ts` -- Feature/release/hotfix names~~ — FIXED (migrated to `showPrompt`)
+- ~~`src/components/toolbar/lv-search-bar.ts` -- Save search preset~~ — FIXED (migrated to `showPrompt`)
 
-### 4.3 Missing Loading States for Async Operations (~15 instances)
+All `prompt()` calls replaced with `showPrompt()` backed by a new `lv-prompt-dialog` component.
 
-**Severity: MEDIUM**
-
-These operations have no visual loading indicator. The user clicks and waits with no feedback.
-
-**lv-branch-list.ts:**
-- `handleCheckout()` (line 925) -- no loading state
-- `handleRenameBranch()` (line 968) -- no loading state
-- `handleDeleteBranch()` (line 1000) -- no loading state
-- `handleMergeBranch()` (line 1036) -- no loading state
-- `handleRebaseBranch()` (line 1078) -- no loading state
-- `handleDeleteMergedBranches()` (line 860) -- iterates with no progress
-
-**lv-tag-list.ts:**
-- `handleCheckoutTag()` (line 455) -- no loading state
-- `handleDeleteTag()` (line 482) -- no loading state
-- `handlePushTag()` (line 539) -- no loading state
-
-**lv-file-status.ts:**
-- `handleStageFile()`, `handleUnstageFile()`, `handleDiscardFile()` -- no per-operation loading state
-
-### 4.4 Missing Confirmations for Destructive Operations
-
-**Severity: HIGH**
-
-- **Clean dialog's "Delete Selected"** (`lv-clean-dialog.ts:415`): Permanently deletes files without a final "Are you sure?" confirmation
-- **Revert commit** (`app-shell.ts:1128`): No confirmation before reverting
-- **Soft/mixed reset** (`app-shell.ts:1222-1234`): Only hard reset has confirmation; soft/mixed resets move HEAD without warning
-- **Tag checkout** (`lv-tag-list.ts:455`): No warning about entering detached HEAD state
-- **Stash apply/pop** (`lv-stash-list.ts`): No confirmation before potentially overwriting working directory changes
-
-### 4.5 Missing Disabled States / Double-Click Prevention
+### ~~4.3 Missing Loading States for Async Operations~~ FIXED
 
 **Severity: MEDIUM**
 
-Context menu actions in `lv-branch-list`, `lv-tag-list`, and `lv-stash-list` are always enabled. There's no guard to prevent double-clicking operations (e.g., merging a branch while another merge is in progress).
+~~These operations have no visual loading indicator. The user clicks and waits with no feedback.~~
 
-### 4.6 Inconsistent Notification Pattern in git.service.ts
+**lv-branch-list.ts:** — FIXED (`operationInProgress` guard + disabled context menu items)
+- ~~`handleCheckout()` -- no loading state~~
+- ~~`handleRenameBranch()` -- no loading state~~
+- ~~`handleDeleteBranch()` -- no loading state~~
+- ~~`handleMergeBranch()` -- no loading state~~
+- ~~`handleRebaseBranch()` -- no loading state~~
+- ~~`handleDeleteMergedBranches()` -- iterates with no progress~~
+
+**lv-tag-list.ts:** — FIXED (`operationInProgress` guard + disabled context menu items)
+- ~~`handleCheckoutTag()` -- no loading state~~
+- ~~`handleDeleteTag()` -- no loading state~~
+- ~~`handlePushTag()` -- no loading state~~
+
+**lv-file-status.ts:** — FIXED (`operationInProgress` guard + disabled buttons on all async handlers)
+- ~~`handleStageFile()`, `handleUnstageFile()`, `handleDiscardFile()` -- no per-operation loading state~~
+
+### 4.4 ~~Missing Confirmations for Destructive Operations~~ MOSTLY RESOLVED
+
+- ~~**Revert commit** (`app-shell.ts`): No confirmation before reverting~~ — FIXED: Now shows `showConfirm` warning dialog
+- ~~**Soft/mixed reset** (`app-shell.ts`): Only hard reset has confirmation~~ — FIXED: All reset modes now confirm via `showConfirm`; hard reset also migrated from native `confirm()` to `showConfirm()`, and a success toast was added
+- ~~**Tag checkout** (`lv-tag-list.ts`): No warning about detached HEAD state~~ — FIXED: Now warns about detached HEAD via `showConfirm`
+- **Clean dialog's "Delete Selected"** (`lv-clean-dialog.ts`): Acceptable — has visible warning banner and user clicks an explicit "Delete" button
+- **Stash apply/pop** (`lv-stash-list.ts`): Acceptable — reversible operations that don't warrant a confirmation dialog
+
+### 4.5 ~~Missing Disabled States / Double-Click Prevention~~ FIXED
 
 **Severity: MEDIUM**
 
-Network operations (fetch, pull, push) show toasts on success/failure. Equally important operations do not:
+~~Context menu actions in `lv-branch-list`, `lv-tag-list`, and `lv-stash-list` are always enabled. There's no guard to prevent double-clicking operations (e.g., merging a branch while another merge is in progress).~~
+
+All three components now have `operationInProgress` guards on async handlers, `?disabled` on context menu buttons, and drag-start prevention during operations.
+
+### 4.6 ~~Inconsistent Notification Pattern in git.service.ts~~ RESOLVED
+
+**Severity: MEDIUM**
+
+Network operations (fetch, pull, push) show toasts on success/failure. All other operations now do too:
 
 | Operation | Shows Toast? |
 |---|---|
 | fetch/pull/push | Yes |
-| merge | No |
-| rebase | No |
-| cherry-pick | No |
-| revert | No |
-| reset | No |
-| stash create/apply/pop | No |
-| tag create/delete/push | No |
-| squash commits | No |
-| drop commit | No |
+| merge | Yes (added) |
+| rebase | Yes (added) |
+| interactive rebase | Yes (added) |
+| cherry-pick | Yes |
+| revert | Yes |
+| reset | Yes (added) |
+| stash create/apply/pop/drop | Yes (added) |
+| tag create/delete/push | Yes (added) |
+| squash commits | Yes |
 
-### 4.7 Keyboard Accessibility Gaps
+### 4.7 ~~Keyboard Accessibility Gaps~~ FIXED
 
 **Severity: MEDIUM**
 
-- Only 14 `aria-label` attributes across the entire component directory
-- Only 3 `role` attributes across the entire codebase
-- `lv-stash-list`, `lv-tag-list`: Clickable items with no keyboard handlers (no tabindex, no keydown)
-- Context menus: Mouse-only interaction (no keyboard trapping, arrow key navigation, or Escape handling)
-- Tab close button in toolbar: `<span class="tab-close">` with `@click` but no keyboard handler, no button role
+~~`lv-stash-list`, `lv-tag-list`: Clickable items with no keyboard handlers (no tabindex, no keydown)~~
+~~Context menus: Mouse-only interaction (no keyboard trapping, arrow key navigation, or Escape handling)~~
+~~Tab close button in toolbar: `<span class="tab-close">` with `@click` but no keyboard handler, no button role~~
+
+**Fixed:**
+- `lv-stash-list`, `lv-tag-list`, `lv-branch-list`: All list items now have `tabindex="0"`, `role="option"`, `aria-label`, and `@keydown` handlers (Enter/Space)
+- All context menus now have `role="menu"`, `role="menuitem"` on items, `role="separator"` on dividers, and Escape key handler
+- All collapsible group headers now have `tabindex="0"`, `role="button"`, `aria-expanded`, and keyboard support
+- List containers have `role="listbox"` with `aria-label`
+- Branch items have `aria-selected` for current branch
+- Toolbar tabs converted from nested `<button>/<span>` (invalid HTML) to `<div role="tab">/<button>` with proper `aria-selected`, `aria-label`, keyboard support, and `:focus-visible` styling on the close button
 
 ---
 
 ## 5. Incomplete Features
 
-### 5.1 `uiStore.globalLoading` Never Used
+### 5.1 ~~`uiStore.globalLoading` Never Used~~ NOT APPLICABLE
+
+`uiStore` does not have `globalLoading` — the described feature was never implemented.
+
+### 5.2 ~~Potentially Unused Functions in git.service.ts~~ FIXED
 
 **Severity: LOW**
 
-`src/stores/ui.store.ts` defines `globalLoading` and `setGlobalLoading()`, but no component or service ever calls `setGlobalLoading()`. This was presumably intended as a centralized loading state but was never wired up.
+Removed unused functions that had no production callers:
+- `getCommitSignature()` (singular) — superseded by `getCommitsSignatures()` (batch with caching)
+- `getRepoStats()` — superseded by `getRepoStatistics()` (enhanced version)
+- `getContributorStats()` — superseded by `getRepoStatistics()` (enhanced version)
 
-### 5.2 Potentially Unused Functions in git.service.ts
+The associated old stat types (`ContributorStats`, `MonthActivity`, `DayOfWeekActivity`, `HourActivity`, `RepoStats`) were also removed as they were only used by these dead functions. Test file updated to only test `getRepoStatistics()`.
 
-**Severity: LOW**
+`runGarbageCollection()`, `verifyRepository()`, `getRepoSizeInfo()` had already been removed.
 
-These functions are defined but appear only in the service definition and/or test files, never called from production components:
-
-| Function | Line |
-|---|---|
-| `getCommitSignature()` (singular) | 2029 |
-| `runGarbageCollection()` | 6350 |
-| `verifyRepository()` | 6390 |
-| `getRepoSizeInfo()` | 6408 |
-| `getRepoStats()` | 4966 |
-| `getContributorStats()` | 4976 |
-
-### 5.3 Cache Usage Inconsistency
+### 5.3 ~~Cache Usage Inconsistency~~ FIXED
 
 **Severity: LOW**
 
-`getCommitsSignatures()` (batch, line 2039) uses caching, but `getCommitSignature()` (singular, line 2029) does not. A call to the singular version bypasses the cache entirely.
+Resolved by removing `getCommitSignature()` (singular). Only `getCommitsSignatures()` (batch with caching) remains.
 
-### 5.4 Progress Service Race Condition
+### 5.4 ~~Progress Service Race Condition~~ FIXED
 
 **Severity: LOW**
 
-`src/services/progress.service.ts`: `setupListeners()` is called without `await` in the constructor. Event listeners may not be ready for operations that start very quickly after initialization.
+`ProgressService` now exposes a `ready: Promise<void>` property that resolves when backend event listeners are initialized. Callers can `await progressService.ready` if they need to ensure listeners are active before proceeding.
 
 ---
 
@@ -475,37 +317,39 @@ Only 7 integration tests exist in `src-tauri/tests/`. Missing tests for:
 
 ## 8. Summary: Prioritized Action Items
 
-### Critical (Functionality Broken)
-1. Fix `clean-complete` / `files-cleaned` event name mismatch
-2. Fix 4 snake_case Tauri parameter bugs in `git.service.ts`
-3. Wire up `merge-conflict` event from branch list to open conflict dialog
-4. Wire up `gitflow-initialized`/`gitflow-operation` events to trigger refresh
-5. Fix `show-toast` events (replace with direct `showToast()` calls)
-6. Wire up `show-commit` from reflog dialog to navigate graph
-7. Fix Repository Health dialog `title` -> `modalTitle`
+### Critical (Functionality Broken) — ALL RESOLVED
+1. ~~Fix `clean-complete` / `files-cleaned` event name mismatch~~ — already fixed
+2. ~~Fix 4 snake_case Tauri parameter bugs~~ — already uses camelCase
+3. ~~Wire up `merge-conflict` event~~ — already handled in app-shell
+4. ~~Wire up gitflow events~~ — events were handled but panel was never rendered; now rendered in left panel
+5. ~~Fix `show-toast` events~~ — already uses `showToast()` directly
+6. ~~Wire up `show-commit` from reflog~~ — already handled in app-shell
+7. ~~Fix Repository Health dialog title~~ — was not a bug; uses `modalTitle` correctly
+- **NEW:** Wire up `lv-gitflow-panel` in left panel sidebar — FIXED
+- **NEW:** Handle `open-repo-file` from workspace manager — FIXED
 
 ### High Priority (Data Integrity / UX)
-8. Add user-visible error feedback to ~25 silent-failure operations
-9. Add confirmation dialogs for destructive operations (clean, revert, soft/mixed reset)
-10. Remove or consolidate `workflowStore` with `unifiedProfileStore`
-11. Remove duplicate `recentRepositories` from `settingsStore`
-12. Consolidate triplicate `IntegrationAccount` type definitions
+8. ~~Add user-visible error feedback to ~25 silent-failure operations~~ — RESOLVED (all error paths now have `showToast` calls)
+9. ~~Add confirmation dialogs for destructive operations (clean, revert, soft/mixed reset)~~ — FIXED (revert, all reset modes, tag checkout detached HEAD warning; clean dialog and stash apply/pop acceptable as-is)
+10. ~~Remove or consolidate `workflowStore` with `unifiedProfileStore`~~ — not a duplicate
+11. ~~Remove duplicate `recentRepositories` from `settingsStore`~~ — never existed
+12. ~~Consolidate triplicate `IntegrationAccount` type definitions~~ — FIXED
 
 ### Medium Priority (Quality / Consistency)
-13. Replace ~20 native `confirm()`/`prompt()` calls with themed dialogs
-14. Add loading states to async operations in branch/tag/stash lists
-15. Add disabled states to prevent double-clicking operations
-16. Consolidate duplicate maintenance functions in git.service.ts
-17. Standardize Tauri IPC usage (use `invokeCommand` everywhere)
-18. Consolidate window events vs component events for refresh
-19. Remove unused `uiStore` modal system
-20. Add missing notification toasts for merge/rebase/cherry-pick/stash operations
+13. ~~Replace ~20 native `confirm()`/`prompt()` calls with themed dialogs~~ — FIXED (all `confirm()` replaced with `showConfirm()`; all `prompt()` replaced with `showPrompt()` + `lv-prompt-dialog`)
+14. ~~Add loading states to async operations in branch/tag/stash/file-status lists~~ — FIXED (all components have `operationInProgress` guards)
+15. ~~Add disabled states to prevent double-clicking operations~~ — FIXED
+16. ~~Consolidate duplicate maintenance functions in git.service.ts~~ — already resolved
+17. ~~Standardize Tauri IPC usage (use `invokeCommand` everywhere)~~ — MOSTLY RESOLVED (`search-index.service.ts` migrated; 4 others intentionally use raw `invoke()`)
+18. ~~Consolidate window events vs component events for refresh~~ — FIXED
+19. ~~Remove unused `uiStore` modal system~~ — never existed
+20. ~~Add missing notification toasts for merge/rebase/cherry-pick/stash operations~~ — RESOLVED (all operations now show success/error toasts)
 
 ### Low Priority (Polish / Maintenance)
-21. Improve keyboard accessibility (aria-labels, tab navigation, context menu keyboard support)
-22. Add cache consistency for `getCommitSignature()` singular
-23. Fix error masking in `getRepositoryStats()` and `getPackInfo()`
+21. ~~Improve keyboard accessibility (aria-labels, tab navigation, context menu keyboard support)~~ — FIXED (sidebar lists, context menus, group headers, toolbar tabs all have ARIA + keyboard support)
+22. ~~Add cache consistency for `getCommitSignature()` singular~~ — FIXED (removed singular function; only batch with caching remains)
+23. ~~Fix error masking in `getRepositoryStats()` and `getPackInfo()`~~ — FIXED
 24. Increase component unit test coverage (currently 21%)
 25. Increase utility test coverage (currently 20%)
-26. Remove unused functions from git.service.ts
-27. Move inline types from git.service.ts to proper type files
+26. ~~Remove unused functions from git.service.ts~~ — FIXED (removed `getCommitSignature`, `getRepoStats`, `getContributorStats` and their associated dead types)
+27. ~~Move inline types from git.service.ts to proper type files~~ — FIXED (50+ types moved to `git.types.ts`; stale `Submodule`/`SubmoduleStatus` in `git.types.ts` corrected; re-exports maintain backward compat)

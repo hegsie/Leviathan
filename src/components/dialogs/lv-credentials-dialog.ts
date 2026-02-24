@@ -8,6 +8,7 @@ import type {
   CredentialTestResult,
 } from '../../services/git.service.ts';
 import type { Remote } from '../../types/git.types.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import './lv-modal.ts';
 
 type TabId = 'helpers' | 'test';
@@ -476,7 +477,7 @@ export class LvCredentialsDialog extends LitElement {
   }
 
   private async handleRemoveHelper(helper: CredentialHelper): Promise<void> {
-    const confirmed = confirm(`Remove credential helper "${helper.name}"?`);
+    const confirmed = await showConfirm('Remove Credential Helper', `Remove credential helper "${helper.name}"?`, 'warning');
     if (!confirmed) return;
 
     this.error = null;
@@ -526,9 +527,7 @@ export class LvCredentialsDialog extends LitElement {
   private async handleEraseCredentials(): Promise<void> {
     if (!this.testResult) return;
 
-    const confirmed = confirm(
-      `Erase stored credentials for ${this.testResult.host}?\n\nYou will need to re-authenticate on your next push/pull.`
-    );
+    const confirmed = await showConfirm('Erase Credentials', `Erase stored credentials for ${this.testResult.host}?\n\nYou will need to re-authenticate on your next push/pull.`, 'warning');
     if (!confirmed) return;
 
     this.error = null;

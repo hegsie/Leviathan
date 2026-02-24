@@ -138,3 +138,30 @@ export async function showAsk(
 ): Promise<boolean> {
   return await ask(messageText, { title, kind });
 }
+
+/**
+ * Options for the themed prompt dialog
+ */
+export interface PromptOptions {
+  title: string;
+  message: string;
+  defaultValue?: string;
+  placeholder?: string;
+  confirmLabel?: string;  // default 'OK'
+  cancelLabel?: string;   // default 'Cancel'
+}
+
+/**
+ * Show a themed prompt dialog (replacement for native prompt())
+ * Returns the entered string on confirm, or null on cancel/escape.
+ */
+let promptDialogInstance: import('../components/dialogs/lv-prompt-dialog.ts').LvPromptDialog | null = null;
+
+export async function showPrompt(options: PromptOptions): Promise<string | null> {
+  if (!promptDialogInstance) {
+    await import('../components/dialogs/lv-prompt-dialog.ts');
+    promptDialogInstance = document.createElement('lv-prompt-dialog') as import('../components/dialogs/lv-prompt-dialog.ts').LvPromptDialog;
+    document.body.appendChild(promptDialogInstance);
+  }
+  return promptDialogInstance.open(options);
+}

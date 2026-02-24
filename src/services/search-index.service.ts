@@ -3,7 +3,7 @@
  * Provides fast commit searching via a Rust-side background index
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from './tauri-api.ts';
 import { searchResultCache, createCacheKey } from './cache.service.ts';
 
 export interface IndexedCommit {
@@ -39,10 +39,15 @@ class SearchIndexService {
     this.building = true;
 
     try {
-      const count = await invoke<number>('build_search_index', { path: repoPath });
-      this.indexReady = true;
-      this.currentRepoPath = repoPath;
-      console.log(`[SearchIndex] Built index with ${count} commits`);
+      const result = await invokeCommand<number>('build_search_index', { path: repoPath });
+      if (result.success) {
+        this.indexReady = true;
+        this.currentRepoPath = repoPath;
+        console.log(`[SearchIndex] Built index with ${result.data} commits`);
+      } else {
+        console.warn('[SearchIndex] Failed to build index:', result.error?.message);
+        this.indexReady = false;
+      }
     } catch (err) {
       console.warn('[SearchIndex] Failed to build index:', err);
       this.indexReady = false;
@@ -64,7 +69,7 @@ class SearchIndexService {
     if (!this.indexReady) return null;
 
     try {
-      const results = await invoke<IndexedCommit[]>('search_index', {
+      const result = await invokeCommand<IndexedCommit[]>('search_index', {
         query: options.query || null,
         author: options.author || null,
         dateFrom: options.dateFrom || null,
@@ -72,8 +77,11 @@ class SearchIndexService {
         limit: options.limit || null,
       });
 
-      searchResultCache.set(cacheKey, results);
-      return results;
+      if (result.success && result.data) {
+        searchResultCache.set(cacheKey, result.data);
+        return result.data;
+      }
+      return null;
     } catch {
       return null;
     }
@@ -86,9 +94,13 @@ class SearchIndexService {
     if (!this.indexReady) return;
 
     try {
-      await invoke<number>('refresh_search_index', { path: repoPath });
-      // Invalidate search cache since results may have changed
-      searchResultCache.clear();
+      const result = await invokeCommand<number>('refresh_search_index', { path: repoPath });
+      if (result.success) {
+        // Invalidate search cache since results may have changed
+        searchResultCache.clear();
+      } else {
+        console.warn('[SearchIndex] Failed to refresh index:', result.error?.message);
+      }
     } catch (err) {
       console.warn('[SearchIndex] Failed to refresh index:', err);
     }

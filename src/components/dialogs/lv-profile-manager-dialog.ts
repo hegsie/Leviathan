@@ -12,6 +12,7 @@ import * as unifiedProfileService from '../../services/unified-profile.service.t
 import type { UnifiedProfile, IntegrationAccount, IntegrationType, IntegrationConfig, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
 import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 
 type ViewMode = 'list' | 'edit' | 'create' | 'add-account' | 'edit-account' | 'assign-repos';
 
@@ -655,7 +656,8 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private async handleRestoreBackup(): Promise<void> {
-    if (!confirm('Are you sure you want to restore from backup? This will remove your current unified profiles and restore the pre-migration data. You will need to run migration again.')) {
+    const confirmed = await showConfirm('Restore Backup', 'Are you sure you want to restore from backup? This will remove your current unified profiles and restore the pre-migration data. You will need to run migration again.', 'warning');
+    if (!confirmed) {
       return;
     }
     this.isRestoringBackup = true;
@@ -684,7 +686,8 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private async handleDeleteBackup(): Promise<void> {
-    if (!confirm('Are you sure you want to delete the migration backup? This action cannot be undone.')) {
+    const confirmed = await showConfirm('Delete Backup', 'Are you sure you want to delete the migration backup? This action cannot be undone.', 'warning');
+    if (!confirmed) {
       return;
     }
     try {
@@ -807,7 +810,8 @@ export class LvProfileManagerDialog extends LitElement {
 
   private async handleDelete(profile: UnifiedProfile, e: Event): Promise<void> {
     e.stopPropagation();
-    if (!confirm(`Delete profile "${profile.name}"? This will also remove all associated integration accounts.`)) {
+    const confirmed = await showConfirm('Delete Profile', `Delete profile "${profile.name}"? This will also remove all associated integration accounts.`, 'warning');
+    if (!confirmed) {
       return;
     }
 
@@ -918,7 +922,8 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private async handleRemoveAccount(accountId: string): Promise<void> {
-    if (!confirm('Remove this account? This will delete the account for all profiles.')) return;
+    const confirmed = await showConfirm('Remove Account', 'Remove this account? This will delete the account for all profiles.', 'warning');
+    if (!confirmed) return;
 
     try {
       await unifiedProfileService.deleteGlobalAccount(accountId);

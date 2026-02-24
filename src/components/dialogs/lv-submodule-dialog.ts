@@ -8,6 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { Submodule } from '../../services/git.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 
 type DialogMode = 'list' | 'add';
 
@@ -455,9 +456,7 @@ export class LvSubmoduleDialog extends LitElement {
   }
 
   private async handleRemove(submodule: Submodule): Promise<void> {
-    const confirmed = confirm(
-      `Are you sure you want to remove the submodule "${submodule.name}"?\n\nThis will remove the submodule from your repository.`
-    );
+    const confirmed = await showConfirm('Remove Submodule', `Are you sure you want to remove the submodule "${submodule.name}"?\n\nThis will remove the submodule from your repository.`, 'warning');
 
     if (!confirmed) return;
 

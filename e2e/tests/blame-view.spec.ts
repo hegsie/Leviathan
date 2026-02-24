@@ -228,9 +228,9 @@ test.describe('Blame View - Error Scenarios', () => {
     await page.locator('lv-blame-view').waitFor({ state: 'attached', timeout: 5000 });
 
     // The error should be displayed — either an error element in the blame view or a toast
-    await expect(
-      page.locator('.error, .error-banner, .toast, lv-blame-view .error-message').first()
-    ).toBeVisible({ timeout: 5000 });
+    const errorElement = page.locator('.error, .error-banner, .toast, lv-blame-view .error-message').first();
+    await expect(errorElement).toBeVisible({ timeout: 5000 });
+    await expect(errorElement).toContainText('Failed to get blame');
   });
 
   test('empty blame data should show empty state', async ({ page }) => {
