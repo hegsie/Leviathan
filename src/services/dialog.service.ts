@@ -157,7 +157,16 @@ export interface PromptOptions {
  */
 let promptDialogInstance: import('../components/dialogs/lv-prompt-dialog.ts').LvPromptDialog | null = null;
 
+type PromptOverride = ((options: PromptOptions) => Promise<string | null>) | null;
+let _testPromptOverride: PromptOverride = null;
+
+/** Set an override for showPrompt (for testing). Pass null to clear. */
+export function _setTestPromptOverride(fn: PromptOverride): void {
+  _testPromptOverride = fn;
+}
+
 export async function showPrompt(options: PromptOptions): Promise<string | null> {
+  if (_testPromptOverride) return _testPromptOverride(options);
   if (!promptDialogInstance) {
     await import('../components/dialogs/lv-prompt-dialog.ts');
     promptDialogInstance = document.createElement('lv-prompt-dialog') as import('../components/dialogs/lv-prompt-dialog.ts').LvPromptDialog;

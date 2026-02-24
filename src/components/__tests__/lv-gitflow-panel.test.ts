@@ -31,6 +31,7 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvGitflowPanel } from '../sidebar/lv-gitflow-panel.ts';
 import type { Branch } from '../../types/git.types.ts';
+import { _setTestPromptOverride } from '../../services/dialog.service.ts';
 
 // Import the actual component — registers <lv-gitflow-panel> custom element
 import '../sidebar/lv-gitflow-panel.ts';
@@ -352,8 +353,7 @@ describe('lv-gitflow-panel', () => {
       const el = await renderPanel();
       clearHistory();
 
-      const originalPrompt = globalThis.prompt;
-      globalThis.prompt = () => 'my-feature';
+      _setTestPromptOverride(async () => 'my-feature');
 
       try {
         const actionBtns = el.shadowRoot!.querySelectorAll('.action-btn');
@@ -367,7 +367,7 @@ describe('lv-gitflow-panel', () => {
         expect((calls[0].args as Record<string, unknown>).path).to.equal(REPO_PATH);
         expect((calls[0].args as Record<string, unknown>).name).to.equal('my-feature');
       } finally {
-        globalThis.prompt = originalPrompt;
+        _setTestPromptOverride(null);
       }
     });
 
@@ -376,8 +376,7 @@ describe('lv-gitflow-panel', () => {
       const el = await renderPanel();
       clearHistory();
 
-      const originalPrompt = globalThis.prompt;
-      globalThis.prompt = () => '2.0.0';
+      _setTestPromptOverride(async () => '2.0.0');
 
       try {
         const actionBtns = el.shadowRoot!.querySelectorAll('.action-btn');
@@ -391,7 +390,7 @@ describe('lv-gitflow-panel', () => {
         expect((calls[0].args as Record<string, unknown>).path).to.equal(REPO_PATH);
         expect((calls[0].args as Record<string, unknown>).version).to.equal('2.0.0');
       } finally {
-        globalThis.prompt = originalPrompt;
+        _setTestPromptOverride(null);
       }
     });
 
@@ -400,8 +399,7 @@ describe('lv-gitflow-panel', () => {
       const el = await renderPanel();
       clearHistory();
 
-      const originalPrompt = globalThis.prompt;
-      globalThis.prompt = () => '1.0.2';
+      _setTestPromptOverride(async () => '1.0.2');
 
       try {
         const actionBtns = el.shadowRoot!.querySelectorAll('.action-btn');
@@ -415,7 +413,7 @@ describe('lv-gitflow-panel', () => {
         expect((calls[0].args as Record<string, unknown>).path).to.equal(REPO_PATH);
         expect((calls[0].args as Record<string, unknown>).version).to.equal('1.0.2');
       } finally {
-        globalThis.prompt = originalPrompt;
+        _setTestPromptOverride(null);
       }
     });
 
@@ -424,8 +422,7 @@ describe('lv-gitflow-panel', () => {
       const el = await renderPanel();
       clearHistory();
 
-      const originalPrompt = globalThis.prompt;
-      globalThis.prompt = () => null;
+      _setTestPromptOverride(async () => null);
 
       try {
         const actionBtns = el.shadowRoot!.querySelectorAll('.action-btn');
@@ -436,7 +433,7 @@ describe('lv-gitflow-panel', () => {
 
         expect(findCommands('gitflow_start_feature').length).to.equal(0);
       } finally {
-        globalThis.prompt = originalPrompt;
+        _setTestPromptOverride(null);
       }
     });
 
@@ -444,8 +441,7 @@ describe('lv-gitflow-panel', () => {
       setupMocks({ branches: emptyBranches });
       const el = await renderPanel();
 
-      const originalPrompt = globalThis.prompt;
-      globalThis.prompt = () => 'new-feat';
+      _setTestPromptOverride(async () => 'new-feat');
 
       let eventDetail: unknown = null;
       el.addEventListener('gitflow-operation', ((e: CustomEvent) => {
@@ -461,7 +457,7 @@ describe('lv-gitflow-panel', () => {
 
         expect(eventDetail).to.deep.equal({ type: 'start-feature', name: 'new-feat' });
       } finally {
-        globalThis.prompt = originalPrompt;
+        _setTestPromptOverride(null);
       }
     });
   });
@@ -495,8 +491,7 @@ describe('lv-gitflow-panel', () => {
       const el = await renderPanel();
       clearHistory();
 
-      const originalPrompt = globalThis.prompt;
-      globalThis.prompt = () => 'Release 1.0.0';
+      _setTestPromptOverride(async () => 'Release 1.0.0');
 
       try {
         const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
@@ -513,7 +508,7 @@ describe('lv-gitflow-panel', () => {
         expect(args.path).to.equal(REPO_PATH);
         expect(args.version).to.equal('1.0.0');
       } finally {
-        globalThis.prompt = originalPrompt;
+        _setTestPromptOverride(null);
       }
     });
 
@@ -522,8 +517,7 @@ describe('lv-gitflow-panel', () => {
       const el = await renderPanel();
       clearHistory();
 
-      const originalPrompt = globalThis.prompt;
-      globalThis.prompt = () => 'Hotfix 1.0.1';
+      _setTestPromptOverride(async () => 'Hotfix 1.0.1');
 
       try {
         const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
@@ -540,7 +534,7 @@ describe('lv-gitflow-panel', () => {
         expect(args.path).to.equal(REPO_PATH);
         expect(args.version).to.equal('1.0.1');
       } finally {
-        globalThis.prompt = originalPrompt;
+        _setTestPromptOverride(null);
       }
     });
 
@@ -567,8 +561,7 @@ describe('lv-gitflow-panel', () => {
       const el = await renderPanel();
       clearHistory();
 
-      const originalPrompt = globalThis.prompt;
-      globalThis.prompt = () => null;
+      _setTestPromptOverride(async () => null);
 
       try {
         const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
@@ -579,7 +572,7 @@ describe('lv-gitflow-panel', () => {
 
         expect(findCommands('gitflow_finish_release').length).to.equal(0);
       } finally {
-        globalThis.prompt = originalPrompt;
+        _setTestPromptOverride(null);
       }
     });
   });
@@ -646,8 +639,7 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      const originalPrompt = globalThis.prompt;
-      globalThis.prompt = () => 'duplicate';
+      _setTestPromptOverride(async () => 'duplicate');
 
       try {
         const actionBtns = el.shadowRoot!.querySelectorAll('.action-btn');
@@ -660,7 +652,7 @@ describe('lv-gitflow-panel', () => {
         expect(errorEl).to.not.be.null;
         expect(errorEl!.textContent).to.include('Branch already exists');
       } finally {
-        globalThis.prompt = originalPrompt;
+        _setTestPromptOverride(null);
       }
     });
 
