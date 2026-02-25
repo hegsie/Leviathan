@@ -111,8 +111,13 @@ export class LvStashList extends LitElement {
         cursor: pointer;
       }
 
-      .context-menu-item:hover {
+      .context-menu-item:hover:not(:disabled) {
         background: var(--color-bg-hover);
+      }
+
+      .context-menu-item:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
       }
 
       .context-menu-item.danger {
@@ -142,6 +147,7 @@ export class LvStashList extends LitElement {
   @state() private stashes: Stash[] = [];
   @state() private loading = true;
   @state() private isStashing = false;
+  @state() private operationInProgress = false;
   @state() private contextMenu: ContextMenuState = { visible: false, x: 0, y: 0, stash: null };
 
   async connectedCallback(): Promise<void> {
@@ -239,54 +245,64 @@ export class LvStashList extends LitElement {
 
   private async handleApplyStash(): Promise<void> {
     const stash = this.contextMenu.stash;
-    if (!stash) return;
+    if (!stash || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
+    this.operationInProgress = true;
 
-    const result = await gitService.applyStash({
-      path: this.repositoryPath,
-      index: stash.index,
-      dropAfter: false,
-    });
+    try {
+      const result = await gitService.applyStash({
+        path: this.repositoryPath,
+        index: stash.index,
+        dropAfter: false,
+      });
 
-    if (result.success) {
-      await this.loadStashes();
-      this.dispatchEvent(new CustomEvent('stash-applied', {
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      console.error('Failed to apply stash:', result.error);
-      showToast(result.error?.message ?? 'Failed to apply stash', 'error');
+      if (result.success) {
+        await this.loadStashes();
+        this.dispatchEvent(new CustomEvent('stash-applied', {
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Failed to apply stash:', result.error);
+        showToast(result.error?.message ?? 'Failed to apply stash', 'error');
+      }
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
   private async handlePopStash(): Promise<void> {
     const stash = this.contextMenu.stash;
-    if (!stash) return;
+    if (!stash || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
+    this.operationInProgress = true;
 
-    const result = await gitService.popStash({
-      path: this.repositoryPath,
-      index: stash.index,
-    });
+    try {
+      const result = await gitService.popStash({
+        path: this.repositoryPath,
+        index: stash.index,
+      });
 
-    if (result.success) {
-      await this.loadStashes();
-      this.dispatchEvent(new CustomEvent('stash-applied', {
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      console.error('Failed to pop stash:', result.error);
-      showToast(result.error?.message ?? 'Failed to pop stash', 'error');
+      if (result.success) {
+        await this.loadStashes();
+        this.dispatchEvent(new CustomEvent('stash-applied', {
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Failed to pop stash:', result.error);
+        showToast(result.error?.message ?? 'Failed to pop stash', 'error');
+      }
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
   private async handleDropStash(): Promise<void> {
     const stash = this.contextMenu.stash;
-    if (!stash) return;
+    if (!stash || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -298,21 +314,27 @@ export class LvStashList extends LitElement {
 
     if (!confirmed) return;
 
-    const result = await gitService.dropStash({
-      path: this.repositoryPath,
-      index: stash.index,
-    });
+    this.operationInProgress = true;
 
-    if (result.success) {
-      await this.loadStashes();
-      this.dispatchEvent(new CustomEvent('stash-dropped', {
-        detail: { stash },
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      console.error('Failed to drop stash:', result.error);
-      showToast(result.error?.message ?? 'Failed to drop stash', 'error');
+    try {
+      const result = await gitService.dropStash({
+        path: this.repositoryPath,
+        index: stash.index,
+      });
+
+      if (result.success) {
+        await this.loadStashes();
+        this.dispatchEvent(new CustomEvent('stash-dropped', {
+          detail: { stash },
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Failed to drop stash:', result.error);
+        showToast(result.error?.message ?? 'Failed to drop stash', 'error');
+      }
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
@@ -325,13 +347,13 @@ export class LvStashList extends LitElement {
         style="left: ${this.contextMenu.x}px; top: ${this.contextMenu.y}px;"
         @click=${(e: Event) => e.stopPropagation()}
       >
-        <button class="context-menu-item" @click=${this.handleApplyStash}>
+        <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handleApplyStash}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="20 6 9 17 4 12"></polyline>
           </svg>
           Apply
         </button>
-        <button class="context-menu-item" @click=${this.handlePopStash}>
+        <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handlePopStash}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 3v18"></path>
             <path d="M5 8l7-7 7 7"></path>
@@ -339,7 +361,7 @@ export class LvStashList extends LitElement {
           Pop
         </button>
         <div class="context-menu-divider"></div>
-        <button class="context-menu-item danger" @click=${this.handleDropStash}>
+        <button class="context-menu-item danger" ?disabled=${this.operationInProgress} @click=${this.handleDropStash}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="3 6 5 6 21 6"></polyline>
             <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>

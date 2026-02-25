@@ -2160,6 +2160,35 @@ export class AppShell extends LitElement {
     await gitService.openInConfiguredEditor(this.activeRepository.repository.path, e.detail.path);
   }
 
+  private async handleWorkspaceOpenRepoFile(e: CustomEvent<{ repoPath: string; filePath: string; lineNumber: number }>): Promise<void> {
+    const { repoPath, filePath, lineNumber } = e.detail;
+
+    // Close the workspace manager
+    this.showWorkspaceManager = false;
+
+    try {
+      const currentRepoPath = this.activeRepository?.repository.path;
+
+      if (repoPath !== currentRepoPath) {
+        // Open the different repository
+        const result = await gitService.openRepository({ path: repoPath });
+        if (result.success && result.data) {
+          repositoryStore.getState().addRepository(result.data);
+        } else {
+          showToast(result.error?.message ?? 'Failed to open repository', 'error');
+          return;
+        }
+      }
+
+      // Show blame view for the file
+      this.blameFile = filePath;
+      this.blameCommitOid = null;
+      this.showBlame = true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Failed to open repository', 'error');
+    }
+  }
+
   private handleNavigateToCommit(e: CustomEvent<{ oid: string }>): void {
     this.graphCanvas?.selectCommit(e.detail.oid);
   }
@@ -2778,6 +2807,7 @@ export class AppShell extends LitElement {
       <lv-workspace-manager-dialog
         ?open=${this.showWorkspaceManager}
         @close=${() => { this.showWorkspaceManager = false; }}
+        @open-repo-file=${this.handleWorkspaceOpenRepoFile}
       ></lv-workspace-manager-dialog>
 
       ${this.activeRepository ? html`

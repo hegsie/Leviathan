@@ -8,8 +8,8 @@ export default defineConfig({
   outputDir: path.join(e2eDir, 'test-results'),
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  retries: process.env.CI ? 1 : 0,
+  workers: process.env.CI ? 4 : undefined,
   reporter: process.env.CI
     ? [['github'], ['html', { outputFolder: path.join(e2eDir, 'playwright-report'), open: 'never' }]]
     : [['html', { outputFolder: path.join(e2eDir, 'playwright-report') }]],
