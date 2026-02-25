@@ -188,6 +188,24 @@ export function getOrganization(account: IntegrationAccount): string | null {
 }
 
 /**
+ * Get display label for an account (name + context info)
+ */
+export function getAccountDisplayLabel(account: IntegrationAccount): string {
+  const parts = [account.name];
+
+  if (account.config.type === 'gitlab' && account.config.instanceUrl) {
+    const url = new URL(account.config.instanceUrl);
+    if (url.hostname !== 'gitlab.com') {
+      parts.push(`(${url.hostname})`);
+    }
+  } else if (account.config.type === 'azure-devops' && account.config.organization) {
+    parts.push(`(${account.config.organization})`);
+  }
+
+  return parts.join(' ');
+}
+
+/**
  * Generate a UUID v4 for account IDs
  */
 export function generateAccountId(): string {

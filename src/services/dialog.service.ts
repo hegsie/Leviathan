@@ -138,39 +138,3 @@ export async function showAsk(
 ): Promise<boolean> {
   return await ask(messageText, { title, kind });
 }
-
-/**
- * Options for the themed prompt dialog
- */
-export interface PromptOptions {
-  title: string;
-  message: string;
-  defaultValue?: string;
-  placeholder?: string;
-  confirmLabel?: string;  // default 'OK'
-  cancelLabel?: string;   // default 'Cancel'
-}
-
-/**
- * Show a themed prompt dialog (replacement for native prompt())
- * Returns the entered string on confirm, or null on cancel/escape.
- */
-let promptDialogInstance: import('../components/dialogs/lv-prompt-dialog.ts').LvPromptDialog | null = null;
-
-type PromptOverride = ((options: PromptOptions) => Promise<string | null>) | null;
-let _testPromptOverride: PromptOverride = null;
-
-/** Set an override for showPrompt (for testing). Pass null to clear. */
-export function _setTestPromptOverride(fn: PromptOverride): void {
-  _testPromptOverride = fn;
-}
-
-export async function showPrompt(options: PromptOptions): Promise<string | null> {
-  if (_testPromptOverride) return _testPromptOverride(options);
-  if (!promptDialogInstance) {
-    await import('../components/dialogs/lv-prompt-dialog.ts');
-    promptDialogInstance = document.createElement('lv-prompt-dialog') as import('../components/dialogs/lv-prompt-dialog.ts').LvPromptDialog;
-    document.body.appendChild(promptDialogInstance);
-  }
-  return promptDialogInstance.open(options);
-}

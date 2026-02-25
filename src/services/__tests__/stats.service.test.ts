@@ -15,7 +15,11 @@ let lastInvokedArgs: unknown = null;
 };
 
 import {
+  getRepoStats,
+  getContributorStats,
   getRepoStatistics,
+  type RepoStats,
+  type ContributorStats,
   type RepoStatistics,
 } from '../git.service.ts';
 
@@ -23,6 +27,217 @@ describe('git.service - Repository statistics', () => {
   beforeEach(() => {
     lastInvokedCommand = null;
     lastInvokedArgs = null;
+  });
+
+  describe('getRepoStats', () => {
+    it('invokes get_repo_stats command', async () => {
+      const mockStats: RepoStats = {
+        totalCommits: 150,
+        totalBranches: 5,
+        totalTags: 3,
+        totalContributors: 4,
+        firstCommitDate: 1609459200,
+        latestCommitDate: 1704067200,
+        contributors: [
+          {
+            name: 'Alice',
+            email: 'alice@example.com',
+            commitCount: 80,
+            firstCommit: 1609459200,
+            latestCommit: 1704067200,
+            linesAdded: 5000,
+            linesDeleted: 2000,
+          },
+          {
+            name: 'Bob',
+            email: 'bob@example.com',
+            commitCount: 70,
+            firstCommit: 1609459200,
+            latestCommit: 1701475200,
+            linesAdded: 3000,
+            linesDeleted: 1500,
+          },
+        ],
+        activityByMonth: [
+          { year: 2023, month: 1, commitCount: 20 },
+          { year: 2023, month: 2, commitCount: 15 },
+        ],
+        activityByDayOfWeek: [
+          { day: 'Monday', dayIndex: 1, commitCount: 30 },
+          { day: 'Tuesday', dayIndex: 2, commitCount: 25 },
+        ],
+        activityByHour: [
+          { hour: 9, commitCount: 15 },
+          { hour: 10, commitCount: 20 },
+        ],
+        filesCount: 50,
+        totalLinesAdded: 8000,
+        totalLinesDeleted: 3500,
+      };
+      mockInvoke = () => Promise.resolve(mockStats);
+
+      const result = await getRepoStats('/test/repo');
+      expect(lastInvokedCommand).to.equal('get_repo_stats');
+      expect(result.success).to.be.true;
+      expect(result.data?.totalCommits).to.equal(150);
+      expect(result.data?.totalContributors).to.equal(4);
+    });
+
+    it('supports max commits parameter', async () => {
+      mockInvoke = () =>
+        Promise.resolve({
+          totalCommits: 100,
+          totalBranches: 1,
+          totalTags: 0,
+          totalContributors: 1,
+          firstCommitDate: null,
+          latestCommitDate: null,
+          contributors: [],
+          activityByMonth: [],
+          activityByDayOfWeek: [],
+          activityByHour: [],
+          filesCount: 0,
+          totalLinesAdded: 0,
+          totalLinesDeleted: 0,
+        });
+
+      await getRepoStats('/test/repo', 100);
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.maxCommits).to.equal(100);
+    });
+
+    it('handles empty repository', async () => {
+      mockInvoke = () =>
+        Promise.resolve({
+          totalCommits: 0,
+          totalBranches: 0,
+          totalTags: 0,
+          totalContributors: 0,
+          firstCommitDate: null,
+          latestCommitDate: null,
+          contributors: [],
+          activityByMonth: [],
+          activityByDayOfWeek: [],
+          activityByHour: [],
+          filesCount: 0,
+          totalLinesAdded: 0,
+          totalLinesDeleted: 0,
+        });
+
+      const result = await getRepoStats('/test/repo');
+      expect(result.data?.totalCommits).to.equal(0);
+      expect(result.data?.contributors).to.deep.equal([]);
+    });
+
+    it('returns sorted contributors by commit count', async () => {
+      mockInvoke = () =>
+        Promise.resolve({
+          totalCommits: 10,
+          totalBranches: 1,
+          totalTags: 0,
+          totalContributors: 2,
+          firstCommitDate: 1609459200,
+          latestCommitDate: 1704067200,
+          contributors: [
+            { name: 'Alice', email: 'alice@example.com', commitCount: 7, firstCommit: 1609459200, latestCommit: 1704067200, linesAdded: 0, linesDeleted: 0 },
+            { name: 'Bob', email: 'bob@example.com', commitCount: 3, firstCommit: 1609459200, latestCommit: 1704067200, linesAdded: 0, linesDeleted: 0 },
+          ],
+          activityByMonth: [],
+          activityByDayOfWeek: [],
+          activityByHour: [],
+          filesCount: 0,
+          totalLinesAdded: 0,
+          totalLinesDeleted: 0,
+        });
+
+      const result = await getRepoStats('/test/repo');
+      const contributors = result.data?.contributors ?? [];
+      expect(contributors[0].commitCount).to.be.greaterThanOrEqual(contributors[1].commitCount);
+    });
+
+    it('has 7 day-of-week entries', async () => {
+      const dowEntries = Array.from({ length: 7 }, (_, i) => ({
+        day: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][i],
+        dayIndex: i,
+        commitCount: Math.floor(Math.random() * 20),
+      }));
+      mockInvoke = () =>
+        Promise.resolve({
+          totalCommits: 50,
+          totalBranches: 1,
+          totalTags: 0,
+          totalContributors: 1,
+          firstCommitDate: null,
+          latestCommitDate: null,
+          contributors: [],
+          activityByMonth: [],
+          activityByDayOfWeek: dowEntries,
+          activityByHour: [],
+          filesCount: 0,
+          totalLinesAdded: 0,
+          totalLinesDeleted: 0,
+        });
+
+      const result = await getRepoStats('/test/repo');
+      expect(result.data?.activityByDayOfWeek.length).to.equal(7);
+    });
+
+    it('has 24 hour entries', async () => {
+      const hourEntries = Array.from({ length: 24 }, (_, i) => ({
+        hour: i,
+        commitCount: Math.floor(Math.random() * 10),
+      }));
+      mockInvoke = () =>
+        Promise.resolve({
+          totalCommits: 50,
+          totalBranches: 1,
+          totalTags: 0,
+          totalContributors: 1,
+          firstCommitDate: null,
+          latestCommitDate: null,
+          contributors: [],
+          activityByMonth: [],
+          activityByDayOfWeek: [],
+          activityByHour: hourEntries,
+          filesCount: 0,
+          totalLinesAdded: 0,
+          totalLinesDeleted: 0,
+        });
+
+      const result = await getRepoStats('/test/repo');
+      expect(result.data?.activityByHour.length).to.equal(24);
+    });
+  });
+
+  describe('getContributorStats', () => {
+    it('invokes get_contributor_stats command', async () => {
+      const mockContributors: ContributorStats[] = [
+        {
+          name: 'Alice',
+          email: 'alice@example.com',
+          commitCount: 50,
+          firstCommit: 1609459200,
+          latestCommit: 1704067200,
+          linesAdded: 3000,
+          linesDeleted: 1000,
+        },
+      ];
+      mockInvoke = () => Promise.resolve(mockContributors);
+
+      const result = await getContributorStats('/test/repo');
+      expect(lastInvokedCommand).to.equal('get_contributor_stats');
+      expect(result.success).to.be.true;
+      expect(result.data?.length).to.equal(1);
+      expect(result.data?.[0].linesAdded).to.equal(3000);
+    });
+
+    it('supports max commits parameter', async () => {
+      mockInvoke = () => Promise.resolve([]);
+
+      await getContributorStats('/test/repo', 500);
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.maxCommits).to.equal(500);
+    });
   });
 
   describe('getRepoStatistics', () => {

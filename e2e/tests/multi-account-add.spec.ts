@@ -4,7 +4,9 @@ import {
   type MockUnifiedProfile,
   type MockIntegrationAccount,
 } from '../fixtures/tauri-mock';
+import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
+import { injectCommandMock } from '../fixtures/test-helpers';
 
 /**
  * E2E Tests: Adding a second integration account
@@ -37,6 +39,7 @@ const existingGitHubAccount: MockIntegrationAccount = {
 };
 
 test.describe('Multi-Account - Adding Second Account', () => {
+  let app: AppPage;
   let dialogs: DialogsPage;
 
   test.beforeEach(async ({ page }) => {
@@ -49,52 +52,62 @@ test.describe('Multi-Account - Adding Second Account', () => {
       },
     );
 
+    // Inject account data into Tauri IPC mocks so dialog's loadInitialData() finds them.
+    // The dialog calls get_unified_profiles_config which returns the full config,
+    // then store.setConfig() sets both profiles and accounts from it.
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [defaultProfile],
+        accounts: [existingGitHubAccount],
+        repositoryAssignments: {},
+      },
+      get_integration_accounts: [existingGitHubAccount],
+      get_profiles: [defaultProfile],
+      get_active_profile: defaultProfile,
+    });
+
+    app = new AppPage(page);
     dialogs = new DialogsPage(page);
   });
 
   test('should display existing account in GitHub dialog account selector', async ({ page }) => {
-    // Open GitHub dialog via toolbar or command palette
-    await page.locator('lv-toolbar').getByRole('button', { name: /GitHub/i }).click();
-    await page.waitForTimeout(300);
+    // Open GitHub dialog via command palette
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
 
     // The account selector should show the existing account
     const selector = page.locator('lv-github-dialog lv-account-selector');
     await expect(selector).toBeVisible();
 
     // Should display the account name
-    const selectorText = await selector.textContent();
-    expect(selectorText).toContain('GitHub (testuser)');
+    await expect(selector).toContainText('GitHub (testuser)');
   });
 
   test('should show Add Account option in account selector dropdown', async ({ page }) => {
-    // Open GitHub dialog
-    await page.locator('lv-toolbar').getByRole('button', { name: /GitHub/i }).click();
-    await page.waitForTimeout(300);
+    // Open GitHub dialog via command palette
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
 
     // Click the selector to open dropdown
     const selectorBtn = page.locator('lv-github-dialog lv-account-selector .selector-btn');
     await selectorBtn.click();
-    await page.waitForTimeout(200);
 
     // Should show "Add Account" action in the dropdown
     const addAccountBtn = page.locator('lv-github-dialog lv-account-selector .dropdown-action.primary');
     await expect(addAccountBtn).toBeVisible();
-    const addAccountText = await addAccountBtn.textContent();
-    expect(addAccountText).toContain('Add Account');
+    await expect(addAccountBtn).toContainText('Add Account');
   });
 
   test('should show PAT input for connecting a second account', async ({ page }) => {
-    // Open GitHub dialog
-    await page.locator('lv-toolbar').getByRole('button', { name: /GitHub/i }).click();
-    await page.waitForTimeout(300);
+    // Open GitHub dialog via command palette
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
 
     // The connection tab should have a token input (for PAT method)
     const connectionTab = page.locator('lv-github-dialog .tab:has-text("Connection")');
     await connectionTab.click();
-    await page.waitForTimeout(200);
 
-    // Check for PAT input area
-    const tokenInput = page.locator('lv-github-dialog input[type="password"]');
     // Token input may or may not be visible depending on auth method, but the
     // connection tab should be reachable
     const connectionTabContent = page.locator('lv-github-dialog .tab-content');
@@ -102,19 +115,13 @@ test.describe('Multi-Account - Adding Second Account', () => {
   });
 
   test('should show OAuth sign-in option when OAuth is configured', async ({ page }) => {
-    // Open GitHub dialog
-    await page.locator('lv-toolbar').getByRole('button', { name: /GitHub/i }).click();
-    await page.waitForTimeout(300);
+    // Open GitHub dialog via command palette
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
 
     // Switch to connection tab
     const connectionTab = page.locator('lv-github-dialog .tab:has-text("Connection")');
     await connectionTab.click();
-    await page.waitForTimeout(200);
-
-    // If OAuth is configured, we should see the sign-in button or auth method toggle
-    // The button may be "Sign in with GitHub" or the auth method toggle
-    const authToggle = page.locator('lv-github-dialog .auth-method-toggle');
-    const oauthBtn = page.locator('lv-github-dialog .btn-oauth');
 
     // Either the auth toggle or the OAuth button should exist in the connection UI
     const tabContent = page.locator('lv-github-dialog .tab-content');

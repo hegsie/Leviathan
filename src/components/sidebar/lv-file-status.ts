@@ -519,7 +519,6 @@ export class LvFileStatus extends LitElement {
   @state() private focusedIndex: number = -1;
   @state() private viewMode: "flat" | "tree" = "flat";
   @state() private expandedFolders: Set<string> = new Set();
-  @state() private operationInProgress = false;
   @state() private contextMenu: FileContextMenuState = {
     visible: false,
     x: 0,
@@ -632,21 +631,15 @@ export class LvFileStatus extends LitElement {
     e: Event,
   ): Promise<void> {
     e.stopPropagation();
-    if (this.operationInProgress) return;
     const filesToStage = this.getFilesUnderPath(this.unstagedFiles, dirPath);
     if (filesToStage.length === 0) return;
 
-    this.operationInProgress = true;
-    try {
-      const paths = filesToStage.map((f) => f.path);
-      const result = await gitService.stageFiles(this.repositoryPath, { paths });
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to stage files', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const paths = filesToStage.map((f) => f.path);
+    const result = await gitService.stageFiles(this.repositoryPath, { paths });
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage files', 'error');
     }
   }
 
@@ -656,23 +649,17 @@ export class LvFileStatus extends LitElement {
     e: Event,
   ): Promise<void> {
     e.stopPropagation();
-    if (this.operationInProgress) return;
     const filesToUnstage = this.getFilesUnderPath(this.stagedFiles, dirPath);
     if (filesToUnstage.length === 0) return;
 
-    this.operationInProgress = true;
-    try {
-      const paths = filesToUnstage.map((f) => f.path);
-      const result = await gitService.unstageFiles(this.repositoryPath, {
-        paths,
-      });
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to unstage files', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const paths = filesToUnstage.map((f) => f.path);
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths,
+    });
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage files', 'error');
     }
   }
 
@@ -682,7 +669,6 @@ export class LvFileStatus extends LitElement {
     e: Event,
   ): Promise<void> {
     e.stopPropagation();
-    if (this.operationInProgress) return;
     const filesToDiscard = this.getFilesUnderPath(this.unstagedFiles, dirPath);
     if (filesToDiscard.length === 0) return;
 
@@ -694,16 +680,11 @@ export class LvFileStatus extends LitElement {
     );
     if (!confirmed) return;
 
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.discardChanges(this.repositoryPath, paths);
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.discardChanges(this.repositoryPath, paths);
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
     }
   }
 
@@ -1089,58 +1070,45 @@ export class LvFileStatus extends LitElement {
 
   private async handleStageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
-    if (this.operationInProgress) return;
-
+    
     // If multiple files are selected and this file is one of them, stage all selected
     if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
       await this.handleStageSelected();
       return;
     }
-
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.stageFiles(this.repositoryPath, {
-        paths: [file.path],
-      });
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to stage file', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    
+    const result = await gitService.stageFiles(this.repositoryPath, {
+      paths: [file.path],
+    });
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage file', 'error');
     }
   }
 
   private async handleUnstageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
-    if (this.operationInProgress) return;
-
+    
     // If multiple files are selected and this file is one of them, unstage all selected
     if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
       await this.handleUnstageSelected();
       return;
     }
-
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.unstageFiles(this.repositoryPath, {
-        paths: [file.path],
-      });
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to unstage file', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths: [file.path],
+    });
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage file', 'error');
     }
   }
 
   private async handleDiscardFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
-    if (this.operationInProgress) return;
-
+    
     // If multiple files are selected and this file is one of them, discard all selected
     if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
       await this.handleDiscardSelected();
@@ -1155,56 +1123,39 @@ export class LvFileStatus extends LitElement {
 
     if (!confirmed) return;
 
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.discardChanges(this.repositoryPath, [
-        file.path,
-      ]);
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.discardChanges(this.repositoryPath, [
+      file.path,
+    ]);
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
     }
   }
 
   private async handleStageAll(): Promise<void> {
-    if (this.operationInProgress) return;
     const paths = this.unstagedFiles.map((f) => f.path);
     if (paths.length === 0) return;
 
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.stageFiles(this.repositoryPath, { paths });
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to stage files', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.stageFiles(this.repositoryPath, { paths });
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage files', 'error');
     }
   }
 
   private async handleUnstageAll(): Promise<void> {
-    if (this.operationInProgress) return;
     const paths = this.stagedFiles.map((f) => f.path);
     if (paths.length === 0) return;
 
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.unstageFiles(this.repositoryPath, {
-        paths,
-      });
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to unstage files', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths,
+    });
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage files', 'error');
     }
   }
 
@@ -1261,56 +1212,43 @@ export class LvFileStatus extends LitElement {
 
   // Batch operation handlers
   private async handleStageSelected(): Promise<void> {
-    if (this.operationInProgress) return;
     const paths = this.unstagedFiles
       .filter((f) => this.selectedFiles.has(f.path))
       .map((f) => f.path);
     if (paths.length === 0) return;
 
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.stageFiles(this.repositoryPath, { paths });
-      if (result.success) {
-        // Remove staged files from selection
-        const newSelected = new Set(this.selectedFiles);
-        paths.forEach((p) => newSelected.delete(p));
-        this.selectedFiles = newSelected;
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to stage files', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.stageFiles(this.repositoryPath, { paths });
+    if (result.success) {
+      // Remove staged files from selection
+      const newSelected = new Set(this.selectedFiles);
+      paths.forEach((p) => newSelected.delete(p));
+      this.selectedFiles = newSelected;
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage files', 'error');
     }
   }
 
   private async handleUnstageSelected(): Promise<void> {
-    if (this.operationInProgress) return;
     const paths = this.stagedFiles
       .filter((f) => this.selectedFiles.has(f.path))
       .map((f) => f.path);
     if (paths.length === 0) return;
 
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.unstageFiles(this.repositoryPath, {
-        paths,
-      });
-      if (result.success) {
-        const newSelected = new Set(this.selectedFiles);
-        paths.forEach((p) => newSelected.delete(p));
-        this.selectedFiles = newSelected;
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to unstage files', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths,
+    });
+    if (result.success) {
+      const newSelected = new Set(this.selectedFiles);
+      paths.forEach((p) => newSelected.delete(p));
+      this.selectedFiles = newSelected;
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage files', 'error');
     }
   }
 
   private async handleDiscardSelected(): Promise<void> {
-    if (this.operationInProgress) return;
     const paths = this.unstagedFiles
       .filter((f) => this.selectedFiles.has(f.path))
       .map((f) => f.path);
@@ -1323,19 +1261,14 @@ export class LvFileStatus extends LitElement {
     );
     if (!confirmed) return;
 
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.discardChanges(this.repositoryPath, paths);
-      if (result.success) {
-        const newSelected = new Set(this.selectedFiles);
-        paths.forEach((p) => newSelected.delete(p));
-        this.selectedFiles = newSelected;
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.discardChanges(this.repositoryPath, paths);
+    if (result.success) {
+      const newSelected = new Set(this.selectedFiles);
+      paths.forEach((p) => newSelected.delete(p));
+      this.selectedFiles = newSelected;
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
     }
   }
 
@@ -1358,39 +1291,29 @@ export class LvFileStatus extends LitElement {
 
   private async handleContextStage(): Promise<void> {
     const file = this.contextMenu.file;
-    if (!file || this.operationInProgress) return;
+    if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.stageFiles(this.repositoryPath, {
-        paths: [file.path],
-      });
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to stage file', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.stageFiles(this.repositoryPath, {
+      paths: [file.path],
+    });
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage file', 'error');
     }
   }
 
   private async handleContextUnstage(): Promise<void> {
     const file = this.contextMenu.file;
-    if (!file || this.operationInProgress) return;
+    if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.unstageFiles(this.repositoryPath, {
-        paths: [file.path],
-      });
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to unstage file', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.unstageFiles(this.repositoryPath, {
+      paths: [file.path],
+    });
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to unstage file', 'error');
     }
   }
 
@@ -1448,7 +1371,7 @@ export class LvFileStatus extends LitElement {
 
   private async handleContextDiscard(): Promise<void> {
     const file = this.contextMenu.file;
-    if (!file || this.operationInProgress) return;
+    if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
     const confirmed = await showConfirm(
       "Discard Changes",
@@ -1456,18 +1379,13 @@ export class LvFileStatus extends LitElement {
       "warning",
     );
     if (!confirmed) return;
-    this.operationInProgress = true;
-    try {
-      const result = await gitService.discardChanges(this.repositoryPath, [
-        file.path,
-      ]);
-      if (result.success) {
-        await this.loadStatus();
-      } else {
-        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
-      }
-    } finally {
-      this.operationInProgress = false;
+    const result = await gitService.discardChanges(this.repositoryPath, [
+      file.path,
+    ]);
+    if (result.success) {
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
     }
   }
 
@@ -1799,7 +1717,6 @@ export class LvFileStatus extends LitElement {
           ? html`
               <button
                 class="selection-action-btn"
-                ?disabled=${this.operationInProgress}
                 @click=${() => this.handleUnstageSelected()}
                 title="Unstage selected files"
               >
@@ -1809,7 +1726,6 @@ export class LvFileStatus extends LitElement {
           : html`
               <button
                 class="selection-action-btn"
-                ?disabled=${this.operationInProgress}
                 @click=${() => this.handleStageSelected()}
                 title="Stage selected files"
               >
@@ -1817,7 +1733,6 @@ export class LvFileStatus extends LitElement {
               </button>
               <button
                 class="selection-action-btn danger"
-                ?disabled=${this.operationInProgress}
                 @click=${() => this.handleDiscardSelected()}
                 title="Discard selected files"
               >
@@ -1873,7 +1788,6 @@ export class LvFileStatus extends LitElement {
           ? html`
               <button
                 class="context-menu-item"
-                ?disabled=${this.operationInProgress}
                 @click=${this.handleContextUnstage}
               >
                 <svg
@@ -1890,7 +1804,6 @@ export class LvFileStatus extends LitElement {
           : html`
               <button
                 class="context-menu-item"
-                ?disabled=${this.operationInProgress}
                 @click=${this.handleContextStage}
               >
                 <svg
@@ -1971,7 +1884,6 @@ export class LvFileStatus extends LitElement {
         <div class="context-menu-divider"></div>
         <button
           class="context-menu-item danger"
-          ?disabled=${this.operationInProgress}
           @click=${this.handleContextDiscard}
         >
           <svg
@@ -2074,7 +1986,6 @@ export class LvFileStatus extends LitElement {
                   <button
                     class="section-action"
                     title="Unstage all"
-                    ?disabled=${this.operationInProgress}
                     @click=${this.handleUnstageAll}
                   >
                     <svg
@@ -2124,7 +2035,6 @@ export class LvFileStatus extends LitElement {
                   <button
                     class="section-action"
                     title="Stage all"
-                    ?disabled=${this.operationInProgress}
                     @click=${this.handleStageAll}
                   >
                     <svg

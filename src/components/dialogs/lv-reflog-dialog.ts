@@ -8,8 +8,6 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
-import { showConfirm } from '../../services/dialog.service.ts';
-import { showToast } from '../../services/notification.service.ts';
 
 interface ReflogContextMenuState {
   visible: boolean;
@@ -386,11 +384,11 @@ export class LvReflogDialog extends LitElement {
   private async handleReset(entry: ReflogEntry, mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     if (this.resetting) return;
 
+    // Confirm hard reset
     if (mode === 'hard') {
-      const confirmed = await showConfirm('Hard Reset', `Are you sure you want to hard reset to ${entry.shortId}? This will discard all uncommitted changes.`, 'warning');
-      if (!confirmed) return;
-    } else {
-      const confirmed = await showConfirm(`${mode.charAt(0).toUpperCase() + mode.slice(1)} Reset`, `Reset HEAD to ${entry.shortId} using ${mode} mode?`, 'info');
+      const confirmed = window.confirm(
+        `Are you sure you want to hard reset to ${entry.shortId}? This will discard all uncommitted changes.`
+      );
       if (!confirmed) return;
     }
 
@@ -400,7 +398,6 @@ export class LvReflogDialog extends LitElement {
       const result = await gitService.resetToReflog(this.repositoryPath, entry.index, mode);
 
       if (result.success) {
-        showToast(`Reset to ${entry.shortId} (${mode})`, 'success');
         this.dispatchEvent(new CustomEvent('undo-complete', {
           detail: { entry: result.data, mode },
           bubbles: true,
@@ -409,11 +406,9 @@ export class LvReflogDialog extends LitElement {
         this.close();
       } else {
         console.error('Reset failed:', result.error);
-        showToast(`Reset failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Reset failed:', err);
-      showToast('Reset failed', 'error');
     } finally {
       this.resetting = false;
     }

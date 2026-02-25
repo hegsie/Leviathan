@@ -1,7 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { showPrompt } from '../../services/dialog.service.ts';
 
 export interface SearchFilter {
   query: string;
@@ -328,12 +327,8 @@ export class LvSearchBar extends LitElement {
     }
   }
 
-  private async handleSavePreset(): Promise<void> {
-    const name = await showPrompt({
-      title: 'Save Preset',
-      message: 'Preset name:',
-      placeholder: 'My preset',
-    });
+  private handleSavePreset(): void {
+    const name = window.prompt('Preset name:');
     if (name?.trim()) {
       this.savePreset(name.trim());
     }

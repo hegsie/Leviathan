@@ -12,6 +12,7 @@ import {
   createBitbucketAccount,
   getInstanceUrl,
   getOrganization,
+  getAccountDisplayLabel,
   generateAccountId,
   isGitLabConfig,
   isAzureDevOpsConfig,
@@ -23,7 +24,6 @@ import {
   safeGetWorkspace,
   safeSetWorkspace,
 } from '../integration-accounts.types.ts';
-import { getAccountDisplayLabel } from '../unified-profile.types.ts';
 
 describe('integration-accounts.types', () => {
   describe('ACCOUNT_COLORS', () => {

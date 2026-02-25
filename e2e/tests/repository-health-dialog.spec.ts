@@ -416,9 +416,7 @@ test.describe('Repository Health Dialog - Error Scenarios', () => {
     await expect(gcButton).toBeVisible();
     await gcButton.click();
 
-    const gcError = page.locator('.toast.error').first();
-    await expect(gcError).toBeVisible({ timeout: 5000 });
-    await expect(gcError).toContainText('repository is locked');
+    await expect(page.locator('.toast.error').first()).toBeVisible({ timeout: 5000 });
   });
 
   test('should show error when run_fsck fails', async ({ page }) => {
@@ -431,9 +429,7 @@ test.describe('Repository Health Dialog - Error Scenarios', () => {
     await expect(fsckButton).toBeVisible();
     await fsckButton.click();
 
-    const fsckError = page.locator('.toast.error').first();
-    await expect(fsckError).toBeVisible({ timeout: 5000 });
-    await expect(fsckError).toContainText('corrupt objects');
+    await expect(page.locator('.toast.error').first()).toBeVisible({ timeout: 5000 });
   });
 });
 

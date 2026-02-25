@@ -146,8 +146,16 @@ async function renderDiffView(props: {
   );
 
   // Wait for initial loadWorkingDiff / loadCommitDiff to complete
+  // Shiki highlighter init can take longer than 100ms in test environment
   await el.updateComplete;
-  await new Promise((r) => setTimeout(r, 100));
+  const maxWait = 3000;
+  const start = Date.now();
+  while (Date.now() - start < maxWait) {
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+    // Check if diff has loaded (loading is false and either diff is set or error is set)
+    if (!(el as unknown as { loading: boolean }).loading) break;
+  }
   await el.updateComplete;
   return el;
 }

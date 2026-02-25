@@ -4,7 +4,9 @@ import {
   type MockUnifiedProfile,
   type MockIntegrationAccount,
 } from '../fixtures/tauri-mock';
+import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
+import { injectCommandMock } from '../fixtures/test-helpers';
 
 /**
  * E2E Tests: Switching between integration accounts
@@ -48,6 +50,7 @@ const account2: MockIntegrationAccount = {
 };
 
 test.describe('Multi-Account - Switching Between Accounts', () => {
+  let app: AppPage;
   let dialogs: DialogsPage;
 
   test.beforeEach(async ({ page }) => {
@@ -60,18 +63,33 @@ test.describe('Multi-Account - Switching Between Accounts', () => {
       },
     );
 
+    // Inject account data into Tauri IPC mocks so dialog's loadInitialData() finds them.
+    // The dialog calls get_unified_profiles_config which returns the full config,
+    // then store.setConfig() sets both profiles and accounts from it.
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [defaultProfile],
+        accounts: [account1, account2],
+        repositoryAssignments: {},
+      },
+      get_integration_accounts: [account1, account2],
+      get_profiles: [defaultProfile],
+      get_active_profile: defaultProfile,
+    });
+
+    app = new AppPage(page);
     dialogs = new DialogsPage(page);
   });
 
   test('should list both accounts in the dropdown', async ({ page }) => {
-    // Open GitHub dialog
-    await page.locator('lv-toolbar').getByRole('button', { name: /GitHub/i }).click();
-    await page.waitForTimeout(300);
+    // Open GitHub dialog via command palette
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
 
     // Click the account selector to open dropdown
     const selectorBtn = page.locator('lv-github-dialog lv-account-selector .selector-btn');
     await selectorBtn.click();
-    await page.waitForTimeout(200);
 
     // Both accounts should be listed
     const dropdownItems = page.locator('lv-github-dialog lv-account-selector .dropdown-item');
@@ -85,20 +103,18 @@ test.describe('Multi-Account - Switching Between Accounts', () => {
   });
 
   test('should show Default badge on the default account', async ({ page }) => {
-    // Open GitHub dialog
-    await page.locator('lv-toolbar').getByRole('button', { name: /GitHub/i }).click();
-    await page.waitForTimeout(300);
+    // Open GitHub dialog via command palette
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
 
     // Open dropdown
     const selectorBtn = page.locator('lv-github-dialog lv-account-selector .selector-btn');
     await selectorBtn.click();
-    await page.waitForTimeout(200);
 
     // The default account should have a "Default" badge
     const defaultBadge = page.locator('lv-github-dialog lv-account-selector .default-badge');
     await expect(defaultBadge).toBeVisible();
-    const badgeText = await defaultBadge.textContent();
-    expect(badgeText).toContain('Default');
+    await expect(defaultBadge).toContainText('Default');
 
     // Only one default badge should exist
     const badgeCount = await page.locator('lv-github-dialog lv-account-selector .default-badge').count();
@@ -106,9 +122,9 @@ test.describe('Multi-Account - Switching Between Accounts', () => {
   });
 
   test('should update selector display when switching accounts', async ({ page }) => {
-    // Open GitHub dialog
-    await page.locator('lv-toolbar').getByRole('button', { name: /GitHub/i }).click();
-    await page.waitForTimeout(300);
+    // Open GitHub dialog via command palette
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
 
     // Verify the initial account is shown
     const selectorText = page.locator('lv-github-dialog lv-account-selector .account-name');
@@ -117,26 +133,23 @@ test.describe('Multi-Account - Switching Between Accounts', () => {
     // Open dropdown and click second account
     const selectorBtn = page.locator('lv-github-dialog lv-account-selector .selector-btn');
     await selectorBtn.click();
-    await page.waitForTimeout(200);
 
     // Select the second account
     const workAccountItem = page.locator('lv-github-dialog lv-account-selector .dropdown-item', { hasText: 'GitHub (work)' });
     await workAccountItem.click();
-    await page.waitForTimeout(300);
 
     // The selector should now show the second account
     await expect(selectorText).toHaveText('GitHub (work)');
   });
 
   test('should show Manage Accounts option in dropdown', async ({ page }) => {
-    // Open GitHub dialog
-    await page.locator('lv-toolbar').getByRole('button', { name: /GitHub/i }).click();
-    await page.waitForTimeout(300);
+    // Open GitHub dialog via command palette
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
 
     // Open dropdown
     const selectorBtn = page.locator('lv-github-dialog lv-account-selector .selector-btn');
     await selectorBtn.click();
-    await page.waitForTimeout(200);
 
     // Should show "Manage Accounts..." action
     const manageBtn = page.locator('lv-github-dialog lv-account-selector .dropdown-action:has-text("Manage Accounts")');

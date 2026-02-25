@@ -24,7 +24,6 @@ const mockInvoke: MockInvoke = () => Promise.resolve(null);
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvSearchBar, SearchFilter } from '../toolbar/lv-search-bar.ts';
-import { _setTestPromptOverride } from '../../services/dialog.service.ts';
 
 // Import the actual component — registers <lv-search-bar> custom element
 import '../toolbar/lv-search-bar.ts';
@@ -372,14 +371,14 @@ describe('lv-search-bar', () => {
       authorInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
       await el.updateComplete;
 
-      // Mock showPrompt to return a preset name
-      _setTestPromptOverride(async () => 'My Preset');
+      // Stub window.prompt to return a preset name
+      const originalPrompt = window.prompt;
+      window.prompt = () => 'My Preset';
 
       try {
         const saveBtn = getFilterActionButton(el, 'Save Preset')!;
         expect(saveBtn).to.not.be.null;
         saveBtn.click();
-        await new Promise((r) => setTimeout(r, 0));
         await el.updateComplete;
 
         // Preset should appear in the list
@@ -397,7 +396,7 @@ describe('lv-search-bar', () => {
         expect(parsed[0].name).to.equal('My Preset');
         expect(parsed[0].filter.author).to.equal('eve');
       } finally {
-        _setTestPromptOverride(null);
+        window.prompt = originalPrompt;
       }
     });
 
@@ -405,19 +404,19 @@ describe('lv-search-bar', () => {
       const el = await renderSearchBar();
       await openFiltersPanel(el);
 
-      // Mock showPrompt to return null (cancel)
-      _setTestPromptOverride(async () => null);
+      // Stub window.prompt to return null (cancel)
+      const originalPrompt = window.prompt;
+      window.prompt = () => null;
 
       try {
         const saveBtn = getFilterActionButton(el, 'Save Preset')!;
         saveBtn.click();
-        await new Promise((r) => setTimeout(r, 0));
         await el.updateComplete;
 
         const presetItems = el.shadowRoot!.querySelectorAll('.preset-item');
         expect(presetItems.length).to.equal(0);
       } finally {
-        _setTestPromptOverride(null);
+        window.prompt = originalPrompt;
       }
     });
   });
@@ -438,12 +437,12 @@ describe('lv-search-bar', () => {
       branchInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
       await el.updateComplete;
 
-      _setTestPromptOverride(async () => 'Dev Filter');
+      const originalPrompt = window.prompt;
+      window.prompt = () => 'Dev Filter';
 
       try {
         const saveBtn = getFilterActionButton(el, 'Save Preset')!;
         saveBtn.click();
-        await new Promise((r) => setTimeout(r, 0));
         await el.updateComplete;
 
         // Clear filters to reset state
@@ -466,7 +465,7 @@ describe('lv-search-bar', () => {
         expect(receivedFilter!.author).to.equal('frank');
         expect(receivedFilter!.branch).to.equal('develop');
       } finally {
-        _setTestPromptOverride(null);
+        window.prompt = originalPrompt;
       }
     });
   });
@@ -478,12 +477,12 @@ describe('lv-search-bar', () => {
       await openFiltersPanel(el);
 
       // Save a preset
-      _setTestPromptOverride(async () => 'Temp Preset');
+      const originalPrompt = window.prompt;
+      window.prompt = () => 'Temp Preset';
 
       try {
         const saveBtn = getFilterActionButton(el, 'Save Preset')!;
         saveBtn.click();
-        await new Promise((r) => setTimeout(r, 0));
         await el.updateComplete;
 
         // Verify preset exists
@@ -505,7 +504,7 @@ describe('lv-search-bar', () => {
         const parsed = JSON.parse(stored!);
         expect(parsed.length).to.equal(0);
       } finally {
-        _setTestPromptOverride(null);
+        window.prompt = originalPrompt;
       }
     });
 
@@ -519,12 +518,12 @@ describe('lv-search-bar', () => {
       authorInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
       await el.updateComplete;
 
-      _setTestPromptOverride(async () => 'Grace Filter');
+      const originalPrompt = window.prompt;
+      window.prompt = () => 'Grace Filter';
 
       try {
         const saveBtn = getFilterActionButton(el, 'Save Preset')!;
         saveBtn.click();
-        await new Promise((r) => setTimeout(r, 0));
         await el.updateComplete;
 
         // Clear the author filter
@@ -547,7 +546,7 @@ describe('lv-search-bar', () => {
         // Author should remain empty (preset was NOT loaded)
         expect(loadedAuthor).to.equal('');
       } finally {
-        _setTestPromptOverride(null);
+        window.prompt = originalPrompt;
       }
     });
   });

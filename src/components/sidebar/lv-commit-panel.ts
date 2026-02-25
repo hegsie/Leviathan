@@ -3,8 +3,6 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
-import { showToast } from '../../services/notification.service.ts';
-import { showPrompt } from '../../services/dialog.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import type { CommitTemplate, ConventionalType } from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
@@ -674,11 +672,7 @@ export class LvCommitPanel extends LitElement {
   }
 
   private async handleSaveTemplate(): Promise<void> {
-    const name = await showPrompt({
-      title: 'Save Template',
-      message: 'Enter template name:',
-      placeholder: 'My template',
-    });
+    const name = prompt('Enter template name:');
     if (!name) return;
 
     const content = this.description
@@ -782,7 +776,6 @@ export class LvCommitPanel extends LitElement {
       }
     } catch (err) {
       console.error('Failed to fetch last commit:', err);
-      showToast('Failed to load last commit message', 'error');
     }
   }
 

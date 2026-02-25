@@ -9,7 +9,6 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getHooks, getHook, saveHook, deleteHook, toggleHook } from '../../services/git.service.ts';
 import type { GitHook } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
-import { showConfirm } from '../../services/dialog.service.ts';
 
 const HOOK_TEMPLATES: Record<string, string> = {
   'pre-commit': `#!/bin/sh
@@ -755,7 +754,7 @@ export class LvHooksDialog extends LitElement {
 
   private async selectHook(hook: GitHook): Promise<void> {
     if (this.hasUnsavedChanges) {
-      const discard = await showConfirm('Unsaved Changes', 'You have unsaved changes. Discard them?', 'warning');
+      const discard = window.confirm('You have unsaved changes. Discard them?');
       if (!discard) return;
     }
 
@@ -938,9 +937,9 @@ export class LvHooksDialog extends LitElement {
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 
-  public async close(): Promise<void> {
+  public close(): void {
     if (this.hasUnsavedChanges) {
-      const discard = await showConfirm('Unsaved Changes', 'You have unsaved changes. Discard them?', 'warning');
+      const discard = window.confirm('You have unsaved changes. Discard them?');
       if (!discard) return;
     }
     this.open = false;
@@ -956,14 +955,14 @@ export class LvHooksDialog extends LitElement {
     return hookName in HOOK_TEMPLATES;
   }
 
-  private async handleUseTemplate(): Promise<void> {
+  private handleUseTemplate(): void {
     if (!this.selectedHook) return;
 
     const template = HOOK_TEMPLATES[this.selectedHook.name];
     if (!template) return;
 
     if (this.editContent.trim() && this.editContent !== this.getDefaultHookContent(this.selectedHook.name)) {
-      const replace = await showConfirm('Use Template', 'Replace current content with template?', 'info');
+      const replace = window.confirm('Replace current content with template?');
       if (!replace) return;
     }
 

@@ -182,16 +182,11 @@ export class LvToolbar extends LitElement {
         justify-content: center;
         width: 16px;
         height: 16px;
-        padding: 0;
-        border: none;
-        background: transparent;
-        color: inherit;
         border-radius: var(--radius-sm);
         opacity: 0.5;
         transition: opacity var(--transition-fast);
         margin-left: auto;
         flex-shrink: 0;
-        cursor: pointer;
       }
 
       .tab:hover .tab-close {
@@ -200,12 +195,6 @@ export class LvToolbar extends LitElement {
 
       .tab-close:hover {
         background: var(--color-bg-hover);
-      }
-
-      .tab-close:focus-visible {
-        opacity: 1;
-        outline: 2px solid var(--color-primary);
-        outline-offset: -2px;
       }
 
       .tab-close svg {
@@ -511,33 +500,22 @@ export class LvToolbar extends LitElement {
             ? html`<span class="no-repos">No repositories open</span>`
             : this.openRepositories.map(
                 (repo, index) => html`
-                  <div
+                  <button
                     class="tab ${index === this.activeIndex ? 'active' : ''}"
-                    role="tab"
-                    tabindex="0"
-                    aria-selected="${index === this.activeIndex}"
-                    aria-label="${repo.repository.name}"
                     @click=${() => this.handleTabClick(index)}
-                    @keydown=${(e: KeyboardEvent) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        this.handleTabClick(index);
-                      }
-                    }}
                   >
                     ${this.renderProviderIcon(repo)}
                     <span class="tab-name">${repo.repository.name}</span>
-                    <button
+                    <span
                       class="tab-close"
-                      aria-label="Close ${repo.repository.name}"
                       @click=${(e: Event) => this.handleTabClose(e, repo.repository.path)}
                     >
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
                         <line x1="6" y1="6" x2="18" y2="18"></line>
                       </svg>
-                    </button>
-                  </div>
+                    </span>
+                  </button>
                 `
               )}
         </div>

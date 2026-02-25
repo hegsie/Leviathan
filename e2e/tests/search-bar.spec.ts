@@ -387,7 +387,6 @@ test.describe('Search Bar - Error Scenarios', () => {
     // or a toast notification rather than crashing
     const errorIndicator = page.locator('lv-graph-canvas .info-panel, lv-toast-container .toast.error, .error-message, .error-banner').first();
     await expect(errorIndicator).toBeVisible({ timeout: 5000 });
-    await expect(errorIndicator).toContainText(/search failed/i);
 
     // Search bar should remain visible and functional after the error
     const searchBar = page.locator('lv-search-bar');

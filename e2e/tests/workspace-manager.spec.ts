@@ -12,6 +12,29 @@ async function openWorkspaceManager(page: import('@playwright/test').Page): Prom
   await page.locator('lv-workspace-manager-dialog[open]').waitFor({ state: 'visible', timeout: 3000 });
 }
 
+/**
+ * Dispatch open-repo-file event from the workspace manager dialog.
+ * The dialog is inside the shadow DOM of lv-app-shell, so we need to
+ * traverse shadow roots to find it.
+ */
+async function dispatchOpenRepoFileEvent(
+  page: import('@playwright/test').Page,
+  detail: { repoPath: string; filePath: string; lineNumber: number },
+): Promise<void> {
+  await page.evaluate((detail) => {
+    // Traverse shadow DOM to find the workspace-manager-dialog
+    const appShell = document.querySelector('lv-app-shell');
+    const dialog = appShell?.shadowRoot?.querySelector('lv-workspace-manager-dialog');
+    if (dialog) {
+      dialog.dispatchEvent(new CustomEvent('open-repo-file', {
+        detail,
+        bubbles: true,
+        composed: true,
+      }));
+    }
+  }, detail);
+}
+
 test.describe('Workspace Manager - open-repo-file handler', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
@@ -30,17 +53,8 @@ test.describe('Workspace Manager - open-repo-file handler', () => {
   test('open-repo-file event should close workspace manager and show blame view', async ({ page }) => {
     await openWorkspaceManager(page);
 
-    // Dispatch open-repo-file event from workspace manager
-    await page.evaluate(() => {
-      const dialog = document.querySelector('lv-workspace-manager-dialog');
-      if (dialog) {
-        dialog.dispatchEvent(new CustomEvent('open-repo-file', {
-          detail: { repoPath: '/tmp/test-repo', filePath: 'src/main.ts', lineNumber: 10 },
-          bubbles: true,
-          composed: true,
-        }));
-      }
-    });
+    // Dispatch open-repo-file event from workspace manager (via shadow DOM)
+    await dispatchOpenRepoFileEvent(page, { repoPath: '/tmp/test-repo', filePath: 'src/main.ts', lineNumber: 10 });
 
     // Workspace manager should close
     await expect(page.locator('lv-workspace-manager-dialog[open]')).not.toBeVisible();
@@ -68,17 +82,8 @@ test.describe('Workspace Manager - open-repo-file handler', () => {
 
     await openWorkspaceManager(page);
 
-    // Dispatch open-repo-file with a different repo path
-    await page.evaluate(() => {
-      const dialog = document.querySelector('lv-workspace-manager-dialog');
-      if (dialog) {
-        dialog.dispatchEvent(new CustomEvent('open-repo-file', {
-          detail: { repoPath: '/tmp/other-repo', filePath: 'README.md', lineNumber: 1 },
-          bubbles: true,
-          composed: true,
-        }));
-      }
-    });
+    // Dispatch open-repo-file with a different repo path (via shadow DOM)
+    await dispatchOpenRepoFileEvent(page, { repoPath: '/tmp/other-repo', filePath: 'README.md', lineNumber: 1 });
 
     // Should have called open_repository with the other repo path
     await expect
@@ -97,17 +102,8 @@ test.describe('Workspace Manager - open-repo-file handler', () => {
 
     await openWorkspaceManager(page);
 
-    // Dispatch open-repo-file with a non-existent repo
-    await page.evaluate(() => {
-      const dialog = document.querySelector('lv-workspace-manager-dialog');
-      if (dialog) {
-        dialog.dispatchEvent(new CustomEvent('open-repo-file', {
-          detail: { repoPath: '/tmp/nonexistent', filePath: 'file.ts', lineNumber: 1 },
-          bubbles: true,
-          composed: true,
-        }));
-      }
-    });
+    // Dispatch open-repo-file with a non-existent repo (via shadow DOM)
+    await dispatchOpenRepoFileEvent(page, { repoPath: '/tmp/nonexistent', filePath: 'file.ts', lineNumber: 1 });
 
     // Should show an error toast
     await expect(page.locator('lv-toast-container .toast.error, lv-toast-container .toast-error')).toBeVisible({ timeout: 5000 });

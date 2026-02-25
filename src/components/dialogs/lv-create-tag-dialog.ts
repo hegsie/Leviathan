@@ -7,7 +7,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, property, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { createTag } from '../../services/git.service.ts';
-import { showToast } from '../../services/notification.service.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 
@@ -273,7 +272,6 @@ export class LvCreateTagDialog extends LitElement {
       });
 
       if (result.success) {
-        showToast(`Tag "${tagName}" created`, 'success');
         this.dispatchEvent(new CustomEvent('tag-created', {
           detail: { tag: result.data },
           bubbles: true,
