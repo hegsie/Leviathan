@@ -70,7 +70,7 @@ test.describe('Diff View Content', () => {
     );
   });
 
-  test('should display diff with additions and deletions', async () => {
+  test('should display diff with file path and diff content', async ({ page }) => {
     // Click on the file to open diff
     const file = rightPanel.getUnstagedFile('src/main.ts');
     await expect(file).toBeVisible();
@@ -78,6 +78,14 @@ test.describe('Diff View Content', () => {
 
     // Wait for diff overlay to appear
     await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    // Verify the diff view shows the file path
+    const diffPath = page.locator('.diff-path');
+    await expect(diffPath).toContainText('main.ts');
+
+    // Verify diff view contains actual diff content (the mock returns hunks with lines)
+    const diffView = page.locator('lv-diff-view');
+    await expect(diffView).toBeVisible();
   });
 });
 

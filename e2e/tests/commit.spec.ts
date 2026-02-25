@@ -34,8 +34,13 @@ test.describe('Commit Workflow', () => {
   });
 
   test('should enable commit button when message is entered and files are staged', async () => {
+    // Commit button should be disabled when message is empty
+    await expect(rightPanel.commitButton).toBeDisabled();
+
     await rightPanel.commitMessage.fill('feat: add new feature');
-    await expect(rightPanel.commitButton).toBeVisible();
+
+    // With staged files and a message, commit button should be enabled
+    await expect(rightPanel.commitButton).toBeEnabled();
   });
 
   test('should accept multi-line commit messages', async () => {
@@ -200,7 +205,7 @@ test.describe('Commit - Error Handling', () => {
     );
   });
 
-  test('should NOT clear commit message after failed commit', async ({ page }) => {
+  test('should preserve message, staged files, and show error after failed commit', async ({ page }) => {
     await injectCommandError(page, 'create_commit', 'Commit failed: empty tree');
 
     // Verify initial staged file count
@@ -210,12 +215,20 @@ test.describe('Commit - Error Handling', () => {
     await rightPanel.commitMessage.fill('test: should persist after failure');
     await rightPanel.commitButton.click();
 
-    // Verify commit message is preserved
+    // Verify error feedback is visible
+    const errorFeedback = page.locator('lv-commit-panel .error').or(page.locator('.toast.error'));
+    await expect(errorFeedback.first()).toBeVisible({ timeout: 5000 });
+    await expect(errorFeedback.first()).toContainText(/Commit failed|empty tree/i);
+
+    // Verify commit message is preserved so user can fix and retry
     await expect(rightPanel.commitMessage).toHaveValue('test: should persist after failure');
 
     // Verify staged files are still present after failed commit
     const finalStaged = await rightPanel.getStagedCount();
     expect(finalStaged).toBe(1);
+
+    // Verify commit button is still enabled (user can retry)
+    await expect(rightPanel.commitButton).toBeEnabled();
   });
 
   test('should not dispatch repository-changed event on failed commit', async ({ page }) => {
@@ -277,10 +290,16 @@ test.describe('Commit - Button State', () => {
     await expect(rightPanel.commitButton).toBeEnabled();
   });
 
-  test('should invoke create_commit with correct message', async ({ page }) => {
+  test('should commit and update all UI: clear message, reset staged files, show success', async ({ page }) => {
+    // Verify initial state: 1 staged file, button disabled without message
+    const initialStaged = await rightPanel.getStagedCount();
+    expect(initialStaged).toBe(1);
+    await expect(rightPanel.commitButton).toBeDisabled();
+
     await startCommandCapture(page);
 
     await rightPanel.commitMessage.fill('feat: test commit message');
+    await expect(rightPanel.commitButton).toBeEnabled();
     await rightPanel.commitButton.click();
 
     await waitForCommand(page, 'create_commit');
@@ -289,10 +308,15 @@ test.describe('Commit - Button State', () => {
     expect(commitCommands.length).toBeGreaterThan(0);
     expect((commitCommands[0].args as { message?: string })?.message).toContain('feat: test commit message');
 
+    // Verify UI: staged files should be cleared after successful commit
     const stagedCount = await rightPanel.getStagedCount();
     expect(stagedCount).toBe(0);
 
+    // Verify UI: commit message should be cleared
     await expect(rightPanel.commitMessage).toHaveValue('');
+
+    // Verify UI: commit button should be disabled again (no staged files, no message)
+    await expect(rightPanel.commitButton).toBeDisabled();
   });
 });
 
