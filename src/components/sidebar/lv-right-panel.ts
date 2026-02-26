@@ -6,9 +6,10 @@ import * as gitService from '../../services/git.service.ts';
 import './lv-file-status.ts';
 import './lv-commit-panel.ts';
 import '../panels/lv-commit-details.ts';
+import '../panels/lv-analytics-panel.ts';
 import type { Commit, RefInfo } from '../../types/git.types.ts';
 
-type TabType = 'changes' | 'details';
+type TabType = 'changes' | 'details' | 'analytics';
 
 /**
  * Right panel container component
@@ -133,6 +134,12 @@ export class LvRightPanel extends LitElement {
         overflow: auto;
       }
 
+      /* Analytics panel layout */
+      .analytics-panel {
+        flex: 1;
+        overflow: auto;
+      }
+
       .placeholder {
         display: flex;
         align-items: center;
@@ -247,6 +254,9 @@ export class LvRightPanel extends LitElement {
     } else if (e.key === '2' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       this.switchTab('details');
+    } else if (e.key === '3' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      this.switchTab('analytics');
     }
   };
 
@@ -272,6 +282,11 @@ export class LvRightPanel extends LitElement {
     this.switchTab('details');
   }
 
+  /** Public method to switch to analytics tab from outside */
+  public showAnalytics(): void {
+    this.switchTab('analytics');
+  }
+
   render() {
     if (!this.repositoryPath) {
       return html`<div class="placeholder">No repository open</div>`;
@@ -295,6 +310,13 @@ export class LvRightPanel extends LitElement {
         >
           <span>Details</span>
           ${this.commit ? html`<span class="badge">${this.commit.oid.slice(0, 7)}</span>` : nothing}
+        </button>
+        <button
+          class="tab ${this.activeTab === 'analytics' ? 'active' : ''}"
+          @click=${() => this.switchTab('analytics')}
+          title="Repository Analytics (Ctrl+3)"
+        >
+          <span>Analytics</span>
         </button>
       </div>
 
@@ -328,6 +350,15 @@ export class LvRightPanel extends LitElement {
               .githubOwner=${this.githubOwner}
               .githubRepo=${this.githubRepo}
             ></lv-commit-details>
+          </div>
+        </div>
+
+        <!-- Analytics Panel -->
+        <div class="tab-panel ${this.activeTab === 'analytics' ? 'active' : ''}">
+          <div class="analytics-panel">
+            <lv-analytics-panel
+              .repositoryPath=${this.repositoryPath}
+            ></lv-analytics-panel>
           </div>
         </div>
       </div>

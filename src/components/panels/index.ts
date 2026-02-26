@@ -5,3 +5,4 @@ export { LvCommitDetails } from './lv-commit-details.ts';
 export { LvDiffView } from './lv-diff-view.ts';
 export { LvBlameView } from './lv-blame-view.ts';
 export { LvImageDiff } from './lv-image-diff.ts';
+export { LvAnalyticsPanel } from './lv-analytics-panel.ts';
