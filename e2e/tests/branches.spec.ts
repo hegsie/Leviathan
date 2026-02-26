@@ -88,19 +88,25 @@ test.describe('Branch with Multiple Branches', () => {
     });
   });
 
-  test('should display main branch as current', async () => {
+  test('should display main branch as current with active indicator', async ({ page }) => {
     const mainBranch = leftPanel.getBranch('main');
     await expect(mainBranch).toBeVisible();
+
+    // main should be marked as the active (HEAD) branch
+    const activeBranch = page.locator('lv-branch-list .branch-item.active');
+    await expect(activeBranch).toContainText('main');
   });
 
-  test('should display develop branch', async () => {
+  test('should display develop branch as non-active', async () => {
     const developBranch = leftPanel.getBranch('develop');
     await expect(developBranch).toBeVisible();
+    await expect(developBranch).not.toHaveClass(/active/);
   });
 
-  test('should display feature branch', async () => {
+  test('should display feature branch as non-active', async () => {
     const featureBranch = leftPanel.getBranch('feature/new-feature');
     await expect(featureBranch).toBeVisible();
+    await expect(featureBranch).not.toHaveClass(/active/);
   });
 });
 
@@ -327,7 +333,7 @@ test.describe('Branch Checkout via Context Menu', () => {
     await expect(page.locator('.context-menu')).not.toBeVisible();
   });
 
-  test('should invoke checkout command when clicking Checkout button', async ({ page }) => {
+  test('should checkout branch and update all views', async ({ page }) => {
     await startCommandCapture(page);
 
     // Right-click on develop branch
@@ -344,17 +350,21 @@ test.describe('Branch Checkout via Context Menu', () => {
     expect(commands.length).toBeGreaterThan(0);
     expect((commands[0].args as { refName?: string })?.refName).toBe('refs/heads/develop');
 
-    // Verify UI: develop should now be the active branch
+    // Verify branch list: develop should now be the active branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
     await expect(activeBranch).toContainText('develop');
 
-    // Verify UI: main should no longer be active
+    // Verify branch list: main should no longer be active
     const mainBranch = leftPanel.getBranch('main');
     await expect(mainBranch).toBeVisible();
     await expect(mainBranch).not.toHaveClass(/active/);
+
+    // Verify only one branch is active (the newly checked out one)
+    const allActive = page.locator('lv-branch-list .branch-item.active');
+    await expect(allActive).toHaveCount(1);
   });
 
-  test('should checkout feature branch via context menu', async ({ page }) => {
+  test('should checkout feature branch and update all views', async ({ page }) => {
     await startCommandCapture(page);
 
     // Right-click on feature branch
@@ -373,13 +383,17 @@ test.describe('Branch Checkout via Context Menu', () => {
       'refs/heads/feature/checkout-test'
     );
 
-    // Verify UI: feature/checkout-test should now be the active branch
+    // Verify branch list: feature/checkout-test should now be the active branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
     await expect(activeBranch).toContainText('feature/checkout-test');
 
-    // Verify UI: main should no longer be active
+    // Verify branch list: main should no longer be active
     const mainBranch = leftPanel.getBranch('main');
     await expect(mainBranch).not.toHaveClass(/active/);
+
+    // Verify only one branch is active (the newly checked out one)
+    const allActiveAfterCheckout = page.locator('lv-branch-list .branch-item.active');
+    await expect(allActiveAfterCheckout).toHaveCount(1);
   });
 
   test('should dispatch repository-changed event after checkout', async ({ page }) => {
@@ -444,7 +458,7 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
     });
   });
 
-  test('should checkout remote branch with correct refName', async ({ page }) => {
+  test('should checkout remote branch and create local tracking branch', async ({ page }) => {
     await startCommandCapture(page);
 
     // Expand the origin remote group to see remote branches
@@ -470,13 +484,20 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
       'refs/remotes/origin/feature/remote-feature'
     );
 
-    // Verify UI: the active branch should now reflect the checked-out remote branch
+    // Verify branch list: the active branch should reflect the checked-out remote branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
     await expect(activeBranch).toContainText('feature/remote-feature');
 
-    // Verify UI: main should no longer be the active branch
+    // Verify branch list: main should no longer be the active branch
     const mainBranch = leftPanel.getBranch('main');
     await expect(mainBranch).not.toHaveClass(/active/);
+
+    // Verify branch list: new local tracking branch should appear
+    await expect(leftPanel.getBranch('feature/remote-feature')).toBeVisible();
+
+    // Verify only one branch is active (the newly checked out one)
+    const allActiveAfterRemoteCheckout = page.locator('lv-branch-list .branch-item.active');
+    await expect(allActiveAfterRemoteCheckout).toHaveCount(1);
   });
 
   test('should checkout remote branch with nested prefix (copilot/) correctly', async ({ page }) => {
@@ -838,7 +859,7 @@ test.describe('Branch Checkout - HEAD Indicator Update', () => {
     });
   });
 
-  test('should invoke checkout with correct refName for target branch', async ({ page }) => {
+  test('should update HEAD indicator and dashboard after checkout', async ({ page }) => {
     await startCommandCapture(page);
 
     await leftPanel.openBranchContextMenu('develop');
@@ -852,9 +873,17 @@ test.describe('Branch Checkout - HEAD Indicator Update', () => {
     expect(checkoutCommands.length).toBeGreaterThan(0);
     expect((checkoutCommands[0].args as { refName?: string })?.refName).toBe('refs/heads/develop');
 
-    // Verify the DOM reflects the new HEAD: develop should now be the active branch
+    // Verify the branch list reflects the new HEAD: develop should now be the active branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
     await expect(activeBranch).toContainText('develop');
+
+    // Verify main is no longer active
+    const mainBranch = leftPanel.getBranch('main');
+    await expect(mainBranch).not.toHaveClass(/active/);
+
+    // Verify only one branch is active (the newly checked out one)
+    const allActiveAfterCheckout = page.locator('lv-branch-list .branch-item.active');
+    await expect(allActiveAfterCheckout).toHaveCount(1);
   });
 
   test('should trigger branch list refresh after checkout', async ({ page }) => {
@@ -918,7 +947,7 @@ test.describe('Remote Branch Checkout - Creates Local Tracking Branch', () => {
     });
   });
 
-  test('should create local tracking branch and show it as HEAD after checkout', async ({ page }) => {
+  test('should create local tracking branch and update all views after checkout', async ({ page }) => {
     await startCommandCapture(page);
 
     // Expand origin remote group
@@ -936,19 +965,27 @@ test.describe('Remote Branch Checkout - Creates Local Tracking Branch', () => {
 
     await waitForCommand(page, 'checkout_with_autostash');
 
-    // Verify checkout command was called
+    // Verify checkout command was called with the remote ref
     const checkoutCommands = await findCommand(page, 'checkout_with_autostash');
     expect(checkoutCommands.length).toBeGreaterThan(0);
     expect((checkoutCommands[0].args as { refName?: string })?.refName).toBe(
       'refs/remotes/origin/feature-x'
     );
 
-    // Verify: new local branch feature-x should now appear and be the active (HEAD) branch
+    // Verify branch list: new local branch feature-x should appear and be the active (HEAD) branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
     await expect(activeBranch).toContainText('feature-x');
 
-    // Verify: the new local branch should be in the branch list
+    // Verify branch list: the new local branch should be in the branch list
     await expect(leftPanel.getBranch('feature-x')).toBeVisible();
+
+    // Verify branch list: main should no longer be active
+    const mainBranch = leftPanel.getBranch('main');
+    await expect(mainBranch).not.toHaveClass(/active/);
+
+    // Verify only one branch is active (the newly checked out one)
+    const allActiveAfterCheckout = page.locator('lv-branch-list .branch-item.active');
+    await expect(allActiveAfterCheckout).toHaveCount(1);
   });
 });
 

@@ -196,7 +196,7 @@ test.describe('Operation Banner', () => {
     await expect(banner).toHaveClass(/cherrypick/);
   });
 
-  test('abort button should be clickable', async ({ page }) => {
+  test('clicking abort should show success toast', async ({ page }) => {
     app = new AppPage(page);
 
     await setupOpenRepository(page, {
@@ -206,11 +206,19 @@ test.describe('Operation Banner', () => {
       },
     });
 
+    const banner = page.locator('.operation-banner');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText('Cherry-pick in progress');
+
     const abortBtn = page.locator('.operation-abort-btn');
     await expect(abortBtn).toBeEnabled();
 
-    // Click abort - should not throw
     await abortBtn.click();
+
+    // After abort, a success toast should appear confirming the operation was aborted
+    const successToast = page.locator('.toast').first();
+    await expect(successToast).toBeVisible({ timeout: 5000 });
+    await expect(successToast).toContainText(/Aborted|abort/i);
   });
 
   test('should show Resolve Conflicts button for cherry-pick state', async ({ page }) => {
@@ -490,54 +498,24 @@ test.describe('Context Menus - Error Scenarios', () => {
     await expect(page.locator('lv-toast-container .toast.error').first()).toBeVisible({ timeout: 5000 });
   });
 
-  test('UI should update after successful context menu checkout', async ({ page }) => {
-    // Mock checkout to return success and mock get_branches to return updated list
-    const updatedBranches = [
-      {
-        name: 'refs/heads/main',
-        isHead: false,
-        isRemote: false,
-        upstream: null,
-        targetOid: 'abc123',
-        shorthand: 'main',
-        isStale: false,
-      },
-      {
-        name: 'refs/heads/feature/test',
-        isHead: true,
-        isRemote: false,
-        upstream: null,
-        targetOid: 'def456',
-        shorthand: 'feature/test',
-        isStale: false,
-      },
-    ];
+  test('revert failure error toast should contain informative message', async ({ page }) => {
+    // Inject revert error with a specific message
+    await injectCommandError(page, 'revert', 'Revert failed: working tree has modifications');
 
-    await injectCommandMock(page, {
-      checkout: null,
-      checkout_branch: null,
-      get_branches: updatedBranches,
-      get_current_branch: updatedBranches[1],
-    });
+    await rightClickOnCommitRow(page, 0);
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
 
-    // Trigger checkout by calling the invoke layer directly and then refresh
-    await page.evaluate(async () => {
-      const invoke = (window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-      }).__TAURI_INTERNALS__.invoke;
-      await invoke('checkout', { path: '/tmp/test-repo', refName: 'refs/heads/feature/test' });
-      // Trigger a store refresh to update the UI
-      const stores = (window as unknown as { __LEVIATHAN_STORES__: Record<string, unknown> }).__LEVIATHAN_STORES__;
-      const repoStore = stores.repositoryStore as { getState: () => { setBranches: (b: unknown[]) => void; setCurrentBranch: (b: unknown) => void } };
-      const branches = await invoke('get_branches', { path: '/tmp/test-repo' }) as unknown[];
-      const currentBranch = await invoke('get_current_branch', { path: '/tmp/test-repo' });
-      repoStore.getState().setBranches(branches);
-      repoStore.getState().setCurrentBranch(currentBranch);
-    });
+    const revertItem = contextMenu.locator('.context-menu-item', { hasText: /revert/i });
+    await expect(revertItem).toBeVisible();
+    await revertItem.click();
 
-    // After checkout, the branch list should show feature/test as the active (current) branch
-    await expect(
-      page.locator('lv-branch-list .branch-item.active').first()
-    ).toBeVisible({ timeout: 5000 });
+    // Context menu should close after clicking
+    await expect(contextMenu).not.toBeVisible();
+
+    // Error feedback should appear with informative content about the failure
+    const errorFeedback = page.locator('.toast, .error-banner, .error').first();
+    await expect(errorFeedback).toBeVisible({ timeout: 5000 });
+    await expect(errorFeedback).toContainText(/Revert failed|modifications/i);
   });
 });

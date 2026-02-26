@@ -143,6 +143,13 @@ test.describe('Toolbar Repository Tabs', () => {
     await expect(repoTab).toContainText('test-repo');
   });
 
+  test('opening repo should highlight current branch in branch list', async ({ page }) => {
+    // The current branch should be marked active in the branch list
+    const activeBranch = page.locator('lv-branch-list .branch-item.active');
+    await expect(activeBranch).toBeVisible();
+    await expect(activeBranch).toContainText('main');
+  });
+
   test('repository tab should have close button', async ({ page }) => {
     const repoTab = page.locator('button', { hasText: 'test-repo' });
     // Close icon should exist within the tab (usually an svg icon)
@@ -399,30 +406,36 @@ test.describe('Toolbar Error Scenarios', () => {
     await setupOpenRepository(page);
   });
 
-  test('should show error toast when fetch fails', async ({ page }) => {
+  test('should show error toast when fetch fails and re-enable button', async ({ page }) => {
     // Inject error for the fetch command
     await injectCommandError(page, 'fetch', 'Network error: could not resolve host');
 
-    // Click the Fetch button
     const fetchButton = page.getByRole('button', { name: /Fetch/i });
     await fetchButton.click();
 
-    // Error toast should appear
-    const toast = page.locator('.toast, .error-message, .notification').first();
+    // Error toast should appear with informative message
+    const toast = page.locator('.toast').first();
     await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText(/error|network|resolve/i);
+
+    // Fetch button should be re-enabled for retry
+    await expect(fetchButton).toBeEnabled();
   });
 
-  test('should show error toast when push fails', async ({ page }) => {
+  test('should show error toast when push fails and re-enable button', async ({ page }) => {
     // Inject error for the push command
     await injectCommandError(page, 'push', 'Push rejected: non-fast-forward update');
 
-    // Click the Push button
     const pushButton = page.getByRole('button', { name: /Push/i });
     await pushButton.click();
 
-    // Error toast should appear
-    const toast = page.locator('.toast, .error-message, .notification').first();
+    // Error toast should appear with informative message
+    const toast = page.locator('.toast').first();
     await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText(/error|rejected|fast-forward/i);
+
+    // Push button should be re-enabled for retry
+    await expect(pushButton).toBeEnabled();
   });
 });
 
