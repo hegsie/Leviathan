@@ -48,12 +48,43 @@ const mockStatistics = {
   totalLinesDeleted: 4300,
 };
 
+/**
+ * Force the analytics panel to reload data.
+ * The component lives deep in shadow DOM (app-shell > ... > lv-right-panel > lv-analytics-panel).
+ * We traverse shadow roots to find it, reset its cache, and trigger loadStats().
+ */
+async function reloadAnalyticsPanel(page: import('@playwright/test').Page): Promise<void> {
+  await page.evaluate(() => {
+    function deepQuerySelector(root: ParentNode, selector: string): Element | null {
+      const el = root.querySelector(selector);
+      if (el) return el;
+      const allElements = root.querySelectorAll('*');
+      for (const elem of allElements) {
+        if (elem.shadowRoot) {
+          const found = deepQuerySelector(elem.shadowRoot, selector);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
+    const panel = deepQuerySelector(document, 'lv-analytics-panel');
+    if (!panel) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ap = panel as any;
+    // Reset lastLoadedPath so loadStats() will actually fetch again
+    ap.lastLoadedPath = null;
+    ap.loadStats();
+  });
+}
+
 test.describe('Analytics Panel', () => {
   let rightPanel: RightPanelPage;
 
   test.beforeEach(async ({ page }) => {
     rightPanel = new RightPanelPage(page);
     await setupOpenRepository(page);
+    // Inject mock before any analytics interaction
     await injectCommandMock(page, { get_repo_statistics: mockStatistics });
   });
 
@@ -68,8 +99,8 @@ test.describe('Analytics Panel', () => {
 
   test('should display overview cards with summary statistics', async ({ page }) => {
     await rightPanel.switchToAnalytics();
+    await reloadAnalyticsPanel(page);
 
-    // Wait for statistics to load
     await page.locator('lv-analytics-panel .stat-card').first().waitFor({ state: 'visible', timeout: 5000 });
 
     const cards = page.locator('lv-analytics-panel .stat-card');
@@ -82,8 +113,8 @@ test.describe('Analytics Panel', () => {
 
   test('should display commit activity timeline chart', async ({ page }) => {
     await rightPanel.switchToAnalytics();
+    await reloadAnalyticsPanel(page);
 
-    // Wait for the chart to render
     const activityBars = page.locator('lv-analytics-panel .section:has-text("Commit Activity") .chart-bar');
     await activityBars.first().waitFor({ state: 'visible', timeout: 5000 });
 
@@ -93,18 +124,18 @@ test.describe('Analytics Panel', () => {
 
   test('should display activity patterns section', async ({ page }) => {
     await rightPanel.switchToAnalytics();
+    await reloadAnalyticsPanel(page);
 
     const patternsSection = page.locator('lv-analytics-panel .section:has-text("Activity Patterns")');
     await expect(patternsSection).toBeVisible({ timeout: 5000 });
 
-    // Should show weekday sub-chart
     await expect(patternsSection.locator('.chart-sub-title:has-text("Day of Week")')).toBeVisible();
-    // Should show hour sub-chart
     await expect(patternsSection.locator('.chart-sub-title:has-text("Hour")')).toBeVisible();
   });
 
   test('should display top contributors', async ({ page }) => {
     await rightPanel.switchToAnalytics();
+    await reloadAnalyticsPanel(page);
 
     const contribSection = page.locator('lv-analytics-panel .section:has-text("Top Contributors")');
     await expect(contribSection).toBeVisible({ timeout: 5000 });
@@ -112,48 +143,28 @@ test.describe('Analytics Panel', () => {
     const rows = contribSection.locator('.contributor-row');
     await expect(rows).toHaveCount(3);
 
-    // First contributor should be Alice (most commits)
     await expect(contribSection.locator('.contributor-name').first()).toHaveText('Alice');
   });
 
   test('should display file type distribution', async ({ page }) => {
     await rightPanel.switchToAnalytics();
+    await reloadAnalyticsPanel(page);
 
     const fileSection = page.locator('lv-analytics-panel .section:has-text("File Types")');
     await expect(fileSection).toBeVisible({ timeout: 5000 });
 
-    // Should have donut chart
     await expect(fileSection.locator('.donut-container svg')).toBeVisible();
 
-    // Should list file types
     const fileRows = fileSection.locator('.file-type-row');
     await expect(fileRows).toHaveCount(5);
   });
 
   test('should show error state when command fails', async ({ page }) => {
-    await injectCommandError(page, 'get_repo_statistics', 'Statistics unavailable');
-    await rightPanel.switchToAnalytics();
-
-    // Force a reload by navigating away and back
-    await rightPanel.switchToChanges();
+    // Inject error mock — this replaces the success mock from beforeEach
     await injectCommandError(page, 'get_repo_statistics', 'Statistics unavailable');
 
-    // Inject error before switching, then switch
-    await page.evaluate(() => {
-      // Reset the analytics panel to force a reload
-      const panel = document.querySelector('lv-analytics-panel');
-      if (panel) {
-        (panel as HTMLElement & { repositoryPath: string | null }).repositoryPath = null;
-      }
-    });
-    await page.evaluate(() => {
-      const panel = document.querySelector('lv-analytics-panel');
-      if (panel) {
-        (panel as HTMLElement & { repositoryPath: string | null }).repositoryPath = '/tmp/test-repo';
-      }
-    });
-
     await rightPanel.switchToAnalytics();
+    await reloadAnalyticsPanel(page);
 
     const errorEl = page.locator('lv-analytics-panel .error');
     await expect(errorEl).toBeVisible({ timeout: 5000 });
@@ -163,21 +174,8 @@ test.describe('Analytics Panel', () => {
   test('should show retry button on error', async ({ page }) => {
     await injectCommandError(page, 'get_repo_statistics', 'Temporary failure');
 
-    // Reset the panel to force a fresh load with error
-    await page.evaluate(() => {
-      const panel = document.querySelector('lv-analytics-panel');
-      if (panel) {
-        (panel as HTMLElement & { repositoryPath: string | null }).repositoryPath = null;
-      }
-    });
-    await page.evaluate(() => {
-      const panel = document.querySelector('lv-analytics-panel');
-      if (panel) {
-        (panel as HTMLElement & { repositoryPath: string | null }).repositoryPath = '/tmp/test-repo';
-      }
-    });
-
     await rightPanel.switchToAnalytics();
+    await reloadAnalyticsPanel(page);
 
     const retryBtn = page.locator('lv-analytics-panel .retry-btn');
     await expect(retryBtn).toBeVisible({ timeout: 5000 });

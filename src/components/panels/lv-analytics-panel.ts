@@ -7,6 +7,7 @@
 import { LitElement, html, css, svg, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
+import { formatFileSize } from '../../utils/format.ts';
 import * as gitService from '../../services/git.service.ts';
 import type {
   RepoStatistics,
@@ -383,7 +384,7 @@ export class LvAnalyticsPanel extends LitElement {
         ${this.stats.activityByWeekday || this.stats.activityByHour
           ? this.renderPatterns(this.stats.activityByWeekday, this.stats.activityByHour)
           : nothing}
-        ${this.stats.topContributors ? this.renderContributors(this.stats.topContributors, this.stats.totalCommits) : nothing}
+        ${this.stats.topContributors ? this.renderContributors(this.stats.topContributors) : nothing}
         ${this.stats.fileTypes ? this.renderFileTypes(this.stats.fileTypes) : nothing}
       </div>
     `;
@@ -394,18 +395,18 @@ export class LvAnalyticsPanel extends LitElement {
   private renderOverview(s: RepoStatistics) {
     const firstDate = s.firstCommitDate ? new Date(s.firstCommitDate * 1000).toLocaleDateString() : '—';
     const lastDate = s.lastCommitDate ? new Date(s.lastCommitDate * 1000).toLocaleDateString() : '—';
-    const size = this.formatBytes(s.repoSizeBytes);
+    const size = formatFileSize(s.repoSizeBytes);
 
     return html`
       <div class="section">
         <div class="section-header">Overview</div>
         <div class="section-body">
           <div class="overview-grid">
-            ${this.renderCard(this.formatNumber(s.totalCommits), 'Commits')}
+            ${this.renderCard(this.formatCompactNumber(s.totalCommits), 'Commits')}
             ${this.renderCard(String(s.totalContributors), 'Contributors')}
             ${this.renderCard(String(s.totalBranches), 'Branches')}
             ${this.renderCard(String(s.totalTags), 'Tags')}
-            ${this.renderCard(this.formatNumber(s.totalFiles), 'Files')}
+            ${this.renderCard(this.formatCompactNumber(s.totalFiles), 'Files')}
             ${this.renderCard(size, 'Repo Size')}
             ${this.renderCard(String(s.repoAgeDays), 'Days Old')}
             ${this.renderCard(firstDate, 'First Commit')}
@@ -563,7 +564,7 @@ export class LvAnalyticsPanel extends LitElement {
 
   /* ── Top Contributors ───────────────────────────────────── */
 
-  private renderContributors(contributors: EnhancedContributorStats[], totalCommits: number) {
+  private renderContributors(contributors: EnhancedContributorStats[]) {
     if (contributors.length === 0) return nothing;
 
     const maxCommits = contributors[0].commits; // already sorted desc
@@ -582,8 +583,8 @@ export class LvAnalyticsPanel extends LitElement {
                   </div>
                   <div class="contributor-commits">${c.commits} commits</div>
                   <div class="contributor-lines">
-                    <span class="lines-added">+${this.formatNumber(c.linesAdded)}</span>
-                    <span class="lines-deleted">-${this.formatNumber(c.linesDeleted)}</span>
+                    <span class="lines-added">+${this.formatCompactNumber(c.linesAdded)}</span>
+                    <span class="lines-deleted">-${this.formatCompactNumber(c.linesDeleted)}</span>
                   </div>
                   <div class="contributor-bar-container">
                     <div class="contributor-bar" style="width: ${(c.commits / maxCommits) * 100}%"></div>
@@ -695,15 +696,7 @@ export class LvAnalyticsPanel extends LitElement {
 
   /* ── Helpers ────────────────────────────────────────────── */
 
-  private formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const units = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${units[i]}`;
-  }
-
-  private formatNumber(n: number): string {
+  private formatCompactNumber(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
     return String(n);
