@@ -974,6 +974,27 @@ export async function setupTauriMocks(
           case 'delete_git_credentials':
             return null;
 
+          // === Statistics commands ===
+          case 'get_repo_statistics':
+            return {
+              totalCommits: 0,
+              totalBranches: 0,
+              totalTags: 0,
+              totalContributors: 0,
+              totalFiles: 0,
+              repoSizeBytes: 0,
+              firstCommitDate: null,
+              lastCommitDate: null,
+              repoAgeDays: 0,
+              activityByMonth: [],
+              activityByWeekday: [],
+              activityByHour: [],
+              topContributors: [],
+              fileTypes: [],
+              totalLinesAdded: 0,
+              totalLinesDeleted: 0,
+            };
+
           // === Integration detection commands ===
           case 'detect_ado_repo':
           case 'detect_gitlab_repo':
