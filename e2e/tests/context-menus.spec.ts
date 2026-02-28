@@ -494,7 +494,7 @@ test.describe('Context Menus - Error Scenarios', () => {
     // Mock checkout to return success and mock get_branches to return updated list
     const updatedBranches = [
       {
-        name: 'refs/heads/main',
+        name: 'main',
         isHead: false,
         isRemote: false,
         upstream: null,
@@ -503,7 +503,7 @@ test.describe('Context Menus - Error Scenarios', () => {
         isStale: false,
       },
       {
-        name: 'refs/heads/feature/test',
+        name: 'feature/test',
         isHead: true,
         isRemote: false,
         upstream: null,
@@ -525,7 +525,7 @@ test.describe('Context Menus - Error Scenarios', () => {
       const invoke = (window as unknown as {
         __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
       }).__TAURI_INTERNALS__.invoke;
-      await invoke('checkout', { path: '/tmp/test-repo', refName: 'refs/heads/feature/test' });
+      await invoke('checkout', { path: '/tmp/test-repo', refName: 'feature/test' });
       // Trigger a store refresh to update the UI
       const stores = (window as unknown as { __LEVIATHAN_STORES__: Record<string, unknown> }).__LEVIATHAN_STORES__;
       const repoStore = stores.repositoryStore as { getState: () => { setBranches: (b: unknown[]) => void; setCurrentBranch: (b: unknown) => void } };

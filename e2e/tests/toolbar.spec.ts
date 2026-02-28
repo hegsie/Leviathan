@@ -453,7 +453,7 @@ test.describe('Toolbar - Extended Tests', () => {
       name: 'new-cloned-repo',
       isValid: true,
       isBare: false,
-      headRef: 'refs/heads/main',
+      headRef: 'main',
       state: 'clean',
     };
     await startCommandCaptureWithMocks(page, {

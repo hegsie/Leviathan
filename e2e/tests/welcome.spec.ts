@@ -505,7 +505,7 @@ test.describe('Welcome - Extended Tests', () => {
             name: 'my-project',
             isValid: true,
             isBare: false,
-            headRef: 'refs/heads/main',
+            headRef: 'main',
             state: 'clean',
           };
         }
@@ -560,7 +560,7 @@ test.describe('Welcome - Extended Tests', () => {
             name: 'new-project',
             isValid: true,
             isBare: false,
-            headRef: 'refs/heads/main',
+            headRef: 'main',
             state: 'clean',
           };
         }

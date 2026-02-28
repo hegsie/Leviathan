@@ -49,16 +49,16 @@ test.describe('Branch with Multiple Branches', () => {
     await setupOpenRepository(page, {
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
-          upstream: 'refs/remotes/origin/main',
+          upstream: 'origin/main',
           targetOid: 'abc123',
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: false,
           isRemote: false,
@@ -67,7 +67,7 @@ test.describe('Branch with Multiple Branches', () => {
           isStale: false,
         },
         {
-          name: 'refs/heads/feature/new-feature',
+          name: 'feature/new-feature',
           shorthand: 'feature/new-feature',
           isHead: false,
           isRemote: false,
@@ -76,7 +76,7 @@ test.describe('Branch with Multiple Branches', () => {
           isStale: false,
         },
         {
-          name: 'refs/remotes/origin/main',
+          name: 'origin/main',
           shorthand: 'origin/main',
           isHead: false,
           isRemote: true,
@@ -254,16 +254,16 @@ test.describe('Branch Checkout via Context Menu', () => {
     await setupOpenRepository(page, {
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
-          upstream: 'refs/remotes/origin/main',
+          upstream: 'origin/main',
           targetOid: 'abc123',
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: false,
           isRemote: false,
@@ -272,7 +272,7 @@ test.describe('Branch Checkout via Context Menu', () => {
           isStale: false,
         },
         {
-          name: 'refs/heads/feature/checkout-test',
+          name: 'feature/checkout-test',
           shorthand: 'feature/checkout-test',
           isHead: false,
           isRemote: false,
@@ -281,7 +281,7 @@ test.describe('Branch Checkout via Context Menu', () => {
           isStale: false,
         },
         {
-          name: 'refs/remotes/origin/main',
+          name: 'origin/main',
           shorthand: 'origin/main',
           isHead: false,
           isRemote: true,
@@ -342,7 +342,7 @@ test.describe('Branch Checkout via Context Menu', () => {
 
     const commands = await findCommand(page, 'checkout_with_autostash');
     expect(commands.length).toBeGreaterThan(0);
-    expect((commands[0].args as { refName?: string })?.refName).toBe('refs/heads/develop');
+    expect((commands[0].args as { refName?: string })?.refName).toBe('develop');
 
     // Verify UI: develop should now be the active branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
@@ -370,7 +370,7 @@ test.describe('Branch Checkout via Context Menu', () => {
     const commands = await findCommand(page, 'checkout_with_autostash');
     expect(commands.length).toBeGreaterThan(0);
     expect((commands[0].args as { refName?: string })?.refName).toBe(
-      'refs/heads/feature/checkout-test'
+      'feature/checkout-test'
     );
 
     // Verify UI: feature/checkout-test should now be the active branch
@@ -405,16 +405,16 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
     await setupOpenRepository(page, {
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
-          upstream: 'refs/remotes/origin/main',
+          upstream: 'origin/main',
           targetOid: 'abc123',
           isStale: false,
         },
         {
-          name: 'refs/remotes/origin/main',
+          name: 'origin/main',
           shorthand: 'main',
           isHead: false,
           isRemote: true,
@@ -423,7 +423,7 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
           isStale: false,
         },
         {
-          name: 'refs/remotes/origin/feature/remote-feature',
+          name: 'origin/feature/remote-feature',
           shorthand: 'feature/remote-feature',
           isHead: false,
           isRemote: true,
@@ -432,7 +432,7 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
           isStale: false,
         },
         {
-          name: 'refs/remotes/origin/copilot/ai-generated-branch',
+          name: 'origin/copilot/ai-generated-branch',
           shorthand: 'copilot/ai-generated-branch',
           isHead: false,
           isRemote: true,
@@ -467,7 +467,7 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
     const commands = await findCommand(page, 'checkout_with_autostash');
     expect(commands.length).toBeGreaterThan(0);
     expect((commands[0].args as { refName?: string })?.refName).toBe(
-      'refs/remotes/origin/feature/remote-feature'
+      'origin/feature/remote-feature'
     );
 
     // Verify UI: the active branch should now reflect the checked-out remote branch
@@ -502,7 +502,7 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
     const commands = await findCommand(page, 'checkout_with_autostash');
     expect(commands.length).toBeGreaterThan(0);
     expect((commands[0].args as { refName?: string })?.refName).toBe(
-      'refs/remotes/origin/copilot/ai-generated-branch'
+      'origin/copilot/ai-generated-branch'
     );
 
     // Verify UI: the active branch should now reflect the checked-out copilot branch
@@ -569,16 +569,16 @@ test.describe('Branch Checkout - Error Handling', () => {
     await setupOpenRepository(page, {
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
-          upstream: 'refs/remotes/origin/main',
+          upstream: 'origin/main',
           targetOid: 'abc123',
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: false,
           isRemote: false,
@@ -631,16 +631,16 @@ test.describe('Branch Delete via Context Menu', () => {
     await setupOpenRepository(page, {
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
-          upstream: 'refs/remotes/origin/main',
+          upstream: 'origin/main',
           targetOid: 'abc123',
           isStale: false,
         },
         {
-          name: 'refs/heads/feature/to-delete',
+          name: 'feature/to-delete',
           shorthand: 'feature/to-delete',
           isHead: false,
           isRemote: false,
@@ -725,11 +725,11 @@ test.describe('Branch Create via Context Menu', () => {
     await setupOpenRepository(page, {
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
-          upstream: 'refs/remotes/origin/main',
+          upstream: 'origin/main',
           targetOid: 'abc123',
           isStale: false,
         },
@@ -817,7 +817,7 @@ test.describe('Branch Checkout - HEAD Indicator Update', () => {
     await setupOpenRepository(page, {
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
@@ -826,7 +826,7 @@ test.describe('Branch Checkout - HEAD Indicator Update', () => {
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: false,
           isRemote: false,
@@ -850,7 +850,7 @@ test.describe('Branch Checkout - HEAD Indicator Update', () => {
 
     const checkoutCommands = await findCommand(page, 'checkout_with_autostash');
     expect(checkoutCommands.length).toBeGreaterThan(0);
-    expect((checkoutCommands[0].args as { refName?: string })?.refName).toBe('refs/heads/develop');
+    expect((checkoutCommands[0].args as { refName?: string })?.refName).toBe('develop');
 
     // Verify the DOM reflects the new HEAD: develop should now be the active branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
@@ -888,16 +888,16 @@ test.describe('Remote Branch Checkout - Creates Local Tracking Branch', () => {
     await setupOpenRepository(page, {
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
-          upstream: 'refs/remotes/origin/main',
+          upstream: 'origin/main',
           targetOid: 'abc123',
           isStale: false,
         },
         {
-          name: 'refs/remotes/origin/main',
+          name: 'origin/main',
           shorthand: 'main',
           isHead: false,
           isRemote: true,
@@ -906,7 +906,7 @@ test.describe('Remote Branch Checkout - Creates Local Tracking Branch', () => {
           isStale: false,
         },
         {
-          name: 'refs/remotes/origin/feature-x',
+          name: 'origin/feature-x',
           shorthand: 'feature-x',
           isHead: false,
           isRemote: true,
@@ -940,7 +940,7 @@ test.describe('Remote Branch Checkout - Creates Local Tracking Branch', () => {
     const checkoutCommands = await findCommand(page, 'checkout_with_autostash');
     expect(checkoutCommands.length).toBeGreaterThan(0);
     expect((checkoutCommands[0].args as { refName?: string })?.refName).toBe(
-      'refs/remotes/origin/feature-x'
+      'origin/feature-x'
     );
 
     // Verify: new local branch feature-x should now appear and be the active (HEAD) branch
@@ -964,16 +964,16 @@ test.describe('Detached HEAD State', () => {
       },
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: false,
           isRemote: false,
-          upstream: 'refs/remotes/origin/main',
+          upstream: 'origin/main',
           targetOid: 'abc123',
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: false,
           isRemote: false,
@@ -1007,16 +1007,16 @@ test.describe('Branches - UI Outcome Verification', () => {
     await setupOpenRepository(page, {
       branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
-          upstream: 'refs/remotes/origin/main',
+          upstream: 'origin/main',
           targetOid: 'abc123',
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: false,
           isRemote: false,
@@ -1025,7 +1025,7 @@ test.describe('Branches - UI Outcome Verification', () => {
           isStale: false,
         },
         {
-          name: 'refs/heads/feature/old-feature',
+          name: 'feature/old-feature',
           shorthand: 'feature/old-feature',
           isHead: false,
           isRemote: false,
@@ -1129,5 +1129,161 @@ test.describe('Branches - UI Outcome Verification', () => {
 
     // Verify the branch is still in the list (delete failed)
     await expect(leftPanel.getBranch('develop')).toBeVisible();
+  });
+});
+
+test.describe('Branch Rename via Prompt Dialog', () => {
+  let leftPanel: LeftPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+    await setupOpenRepository(page, {
+      branches: [
+        {
+          name: 'main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'feature-to-rename',
+          shorthand: 'feature-to-rename',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+      ],
+    });
+  });
+
+  test('should open themed prompt dialog when renaming a branch', async ({ page }) => {
+    // Right-click on the branch to rename
+    await leftPanel.openBranchContextMenu('feature-to-rename');
+
+    // Click the Rename option
+    const renameMenuItem = page.locator('.context-menu-item', { hasText: 'Rename' });
+    await renameMenuItem.waitFor({ state: 'visible' });
+    await renameMenuItem.click();
+
+    // Verify the themed prompt dialog opens (not native prompt)
+    const promptModal = page.locator('lv-prompt-dialog lv-modal[open]');
+    await expect(promptModal).toBeVisible();
+
+    // Verify it shows the correct title and default value
+    await expect(promptModal).toContainText('Rename Branch');
+    const input = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(input).toBeVisible();
+  });
+
+  test('should rename branch when submitting prompt dialog', async ({ page }) => {
+    await startCommandCapture(page);
+
+    // Right-click and rename
+    await leftPanel.openBranchContextMenu('feature-to-rename');
+    const renameMenuItem = page.locator('.context-menu-item', { hasText: 'Rename' });
+    await renameMenuItem.waitFor({ state: 'visible' });
+    await renameMenuItem.click();
+
+    // Wait for prompt dialog
+    const promptModal = page.locator('lv-prompt-dialog lv-modal[open]');
+    await promptModal.waitFor({ state: 'visible' });
+
+    // Clear and type new name
+    const input = page.locator('lv-prompt-dialog .prompt-input');
+    await input.fill('feature-renamed');
+
+    // Click confirm (Rename button)
+    const confirmBtn = page.locator('lv-prompt-dialog .btn-primary');
+    await confirmBtn.click();
+
+    // Verify rename_branch command was called
+    await waitForCommand(page, 'rename_branch');
+    const renameCmds = await findCommand(page, 'rename_branch');
+    expect(renameCmds.length).toBeGreaterThan(0);
+
+    // Verify dialog closes
+    await expect(promptModal).not.toBeVisible();
+  });
+
+  test('should not rename when prompt dialog is cancelled', async ({ page }) => {
+    await startCommandCapture(page);
+
+    // Right-click and rename
+    await leftPanel.openBranchContextMenu('feature-to-rename');
+    const renameMenuItem = page.locator('.context-menu-item', { hasText: 'Rename' });
+    await renameMenuItem.waitFor({ state: 'visible' });
+    await renameMenuItem.click();
+
+    // Wait for prompt dialog
+    const promptModal = page.locator('lv-prompt-dialog lv-modal[open]');
+    await promptModal.waitFor({ state: 'visible' });
+
+    // Click cancel
+    const cancelBtn = page.locator('lv-prompt-dialog .btn-secondary');
+    await cancelBtn.click();
+
+    // Verify dialog closes
+    await expect(promptModal).not.toBeVisible();
+
+    // Verify rename_branch was NOT called
+    const renameCmds = await findCommand(page, 'rename_branch');
+    expect(renameCmds.length).toBe(0);
+
+    // Branch should still be listed with original name
+    await expect(leftPanel.getBranch('feature-to-rename')).toBeVisible();
+  });
+});
+
+test.describe('Drag-Drop Merge Error Toast', () => {
+  let leftPanel: LeftPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+    await setupOpenRepository(page, {
+      branches: [
+        {
+          name: 'main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'feature-drag',
+          shorthand: 'feature-drag',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+      ],
+    });
+  });
+
+  test('should show error toast when drag-drop merge fails with non-conflict error', async ({ page }) => {
+    // Auto-confirm the merge dialog
+    await autoConfirmDialogs(page);
+
+    // Inject merge failure with a non-conflict error
+    await injectCommandError(page, 'merge', 'Merge failed: invalid reference');
+
+    // Perform drag and drop: drag feature-drag onto main (HEAD)
+    const featureBranch = leftPanel.getBranch('feature-drag');
+    const mainBranch = leftPanel.getBranch('main');
+
+    await featureBranch.dragTo(mainBranch);
+
+    // Verify the error toast appears
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toBeVisible();
+    await expect(toastMessage).toContainText('Merge failed');
   });
 });

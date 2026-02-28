@@ -66,8 +66,8 @@ test.describe('Worktree Dialog - List View', () => {
         },
       ],
       get_branches: [
-        { name: 'refs/heads/main', shorthand: 'main', isHead: true, isRemote: false, upstream: null, targetOid: 'abc123', isStale: false },
-        { name: 'refs/heads/develop', shorthand: 'develop', isHead: false, isRemote: false, upstream: null, targetOid: 'xyz789', isStale: false },
+        { name: 'main', shorthand: 'main', isHead: true, isRemote: false, upstream: null, targetOid: 'abc123', isStale: false },
+        { name: 'develop', shorthand: 'develop', isHead: false, isRemote: false, upstream: null, targetOid: 'xyz789', isStale: false },
       ],
       add_worktree: {
         path: '/tmp/new-worktree',
@@ -218,8 +218,8 @@ test.describe('Worktree Dialog - Add Form', () => {
         },
       ],
       get_branches: [
-        { name: 'refs/heads/main', shorthand: 'main', isHead: true, isRemote: false, upstream: null, targetOid: 'abc123', isStale: false },
-        { name: 'refs/heads/develop', shorthand: 'develop', isHead: false, isRemote: false, upstream: null, targetOid: 'xyz789', isStale: false },
+        { name: 'main', shorthand: 'main', isHead: true, isRemote: false, upstream: null, targetOid: 'abc123', isStale: false },
+        { name: 'develop', shorthand: 'develop', isHead: false, isRemote: false, upstream: null, targetOid: 'xyz789', isStale: false },
       ],
       add_worktree: {
         path: '/tmp/new-worktree',
@@ -338,7 +338,7 @@ test.describe('Worktree Dialog - Error Handling', () => {
         },
       ],
       get_branches: [
-        { name: 'refs/heads/develop', shorthand: 'develop', isHead: false, isRemote: false, upstream: null, targetOid: 'xyz789', isStale: false },
+        { name: 'develop', shorthand: 'develop', isHead: false, isRemote: false, upstream: null, targetOid: 'xyz789', isStale: false },
       ],
     });
   });
@@ -704,8 +704,8 @@ test.describe('Worktree Error Scenarios', () => {
         },
       ],
       get_branches: [
-        { name: 'refs/heads/main', shorthand: 'main', isHead: true, isRemote: false, upstream: null, targetOid: 'abc123', isStale: false },
-        { name: 'refs/heads/develop', shorthand: 'develop', isHead: false, isRemote: false, upstream: null, targetOid: 'xyz789', isStale: false },
+        { name: 'main', shorthand: 'main', isHead: true, isRemote: false, upstream: null, targetOid: 'abc123', isStale: false },
+        { name: 'develop', shorthand: 'develop', isHead: false, isRemote: false, upstream: null, targetOid: 'xyz789', isStale: false },
       ],
     });
 

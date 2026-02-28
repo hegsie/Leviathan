@@ -68,7 +68,7 @@ test.describe('Workspace Manager - open-repo-file handler', () => {
         name: 'other-repo',
         isValid: true,
         isBare: false,
-        headRef: 'refs/heads/main',
+        headRef: 'main',
         state: 'clean',
       },
       get_commits: [],

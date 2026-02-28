@@ -73,25 +73,25 @@ export const defaultMockData = {
     name: 'test-repo',
     isValid: true,
     isBare: false,
-    headRef: 'refs/heads/main',
+    headRef: 'main',
     state: 'clean',
   } as MockRepository,
 
   // Branches
   branches: [
     {
-      name: 'refs/heads/main',
+      name: 'main',
       shorthand: 'main',
       isHead: true,
       isRemote: false,
-      upstream: 'refs/remotes/origin/main',
+      upstream: 'origin/main',
       targetOid: 'abc123def456',
       aheadBehind: { ahead: 0, behind: 0 },
       lastCommitTimestamp: Date.now() / 1000,
       isStale: false,
     },
     {
-      name: 'refs/heads/feature/test',
+      name: 'feature/test',
       shorthand: 'feature/test',
       isHead: false,
       isRemote: false,
@@ -100,7 +100,7 @@ export const defaultMockData = {
       isStale: false,
     },
     {
-      name: 'refs/remotes/origin/main',
+      name: 'origin/main',
       shorthand: 'origin/main',
       isHead: false,
       isRemote: true,
@@ -203,19 +203,18 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'checkout_branch': {
         const refName = (args?.refName as string) || (args?.name as string) || '';
         mocks.branches.forEach((b) => { b.isHead = false; });
-        if (refName.startsWith('refs/remotes/')) {
-          const parts = refName.replace('refs/remotes/', '').split('/');
-          parts.shift();
-          const localName = parts.join('/');
-          const remoteBranch = mocks.branches.find((b) => b.name === refName);
-          const targetOid = remoteBranch?.targetOid || 'checkout-oid';
-          const existingLocal = mocks.branches.find((b) => b.name === `refs/heads/${localName}`);
+        const remoteBranch = mocks.branches.find((b) => b.name === refName && b.isRemote);
+        if (remoteBranch) {
+          const firstSlash = refName.indexOf('/');
+          const localName = firstSlash > 0 ? refName.substring(firstSlash + 1) : refName;
+          const targetOid = remoteBranch.targetOid || 'checkout-oid';
+          const existingLocal = mocks.branches.find((b) => b.name === localName && !b.isRemote);
           if (existingLocal) {
             existingLocal.isHead = true;
             existingLocal.upstream = refName;
           } else {
             mocks.branches.push({
-              name: `refs/heads/${localName}`,
+              name: localName,
               shorthand: localName,
               isHead: true,
               isRemote: false,
@@ -236,7 +235,7 @@ function createMockHandler(mocks: typeof defaultMockData) {
         const name = (args?.name as string) || '';
         const startPoint = (args?.startPoint as string) || mocks.commits[0]?.oid || 'abc123';
         mocks.branches.push({
-          name: `refs/heads/${name}`,
+          name,
           shorthand: name,
           isHead: false,
           isRemote: false,
@@ -258,19 +257,18 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'checkout_with_autostash': {
         const refName = (args?.refName as string) || '';
         mocks.branches.forEach((b) => { b.isHead = false; });
-        if (refName.startsWith('refs/remotes/')) {
-          const parts = refName.replace('refs/remotes/', '').split('/');
-          parts.shift();
-          const localName = parts.join('/');
-          const remoteBranch = mocks.branches.find((b) => b.name === refName);
-          const targetOid = remoteBranch?.targetOid || 'checkout-oid';
-          const existingLocal = mocks.branches.find((b) => b.name === `refs/heads/${localName}`);
+        const remoteBranch = mocks.branches.find((b) => b.name === refName && b.isRemote);
+        if (remoteBranch) {
+          const firstSlash = refName.indexOf('/');
+          const localName = firstSlash > 0 ? refName.substring(firstSlash + 1) : refName;
+          const targetOid = remoteBranch.targetOid || 'checkout-oid';
+          const existingLocal = mocks.branches.find((b) => b.name === localName && !b.isRemote);
           if (existingLocal) {
             existingLocal.isHead = true;
             existingLocal.upstream = refName;
           } else {
             mocks.branches.push({
-              name: `refs/heads/${localName}`,
+              name: localName,
               shorthand: localName,
               isHead: true,
               isRemote: false,
@@ -746,20 +744,19 @@ export async function setupTauriMocks(
             const refName = ((args as { refName?: string })?.refName) || ((args as { name?: string })?.name) || '';
             // Clear isHead on all branches
             state.branches.forEach((b: MockBranch) => { b.isHead = false; });
-            if (refName.startsWith('refs/remotes/')) {
+            const remoteBranch = state.branches.find((b: MockBranch) => b.name === refName && b.isRemote);
+            if (remoteBranch) {
               // Remote branch checkout: create local tracking branch
-              const parts = refName.replace('refs/remotes/', '').split('/');
-              parts.shift(); // remove remote name
-              const localName = parts.join('/');
-              const remoteBranch = state.branches.find((b: MockBranch) => b.name === refName);
-              const targetOid = remoteBranch?.targetOid || 'checkout-oid';
-              const existingLocal = state.branches.find((b: MockBranch) => b.name === `refs/heads/${localName}`);
+              const firstSlash = refName.indexOf('/');
+              const localName = firstSlash > 0 ? refName.substring(firstSlash + 1) : refName;
+              const targetOid = remoteBranch.targetOid || 'checkout-oid';
+              const existingLocal = state.branches.find((b: MockBranch) => b.name === localName && !b.isRemote);
               if (existingLocal) {
                 existingLocal.isHead = true;
                 existingLocal.upstream = refName;
               } else {
                 state.branches.push({
-                  name: `refs/heads/${localName}`,
+                  name: localName,
                   shorthand: localName,
                   isHead: true,
                   isRemote: false,
@@ -780,7 +777,7 @@ export async function setupTauriMocks(
             const name = (args as { name?: string })?.name || '';
             const startPoint = (args as { startPoint?: string })?.startPoint || state.commits[0]?.oid || 'abc123';
             state.branches.push({
-              name: `refs/heads/${name}`,
+              name,
               shorthand: name,
               isHead: false,
               isRemote: false,
@@ -803,19 +800,18 @@ export async function setupTauriMocks(
             const refName = ((args as { refName?: string })?.refName) || '';
             // Clear isHead on all branches
             state.branches.forEach((b: MockBranch) => { b.isHead = false; });
-            if (refName.startsWith('refs/remotes/')) {
-              const parts = refName.replace('refs/remotes/', '').split('/');
-              parts.shift();
-              const localName = parts.join('/');
-              const remoteBranch = state.branches.find((b: MockBranch) => b.name === refName);
-              const targetOid = remoteBranch?.targetOid || 'checkout-oid';
-              const existingLocal = state.branches.find((b: MockBranch) => b.name === `refs/heads/${localName}`);
+            const remoteBranch = state.branches.find((b: MockBranch) => b.name === refName && b.isRemote);
+            if (remoteBranch) {
+              const firstSlash = refName.indexOf('/');
+              const localName = firstSlash > 0 ? refName.substring(firstSlash + 1) : refName;
+              const targetOid = remoteBranch.targetOid || 'checkout-oid';
+              const existingLocal = state.branches.find((b: MockBranch) => b.name === localName && !b.isRemote);
               if (existingLocal) {
                 existingLocal.isHead = true;
                 existingLocal.upstream = refName;
               } else {
                 state.branches.push({
-                  name: `refs/heads/${localName}`,
+                  name: localName,
                   shorthand: localName,
                   isHead: true,
                   isRemote: false,
