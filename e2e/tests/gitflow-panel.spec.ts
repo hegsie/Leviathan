@@ -74,7 +74,7 @@ test.describe('GitFlow Panel - Not Initialized', () => {
       },
       get_branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
@@ -83,7 +83,7 @@ test.describe('GitFlow Panel - Not Initialized', () => {
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: false,
           isRemote: false,
@@ -202,7 +202,7 @@ test.describe('GitFlow Panel - Initialized', () => {
       },
       get_branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: false,
           isRemote: false,
@@ -211,7 +211,7 @@ test.describe('GitFlow Panel - Initialized', () => {
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: true,
           isRemote: false,
@@ -340,7 +340,7 @@ test.describe('GitFlow Panel - Section Toggle', () => {
       },
       get_branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: true,
           isRemote: false,
@@ -349,7 +349,7 @@ test.describe('GitFlow Panel - Section Toggle', () => {
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: false,
           isRemote: false,
@@ -425,7 +425,7 @@ test.describe('GitFlow Panel - Operations', () => {
       },
       get_branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: false,
           isRemote: false,
@@ -434,7 +434,7 @@ test.describe('GitFlow Panel - Operations', () => {
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: true,
           isRemote: false,
@@ -494,7 +494,7 @@ test.describe('GitFlow Panel - Operations', () => {
         if (command === 'get_branches') {
           return [
             {
-              name: 'refs/heads/main',
+              name: 'main',
               shorthand: 'main',
               isHead: false,
               isRemote: false,
@@ -503,7 +503,7 @@ test.describe('GitFlow Panel - Operations', () => {
               isStale: false,
             },
             {
-              name: 'refs/heads/develop',
+              name: 'develop',
               shorthand: 'develop',
               isHead: true,
               isRemote: false,
@@ -577,7 +577,7 @@ test.describe('GitFlow Panel - Finish Feature Failure', () => {
       },
       get_branches: [
         {
-          name: 'refs/heads/main',
+          name: 'main',
           shorthand: 'main',
           isHead: false,
           isRemote: false,
@@ -586,7 +586,7 @@ test.describe('GitFlow Panel - Finish Feature Failure', () => {
           isStale: false,
         },
         {
-          name: 'refs/heads/develop',
+          name: 'develop',
           shorthand: 'develop',
           isHead: true,
           isRemote: false,

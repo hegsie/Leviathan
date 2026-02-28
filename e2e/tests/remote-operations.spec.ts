@@ -21,18 +21,18 @@ function withAheadBehind(ahead: number, behind: number) {
   return {
     branches: [
       {
-        name: 'refs/heads/main',
+        name: 'main',
         shorthand: 'main',
         isHead: true,
         isRemote: false,
-        upstream: 'refs/remotes/origin/main',
+        upstream: 'origin/main',
         targetOid: 'abc123def456',
         aheadBehind: { ahead, behind },
         lastCommitTimestamp: Date.now() / 1000,
         isStale: false,
       },
       {
-        name: 'refs/remotes/origin/main',
+        name: 'origin/main',
         shorthand: 'origin/main',
         isHead: false,
         isRemote: true,

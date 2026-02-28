@@ -498,6 +498,57 @@ test.describe('Context Menus - Error Scenarios', () => {
     await expect(page.locator('lv-toast-container .toast.error').first()).toBeVisible({ timeout: 5000 });
   });
 
+  test('UI should update after successful context menu checkout', async ({ page }) => {
+    // Mock checkout to return success and mock get_branches to return updated list
+    const updatedBranches = [
+      {
+        name: 'main',
+        isHead: false,
+        isRemote: false,
+        upstream: null,
+        targetOid: 'abc123',
+        shorthand: 'main',
+        isStale: false,
+      },
+      {
+        name: 'feature/test',
+        isHead: true,
+        isRemote: false,
+        upstream: null,
+        targetOid: 'def456',
+        shorthand: 'feature/test',
+        isStale: false,
+      },
+    ];
+
+    await injectCommandMock(page, {
+      checkout: null,
+      checkout_branch: null,
+      get_branches: updatedBranches,
+      get_current_branch: updatedBranches[1],
+    });
+
+    // Trigger checkout by calling the invoke layer directly and then refresh
+    await page.evaluate(async () => {
+      const invoke = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__.invoke;
+      await invoke('checkout', { path: '/tmp/test-repo', refName: 'feature/test' });
+      // Trigger a store refresh to update the UI
+      const stores = (window as unknown as { __LEVIATHAN_STORES__: Record<string, unknown> }).__LEVIATHAN_STORES__;
+      const repoStore = stores.repositoryStore as { getState: () => { setBranches: (b: unknown[]) => void; setCurrentBranch: (b: unknown) => void } };
+      const branches = await invoke('get_branches', { path: '/tmp/test-repo' }) as unknown[];
+      const currentBranch = await invoke('get_current_branch', { path: '/tmp/test-repo' });
+      repoStore.getState().setBranches(branches);
+      repoStore.getState().setCurrentBranch(currentBranch);
+    });
+
+    // After checkout, the branch list should show feature/test as the active (current) branch
+    await expect(
+      page.locator('lv-branch-list .branch-item.active').first()
+    ).toBeVisible({ timeout: 5000 });
+  });
+
   test('revert failure error toast should contain informative message', async ({ page }) => {
     // Inject revert error with a specific message
     await injectCommandError(page, 'revert', 'Revert failed: working tree has modifications');

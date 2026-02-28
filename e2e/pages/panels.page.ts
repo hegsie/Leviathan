@@ -36,11 +36,11 @@ export class LeftPanelPage {
 
     // Branch list - use role-based selectors that work with shadow DOM
     this.branchList = page.locator('lv-branch-list');
-    // Local branches are listitem elements with names starting with refs/heads/
-    this.localBranches = page.getByRole('listitem', { name: /refs\/heads\// });
-    // Remote branches are listitem elements with names containing origin
-    this.remoteBranches = page.getByRole('listitem', { name: /refs\/remotes\// });
-    this.currentBranch = page.getByRole('listitem', { name: /refs\/heads\/main/ }).first();
+    // Local branches are branch-item elements inside .local-section
+    this.localBranches = this.branchList.locator('.local-section li.branch-item');
+    // Remote branches are branch-item elements inside .group (remote groups)
+    this.remoteBranches = this.branchList.locator('.group li.branch-item');
+    this.currentBranch = this.branchList.locator('li.branch-item.active').first();
 
     // Stash list - the component itself
     this.stashList = page.locator('lv-stash-list');
@@ -71,8 +71,8 @@ export class LeftPanelPage {
    * Get a branch item by name
    */
   getBranch(name: string): Locator {
-    // Search within the branch list component to avoid matching files
-    return this.branchList.getByRole('listitem', { name: new RegExp(`refs/heads/${name}`) });
+    // Search within the branch list component by title attribute (shorthand name)
+    return this.branchList.locator(`li.branch-item[title="${name}"]`);
   }
 
   /**
@@ -91,7 +91,8 @@ export class LeftPanelPage {
 
     // The component auto-expands remote groups in loadBranches().
     // Check if remote branch items are already visible using Playwright locators.
-    const remoteBranchItems = this.branchList.locator(`li.branch-item[title^="refs/remotes/${remoteName}/"]`);
+    // With shorthand names, remote branches have titles like "origin/feature-x"
+    const remoteBranchItems = this.branchList.locator(`li.branch-item[title^="${remoteName}/"]`);
     const itemCount = await remoteBranchItems.count().catch(() => 0);
 
     if (itemCount === 0) {
@@ -114,9 +115,9 @@ export class LeftPanelPage {
    * @param shorthand The branch shorthand without remote prefix (e.g., 'feature/my-branch')
    */
   getRemoteBranch(remoteName: string, shorthand: string): Locator {
-    // Remote branches are <li> elements with title="refs/remotes/${remoteName}/${shorthand}"
-    // The title attribute contains the full git reference (branch.name)
-    return this.branchList.locator(`li.branch-item[title="refs/remotes/${remoteName}/${shorthand}"]`);
+    // Remote branches are <li> elements with title="${remoteName}/${shorthand}"
+    // The title attribute contains the shorthand branch name
+    return this.branchList.locator(`li.branch-item[title="${remoteName}/${shorthand}"]`);
   }
 
   /**
