@@ -29,7 +29,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should open dialog and show commits', async ({ page }) => {
     // Trigger opening the interactive rebase dialog from branch context menu
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
 
     const rebaseMenuItem = page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' });
@@ -47,7 +47,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should show action dropdown for each commit', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -64,7 +64,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should change action and update preview', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -84,7 +84,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should show reword textarea when action is reword', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -104,7 +104,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should allow editing reword message', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -122,7 +122,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should toggle preview panel', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -146,7 +146,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should show squash indicator in preview', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -164,7 +164,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should show error for orphaned squash', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -185,7 +185,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should close dialog on Cancel', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -204,7 +204,7 @@ test.describe('Interactive Rebase Dialog', () => {
     await startCommandCapture(page);
 
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -222,7 +222,7 @@ test.describe('Interactive Rebase Dialog', () => {
 
   test('should show stats for dropped and reworded commits', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -257,7 +257,7 @@ test.describe('Interactive Rebase Autosquash', () => {
 
   test('should show autosquash banner when fixup! commits exist', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -271,7 +271,7 @@ test.describe('Interactive Rebase Autosquash', () => {
 
   test('should apply autosquash when button clicked', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -318,7 +318,7 @@ test.describe('Interactive Rebase - Event Propagation', () => {
     });
 
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -348,7 +348,7 @@ test.describe('Interactive Rebase - Error Handling', () => {
 
   test('should show error message in dialog when rebase fails', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -366,7 +366,7 @@ test.describe('Interactive Rebase - Error Handling', () => {
 
   test('should keep dialog open with entries when rebase fails', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -396,7 +396,7 @@ test.describe('Interactive Rebase - Error Handling', () => {
     });
 
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -428,7 +428,7 @@ test.describe('Interactive Rebase - Command Verification', () => {
     await startCommandCapture(page);
 
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 
@@ -471,7 +471,7 @@ test.describe('Interactive Rebase - Injected Error on Execute', () => {
 
   test('should show error when execute_interactive_rebase fails', async ({ page }) => {
     // Open dialog
-    const developBranch = page.locator('lv-branch-list').getByRole('listitem', { name: /refs\/heads\/feature/ });
+    const developBranch = page.locator('lv-branch-list li.branch-item[title*="feature"]');
     await developBranch.click({ button: 'right' });
     await page.locator('.context-menu-item', { hasText: 'Interactive rebase onto this' }).click();
 

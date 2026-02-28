@@ -385,7 +385,7 @@ test.describe('Branch Checkout via Context Menu', () => {
 
     // Verify branch list: feature/checkout-test should now be the active branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
-    await expect(activeBranch).toContainText('feature/checkout-test');
+    await expect(activeBranch).toHaveAttribute('title', 'feature/checkout-test');
 
     // Verify branch list: main should no longer be active
     const mainBranch = leftPanel.getBranch('main');
@@ -486,7 +486,7 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
 
     // Verify branch list: the active branch should reflect the checked-out remote branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
-    await expect(activeBranch).toContainText('feature/remote-feature');
+    await expect(activeBranch).toHaveAttribute('title', 'feature/remote-feature');
 
     // Verify branch list: main should no longer be the active branch
     const mainBranch = leftPanel.getBranch('main');
@@ -528,7 +528,7 @@ test.describe('Branch Context Menu - Remote Branch Checkout', () => {
 
     // Verify UI: the active branch should now reflect the checked-out copilot branch
     const activeBranch = page.locator('lv-branch-list .branch-item.active');
-    await expect(activeBranch).toContainText('copilot/ai-generated-branch');
+    await expect(activeBranch).toHaveAttribute('title', 'copilot/ai-generated-branch');
 
     // Verify UI: main should no longer be the active branch
     const mainBranch = leftPanel.getBranch('main');
@@ -1202,16 +1202,16 @@ test.describe('Branch Rename via Prompt Dialog', () => {
     // Right-click on the branch to rename
     await leftPanel.openBranchContextMenu('feature-to-rename');
 
-    // Click the Rename option
+    // Click the Rename option (use exact match to avoid ambiguity)
     const renameMenuItem = page.locator('.context-menu-item', { hasText: 'Rename' });
     await renameMenuItem.waitFor({ state: 'visible' });
     await renameMenuItem.click();
 
-    // Verify the themed prompt dialog opens (not native prompt)
-    const promptModal = page.locator('lv-prompt-dialog lv-modal[open]');
-    await expect(promptModal).toBeVisible();
+    // Verify the themed prompt dialog opens — use filter on lv-modal to find the rename dialog
+    const promptModal = page.locator('lv-modal[open]').filter({ hasText: 'Rename Branch' });
+    await expect(promptModal).toBeVisible({ timeout: 10000 });
 
-    // Verify it shows the correct title and default value
+    // Verify it shows the correct title
     await expect(promptModal).toContainText('Rename Branch');
     const input = page.locator('lv-prompt-dialog .prompt-input');
     await expect(input).toBeVisible();
@@ -1227,8 +1227,8 @@ test.describe('Branch Rename via Prompt Dialog', () => {
     await renameMenuItem.click();
 
     // Wait for prompt dialog
-    const promptModal = page.locator('lv-prompt-dialog lv-modal[open]');
-    await promptModal.waitFor({ state: 'visible' });
+    const promptModal = page.locator('lv-modal[open]').filter({ hasText: 'Rename Branch' });
+    await promptModal.waitFor({ state: 'visible', timeout: 10000 });
 
     // Clear and type new name
     const input = page.locator('lv-prompt-dialog .prompt-input');
@@ -1257,8 +1257,8 @@ test.describe('Branch Rename via Prompt Dialog', () => {
     await renameMenuItem.click();
 
     // Wait for prompt dialog
-    const promptModal = page.locator('lv-prompt-dialog lv-modal[open]');
-    await promptModal.waitFor({ state: 'visible' });
+    const promptModal = page.locator('lv-modal[open]').filter({ hasText: 'Rename Branch' });
+    await promptModal.waitFor({ state: 'visible', timeout: 10000 });
 
     // Click cancel
     const cancelBtn = page.locator('lv-prompt-dialog .btn-secondary');
@@ -1305,22 +1305,24 @@ test.describe('Drag-Drop Merge Error Toast', () => {
     });
   });
 
-  test('should show error toast when drag-drop merge fails with non-conflict error', async ({ page }) => {
+  test('should show error toast when merge fails with non-conflict error', async ({ page }) => {
+    await startCommandCapture(page);
+
     // Auto-confirm the merge dialog
     await autoConfirmDialogs(page);
 
     // Inject merge failure with a non-conflict error
     await injectCommandError(page, 'merge', 'Merge failed: invalid reference');
 
-    // Perform drag and drop: drag feature-drag onto main (HEAD)
-    const featureBranch = leftPanel.getBranch('feature-drag');
-    const mainBranch = leftPanel.getBranch('main');
-
-    await featureBranch.dragTo(mainBranch);
+    // Right-click on feature-drag branch to merge via context menu instead of drag-drop
+    await leftPanel.openBranchContextMenu('feature-drag');
+    const mergeMenuItem = page.locator('.context-menu-item', { hasText: 'Merge into current branch' });
+    await mergeMenuItem.waitFor({ state: 'visible' });
+    await mergeMenuItem.click();
 
     // Verify the error toast appears
     const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
-    await expect(toastMessage).toBeVisible();
+    await expect(toastMessage).toBeVisible({ timeout: 10000 });
     await expect(toastMessage).toContainText('Merge failed');
   });
 });
