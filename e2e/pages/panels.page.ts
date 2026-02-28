@@ -188,6 +188,10 @@ export class RightPanelPage {
   // Tabs
   readonly changesTab: Locator;
   readonly detailsTab: Locator;
+  readonly analyticsTab: Locator;
+
+  // Analytics panel
+  readonly analyticsPanel: Locator;
 
   // File status (Changes tab)
   readonly fileStatus: Locator;
@@ -220,6 +224,10 @@ export class RightPanelPage {
     // Tabs - use getByRole for buttons with tab-like behavior
     this.changesTab = page.getByRole('button', { name: /^Changes/ });
     this.detailsTab = page.getByRole('button', { name: 'Details' });
+    this.analyticsTab = page.getByRole('button', { name: 'Analytics' });
+
+    // Analytics panel
+    this.analyticsPanel = page.locator('lv-analytics-panel');
 
     // File status - use accessible selectors
     this.fileStatus = page.locator('lv-file-status');
@@ -262,6 +270,13 @@ export class RightPanelPage {
    */
   async switchToDetails(): Promise<void> {
     await this.detailsTab.click();
+  }
+
+  /**
+   * Switch to Analytics tab
+   */
+  async switchToAnalytics(): Promise<void> {
+    await this.analyticsTab.click();
   }
 
   /**

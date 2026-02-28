@@ -196,7 +196,7 @@ test.describe('Operation Banner', () => {
     await expect(banner).toHaveClass(/cherrypick/);
   });
 
-  test('abort button should be clickable', async ({ page }) => {
+  test('clicking abort should show success toast', async ({ page }) => {
     app = new AppPage(page);
 
     await setupOpenRepository(page, {
@@ -206,11 +206,19 @@ test.describe('Operation Banner', () => {
       },
     });
 
+    const banner = page.locator('.operation-banner');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText('Cherry-pick in progress');
+
     const abortBtn = page.locator('.operation-abort-btn');
     await expect(abortBtn).toBeEnabled();
 
-    // Click abort - should not throw
     await abortBtn.click();
+
+    // After abort, a success toast should appear confirming the operation was aborted
+    const successToast = page.locator('.toast').first();
+    await expect(successToast).toBeVisible({ timeout: 5000 });
+    await expect(successToast).toContainText(/Aborted|abort/i);
   });
 
   test('should show Resolve Conflicts button for cherry-pick state', async ({ page }) => {
@@ -539,5 +547,26 @@ test.describe('Context Menus - Error Scenarios', () => {
     await expect(
       page.locator('lv-branch-list .branch-item.active').first()
     ).toBeVisible({ timeout: 5000 });
+  });
+
+  test('revert failure error toast should contain informative message', async ({ page }) => {
+    // Inject revert error with a specific message
+    await injectCommandError(page, 'revert', 'Revert failed: working tree has modifications');
+
+    await rightClickOnCommitRow(page, 0);
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    const revertItem = contextMenu.locator('.context-menu-item', { hasText: /revert/i });
+    await expect(revertItem).toBeVisible();
+    await revertItem.click();
+
+    // Context menu should close after clicking
+    await expect(contextMenu).not.toBeVisible();
+
+    // Error feedback should appear with informative content about the failure
+    const errorFeedback = page.locator('.toast, .error-banner, .error').first();
+    await expect(errorFeedback).toBeVisible({ timeout: 5000 });
+    await expect(errorFeedback).toContainText(/Revert failed|modifications/i);
   });
 });
