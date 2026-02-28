@@ -158,6 +158,7 @@ test.describe('Create Tag Dialog', () => {
     await messageTextarea.fill('Release v3.0.0');
 
     const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await expect(createBtn).toBeEnabled();
     await createBtn.click();
 
     await waitForCommand(page, 'create_tag');
