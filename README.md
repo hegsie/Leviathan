@@ -1,4 +1,4 @@
-# Leviathan
+# Leviathan 
 
 [![Build & Release](https://github.com/hegsie/Leviathan/actions/workflows/build.yml/badge.svg)](https://github.com/hegsie/Leviathan/actions/workflows/build.yml)
 [![CI](https://github.com/hegsie/Leviathan/actions/workflows/ci.yml/badge.svg)](https://github.com/hegsie/Leviathan/actions/workflows/ci.yml)
