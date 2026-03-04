@@ -4,6 +4,7 @@ import { sharedStyles } from './styles/shared-styles.ts';
 import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
 import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
 import { loggers } from './utils/logger.ts';
+import * as watcherService from './services/watcher.service.ts';
 
 const log = loggers.app;
 import './components/toolbar/lv-toolbar.ts';
@@ -554,6 +555,8 @@ export class AppShell extends LitElement {
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
+  private unsubscribeWatcher?: () => void;
+  private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
   private shownIntegrationSuggestions: Set<string> = new Set();
   private isRestoringRepositories = false;
@@ -579,6 +582,16 @@ export class AppShell extends LitElement {
   // Handle repository-refresh events from window (e.g., after commit)
   private handleWindowRefresh = (): void => {
     this.graphCanvas?.refresh?.();
+  };
+
+  // Handle refs-changed from file watcher (debounced)
+  private handleRefsChanged = (): void => {
+    if (this.refsChangedDebounceTimer) {
+      clearTimeout(this.refsChangedDebounceTimer);
+    }
+    this.refsChangedDebounceTimer = setTimeout(() => {
+      this.handleRefresh();
+    }, 200);
   };
 
   // Handle open-conflict-dialog events from child components (e.g., interactive rebase)
@@ -647,12 +660,22 @@ export class AppShell extends LitElement {
           if (!newActiveRepo.remotes || newActiveRepo.remotes.length === 0) {
             this.loadRepositoryRemotes(newActiveRepo.repository.path);
           }
+          // Start file watcher for the new repository
+          watcherService.startWatching(newActiveRepo.repository.path).catch((err) => {
+            log.warn('Failed to start file watcher:', err);
+          });
         }
       }
     });
     this.unsubscribeUi = uiStore.subscribe((state) => {
       this.leftPanelVisible = state.panels.left.isVisible;
       this.rightPanelVisible = state.panels.right.isVisible;
+    });
+    // Subscribe to file watcher for refs-changed events (e.g., external pull/fetch)
+    this.unsubscribeWatcher = watcherService.onFileChange((event) => {
+      if (event.eventType === 'refs-changed') {
+        this.handleRefsChanged();
+      }
     });
     document.addEventListener('keydown', this.boundHandleKeyDown);
     document.addEventListener('click', this.handleDocumentClick);
@@ -752,6 +775,10 @@ export class AppShell extends LitElement {
     super.disconnectedCallback();
     this.unsubscribe?.();
     this.unsubscribeUi?.();
+    this.unsubscribeWatcher?.();
+    if (this.refsChangedDebounceTimer) {
+      clearTimeout(this.refsChangedDebounceTimer);
+    }
     document.removeEventListener('mousemove', this.boundHandleMouseMove);
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
     document.removeEventListener('keydown', this.boundHandleKeyDown);
