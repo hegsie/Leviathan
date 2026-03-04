@@ -700,6 +700,8 @@ export class LvFileStatus extends LitElement {
     document.addEventListener("click", this.handleDocumentClick);
 
     // Subscribe to file change events with debouncing
+    // Note: refs-changed is handled globally by app-shell to ensure it works
+    // even when the right panel (and this component) is hidden
     this.unsubscribeWatcher = watcherService.onFileChange((event) => {
       // Refresh status on workdir or index changes
       if (
@@ -707,11 +709,6 @@ export class LvFileStatus extends LitElement {
         event.eventType === "index-changed"
       ) {
         this.debouncedLoadStatus();
-      }
-      // Dispatch repository-refresh on refs changes (e.g., commits, branch changes)
-      // This updates the push/pull indicators in the dashboard
-      if (event.eventType === "refs-changed") {
-        window.dispatchEvent(new CustomEvent("repository-refresh"));
       }
     });
 
