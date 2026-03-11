@@ -4,14 +4,17 @@ This document outlines the strategic vision and planned features for Leviathan. 
 
 ## Vision
 
-Leviathan aims to become a polished, cross-platform, power-user Git GUI that can fully replace tools like Sourcetree, Fork, and GitKraken for developers who care about **privacy and performance**. Unlike commercial alternatives, Leviathan:
+Leviathan is transitioning from a "Git GUI with AI" to a **Local-First AI Development Hub**. The goal is to move beyond simple commit message generation and leverage Leviathan's unique position inside the user's filesystem and Git history.
+
+Unlike commercial alternatives, Leviathan:
 
 - **Runs entirely offline** with no telemetry, account requirements, or cloud dependencies
 - **Respects your privacy** by keeping all data local
 - **Performs exceptionally** even with large repositories
 - **Remains open source** and transparent
+- **Costs $0 in API credits** — all AI features are powered by your own hardware
 
-Our north star: *A fast, scriptable, offline-first Git workstation that teams can standardize on without giving up their privacy or their existing tools.*
+Our north star: *A privacy-first, AI-native Git workstation where intelligence runs on your GPU, not someone else's cloud.*
 
 ---
 
@@ -262,22 +265,74 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 
 ### AI & Machine Learning Features
 
+#### Shipped
+
 - ✅ **Local AI backends** — Ollama, LM Studio auto-detection, configurable model selection, provider fallback
 - ✅ **Cloud AI providers** — Anthropic Claude, GitHub Copilot, OpenAI, Google Gemini, API key management
 - ✅ **AI-assisted workflows**
   - Generate commit messages from staged changes
   - Conflict resolution suggestions with reasoning
 
-- **AI enhancements** (planned)
-  - Code review suggestions with explanations
-  - Automated commit message improvements (grammar, clarity, conventional format)
-  - Smart branch naming based on issue or task
-  - Pull request description generation from commits
-  - Diff summarization for large changes
-  - Code explanation for complex diffs
-  - Security vulnerability detection in changes
-  - Usage tracking and cost estimates per provider
-  - Rate limiting and quota management
+#### Phase 1: The "Sovereign Brain" (Q3 2026)
+
+*Establishing the hardware-accelerated foundation.*
+
+- **Adaptive Model Switching** — Instead of a static 2GB model, Leviathan detects system VRAM and selects the optimal model:
+  - **Ultra-light (8GB RAM):** Uses **Gemma 3 1B** (distilled) or **Llama 3.2 1B**
+  - **Standard (16GB+ RAM):** Uses **Gemma 3 4B** or **Phi-4-mini** (3.8B)
+
+- **WGPU-Native Inference** — Move away from generic `llama.cpp` wrappers to a custom Rust-based `wgpu` backend (via `burn` or `candle`). Native GPU acceleration on macOS (Metal), Windows (DirectX/Vulkan), and Linux without external dependencies.
+
+- **The "Context Proxy"** — A local-first implementation of the **Model Context Protocol (MCP)**. Leviathan serves as an MCP host, allowing other tools (like Cursor or VS Code) to "ask" Leviathan about the Git history via its local AI.
+
+#### Phase 2: Semantic Git History (Q4 2026)
+
+*Moving from keyword search to "Meaning Search."*
+
+- **Local RAG (Retrieval-Augmented Generation)**
+  - **Vectorized Commits:** Leviathan indexes every commit message and diff into a local **Qdrant** or **LanceDB** instance (embedded).
+  - **Natural Language History Search:** Users can ask: *"When did we last change the auth logic in the Tauri backend?"* or *"Why was the GPG signing logic moved to the Rust layer?"*
+
+- **Automatic Changelog Generation**
+  - Instead of regex-based tools like `git-cliff`, the local LLM analyzes a range of commits and generates **User-Facing vs. Developer-Facing** release notes.
+  - **Feature Grouping:** Automatically categorize changes into "Security," "Performance," and "UX" without requiring Conventional Commits.
+
+#### Phase 3: The "Local Bouncer" (Q1 2027)
+
+*Local AI Code Review before you push.*
+
+- **Pre-Commit "Vibe Check"** — As you stage files, a background worker runs a **Small Language Model (SLM)** to check for:
+  1. **Hardcoded Secrets:** Env files, API keys
+  2. **Complexity Spikes:** Flagging functions that grew significantly in a single commit
+  3. **Linter Violations:** Predicting CI failure before you commit
+
+- **Automated PR Descriptions** — Generate a full markdown template for GitHub/GitLab PRs based on the *semantic intent* of the branch. Not just changed files — a summary of the *architectural impact*.
+
+- **AI-Assisted Staging** — Leviathan identifies "tangled commits" (e.g., you're fixing a bug but also refactoring a CSS file). The AI suggests splitting the changes into two logical commits and offers to stage the lines accordingly.
+
+#### Phase 4: The "Rebase Pilot" (Q2 2027)
+
+*Eliminating Git anxiety through predictive resolution.*
+
+- **Conflict Explainer** — When a conflict occurs during a rebase or merge, the AI analyzes both sides (`HEAD` vs. `Incoming`):
+  - *"The incoming change adds a new parameter to `fetch_repo`, while your local change renamed the function to `get_repo`. I suggest keeping the rename and adding the parameter."*
+
+- **Predictive Rebase** — Before you hit "Rebase," Leviathan runs a "Ghost Rebase" in a temp worktree. The AI reports: *"This rebase will have 3 conflicts in `main.rs`. I can resolve 2 of them automatically based on your previous 10 conflict resolutions. Proceed?"*
+
+- **Semantic "Undo" (Reflog Intelligence)** — Users can type in the Command Palette: *"I messed up the rebase, take me back to where I was 10 minutes ago."* Leviathan uses the reflog to find the exact state and restores it.
+
+#### Hardware & Model Specs (2026-2027)
+
+| Feature | Model Recommendation | Est. RAM Usage | Latency Goal |
+|---------|---------------------|---------------|--------------|
+| **Commit Messages** | Gemma 3 1B | 1.2 GB | < 500ms |
+| **Semantic Search** | Nomic-Embed-v1.5 | 500 MB | < 200ms |
+| **Code Review** | Phi-4 (3.8B) | 3.5 GB | 2-5 sec |
+| **Conflict Analysis** | Llama 4 Scout (17B) | 12 GB (Opt.) | 5-10 sec |
+
+#### The Competitive Killer
+
+By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits** and **is 100% air-gapped**. While GitKraken users are paying $15/month for cloud-based AI that sees their private code, Leviathan users are getting the same intelligence powered by their own GPU.
 
 ---
 
@@ -317,7 +372,6 @@ Our north star: *A fast, scriptable, offline-first Git workstation that teams ca
 
 These are ideas for the distant future, to be evaluated based on user feedback and project maturity:
 
-- **Code review tools** — inline commenting, review workflow, approval tracking, checklist templates
 - **Repository analytics** — commit frequency graphs, contributor visualization, code churn, file heatmaps (all local)
 - **Plugin/extension system** — extension API, community plugins, marketplace, sandboxing
 - **Internationalization (i18n)** — multi-language support, community translations, RTL support
@@ -349,4 +403,4 @@ Remember: Leviathan's core value proposition is **privacy-first, offline-capable
 
 ---
 
-Last updated: 2026-02-11
+Last updated: 2026-03-11
