@@ -4,10 +4,15 @@ import { settingsStore, getGraphColorSchemes, type Theme, type FontSize, type De
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
 import * as aiService from '../../services/ai.service.ts';
+import * as localAiService from '../../services/local-ai.service.ts';
+import * as mcpService from '../../services/mcp.service.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { MergeToolInfo, AvailableDiffTool } from '../../services/git.service.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
 import type { AiProviderInfo, AiProviderType } from '../../services/ai.service.ts';
+import type { SystemCapabilities, ModelEntry, DownloadedModel, DownloadProgress, LocalModelStatus } from '../../services/local-ai.service.ts';
+import type { McpStatus } from '../../services/mcp.service.ts';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 @customElement('lv-settings-dialog')
 export class LvSettingsDialog extends LitElement {
@@ -323,6 +328,24 @@ export class LvSettingsDialog extends LitElement {
   @state() private providerTestStatus: Record<string, 'untested' | 'success' | 'failed'> = {};
   @state() private apiKeyInputs: Record<string, string> = {};
 
+  // Local AI settings
+  @state() private systemCapabilities: SystemCapabilities | null = null;
+  @state() private availableModels: ModelEntry[] = [];
+  @state() private downloadedModels: DownloadedModel[] = [];
+  @state() private downloadProgress: Record<string, DownloadProgress> = {};
+  @state() private localModelStatus: LocalModelStatus = 'unloaded';
+  @state() private recommendedModel: ModelEntry | null = null;
+
+  // MCP settings
+  @state() private mcpStatus: McpStatus = { running: false, port: 3001, url: null };
+  @state() private mcpPort = 3001;
+  @state() private mcpToggling = false;
+
+  // Event listener cleanup
+  private downloadProgressUnlisten: UnlistenFn | null = null;
+  private downloadCompleteUnlisten: UnlistenFn | null = null;
+  private downloadErrorUnlisten: UnlistenFn | null = null;
+
   // External tools settings
   @state() private mergeToolName: string | null = null;
   @state() private mergeToolCmd: string | null = null;
@@ -338,6 +361,16 @@ export class LvSettingsDialog extends LitElement {
     this.loadVersion();
     this.loadAiProviders();
     this.loadExternalToolsConfig();
+    this.loadLocalAiData();
+    this.loadMcpStatus();
+    this.setupDownloadListeners();
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.downloadProgressUnlisten?.();
+    this.downloadCompleteUnlisten?.();
+    this.downloadErrorUnlisten?.();
   }
 
   private async loadVersion(): Promise<void> {
@@ -633,6 +666,137 @@ export class LvSettingsDialog extends LitElement {
         store.setShowNativeNotifications(value);
         break;
     }
+  }
+
+  // =====================================================
+  // Local AI Methods
+  // =====================================================
+
+  private async loadLocalAiData(): Promise<void> {
+    const [capsResult, modelsResult, downloadedResult, recommendedResult, statusResult] = await Promise.all([
+      localAiService.getSystemCapabilities(),
+      localAiService.getAvailableModels(),
+      localAiService.getDownloadedModels(),
+      localAiService.getRecommendedModel(),
+      localAiService.getModelStatus(),
+    ]);
+
+    if (capsResult.success && capsResult.data) {
+      this.systemCapabilities = capsResult.data;
+    }
+    if (modelsResult.success && modelsResult.data) {
+      this.availableModels = modelsResult.data;
+    }
+    if (downloadedResult.success && downloadedResult.data) {
+      this.downloadedModels = downloadedResult.data;
+    }
+    if (recommendedResult.success && recommendedResult.data !== undefined) {
+      this.recommendedModel = recommendedResult.data;
+    }
+    if (statusResult.success && statusResult.data !== undefined) {
+      this.localModelStatus = statusResult.data;
+    }
+  }
+
+  private async setupDownloadListeners(): Promise<void> {
+    this.downloadProgressUnlisten = await listen<DownloadProgress>('model-download-progress', (event) => {
+      this.downloadProgress = {
+        ...this.downloadProgress,
+        [event.payload.modelId]: event.payload,
+      };
+    });
+
+    this.downloadCompleteUnlisten = await listen<{ modelId: string }>('model-download-complete', (event) => {
+      // Remove from progress tracking and refresh the model list
+      const { [event.payload.modelId]: _, ...rest } = this.downloadProgress;
+      this.downloadProgress = rest;
+      this.loadLocalAiData();
+    });
+
+    this.downloadErrorUnlisten = await listen<{ modelId: string; error: string }>('model-download-error', (event) => {
+      this.aiError = `Download failed for ${event.payload.modelId}: ${event.payload.error}`;
+      // Remove from progress tracking and refresh downloaded models list
+      const { [event.payload.modelId]: _, ...rest } = this.downloadProgress;
+      this.downloadProgress = rest;
+      this.loadLocalAiData();
+    });
+  }
+
+  private async handleDownloadModel(modelId: string): Promise<void> {
+    this.aiError = null;
+    const result = await localAiService.downloadModel(modelId);
+    if (!result.success) {
+      this.aiError = result.error?.message ?? 'Failed to start download';
+    }
+  }
+
+  private async handleCancelDownload(modelId: string): Promise<void> {
+    await localAiService.cancelModelDownload(modelId);
+    const { [modelId]: _, ...rest } = this.downloadProgress;
+    this.downloadProgress = rest;
+    await this.loadLocalAiData();
+  }
+
+  private async handleDeleteModel(modelId: string): Promise<void> {
+    const result = await localAiService.deleteModel(modelId);
+    if (result.success) {
+      await this.loadLocalAiData();
+    } else {
+      this.aiError = result.error?.message ?? 'Failed to delete model';
+    }
+  }
+
+  private isModelDownloaded(modelId: string): boolean {
+    return this.downloadedModels.some(m => m.id === modelId);
+  }
+
+  private isModelDownloading(modelId: string): boolean {
+    return modelId in this.downloadProgress;
+  }
+
+  // =====================================================
+  // MCP Methods
+  // =====================================================
+
+  private async loadMcpStatus(): Promise<void> {
+    const [statusResult, configResult] = await Promise.all([
+      mcpService.getMcpStatus(),
+      mcpService.getMcpConfig(),
+    ]);
+
+    if (statusResult.success && statusResult.data) {
+      this.mcpStatus = statusResult.data;
+    }
+    if (configResult.success && configResult.data) {
+      this.mcpPort = configResult.data.port;
+    }
+  }
+
+  private async handleMcpToggle(): Promise<void> {
+    this.mcpToggling = true;
+    this.aiError = null;
+
+    if (this.mcpStatus.running) {
+      const result = await mcpService.stopMcpServer();
+      if (!result.success) {
+        this.aiError = result.error?.message ?? 'Failed to stop MCP server';
+      }
+    } else {
+      // Save config first, then start
+      await mcpService.setMcpConfig({ enabled: true, port: this.mcpPort, allowedOrigins: [] });
+      const result = await mcpService.startMcpServer();
+      if (!result.success) {
+        this.aiError = result.error?.message ?? 'Failed to start MCP server';
+      }
+    }
+
+    await this.loadMcpStatus();
+    this.mcpToggling = false;
+  }
+
+  private async handleMcpPortChange(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement;
+    this.mcpPort = Math.max(1024, Math.min(65535, parseInt(input.value, 10) || 3001));
   }
 
   private handleReset(): void {
@@ -1046,6 +1210,161 @@ export class LvSettingsDialog extends LitElement {
               Refresh
             </button>
           </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-title">Local AI Engine</div>
+
+          ${this.systemCapabilities ? html`
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="setting-name">System</span>
+                <span class="setting-description">
+                  RAM: ${localAiService.formatBytes(this.systemCapabilities.totalRamBytes)}
+                  ${this.systemCapabilities.gpuInfo
+                    ? html` | GPU: ${this.systemCapabilities.gpuInfo.name}`
+                    : html` | No dedicated GPU detected`}
+                </span>
+              </div>
+              <span class="status-indicator ${this.systemCapabilities.recommendedTier !== 'none' ? 'configured' : 'not-configured'}">
+                <span class="status-dot"></span>
+                ${localAiService.getTierDisplayName(this.systemCapabilities.recommendedTier)}
+              </span>
+            </div>
+          ` : html`
+            <div class="setting-row">
+              <span class="setting-description">Detecting system capabilities...</span>
+            </div>
+          `}
+
+          ${this.localModelStatus === 'ready' ? html`
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="setting-name">Engine Status</span>
+              </div>
+              <span class="status-indicator configured">
+                <span class="status-dot"></span>
+                Model Loaded
+              </span>
+            </div>
+          ` : this.localModelStatus === 'loading' ? html`
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="setting-name">Engine Status</span>
+              </div>
+              <span class="status-indicator testing">Loading model...</span>
+            </div>
+          ` : nothing}
+
+          ${this.recommendedModel && !this.isModelDownloaded(this.recommendedModel.id) ? html`
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="setting-name">Recommended: ${this.recommendedModel.displayName}</span>
+                <span class="setting-description">
+                  ${localAiService.formatBytes(this.recommendedModel.sizeBytes)} download
+                </span>
+              </div>
+              <button
+                class="primary"
+                @click=${() => this.handleDownloadModel(this.recommendedModel!.id)}
+                ?disabled=${this.isModelDownloading(this.recommendedModel.id)}
+              >
+                ${this.isModelDownloading(this.recommendedModel.id) ? 'Downloading...' : 'Download'}
+              </button>
+            </div>
+          ` : nothing}
+
+          ${this.availableModels.map(model => {
+            const downloaded = this.isModelDownloaded(model.id);
+            const downloading = this.isModelDownloading(model.id);
+            const progress = this.downloadProgress[model.id];
+            return html`
+              <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 4px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <div class="setting-label">
+                    <span class="setting-name">${model.displayName}</span>
+                    <span class="setting-description">
+                      ${localAiService.formatBytes(model.sizeBytes)} |
+                      ${localAiService.getTierDisplayName(model.tier)} |
+                      ${model.architecture}
+                    </span>
+                  </div>
+                  <div style="display: flex; gap: 4px;">
+                    ${downloaded ? html`
+                      <span class="status-indicator configured">Downloaded</span>
+                      <button class="danger" @click=${() => this.handleDeleteModel(model.id)}>Delete</button>
+                    ` : downloading ? html`
+                      <button @click=${() => this.handleCancelDownload(model.id)}>Cancel</button>
+                    ` : html`
+                      <button @click=${() => this.handleDownloadModel(model.id)}>Download</button>
+                    `}
+                  </div>
+                </div>
+                ${downloading && progress ? html`
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: ${progress.progressPercent}%"></div>
+                  </div>
+                  <span class="progress-text">
+                    ${localAiService.formatBytes(progress.downloadedBytes)} / ${localAiService.formatBytes(progress.totalBytes)}
+                    (${progress.progressPercent.toFixed(1)}%)
+                  </span>
+                ` : nothing}
+              </div>
+            `;
+          })}
+        </div>
+
+        <div class="settings-section">
+          <div class="section-title">MCP Server</div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Context Proxy</span>
+              <span class="setting-description">
+                Allow external tools (Cursor, VS Code) to query Git context via MCP
+              </span>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <span class="status-indicator ${this.mcpStatus.running ? 'configured' : 'not-configured'}">
+                <span class="status-dot"></span>
+                ${this.mcpStatus.running ? 'Running' : 'Stopped'}
+              </span>
+              <button
+                @click=${this.handleMcpToggle}
+                ?disabled=${this.mcpToggling}
+              >
+                ${this.mcpToggling ? '...' : this.mcpStatus.running ? 'Stop' : 'Start'}
+              </button>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Port</span>
+              <span class="setting-description">
+                Localhost port for the MCP server
+              </span>
+            </div>
+            <input
+              type="number"
+              min="1024"
+              max="65535"
+              .value=${String(this.mcpPort)}
+              @change=${this.handleMcpPortChange}
+              ?disabled=${this.mcpStatus.running}
+              style="width: 80px;"
+            />
+          </div>
+
+          ${this.mcpStatus.running && this.mcpStatus.url ? html`
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="setting-name">Connection URL</span>
+                <span class="setting-description" style="font-family: monospace;">
+                  ${this.mcpStatus.url}
+                </span>
+              </div>
+            </div>
+          ` : nothing}
         </div>
 
         <div class="settings-section">

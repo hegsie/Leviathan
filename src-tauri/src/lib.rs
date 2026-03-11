@@ -17,7 +17,9 @@ use std::sync::Arc;
 use tauri::{Emitter, Listener, Manager};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use commands::local_ai::create_local_ai_state;
 use commands::watcher::WatcherState;
+use services::ai::mcp::server::create_mcp_state;
 use services::commit_index::SharedCommitIndex;
 use services::{
     create_ai_state, create_autofetch_state, create_update_state, CancellationRegistry,
@@ -158,6 +160,13 @@ pub fn run() {
             // Initialize AI state with config directory
             let config_dir = app.path().app_config_dir().unwrap_or_default();
             app.manage(create_ai_state(config_dir));
+
+            // Initialize local AI state with models directory
+            let models_dir = app.path().app_data_dir().unwrap_or_default().join("models");
+            app.manage(create_local_ai_state(models_dir));
+
+            // Initialize MCP server state
+            app.manage(create_mcp_state());
 
             tracing::info!("Application setup complete");
 
@@ -614,6 +623,21 @@ pub fn run() {
             commands::ai::generate_commit_message,
             commands::ai::is_ai_available,
             commands::ai::suggest_conflict_resolution,
+            // Local AI model management
+            commands::local_ai::get_system_capabilities,
+            commands::local_ai::get_available_models,
+            commands::local_ai::get_downloaded_models,
+            commands::local_ai::download_model,
+            commands::local_ai::cancel_model_download,
+            commands::local_ai::delete_model,
+            commands::local_ai::get_model_status,
+            commands::local_ai::get_recommended_model,
+            // MCP server
+            commands::mcp::start_mcp_server,
+            commands::mcp::stop_mcp_server,
+            commands::mcp::get_mcp_status,
+            commands::mcp::get_mcp_config,
+            commands::mcp::set_mcp_config,
             // OAuth authentication
             commands::oauth::oauth_get_authorize_url,
             commands::oauth::oauth_start_github_flow,

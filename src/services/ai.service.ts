@@ -9,7 +9,7 @@ import type { CommandResult } from '../types/api.types.ts';
 /**
  * AI provider types
  */
-export type AiProviderType = 'ollama' | 'lm_studio' | 'openai' | 'anthropic' | 'github_copilot' | 'google_gemini';
+export type AiProviderType = 'ollama' | 'lm_studio' | 'openai' | 'anthropic' | 'github_copilot' | 'google_gemini' | 'local_inference';
 
 /**
  * AI provider information
@@ -157,6 +157,8 @@ export function getProviderDisplayName(providerType: AiProviderType): string {
       return 'GitHub Models';
     case 'google_gemini':
       return 'Google Gemini';
+    case 'local_inference':
+      return 'Local AI (Embedded)';
   }
 }
 

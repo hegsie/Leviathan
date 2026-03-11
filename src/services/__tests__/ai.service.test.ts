@@ -75,6 +75,7 @@ describe('AI Service Types', () => {
       expect(getProviderDisplayName('anthropic')).to.equal('Anthropic Claude');
       expect(getProviderDisplayName('github_copilot')).to.equal('GitHub Models');
       expect(getProviderDisplayName('google_gemini')).to.equal('Google Gemini');
+      expect(getProviderDisplayName('local_inference')).to.equal('Local AI (Embedded)');
     });
 
     it('should correctly identify API key requirements', () => {
@@ -84,6 +85,7 @@ describe('AI Service Types', () => {
       expect(providerRequiresApiKey('anthropic')).to.be.true;
       expect(providerRequiresApiKey('github_copilot')).to.be.true;
       expect(providerRequiresApiKey('google_gemini')).to.be.true;
+      expect(providerRequiresApiKey('local_inference')).to.be.false;
     });
   });
 

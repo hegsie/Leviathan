@@ -5,6 +5,8 @@
 //! (OpenAI, Anthropic) providers.
 
 pub mod config;
+pub mod local;
+pub mod mcp;
 pub mod providers;
 
 use async_trait::async_trait;
@@ -16,8 +18,8 @@ use tokio::sync::RwLock;
 
 pub use config::{AiConfig, ProviderSettings};
 pub use providers::{
-    AnthropicProvider, GeminiProvider, GithubCopilotProvider, OllamaProvider,
-    OpenAiCompatibleProvider,
+    AnthropicProvider, GeminiProvider, GithubCopilotProvider, LocalInferenceProvider,
+    OllamaProvider, OpenAiCompatibleProvider,
 };
 
 /// AI provider types supported by the system
@@ -30,6 +32,7 @@ pub enum AiProviderType {
     Anthropic,
     GithubCopilot,
     GoogleGemini,
+    LocalInference,
 }
 
 impl AiProviderType {
@@ -41,6 +44,7 @@ impl AiProviderType {
             AiProviderType::Anthropic => "Anthropic Claude",
             AiProviderType::GithubCopilot => "GitHub Models",
             AiProviderType::GoogleGemini => "Google Gemini",
+            AiProviderType::LocalInference => "Local AI (Embedded)",
         }
     }
 
@@ -52,12 +56,15 @@ impl AiProviderType {
             AiProviderType::Anthropic => "https://api.anthropic.com",
             AiProviderType::GithubCopilot => "https://models.inference.ai.azure.com",
             AiProviderType::GoogleGemini => "https://generativelanguage.googleapis.com",
+            AiProviderType::LocalInference => "",
         }
     }
 
     pub fn requires_api_key(&self) -> bool {
         match self {
-            AiProviderType::Ollama | AiProviderType::LmStudio => false,
+            AiProviderType::Ollama | AiProviderType::LmStudio | AiProviderType::LocalInference => {
+                false
+            }
             AiProviderType::OpenAi
             | AiProviderType::Anthropic
             | AiProviderType::GithubCopilot
@@ -73,6 +80,7 @@ impl AiProviderType {
             AiProviderType::Anthropic => "claude-sonnet-4-20250514",
             AiProviderType::GithubCopilot => "gpt-4o",
             AiProviderType::GoogleGemini => "gemini-2.0-flash",
+            AiProviderType::LocalInference => "local",
         }
     }
 
@@ -84,6 +92,7 @@ impl AiProviderType {
             AiProviderType::Anthropic,
             AiProviderType::GithubCopilot,
             AiProviderType::GoogleGemini,
+            AiProviderType::LocalInference,
         ]
     }
 }
@@ -308,6 +317,26 @@ impl AiService {
         );
         self.providers
             .insert(AiProviderType::GoogleGemini, Box::new(gemini));
+
+        // Local inference provider
+        let local = LocalInferenceProvider::new();
+        self.providers
+            .insert(AiProviderType::LocalInference, Box::new(local));
+    }
+
+    /// Get the local model status
+    pub async fn get_local_model_status(&self) -> providers::LocalModelStatus {
+        if let Some(provider) = self.providers.get(&AiProviderType::LocalInference) {
+            // Downcast to LocalInferenceProvider to access get_status()
+            // Since we can't downcast trait objects easily, check availability as a proxy
+            if provider.is_available().await {
+                providers::LocalModelStatus::Ready
+            } else {
+                providers::LocalModelStatus::Unloaded
+            }
+        } else {
+            providers::LocalModelStatus::Unloaded
+        }
     }
 
     /// Get the current configuration
@@ -522,8 +551,26 @@ mod tests {
     fn test_provider_type_requires_api_key() {
         assert!(!AiProviderType::Ollama.requires_api_key());
         assert!(!AiProviderType::LmStudio.requires_api_key());
+        assert!(!AiProviderType::LocalInference.requires_api_key());
         assert!(AiProviderType::OpenAi.requires_api_key());
         assert!(AiProviderType::Anthropic.requires_api_key());
         assert!(AiProviderType::GoogleGemini.requires_api_key());
+    }
+
+    #[test]
+    fn test_local_inference_provider_type() {
+        assert_eq!(
+            AiProviderType::LocalInference.display_name(),
+            "Local AI (Embedded)"
+        );
+        assert_eq!(AiProviderType::LocalInference.default_model(), "local");
+        assert_eq!(AiProviderType::LocalInference.default_endpoint(), "");
+    }
+
+    #[test]
+    fn test_all_providers_includes_local() {
+        let all = AiProviderType::all();
+        assert!(all.contains(&AiProviderType::LocalInference));
+        assert_eq!(all.len(), 7);
     }
 }
