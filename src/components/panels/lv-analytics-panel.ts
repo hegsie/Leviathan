@@ -113,22 +113,26 @@ export class LvAnalyticsPanel extends LitElement {
       /* ── Overview Cards ───────────────────────────────────── */
       .overview-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-        gap: 8px;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
       }
 
       .stat-card {
-        padding: 8px 10px;
+        padding: 6px 4px;
         border-radius: var(--radius-sm);
         background: var(--color-bg-secondary);
         text-align: center;
+        overflow: hidden;
       }
 
       .stat-value {
-        font-size: 18px;
+        font-size: 14px;
         font-weight: var(--font-weight-bold);
         color: var(--color-text-primary);
         font-family: var(--font-family-mono);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .stat-label {
@@ -150,7 +154,7 @@ export class LvAnalyticsPanel extends LitElement {
       }
 
       .chart-label {
-        font-size: 9px;
+        font-size: 10px;
         fill: var(--color-text-muted);
         font-family: var(--font-family-mono);
       }
@@ -164,15 +168,9 @@ export class LvAnalyticsPanel extends LitElement {
       }
 
       .chart-pair {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
+        display: flex;
+        flex-direction: column;
         gap: 12px;
-      }
-
-      @media (max-width: 500px) {
-        .chart-pair {
-          grid-template-columns: 1fr;
-        }
       }
 
       .chart-sub {
@@ -195,17 +193,24 @@ export class LvAnalyticsPanel extends LitElement {
       }
 
       .contributor-row {
-        display: grid;
-        grid-template-columns: 1fr auto auto;
-        gap: 8px;
-        align-items: center;
-        padding: 4px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 6px 0;
         font-size: var(--font-size-xs);
+        min-width: 0;
       }
 
       .contributor-row + .contributor-row {
         border-top: 1px solid var(--color-border);
-        padding-top: 6px;
+      }
+
+      .contributor-info {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 6px;
+        min-width: 0;
       }
 
       .contributor-name {
@@ -214,15 +219,27 @@ export class LvAnalyticsPanel extends LitElement {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        flex-shrink: 1;
+        min-width: 0;
       }
 
       .contributor-email {
         color: var(--color-text-muted);
         font-size: 10px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .contributor-stats {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-family: var(--font-family-mono);
+        font-size: 10px;
       }
 
       .contributor-commits {
-        font-family: var(--font-family-mono);
         color: var(--color-text-secondary);
         white-space: nowrap;
       }
@@ -230,8 +247,6 @@ export class LvAnalyticsPanel extends LitElement {
       .contributor-lines {
         display: flex;
         gap: 6px;
-        font-family: var(--font-family-mono);
-        font-size: 10px;
         white-space: nowrap;
       }
 
@@ -244,7 +259,6 @@ export class LvAnalyticsPanel extends LitElement {
       }
 
       .contributor-bar-container {
-        grid-column: 1 / -1;
         height: 4px;
         background: var(--color-bg-tertiary);
         border-radius: 2px;
@@ -260,16 +274,10 @@ export class LvAnalyticsPanel extends LitElement {
 
       /* ── File Types ───────────────────────────────────────── */
       .file-types-layout {
-        display: grid;
-        grid-template-columns: 120px 1fr;
-        gap: 12px;
-        align-items: start;
-      }
-
-      @media (max-width: 400px) {
-        .file-types-layout {
-          grid-template-columns: 1fr;
-        }
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        align-items: center;
       }
 
       .donut-container {
@@ -282,6 +290,7 @@ export class LvAnalyticsPanel extends LitElement {
         flex-direction: column;
         gap: 3px;
         font-size: var(--font-size-xs);
+        width: 100%;
       }
 
       .file-type-row {
@@ -300,7 +309,7 @@ export class LvAnalyticsPanel extends LitElement {
       .file-type-ext {
         font-family: var(--font-family-mono);
         color: var(--color-text-primary);
-        min-width: 70px;
+        min-width: 50px;
       }
 
       .file-type-count {
@@ -436,8 +445,8 @@ export class LvAnalyticsPanel extends LitElement {
     const gap = 4;
     const chartW = months.length * (barW + gap);
     const chartH = 80;
-    const labelH = 14;
-    const totalH = chartH + labelH + 4;
+    const labelH = 16;
+    const totalH = chartH + labelH + 6;
 
     return html`
       <div class="section">
@@ -507,8 +516,8 @@ export class LvAnalyticsPanel extends LitElement {
     const gap = 4;
     const chartW = days.length * (barW + gap);
     const chartH = 60;
-    const labelH = 14;
-    const totalH = chartH + labelH + 4;
+    const labelH = 16;
+    const totalH = chartH + labelH + 6;
 
     return html`
       <div class="chart-container">
@@ -536,8 +545,8 @@ export class LvAnalyticsPanel extends LitElement {
     const gap = 2;
     const chartW = hours.length * (barW + gap);
     const chartH = 60;
-    const labelH = 14;
-    const totalH = chartH + labelH + 4;
+    const labelH = 16;
+    const totalH = chartH + labelH + 6;
 
     return html`
       <div class="chart-container">
@@ -577,15 +586,17 @@ export class LvAnalyticsPanel extends LitElement {
             ${contributors.slice(0, 15).map(
               (c) => html`
                 <div class="contributor-row">
-                  <div>
+                  <div class="contributor-info">
                     <div class="contributor-name">${c.name}</div>
-                    <div class="contributor-email">${c.email}</div>
+                    <div class="contributor-stats">
+                      <span class="contributor-commits">${c.commits} commits</span>
+                      <span class="contributor-lines">
+                        <span class="lines-added">+${this.formatCompactNumber(c.linesAdded)}</span>
+                        <span class="lines-deleted">-${this.formatCompactNumber(c.linesDeleted)}</span>
+                      </span>
+                    </div>
                   </div>
-                  <div class="contributor-commits">${c.commits} commits</div>
-                  <div class="contributor-lines">
-                    <span class="lines-added">+${this.formatCompactNumber(c.linesAdded)}</span>
-                    <span class="lines-deleted">-${this.formatCompactNumber(c.linesDeleted)}</span>
-                  </div>
+                  <div class="contributor-email">${c.email}</div>
                   <div class="contributor-bar-container">
                     <div class="contributor-bar" style="width: ${(c.commits / maxCommits) * 100}%"></div>
                   </div>
