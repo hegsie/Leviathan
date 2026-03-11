@@ -676,7 +676,7 @@ mod tests {
         let result = response.result.unwrap();
         assert_eq!(result["protocolVersion"], "2024-11-05");
         assert_eq!(result["serverInfo"]["name"], "leviathan");
-        assert_eq!(result["serverInfo"]["version"], "0.2.68");
+        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[tokio::test]
