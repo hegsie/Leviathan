@@ -49,53 +49,53 @@ impl Default for ModelRegistry {
                 ModelEntry {
                     id: "gemma-3-1b-q4km".to_string(),
                     display_name: "Gemma 3 1B (Q4_K_M)".to_string(),
-                    hf_repo: "bartowski/gemma-3-1b-it-GGUF".to_string(),
+                    hf_repo: "unsloth/gemma-3-1b-it-GGUF".to_string(),
                     hf_filename: "gemma-3-1b-it-Q4_K_M.gguf".to_string(),
                     sha256: "placeholder_sha256_gemma3_1b".to_string(), // TODO: replace with real SHA-256 hash
                     size_bytes: 700 * 1_048_576,                        // ~700 MB
                     min_ram_bytes: 8 * GB,
                     tier: ModelTier::UltraLight,
                     architecture: "gemma3".to_string(),
-                    tokenizer_repo: "google/gemma-3-1b-it".to_string(),
+                    tokenizer_repo: "unsloth/gemma-3-1b-it-GGUF".to_string(),
                     context_length: 8192,
                 },
                 ModelEntry {
                     id: "llama-3.2-1b-q4km".to_string(),
                     display_name: "Llama 3.2 1B (Q4_K_M)".to_string(),
-                    hf_repo: "bartowski/Llama-3.2-1B-Instruct-GGUF".to_string(),
+                    hf_repo: "unsloth/Llama-3.2-1B-Instruct-GGUF".to_string(),
                     hf_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf".to_string(),
                     sha256: "placeholder_sha256_llama32_1b".to_string(), // TODO: replace with real SHA-256 hash
                     size_bytes: 750 * 1_048_576,                         // ~750 MB
                     min_ram_bytes: 8 * GB,
                     tier: ModelTier::UltraLight,
                     architecture: "llama".to_string(),
-                    tokenizer_repo: "meta-llama/Llama-3.2-1B-Instruct".to_string(),
+                    tokenizer_repo: "unsloth/Llama-3.2-1B-Instruct-GGUF".to_string(),
                     context_length: 8192,
                 },
                 ModelEntry {
                     id: "phi-4-mini-q4km".to_string(),
                     display_name: "Phi-4 Mini 3.8B (Q4_K_M)".to_string(),
-                    hf_repo: "bartowski/phi-4-mini-instruct-GGUF".to_string(),
-                    hf_filename: "phi-4-mini-instruct-Q4_K_M.gguf".to_string(),
+                    hf_repo: "unsloth/Phi-4-mini-instruct-GGUF".to_string(),
+                    hf_filename: "Phi-4-mini-instruct-Q4_K_M.gguf".to_string(),
                     sha256: "placeholder_sha256_phi4_mini".to_string(), // TODO: replace with real SHA-256 hash
                     size_bytes: 2_300 * 1_048_576,                      // ~2.3 GB
                     min_ram_bytes: 16 * GB,
                     tier: ModelTier::Standard,
                     architecture: "phi".to_string(),
-                    tokenizer_repo: "microsoft/phi-4-mini-instruct".to_string(),
+                    tokenizer_repo: "unsloth/Phi-4-mini-instruct-GGUF".to_string(),
                     context_length: 4096,
                 },
                 ModelEntry {
                     id: "gemma-3-4b-q4km".to_string(),
                     display_name: "Gemma 3 4B (Q4_K_M)".to_string(),
-                    hf_repo: "bartowski/gemma-3-4b-it-GGUF".to_string(),
+                    hf_repo: "unsloth/gemma-3-4b-it-GGUF".to_string(),
                     hf_filename: "gemma-3-4b-it-Q4_K_M.gguf".to_string(),
                     sha256: "placeholder_sha256_gemma3_4b".to_string(), // TODO: replace with real SHA-256 hash
                     size_bytes: 2_500 * 1_048_576,                      // ~2.5 GB
                     min_ram_bytes: 16 * GB,
                     tier: ModelTier::Standard,
                     architecture: "gemma3".to_string(),
-                    tokenizer_repo: "google/gemma-3-4b-it".to_string(),
+                    tokenizer_repo: "unsloth/gemma-3-4b-it-GGUF".to_string(),
                     context_length: 8192,
                 },
             ],
