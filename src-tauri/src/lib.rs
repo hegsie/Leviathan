@@ -99,6 +99,13 @@ pub fn run() {
             "PANIC: Application crashed"
         );
 
+        // Stronghold's mprotect panic is non-fatal — don't capture a backtrace
+        // for it as that can trigger SIGABRT on macOS.
+        if message.contains("memory protection") {
+            eprintln!("(Stronghold mprotect panic — non-fatal, continuing)");
+            return;
+        }
+
         // Capture backtrace if available
         let backtrace = std::backtrace::Backtrace::force_capture();
         eprintln!("\nBacktrace:\n{}", backtrace);
@@ -150,7 +157,7 @@ pub fn run() {
             .plugin(tauri_plugin_deep_link::init());
     }
 
-    builder
+    let app = builder
         .manage(WatcherState::default())
         .manage(create_autofetch_state())
         .manage(create_update_state())
@@ -167,6 +174,66 @@ pub fn run() {
 
             // Initialize MCP server state
             app.manage(create_mcp_state());
+
+            // Auto-load a downloaded model if available
+            {
+                let ai_state = app.state::<services::ai::AiState>().inner().clone();
+                let local_state = app
+                    .state::<commands::local_ai::SharedLocalAiState>()
+                    .inner()
+                    .clone();
+
+                tauri::async_runtime::spawn(async move {
+                    // Delay model loading to let Stronghold plugin finish its
+                    // secure memory initialization — avoids mprotect race condition.
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                    let local = local_state.read().await;
+                    let downloaded = match local.model_manager.list_downloaded() {
+                        Ok(models) => models,
+                        Err(e) => {
+                            tracing::warn!("Failed to list downloaded models: {e}");
+                            return;
+                        }
+                    };
+
+                    // Prefer the smallest downloaded model to minimize memory usage
+                    let mut candidates: Vec<_> = downloaded
+                        .iter()
+                        .filter(|m| {
+                            m.status == services::ai::local::model_manager::ModelStatus::Downloaded
+                        })
+                        .collect();
+                    candidates.sort_by_key(|m| m.size_bytes);
+
+                    if let Some(model) = candidates.first() {
+                        let model_path = model.path.clone();
+                        let display_name = model.display_name.clone();
+                        let model_id = model.id.clone();
+
+                        // Look up full model metadata from the registry before dropping the lock
+                        let meta = local.registry.get_by_id(&model.id).map(|entry| {
+                            services::ai::providers::LoadedModelMeta {
+                                tier: entry.tier,
+                                architecture: entry.architecture.clone(),
+                                context_length: entry.context_length,
+                            }
+                        });
+                        drop(local);
+
+                        let service = ai_state.read().await;
+                        match service
+                            .load_local_model(&model_path, display_name, meta)
+                            .await
+                        {
+                            Ok(()) => tracing::info!("Auto-loaded local model: {model_id}"),
+                            Err(e) => {
+                                tracing::warn!("Failed to auto-load model {model_id}: {e}")
+                            }
+                        }
+                    }
+                });
+            }
 
             tracing::info!("Application setup complete");
 
@@ -631,7 +698,10 @@ pub fn run() {
             commands::local_ai::cancel_model_download,
             commands::local_ai::delete_model,
             commands::local_ai::get_model_status,
+            commands::local_ai::get_loaded_model_name,
             commands::local_ai::get_recommended_model,
+            commands::local_ai::load_model,
+            commands::local_ai::unload_model,
             // MCP server
             commands::mcp::start_mcp_server,
             commands::mcp::stop_mcp_server,
@@ -776,6 +846,19 @@ pub fn run() {
             commands::workspace::export_workspace,
             commands::workspace::import_workspace,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            // Unload the local AI model before the process exits to avoid
+            // llama.cpp crashing during unordered global teardown.
+            let ai_state = app_handle.state::<services::ai::AiState>().inner().clone();
+            tauri::async_runtime::block_on(async {
+                let service = ai_state.read().await;
+                service.unload_local_model().await;
+                tracing::info!("Unloaded local AI model for clean shutdown");
+            });
+        }
+    });
 }

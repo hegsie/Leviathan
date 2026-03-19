@@ -31,7 +31,6 @@ pub struct ModelEntry {
     pub min_ram_bytes: u64,
     pub tier: ModelTier,
     pub architecture: String,
-    pub tokenizer_repo: String,
     pub context_length: u32,
 }
 
@@ -56,7 +55,6 @@ impl Default for ModelRegistry {
                     min_ram_bytes: 8 * GB,
                     tier: ModelTier::UltraLight,
                     architecture: "gemma3".to_string(),
-                    tokenizer_repo: "unsloth/gemma-3-1b-it-GGUF".to_string(),
                     context_length: 8192,
                 },
                 ModelEntry {
@@ -69,7 +67,6 @@ impl Default for ModelRegistry {
                     min_ram_bytes: 8 * GB,
                     tier: ModelTier::UltraLight,
                     architecture: "llama".to_string(),
-                    tokenizer_repo: "unsloth/Llama-3.2-1B-Instruct-GGUF".to_string(),
                     context_length: 8192,
                 },
                 ModelEntry {
@@ -82,7 +79,6 @@ impl Default for ModelRegistry {
                     min_ram_bytes: 16 * GB,
                     tier: ModelTier::Standard,
                     architecture: "phi".to_string(),
-                    tokenizer_repo: "unsloth/Phi-4-mini-instruct-GGUF".to_string(),
                     context_length: 4096,
                 },
                 ModelEntry {
@@ -95,7 +91,6 @@ impl Default for ModelRegistry {
                     min_ram_bytes: 16 * GB,
                     tier: ModelTier::Standard,
                     architecture: "gemma3".to_string(),
-                    tokenizer_repo: "unsloth/gemma-3-4b-it-GGUF".to_string(),
                     context_length: 8192,
                 },
             ],
@@ -124,8 +119,18 @@ impl ModelRegistry {
     /// Returns the first model matching the recommended tier, preferring
     /// Gemma models as the default choice. Returns `None` if the system
     /// doesn't meet minimum requirements.
+    ///
+    /// If GPU acceleration is not available, caps at UltraLight (1B models)
+    /// since larger models are impractically slow on CPU.
     pub fn get_recommended(&self, capabilities: &SystemCapabilities) -> Option<&ModelEntry> {
-        let tier = capabilities.recommended_tier;
+        let tier = if !capabilities.gpu_acceleration_available
+            && capabilities.recommended_tier == ModelTier::Standard
+        {
+            ModelTier::UltraLight
+        } else {
+            capabilities.recommended_tier
+        };
+
         if tier == ModelTier::None {
             return None;
         }
@@ -205,6 +210,7 @@ mod tests {
             available_ram_bytes: 16 * GB,
             gpu_info: None,
             recommended_tier: ModelTier::Standard,
+            gpu_acceleration_available: true,
         };
         let recommended = reg.get_recommended(&caps);
         assert!(recommended.is_some());
@@ -222,6 +228,7 @@ mod tests {
             available_ram_bytes: 4 * GB,
             gpu_info: None,
             recommended_tier: ModelTier::UltraLight,
+            gpu_acceleration_available: false,
         };
         let recommended = reg.get_recommended(&caps);
         assert!(recommended.is_some());
@@ -238,8 +245,26 @@ mod tests {
             available_ram_bytes: 2 * GB,
             gpu_info: None,
             recommended_tier: ModelTier::None,
+            gpu_acceleration_available: false,
         };
         assert!(reg.get_recommended(&caps).is_none());
+    }
+
+    #[test]
+    fn test_get_recommended_cpu_only_caps_at_ultralight() {
+        let reg = registry();
+        // Even though tier says Standard, CPU-only should cap at UltraLight
+        let caps = SystemCapabilities {
+            total_ram_bytes: 48 * GB,
+            available_ram_bytes: 32 * GB,
+            gpu_info: None,
+            recommended_tier: ModelTier::Standard,
+            gpu_acceleration_available: false,
+        };
+        let recommended = reg.get_recommended(&caps);
+        assert!(recommended.is_some());
+        let model = recommended.unwrap();
+        assert_eq!(model.tier, ModelTier::UltraLight);
     }
 
     #[test]

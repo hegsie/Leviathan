@@ -11,10 +11,18 @@ import {
   getAvailableModels,
   downloadModel,
   getModelStatus,
+  getLoadedModelName,
+  loadModel,
+  unloadModel,
 } from '../local-ai.service.ts';
 
 // Mock Tauri API
+let aiSettingsChangedEvents = 0;
+window.addEventListener('ai-settings-changed', () => aiSettingsChangedEvents++);
+
 const mockResults: Record<string, unknown> = {
+  load_model: null,
+  unload_model: null,
   get_system_capabilities: {
     totalRamBytes: 17179869184,
     availableRamBytes: 8589934592,
@@ -26,6 +34,7 @@ const mockResults: Record<string, unknown> = {
       cudaSupported: false,
     },
     recommendedTier: 'standard',
+    gpuAccelerationAvailable: true,
   } as SystemCapabilities,
   get_available_models: [
     {
@@ -38,12 +47,12 @@ const mockResults: Record<string, unknown> = {
       minRamBytes: 8589934592,
       tier: 'ultra_light',
       architecture: 'llama',
-      tokenizerRepo: 'HuggingFaceTB/SmolLM2-360M-Instruct',
       contextLength: 4096,
     },
   ] as ModelEntry[],
   download_model: null,
   get_model_status: 'ready' as LocalModelStatus,
+  get_loaded_model_name: 'Test Model' as string | null,
 };
 
 const mockInvoke = (command: string, _args?: Record<string, unknown>): Promise<unknown> => {
@@ -148,5 +157,40 @@ describe('Local AI Service - getModelStatus', () => {
     const result = await getModelStatus();
     expect(result.success).to.be.true;
     expect(result.data).to.equal('ready');
+  });
+});
+
+describe('Local AI Service - getLoadedModelName', () => {
+  it('should return the loaded model name', async () => {
+    const result = await getLoadedModelName();
+    expect(result.success).to.be.true;
+    expect(result.data).to.equal('Test Model');
+  });
+});
+
+describe('Local AI Service - loadModel', () => {
+  it('should invoke load_model command', async () => {
+    aiSettingsChangedEvents = 0;
+    const result = await loadModel('test-model');
+    expect(result.success).to.be.true;
+  });
+
+  it('should dispatch ai-settings-changed event on success', async () => {
+    aiSettingsChangedEvents = 0;
+    await loadModel('test-model');
+    expect(aiSettingsChangedEvents).to.equal(1);
+  });
+});
+
+describe('Local AI Service - unloadModel', () => {
+  it('should invoke unload_model command', async () => {
+    const result = await unloadModel();
+    expect(result.success).to.be.true;
+  });
+
+  it('should dispatch ai-settings-changed event on success', async () => {
+    aiSettingsChangedEvents = 0;
+    await unloadModel();
+    expect(aiSettingsChangedEvents).to.equal(1);
   });
 });

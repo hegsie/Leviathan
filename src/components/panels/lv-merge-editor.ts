@@ -518,6 +518,20 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.lineOrigins = newOrigins;
   }
 
+  private boundHandleAiSettingsChanged = async () => {
+    this.aiAvailable = await aiService.isAiAvailable();
+  };
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    window.addEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('conflictFile') && this.conflictFile) {
       await this.loadContents();

@@ -214,7 +214,7 @@ impl ModelManager {
         let mut downloaded_bytes: u64 = 0;
         let mut stream = response.bytes_stream();
 
-        use futures_lite::StreamExt;
+        use futures_util::StreamExt;
         use std::io::Write;
 
         while let Some(chunk_result) = stream.next().await {
@@ -263,9 +263,6 @@ impl ModelManager {
             }
         }
 
-        // Download tokenizer config
-        self.download_tokenizer(entry, model_dir).await?;
-
         // Write metadata
         let meta = ModelMeta {
             id: entry.id.clone(),
@@ -281,45 +278,6 @@ impl ModelManager {
 
         std::fs::write(model_dir.join("model_meta.json"), meta_json)
             .map_err(|e| format!("Failed to write model metadata: {e}"))?;
-
-        Ok(())
-    }
-
-    async fn download_tokenizer(
-        &self,
-        entry: &ModelEntry,
-        model_dir: &std::path::Path,
-    ) -> Result<(), String> {
-        let tokenizer_url = format!(
-            "https://huggingface.co/{}/resolve/main/tokenizer.json",
-            entry.tokenizer_repo
-        );
-
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&tokenizer_url)
-            .header("User-Agent", "Leviathan-Git-GUI")
-            .send()
-            .await
-            .map_err(|e| format!("Failed to download tokenizer: {e}"))?;
-
-        if !response.status().is_success() {
-            // Tokenizer download failure is non-fatal; log and continue
-            tracing::warn!(
-                "Failed to download tokenizer for {}: HTTP {}",
-                entry.id,
-                response.status()
-            );
-            return Ok(());
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| format!("Failed to read tokenizer response: {e}"))?;
-
-        std::fs::write(model_dir.join("tokenizer.json"), &bytes)
-            .map_err(|e| format!("Failed to write tokenizer: {e}"))?;
 
         Ok(())
     }

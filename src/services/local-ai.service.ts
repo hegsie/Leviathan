@@ -35,6 +35,7 @@ export interface SystemCapabilities {
   availableRamBytes: number;
   gpuInfo: GpuInfo | null;
   recommendedTier: ModelTier;
+  gpuAccelerationAvailable: boolean;
 }
 
 /**
@@ -50,7 +51,6 @@ export interface ModelEntry {
   minRamBytes: number;
   tier: ModelTier;
   architecture: string;
-  tokenizerRepo: string;
   contextLength: number;
 }
 
@@ -135,10 +135,40 @@ export async function getModelStatus(): Promise<CommandResult<LocalModelStatus>>
 }
 
 /**
+ * Get the display name of the currently loaded model, if any
+ */
+export async function getLoadedModelName(): Promise<CommandResult<string | null>> {
+  return invokeCommand<string | null>('get_loaded_model_name');
+}
+
+/**
  * Get the recommended model based on system capabilities
  */
 export async function getRecommendedModel(): Promise<CommandResult<ModelEntry | null>> {
   return invokeCommand<ModelEntry | null>('get_recommended_model');
+}
+
+/**
+ * Load a downloaded model into the inference engine
+ */
+export async function loadModel(modelId: string): Promise<CommandResult<void>> {
+  const result = await invokeCommand<void>('load_model', { modelId });
+  if (result.success) {
+    // Notify other components that AI is now available
+    window.dispatchEvent(new CustomEvent('ai-settings-changed'));
+  }
+  return result;
+}
+
+/**
+ * Unload the current local model from memory
+ */
+export async function unloadModel(): Promise<CommandResult<void>> {
+  const result = await invokeCommand<void>('unload_model');
+  if (result.success) {
+    window.dispatchEvent(new CustomEvent('ai-settings-changed'));
+  }
+  return result;
 }
 
 /**

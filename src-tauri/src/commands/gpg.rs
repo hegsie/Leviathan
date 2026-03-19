@@ -158,17 +158,7 @@ pub async fn get_gpg_config(path: String) -> Result<GpgConfig> {
     let gpg_available = is_gpg_available();
     let gpg_version = get_gpg_version();
 
-    if !gpg_available {
-        return Ok(GpgConfig {
-            gpg_available: false,
-            gpg_version: None,
-            signing_key: None,
-            sign_commits: false,
-            sign_tags: false,
-            gpg_program: None,
-        });
-    }
-
+    // Always read config values - they can be set even when GPG is not installed
     // Get signing key from git config
     let signing_key = run_git_command(repo_path, &["config", "--get", "user.signingkey"])
         .ok()

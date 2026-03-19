@@ -1,6 +1,6 @@
 [package]
 name = "leviathan"
-version = "0.2.70"
+version = "0.2.71"
 description = "A fully-featured, open-source, cross-platform Git GUI client"
 authors = ["Leviathan Contributors"]
 edition = "2021"
@@ -53,10 +53,11 @@ flate2 = "1"
 
 # AI Provider System
 async-trait = "0.1"
+futures-util = "0.3"
 
 # Local AI inference
 sysinfo = "0.35"
-futures-lite = "2"
+llama-cpp-2 = { version = "0.1", default-features = false }
 
 # OAuth System
 sha2 = "0.10"
@@ -72,6 +73,7 @@ tempfile = "3"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+cuda = ["llama-cpp-2/cuda"]
 
 [profile.release]
 panic = "abort"

@@ -520,6 +520,47 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'generate_commit_message':
         return { summary: 'Auto-generated commit', body: null };
 
+      // AI availability
+      case 'is_ai_available':
+        return false;
+
+      // AI provider commands
+      case 'get_ai_providers':
+        return [
+          { providerType: 'local_inference', name: 'Local AI (Embedded)', available: false, requiresApiKey: false, hasApiKey: false, endpoint: '', models: [], selectedModel: null },
+          { providerType: 'ollama', name: 'Ollama', available: false, requiresApiKey: false, hasApiKey: false, endpoint: 'http://localhost:11434', models: [], selectedModel: null },
+          { providerType: 'anthropic', name: 'Anthropic Claude', available: false, requiresApiKey: true, hasApiKey: false, endpoint: 'https://api.anthropic.com', models: [], selectedModel: null },
+        ];
+      case 'get_active_ai_provider':
+        return null;
+      case 'set_ai_provider':
+      case 'set_ai_api_key':
+      case 'set_ai_model':
+      case 'test_ai_provider':
+        return null;
+
+      // Local AI commands
+      case 'get_system_capabilities':
+        return { totalRamBytes: 16000000000, availableRamBytes: 8000000000, gpuInfo: null, recommendedTier: 'standard', gpuAccelerationAvailable: true };
+      case 'get_available_models':
+        return [
+          { id: 'gemma-3-1b-q4km', displayName: 'Gemma 3 1B (Q4_K_M)', hfRepo: 'unsloth/gemma-3-1b-it-GGUF', hfFilename: 'gemma-3-1b-it-Q4_K_M.gguf', sha256: '', sizeBytes: 700000000, minRamBytes: 8000000000, tier: 'ultra_light', architecture: 'gemma3', contextLength: 8192 },
+        ];
+      case 'get_downloaded_models':
+        return [];
+      case 'get_model_status':
+        return 'unloaded';
+      case 'get_loaded_model_name':
+        return null;
+      case 'get_recommended_model':
+        return null;
+      case 'load_model':
+      case 'unload_model':
+      case 'download_model':
+      case 'cancel_model_download':
+      case 'delete_model':
+        return null;
+
       // Settings
       case 'get_settings':
         return mocks.settings;
@@ -548,10 +589,6 @@ function createMockHandler(mocks: typeof defaultMockData) {
           { typeName: 'test', description: 'Adding tests', emoji: null },
           { typeName: 'chore', description: 'Maintenance tasks', emoji: null },
         ];
-
-      // AI availability
-      case 'is_ai_available':
-        return false;
 
       // Identity
       case 'get_user_identity':
@@ -949,6 +986,35 @@ export async function setupTauriMocks(
             return false;
           case 'generate_commit_message':
             return { summary: 'Auto-generated commit', body: null };
+          case 'get_ai_providers':
+            return [
+              { providerType: 'local_inference', name: 'Local AI (Embedded)', available: false, requiresApiKey: false, hasApiKey: false, endpoint: '', models: [], selectedModel: null },
+            ];
+          case 'get_active_ai_provider':
+            return null;
+          case 'set_ai_provider':
+          case 'set_ai_api_key':
+          case 'set_ai_model':
+          case 'test_ai_provider':
+            return null;
+          case 'get_system_capabilities':
+            return { totalRamBytes: 16000000000, availableRamBytes: 8000000000, gpuInfo: null, recommendedTier: 'standard', gpuAccelerationAvailable: true };
+          case 'get_available_models':
+            return [];
+          case 'get_downloaded_models':
+            return [];
+          case 'get_model_status':
+            return 'unloaded';
+          case 'get_loaded_model_name':
+            return null;
+          case 'get_recommended_model':
+            return null;
+          case 'load_model':
+          case 'unload_model':
+          case 'download_model':
+          case 'cancel_model_download':
+          case 'delete_model':
+            return null;
 
           // === Identity commands ===
           case 'get_user_identity':

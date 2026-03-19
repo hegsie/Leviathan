@@ -19,8 +19,8 @@ export class LvCommitPanel extends LitElement {
       :host {
         display: flex;
         flex-direction: column;
-        padding: var(--spacing-sm);
-        gap: var(--spacing-sm);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        gap: var(--spacing-xs);
         background: var(--color-bg-secondary);
       }
 
@@ -131,7 +131,7 @@ export class LvCommitPanel extends LitElement {
       .message-container {
         display: flex;
         flex-direction: column;
-        gap: var(--spacing-xs);
+        gap: 2px;
       }
 
       .summary-input {
@@ -162,7 +162,7 @@ export class LvCommitPanel extends LitElement {
 
       .description-input {
         width: 100%;
-        min-height: 60px;
+        min-height: 48px;
         padding: var(--spacing-xs) var(--spacing-sm);
         background: var(--color-bg-primary);
         border: 1px solid var(--color-border);
@@ -183,10 +183,15 @@ export class LvCommitPanel extends LitElement {
         color: var(--color-text-muted);
       }
 
+      .summary-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
       .char-count {
         font-size: var(--font-size-xs);
         color: var(--color-text-muted);
-        text-align: right;
       }
 
       .char-count.over-limit {
@@ -278,25 +283,30 @@ export class LvCommitPanel extends LitElement {
         font-size: var(--font-size-xs);
       }
 
+      .header-actions {
+        display: flex;
+        gap: var(--spacing-xs);
+        align-items: center;
+      }
+
       .generate-btn {
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: var(--spacing-xs);
-        padding: var(--spacing-xs) var(--spacing-sm);
-        background: var(--color-bg-tertiary);
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        background: transparent;
         border: 1px solid var(--color-border);
         border-radius: var(--radius-sm);
         color: var(--color-text-secondary);
-        font-size: var(--font-size-xs);
         cursor: pointer;
         transition: all var(--transition-fast);
       }
 
       .generate-btn:hover:not(:disabled) {
         background: var(--color-bg-hover);
-        color: var(--color-primary);
-        border-color: var(--color-primary);
+        color: var(--color-text-primary);
       }
 
       .generate-btn:disabled {
@@ -318,16 +328,6 @@ export class LvCommitPanel extends LitElement {
         to { transform: rotate(360deg); }
       }
 
-      .message-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-      }
-
-      .message-label {
-        font-size: var(--font-size-xs);
-        color: var(--color-text-secondary);
-      }
 
       .history-wrapper {
         position: relative;
@@ -483,7 +483,9 @@ export class LvCommitPanel extends LitElement {
   private readonly HISTORY_MAX_ENTRIES = 20;
 
   private boundHandleTriggerAmend = this.handleTriggerAmend.bind(this);
+  private boundHandleAiSettingsChanged = () => this.checkAiAvailability();
   private unsubscribeStore?: () => void;
+  private aiRetryTimer?: ReturnType<typeof setTimeout>;
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -505,13 +507,46 @@ export class LvCommitPanel extends LitElement {
 
     // Listen for trigger-amend events from context menu
     window.addEventListener('trigger-amend', this.boundHandleTriggerAmend);
+
+    // Re-check AI availability when settings change (browser event from settings dialog)
+    window.addEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
+
+    // If AI isn't available yet, poll periodically to catch backend auto-loading
+    // a model on startup (which can take 10-30 seconds)
+    if (!this.aiAvailable) {
+      this.startAiAvailabilityPolling();
+    }
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('click', this._onDocumentClick);
     window.removeEventListener('trigger-amend', this.boundHandleTriggerAmend);
+    window.removeEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
+    if (this.aiRetryTimer) clearTimeout(this.aiRetryTimer);
     this.unsubscribeStore?.();
+  }
+
+  /** Poll for AI availability until it becomes available or we give up. */
+  private startAiAvailabilityPolling(): void {
+    let attempts = 0;
+    const maxAttempts = 12; // ~60 seconds total (5s × 12)
+    console.log('[lv-commit-panel] Starting AI availability polling');
+    const poll = async () => {
+      attempts++;
+      console.log(`[lv-commit-panel] Poll attempt ${attempts}/${maxAttempts}`);
+      await this.checkAiAvailability();
+      if (this.aiAvailable) {
+        console.log('[lv-commit-panel] AI became available!');
+        return;
+      }
+      if (attempts >= maxAttempts) {
+        console.log('[lv-commit-panel] Gave up polling after', maxAttempts, 'attempts');
+        return;
+      }
+      this.aiRetryTimer = setTimeout(poll, 5000);
+    };
+    this.aiRetryTimer = setTimeout(poll, 5000);
   }
 
   private _onDocumentClick(e: MouseEvent): void {
@@ -893,6 +928,40 @@ export class LvCommitPanel extends LitElement {
         <span class="staged-count ${this.stagedCount > 0 ? 'has-staged' : ''}">
           ${this.stagedCount} staged ${this.stagedCount === 1 ? 'file' : 'files'}
         </span>
+        <div class="header-actions">
+          <button
+            class="generate-btn"
+            @click=${this.aiAvailable ? this.handleGenerateMessage : this.handleOpenSettings}
+            ?disabled=${this.isGenerating || (this.aiAvailable && this.stagedCount === 0)}
+            title=${this.aiAvailable
+              ? (this.stagedCount === 0 ? 'Stage changes to generate a commit message' : 'Generate commit message using AI')
+              : 'Configure an AI provider in Settings to enable this feature'}
+          >
+            ${this.isGenerating ? html`
+              <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" stroke-dasharray="60" stroke-dashoffset="20"></circle>
+              </svg>
+            ` : html`
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                <path d="M2 17l10 5 10-5"/>
+                <path d="M2 12l10 5 10-5"/>
+              </svg>
+            `}
+          </button>
+          <button
+            class="icon-btn"
+            @click=${this.handleSaveTemplate}
+            title="Save as template"
+            ?disabled=${!this.summary.trim()}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+              <polyline points="17 21 17 13 7 13 7 21"></polyline>
+              <polyline points="7 3 7 8 15 8"></polyline>
+            </svg>
+          </button>
+        </div>
       </div>
 
       ${this.templates.length > 0 ? html`
@@ -907,59 +976,8 @@ export class LvCommitPanel extends LitElement {
               <option value=${t.id}>${t.name}</option>
             `)}
           </select>
-          <button
-            class="icon-btn"
-            @click=${this.handleSaveTemplate}
-            title="Save as template"
-            ?disabled=${!this.summary.trim()}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-              <polyline points="17 21 17 13 7 13 7 21"></polyline>
-              <polyline points="7 3 7 8 15 8"></polyline>
-            </svg>
-          </button>
         </div>
-      ` : html`
-        <div class="template-row">
-          <button
-            class="icon-btn"
-            @click=${this.handleSaveTemplate}
-            title="Save as template"
-            ?disabled=${!this.summary.trim()}
-            style="margin-left: auto;"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-              <polyline points="17 21 17 13 7 13 7 21"></polyline>
-              <polyline points="7 3 7 8 15 8"></polyline>
-            </svg>
-          </button>
-        </div>
-      `}
-
-      <button
-        class="generate-btn"
-        @click=${this.aiAvailable ? this.handleGenerateMessage : this.handleOpenSettings}
-        ?disabled=${this.isGenerating || (this.aiAvailable && this.stagedCount === 0)}
-        title=${this.aiAvailable
-          ? (this.stagedCount === 0 ? 'Stage changes to generate a commit message' : 'Generate commit message using AI')
-          : 'Configure an AI provider in Settings to enable this feature'}
-      >
-        ${this.isGenerating ? html`
-          <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10" stroke-dasharray="60" stroke-dashoffset="20"></circle>
-          </svg>
-          Generating...
-        ` : html`
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-            <path d="M2 17l10 5 10-5"/>
-            <path d="M2 12l10 5 10-5"/>
-          </svg>
-          ${this.aiAvailable ? 'Generate with AI' : 'Configure AI'}
-        `}
-      </button>
+      ` : nothing}
 
       ${this.generationError ? html`
         <div class="error">${this.generationError}</div>
@@ -988,44 +1006,6 @@ export class LvCommitPanel extends LitElement {
         </div>
       ` : nothing}
 
-      <div class="message-header">
-        <span class="message-label">Message</span>
-        <div class="history-wrapper">
-          <button
-            class="history-btn"
-            @click=${this.handleHistoryToggle}
-            title="Recent commit messages"
-            ?disabled=${this.commitHistory.length === 0}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"></circle>
-              <polyline points="12 6 12 12 16 14"></polyline>
-            </svg>
-          </button>
-          ${this.showHistory ? html`
-            <div class="history-dropdown">
-              <div class="history-dropdown-header">
-                <span>Recent messages</span>
-                <button class="history-clear-btn" @click=${this.handleClearHistory}>Clear</button>
-              </div>
-              ${this.commitHistory.length > 0
-                ? this.commitHistory.map(
-                    (msg) => html`
-                      <button
-                        class="history-item"
-                        @click=${() => this.handleHistorySelect(msg)}
-                        title=${msg}
-                      >
-                        ${msg.split('\n')[0]}
-                      </button>
-                    `
-                  )
-                : html`<div class="history-empty">No recent messages</div>`}
-            </div>
-          ` : nothing}
-        </div>
-      </div>
-
       <div class="message-container">
         <textarea
           class="summary-input ${summaryOverLimit ? 'over-limit' : ''}"
@@ -1036,8 +1016,44 @@ export class LvCommitPanel extends LitElement {
           @keydown=${this.handleKeyDown}
         ></textarea>
 
-        <div class="char-count ${summaryOverLimit ? 'over-limit' : ''}">
-          ${this.summary.length}/${this.SUMMARY_LIMIT}
+        <div class="summary-meta">
+          <span class="char-count ${summaryOverLimit ? 'over-limit' : ''}">
+            ${this.summary.length}/${this.SUMMARY_LIMIT}
+          </span>
+          <div class="history-wrapper">
+            <button
+              class="history-btn"
+              @click=${this.handleHistoryToggle}
+              title="Recent commit messages"
+              ?disabled=${this.commitHistory.length === 0}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+              </svg>
+            </button>
+            ${this.showHistory ? html`
+              <div class="history-dropdown">
+                <div class="history-dropdown-header">
+                  <span>Recent messages</span>
+                  <button class="history-clear-btn" @click=${this.handleClearHistory}>Clear</button>
+                </div>
+                ${this.commitHistory.length > 0
+                  ? this.commitHistory.map(
+                      (msg) => html`
+                        <button
+                          class="history-item"
+                          @click=${() => this.handleHistorySelect(msg)}
+                          title=${msg}
+                        >
+                          ${msg.split('\n')[0]}
+                        </button>
+                      `
+                    )
+                  : html`<div class="history-empty">No recent messages</div>`}
+              </div>
+            ` : nothing}
+          </div>
         </div>
 
         <textarea

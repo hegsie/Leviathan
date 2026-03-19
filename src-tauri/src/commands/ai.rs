@@ -108,22 +108,7 @@ pub async fn generate_commit_message(
 #[command]
 pub async fn is_ai_available(state: State<'_, AiState>) -> Result<bool> {
     let service = state.read().await;
-
-    // Check if there's an active provider
-    let config = service.get_config();
-    if config.active_provider.is_none() {
-        return Ok(false);
-    }
-
-    // Check if the active provider is available
-    if let Some(provider_type) = config.active_provider {
-        return service
-            .test_provider(provider_type)
-            .await
-            .map_err(LeviathanError::OperationFailed);
-    }
-
-    Ok(false)
+    Ok(service.find_available_provider().await.is_some())
 }
 
 /// Suggest a conflict resolution using AI

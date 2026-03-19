@@ -307,9 +307,27 @@ mod tests {
         assert_eq!(deserialized.type_name, "feat");
     }
 
+    /// Helper to isolate a test repo from global git config for commit.template.
+    /// Sets a local commit.template pointing to a non-existent file, which
+    /// overrides any global commit.template value and falls through gracefully.
+    fn isolate_commit_template_config(repo: &TestRepo) {
+        let git_repo = repo.repo();
+        let mut config = git_repo.config().unwrap();
+        config
+            .set_str(
+                "commit.template",
+                repo.path.join(".nonexistent-template").to_str().unwrap(),
+            )
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_get_commit_template_no_template() {
         let repo = TestRepo::with_initial_commit();
+
+        // Override any global commit.template so this test is isolated
+        isolate_commit_template_config(&repo);
+
         let result = get_commit_template(repo.path_str()).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -318,6 +336,9 @@ mod tests {
     #[tokio::test]
     async fn test_get_commit_template_with_gitmessage() {
         let repo = TestRepo::with_initial_commit();
+
+        // Override any global commit.template so this test is isolated
+        isolate_commit_template_config(&repo);
 
         // Create a .gitmessage file in the repo root
         let gitmessage_content = "# Commit message template\n\nTicket: ";

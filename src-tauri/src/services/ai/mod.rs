@@ -198,6 +198,8 @@ pub struct AiService {
     config_dir: PathBuf,
     config: AiConfig,
     providers: HashMap<AiProviderType, Box<dyn AiProvider>>,
+    /// Shared reference to the local inference provider (for loading models)
+    local_provider: LocalInferenceProvider,
 }
 
 impl AiService {
@@ -209,6 +211,7 @@ impl AiService {
             config_dir,
             config,
             providers: HashMap::new(),
+            local_provider: LocalInferenceProvider::new(),
         };
 
         // Initialize providers
@@ -318,25 +321,21 @@ impl AiService {
         self.providers
             .insert(AiProviderType::GoogleGemini, Box::new(gemini));
 
-        // Local inference provider
-        let local = LocalInferenceProvider::new();
-        self.providers
-            .insert(AiProviderType::LocalInference, Box::new(local));
+        // Local inference provider — reuse shared instance to preserve loaded engine
+        self.providers.insert(
+            AiProviderType::LocalInference,
+            Box::new(self.local_provider.clone()),
+        );
     }
 
     /// Get the local model status
     pub async fn get_local_model_status(&self) -> providers::LocalModelStatus {
-        if let Some(provider) = self.providers.get(&AiProviderType::LocalInference) {
-            // Downcast to LocalInferenceProvider to access get_status()
-            // Since we can't downcast trait objects easily, check availability as a proxy
-            if provider.is_available().await {
-                providers::LocalModelStatus::Ready
-            } else {
-                providers::LocalModelStatus::Unloaded
-            }
-        } else {
-            providers::LocalModelStatus::Unloaded
-        }
+        self.local_provider.get_status().await
+    }
+
+    /// Get the display name of the currently loaded local model, if any.
+    pub async fn get_loaded_model_name(&self) -> Option<String> {
+        self.local_provider.get_model_name().await
     }
 
     /// Get the current configuration
@@ -384,8 +383,14 @@ impl AiService {
         provider_type: AiProviderType,
         api_key: Option<String>,
     ) -> Result<(), String> {
+        let has_key = api_key.is_some();
         let settings = self.config.providers.entry(provider_type).or_default();
         settings.api_key = api_key;
+
+        // Auto-select this provider if none is active and a key was provided
+        if has_key && self.config.active_provider.is_none() {
+            self.config.active_provider = Some(provider_type);
+        }
 
         // Reinitialize providers to pick up new key
         self.init_providers();
@@ -417,6 +422,37 @@ impl AiService {
         self.save_config()
     }
 
+    /// Find the first available provider, preferring the active one
+    pub async fn find_available_provider(&self) -> Option<(&dyn AiProvider, AiProviderType)> {
+        // Try the active provider first
+        if let Some(pt) = self.config.active_provider {
+            if let Some(provider) = self.providers.get(&pt) {
+                if provider.is_available().await {
+                    return Some((provider.as_ref(), pt));
+                }
+            }
+        }
+
+        // Check local inference first (instant, no HTTP)
+        if let Some(provider) = self.providers.get(&AiProviderType::LocalInference) {
+            if provider.is_available().await {
+                return Some((provider.as_ref(), AiProviderType::LocalInference));
+            }
+        }
+
+        // Fall back to any other available provider
+        for (pt, provider) in &self.providers {
+            if *pt == AiProviderType::LocalInference {
+                continue; // Already checked above
+            }
+            if provider.is_available().await {
+                return Some((provider.as_ref(), *pt));
+            }
+        }
+
+        None
+    }
+
     /// Save configuration to disk
     fn save_config(&self) -> Result<(), String> {
         self.config.save(&self.config_dir)
@@ -437,25 +473,16 @@ impl AiService {
         &self,
         diff: String,
     ) -> Result<GeneratedCommitMessage, String> {
-        let provider_type = self
-            .config
-            .active_provider
-            .ok_or("No AI provider configured. Please select a provider in Settings.")?;
+        let (provider, provider_type) = self
+            .find_available_provider()
+            .await
+            .ok_or("No AI provider available. Please configure a provider in Settings.")?;
 
-        let provider = self
-            .providers
-            .get(&provider_type)
-            .ok_or_else(|| format!("Provider {:?} not found", provider_type))?;
-
-        if !provider.is_available().await {
-            return Err(format!(
-                "{} is not available. Please check that the service is running.",
-                provider.name()
-            ));
-        }
-
-        // Truncate diff if too long
-        let truncated_diff = if diff.len() > MAX_DIFF_CHARS {
+        // Truncate diff if too long (skip for local inference — it handles
+        // per-file truncation internally and needs all files for good summaries)
+        let truncated_diff = if provider_type == AiProviderType::LocalInference {
+            diff
+        } else if diff.len() > MAX_DIFF_CHARS {
             format!(
                 "{}...\n[Diff truncated for length]",
                 &diff[..MAX_DIFF_CHARS]
@@ -483,22 +510,10 @@ impl AiService {
         user_prompt: &str,
         max_tokens: Option<u32>,
     ) -> Result<String, String> {
-        let provider_type = self
-            .config
-            .active_provider
-            .ok_or("No AI provider configured. Please select a provider in Settings.")?;
-
-        let provider = self
-            .providers
-            .get(&provider_type)
-            .ok_or_else(|| format!("Provider {:?} not found", provider_type))?;
-
-        if !provider.is_available().await {
-            return Err(format!(
-                "{} is not available. Please check that the service is running.",
-                provider.name()
-            ));
-        }
+        let (provider, provider_type) = self
+            .find_available_provider()
+            .await
+            .ok_or("No AI provider available. Please configure a provider in Settings.")?;
 
         // Get the selected model for this provider
         let model = self
@@ -510,6 +525,54 @@ impl AiService {
         provider
             .generate_text(system_prompt, user_prompt, model, max_tokens)
             .await
+    }
+
+    /// Load a GGUF model into the local inference engine.
+    ///
+    /// After loading, the local inference provider will report as available
+    /// and can be used for commit message generation and conflict resolution.
+    pub async fn load_local_model(
+        &self,
+        model_path: &std::path::Path,
+        model_name: String,
+        meta: Option<providers::LoadedModelMeta>,
+    ) -> Result<(), String> {
+        // Guard: skip if a model is already loading or ready
+        let status = self.local_provider.get_status().await;
+        if status == providers::LocalModelStatus::Loading {
+            return Err("A model is already being loaded".to_string());
+        }
+        if status == providers::LocalModelStatus::Ready {
+            tracing::info!("Replacing currently loaded model with '{}'", model_name);
+        }
+
+        self.local_provider.set_loading().await;
+
+        let model_path = model_path.to_path_buf();
+
+        // Run the heavy GGUF loading on a blocking thread to avoid freezing the async runtime
+        let result = tokio::task::spawn_blocking(move || {
+            local::GgufEngine::load(&model_path, model_name, meta)
+        })
+        .await
+        .map_err(|e| format!("Model loading task failed: {e}"))?;
+
+        match result {
+            Ok(engine) => {
+                self.local_provider.set_engine(Box::new(engine)).await;
+                tracing::info!("Local inference engine loaded and ready");
+                Ok(())
+            }
+            Err(e) => {
+                self.local_provider.set_error().await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Unload the current local model
+    pub async fn unload_local_model(&self) {
+        self.local_provider.clear_engine().await;
     }
 
     /// Auto-detect available local providers

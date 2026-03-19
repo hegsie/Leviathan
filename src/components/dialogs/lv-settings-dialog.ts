@@ -334,6 +334,8 @@ export class LvSettingsDialog extends LitElement {
   @state() private downloadedModels: DownloadedModel[] = [];
   @state() private downloadProgress: Record<string, DownloadProgress> = {};
   @state() private localModelStatus: LocalModelStatus = 'unloaded';
+  @state() private loadedModelName: string | null = null;
+  @state() private loadingModelId: string | null = null;
   @state() private recommendedModel: ModelEntry | null = null;
 
   // MCP settings
@@ -397,6 +399,7 @@ export class LvSettingsDialog extends LitElement {
     const result = await aiService.setAiProvider(providerType);
     if (result.success) {
       this.activeProvider = providerType;
+      window.dispatchEvent(new CustomEvent('ai-settings-changed'));
     } else {
       this.aiError = result.error?.message ?? 'Failed to set provider';
     }
@@ -412,6 +415,7 @@ export class LvSettingsDialog extends LitElement {
     const result = await aiService.setAiApiKey(providerType, apiKey || null);
     if (result.success) {
       await this.loadAiProviders();
+      window.dispatchEvent(new CustomEvent('ai-settings-changed'));
     } else {
       this.aiError = result.error?.message ?? 'Failed to save API key';
     }
@@ -673,12 +677,13 @@ export class LvSettingsDialog extends LitElement {
   // =====================================================
 
   private async loadLocalAiData(): Promise<void> {
-    const [capsResult, modelsResult, downloadedResult, recommendedResult, statusResult] = await Promise.all([
+    const [capsResult, modelsResult, downloadedResult, recommendedResult, statusResult, nameResult] = await Promise.all([
       localAiService.getSystemCapabilities(),
       localAiService.getAvailableModels(),
       localAiService.getDownloadedModels(),
       localAiService.getRecommendedModel(),
       localAiService.getModelStatus(),
+      localAiService.getLoadedModelName(),
     ]);
 
     if (capsResult.success && capsResult.data) {
@@ -696,6 +701,9 @@ export class LvSettingsDialog extends LitElement {
     if (statusResult.success && statusResult.data !== undefined) {
       this.localModelStatus = statusResult.data;
     }
+    if (nameResult.success) {
+      this.loadedModelName = nameResult.data ?? null;
+    }
   }
 
   private async setupDownloadListeners(): Promise<void> {
@@ -706,11 +714,17 @@ export class LvSettingsDialog extends LitElement {
       };
     });
 
-    this.downloadCompleteUnlisten = await listen<{ modelId: string }>('model-download-complete', (event) => {
+    this.downloadCompleteUnlisten = await listen<{ modelId: string; loaded?: boolean }>('model-download-complete', (event) => {
       // Remove from progress tracking and refresh the model list
       const { [event.payload.modelId]: _, ...rest } = this.downloadProgress;
       this.downloadProgress = rest;
       this.loadLocalAiData();
+
+      // If the model was auto-loaded, refresh provider list and notify other components
+      if (event.payload.loaded) {
+        this.loadAiProviders();
+        window.dispatchEvent(new CustomEvent('ai-settings-changed'));
+      }
     });
 
     this.downloadErrorUnlisten = await listen<{ modelId: string; error: string }>('model-download-error', (event) => {
@@ -738,11 +752,38 @@ export class LvSettingsDialog extends LitElement {
   }
 
   private async handleDeleteModel(modelId: string): Promise<void> {
+    // Unload first if this model is currently loaded
+    if (this.localModelStatus === 'ready') {
+      await localAiService.unloadModel();
+    }
     const result = await localAiService.deleteModel(modelId);
     if (result.success) {
-      await this.loadLocalAiData();
+      await Promise.all([this.loadLocalAiData(), this.loadAiProviders()]);
     } else {
       this.aiError = result.error?.message ?? 'Failed to delete model';
+    }
+  }
+
+  private async handleLoadModel(modelId: string): Promise<void> {
+    this.aiError = null;
+    this.localModelStatus = 'loading';
+    this.loadingModelId = modelId;
+    const result = await localAiService.loadModel(modelId);
+    this.loadingModelId = null;
+    if (result.success) {
+      await Promise.all([this.loadLocalAiData(), this.loadAiProviders()]);
+    } else {
+      this.aiError = result.error?.message ?? 'Failed to load model';
+      await this.loadLocalAiData();
+    }
+  }
+
+  private async handleUnloadModel(): Promise<void> {
+    const result = await localAiService.unloadModel();
+    if (result.success) {
+      await Promise.all([this.loadLocalAiData(), this.loadAiProviders()]);
+    } else {
+      this.aiError = result.error?.message ?? 'Failed to unload model';
     }
   }
 
@@ -1224,6 +1265,7 @@ export class LvSettingsDialog extends LitElement {
                   ${this.systemCapabilities.gpuInfo
                     ? html` | GPU: ${this.systemCapabilities.gpuInfo.name}`
                     : html` | No dedicated GPU detected`}
+                  | ${this.systemCapabilities.gpuAccelerationAvailable ? 'GPU Accelerated' : 'CPU Only'}
                 </span>
               </div>
               <span class="status-indicator ${this.systemCapabilities.recommendedTier !== 'none' ? 'configured' : 'not-configured'}">
@@ -1241,6 +1283,9 @@ export class LvSettingsDialog extends LitElement {
             <div class="setting-row">
               <div class="setting-label">
                 <span class="setting-name">Engine Status</span>
+                ${this.loadedModelName ? html`
+                  <span class="setting-description">${this.loadedModelName}</span>
+                ` : nothing}
               </div>
               <span class="status-indicator configured">
                 <span class="status-dot"></span>
@@ -1291,7 +1336,18 @@ export class LvSettingsDialog extends LitElement {
                   </div>
                   <div style="display: flex; gap: 4px;">
                     ${downloaded ? html`
-                      <span class="status-indicator configured">Downloaded</span>
+                      ${this.localModelStatus === 'ready' && this.loadedModelName === model.displayName ? html`
+                        <span class="status-indicator configured">Loaded</span>
+                        <button @click=${() => this.handleUnloadModel()}>Unload</button>
+                      ` : this.loadingModelId === model.id ? html`
+                        <span class="status-indicator">Loading...</span>
+                      ` : html`
+                        <span class="status-indicator">Downloaded</span>
+                        <button
+                          @click=${() => this.handleLoadModel(model.id)}
+                          ?disabled=${this.localModelStatus === 'loading'}
+                        >Load</button>
+                      `}
                       <button class="danger" @click=${() => this.handleDeleteModel(model.id)}>Delete</button>
                     ` : downloading ? html`
                       <button @click=${() => this.handleCancelDownload(model.id)}>Cancel</button>

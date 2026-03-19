@@ -36,9 +36,30 @@ pub struct SystemCapabilities {
     pub available_ram_bytes: u64,
     pub gpu_info: Option<GpuInfo>,
     pub recommended_tier: ModelTier,
+    /// Whether GPU acceleration (Metal/CUDA) is available at inference time.
+    /// If false, only small models should be recommended since CPU inference is slow.
+    pub gpu_acceleration_available: bool,
 }
 
 const GB: u64 = 1_073_741_824;
+
+/// Check whether GPU acceleration is available for llama.cpp inference.
+///
+/// On macOS ARM64, Metal is auto-enabled at compile time by llama-cpp-2.
+/// On Linux/Windows with the `cuda` feature, CUDA is available.
+fn detect_gpu_acceleration() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // llama-cpp-2 auto-enables Metal on macOS ARM64
+        cfg!(target_arch = "aarch64")
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // CUDA is available when compiled with the cuda feature
+        cfg!(feature = "cuda")
+    }
+}
 
 /// Detect system capabilities for local AI inference.
 pub fn detect() -> SystemCapabilities {
@@ -49,35 +70,46 @@ pub fn detect() -> SystemCapabilities {
     let available_ram_bytes = sys.available_memory();
 
     let gpu_info = detect_gpu();
+    let gpu_acceleration_available = detect_gpu_acceleration();
 
-    let recommended_tier = recommend_tier(total_ram_bytes, &gpu_info);
+    let recommended_tier = recommend_tier(total_ram_bytes, &gpu_info, gpu_acceleration_available);
 
     SystemCapabilities {
         total_ram_bytes,
         available_ram_bytes,
         gpu_info,
         recommended_tier,
+        gpu_acceleration_available,
     }
 }
 
 /// Calculate the recommended model tier based on system capabilities.
-pub fn recommend_tier(total_ram_bytes: u64, gpu_info: &Option<GpuInfo>) -> ModelTier {
-    let has_capable_gpu = gpu_info
-        .as_ref()
-        .map(|gpu| {
-            // Apple Silicon (Metal) is always capable
-            if gpu.vendor == GpuVendor::Apple && gpu.metal_supported {
-                return true;
-            }
-            // NVIDIA with >= 4GB VRAM
-            if gpu.vendor == GpuVendor::Nvidia {
-                if let Some(vram) = gpu.vram_bytes {
-                    return vram >= 4 * GB;
+///
+/// `gpu_acceleration_available` indicates whether the binary has GPU acceleration
+/// (Metal/CUDA) enabled and working. Without it, we cap at UltraLight (1B models)
+/// since larger models are too slow on CPU.
+pub fn recommend_tier(
+    total_ram_bytes: u64,
+    gpu_info: &Option<GpuInfo>,
+    gpu_acceleration_available: bool,
+) -> ModelTier {
+    let has_capable_gpu = gpu_acceleration_available
+        && gpu_info
+            .as_ref()
+            .map(|gpu| {
+                // Apple Silicon (Metal) is always capable
+                if gpu.vendor == GpuVendor::Apple && gpu.metal_supported {
+                    return true;
                 }
-            }
-            false
-        })
-        .unwrap_or(false);
+                // NVIDIA with >= 4GB VRAM
+                if gpu.vendor == GpuVendor::Nvidia {
+                    if let Some(vram) = gpu.vram_bytes {
+                        return vram >= 4 * GB;
+                    }
+                }
+                false
+            })
+            .unwrap_or(false);
 
     if total_ram_bytes >= 16 * GB && has_capable_gpu {
         ModelTier::Standard
@@ -359,7 +391,7 @@ mod tests {
             metal_supported: true,
             cuda_supported: false,
         });
-        assert_eq!(recommend_tier(16 * GB, &gpu), ModelTier::Standard);
+        assert_eq!(recommend_tier(16 * GB, &gpu, true), ModelTier::Standard);
     }
 
     #[test]
@@ -371,7 +403,7 @@ mod tests {
             metal_supported: false,
             cuda_supported: true,
         });
-        assert_eq!(recommend_tier(16 * GB, &gpu), ModelTier::Standard);
+        assert_eq!(recommend_tier(16 * GB, &gpu, true), ModelTier::Standard);
     }
 
     #[test]
@@ -384,23 +416,23 @@ mod tests {
             cuda_supported: true,
         });
         // 16GB RAM but GPU only has 2GB VRAM — falls to UltraLight
-        assert_eq!(recommend_tier(16 * GB, &gpu), ModelTier::UltraLight);
+        assert_eq!(recommend_tier(16 * GB, &gpu, true), ModelTier::UltraLight);
     }
 
     #[test]
     fn test_recommend_tier_ultralight_enough_ram() {
-        assert_eq!(recommend_tier(8 * GB, &None), ModelTier::UltraLight);
+        assert_eq!(recommend_tier(8 * GB, &None, false), ModelTier::UltraLight);
     }
 
     #[test]
     fn test_recommend_tier_none_low_ram() {
-        assert_eq!(recommend_tier(4 * GB, &None), ModelTier::None);
+        assert_eq!(recommend_tier(4 * GB, &None, false), ModelTier::None);
     }
 
     #[test]
     fn test_recommend_tier_ultralight_no_gpu() {
         // 16GB RAM but no GPU at all — UltraLight (not Standard)
-        assert_eq!(recommend_tier(16 * GB, &None), ModelTier::UltraLight);
+        assert_eq!(recommend_tier(16 * GB, &None, false), ModelTier::UltraLight);
     }
 
     #[test]
@@ -413,7 +445,20 @@ mod tests {
             cuda_supported: false,
         });
         // AMD GPUs don't qualify for Standard tier (no CUDA/Metal)
-        assert_eq!(recommend_tier(16 * GB, &gpu), ModelTier::UltraLight);
+        assert_eq!(recommend_tier(16 * GB, &gpu, true), ModelTier::UltraLight);
+    }
+
+    #[test]
+    fn test_recommend_tier_cpu_only_caps_at_ultralight() {
+        let gpu = Some(GpuInfo {
+            name: "Apple M3 Max".to_string(),
+            vendor: GpuVendor::Apple,
+            vram_bytes: None,
+            metal_supported: true,
+            cuda_supported: false,
+        });
+        // GPU hardware present but acceleration not available (CPU-only build)
+        assert_eq!(recommend_tier(48 * GB, &gpu, false), ModelTier::UltraLight);
     }
 
     #[test]
@@ -440,9 +485,11 @@ mod tests {
             available_ram_bytes: 8 * GB,
             gpu_info: None,
             recommended_tier: ModelTier::UltraLight,
+            gpu_acceleration_available: false,
         };
         let json = serde_json::to_string(&caps).unwrap();
         assert!(json.contains("\"totalRamBytes\""));
         assert!(json.contains("\"recommendedTier\""));
+        assert!(json.contains("\"gpuAccelerationAvailable\""));
     }
 }
