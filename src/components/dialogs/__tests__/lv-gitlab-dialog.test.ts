@@ -9,7 +9,7 @@
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 let mockInvoke: MockInvoke = () => Promise.resolve(null);
 const invokeHistory: Array<{ command: string; args: unknown }> = [];
-const tokenStore = new Map<string, number[]>();
+const keyringStore = new Map<string, string>();
 
 (globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } })
   .__TAURI_INTERNALS__ = {
@@ -124,10 +124,6 @@ function createTestAccount(
   } as IntegrationAccount;
 }
 
-function encodeToken(token: string): number[] {
-  return Array.from(new TextEncoder().encode(token));
-}
-
 async function waitForLoad(el: LvGitLabDialog): Promise<void> {
   await el.updateComplete;
   await new Promise((r) => setTimeout(r, 50));
@@ -154,25 +150,25 @@ let connectionResponse: unknown = mockDisconnectedStatus;
 let detectedRepoResponse: unknown = mockDetectedRepo;
 
 function setupMockInvoke(): void {
-  tokenStore.clear();
-  tokenStore.set('gitlab_token_gl-acc-1', encodeToken('glpat-testtoken123456'));
+  keyringStore.clear();
+  keyringStore.set('gitlab_token_gl-acc-1', 'glpat-testtoken123456');
 
   mockInvoke = async (command: string, args?: unknown) => {
     const params = args as Record<string, unknown> | undefined;
 
-    // Stronghold / credential service
-    if (command === 'plugin:path|resolve_directory') return '/mock/app/data';
-    if (command === 'plugin:stronghold|initialize') return null;
-    if (command === 'plugin:stronghold|load_client') return null;
-    if (command === 'plugin:stronghold|create_client') return null;
-    if (command === 'plugin:stronghold|save') return null;
-    if (command === 'migrate_vault_if_needed') return null;
-
-    if (command === 'plugin:stronghold|get_store_record') {
-      const recordPath = (params?.recordPath ?? params?.record_path) as string | undefined;
-      if (recordPath && tokenStore.has(recordPath)) {
-        return tokenStore.get(recordPath);
-      }
+    // Credential service (OS keyring)
+    if (command === 'get_keyring_token') {
+      const key = (params as Record<string, string>)?.key;
+      return keyringStore.get(key) ?? null;
+    }
+    if (command === 'store_keyring_token') {
+      const { key, value } = params as Record<string, string>;
+      keyringStore.set(key, value);
+      return null;
+    }
+    if (command === 'delete_keyring_token') {
+      const key = (params as Record<string, string>)?.key;
+      keyringStore.delete(key);
       return null;
     }
 

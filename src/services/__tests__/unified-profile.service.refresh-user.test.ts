@@ -13,8 +13,8 @@ type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 let mockInvoke: MockInvoke = () => Promise.resolve(null);
 const invokeHistory: Array<{ command: string; args: unknown }> = [];
 
-// Token store for simulating Stronghold
-const tokenStore = new Map<string, number[]>();
+// Token store for simulating OS keyring
+const tokenStore = new Map<string, string>();
 
 (globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } }).__TAURI_INTERNALS__ = {
   invoke: (command: string, args?: unknown) => {
@@ -42,15 +42,10 @@ function createTestAccount(
   } as IntegrationAccount;
 }
 
-// Helper: encode a string as a number array (simulating Stronghold Uint8Array)
-function encodeToken(token: string): number[] {
-  return Array.from(new TextEncoder().encode(token));
-}
-
-// Helper: store a mock token in the simulated Stronghold
+// Helper: store a mock token in the simulated keyring
 function setMockToken(integrationType: string, accountId: string, token: string): void {
   const key = `${integrationType}_token_${accountId}`;
-  tokenStore.set(key, encodeToken(token));
+  tokenStore.set(key, token);
 }
 
 // Default mock responses for connection checks
@@ -97,49 +92,25 @@ const bitbucketConnectionResponse = {
   },
 };
 
-// Track whether Stronghold has been "initialized" for this test run
-let strongholdInitialized = false;
-
 function setupDefaultMockInvoke(): void {
-  strongholdInitialized = false;
-
   mockInvoke = async (command: string, args?: unknown) => {
     const params = args as Record<string, unknown> | undefined;
 
-    // Machine vault password for credential service
-    if (command === 'get_machine_vault_password') {
-      return 'test-vault-password-12345';
-    }
-
-    // Tauri path plugin
-    if (command === 'plugin:path|resolve_directory') {
-      return '/mock/app/data';
-    }
-
-    // Stronghold initialization
-    if (command === 'migrate_vault_if_needed') {
-      return null;
-    }
-    if (command === 'plugin:stronghold|initialize') {
-      strongholdInitialized = true;
-      return null;
-    }
-    if (command === 'plugin:stronghold|load_client') {
-      if (!strongholdInitialized) throw new Error('Not initialized');
-      return null;
-    }
-    if (command === 'plugin:stronghold|create_client') {
-      return null;
-    }
-    if (command === 'plugin:stronghold|save') {
-      return null;
-    }
-
-    // Stronghold store read - return token from our mock store
-    if (command === 'plugin:stronghold|get_store_record') {
+    // Credential service (OS keyring)
+    if (command === 'get_keyring_token') {
       const key = params?.key as string;
-      const data = tokenStore.get(key);
-      return data ?? null;
+      return tokenStore.get(key) ?? null;
+    }
+    if (command === 'store_keyring_token') {
+      const key = params?.key as string;
+      const value = params?.value as string;
+      tokenStore.set(key, value);
+      return null;
+    }
+    if (command === 'delete_keyring_token') {
+      const key = params?.key as string;
+      tokenStore.delete(key);
+      return null;
     }
 
     // Connection checks (these are raw invoke results, invokeCommand wraps them)

@@ -20,7 +20,6 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
-tauri-plugin-stronghold = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 git2 = { version = "0.20", features = ["vendored-openssl"] }
@@ -30,7 +29,6 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
-keyring = "3"
 notify = "8"
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "query", "form", "http2", "stream"] }
 dirs = "6"
@@ -41,8 +39,6 @@ urlencoding = "2.1.3"
 uuid = { version = "1.21.0", features = ["v4"] }
 glob = "0.3"
 once_cell = "1"
-hostname = "0.4"
-whoami = "2.1"
 chardetng = "0.1"
 encoding_rs = "0.8"
 
@@ -67,6 +63,11 @@ rand = "0.8"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
 
+# Keyring crate only used on non-macOS; macOS uses `security` CLI directly
+# to avoid keychain ACL prompts that the keyring crate triggers on dev builds
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+keyring = { version = "3", features = ["windows-native", "linux-native"] }
+
 [dev-dependencies]
 tempfile = "3"
 
@@ -81,7 +82,3 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = "debuginfo"
-
-# Required for stronghold plugin performance in dev mode
-[profile.dev.package.scrypt]
-opt-level = 3

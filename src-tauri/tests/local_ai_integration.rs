@@ -153,7 +153,7 @@ async fn test_full_commit_message_generation() {
     {
         let service = ai_state.read().await;
         service
-            .load_local_model(&model_path, "Llama-3.2-1B".to_string())
+            .load_local_model(&model_path, "Llama-3.2-1B".to_string(), None)
             .await
             .expect("load_local_model failed");
     }
@@ -245,7 +245,7 @@ async fn test_load_unload_lifecycle() {
     {
         let service = ai_state.read().await;
         service
-            .load_local_model(&model_path, "Llama-3.2-1B".to_string())
+            .load_local_model(&model_path, "Llama-3.2-1B".to_string(), None)
             .await
             .expect("load_local_model failed");
     }

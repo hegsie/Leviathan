@@ -678,6 +678,23 @@ export class LvGitHubDialog extends LitElement {
         background: var(--color-error-bg);
       }
 
+      .btn-danger-outline {
+        background: transparent;
+        color: var(--color-error);
+        border-color: var(--color-error);
+      }
+
+      .btn-danger-outline:hover:not(:disabled) {
+        background: var(--color-error);
+        color: white;
+      }
+
+      .connection-actions {
+        display: flex;
+        gap: var(--spacing-sm);
+        margin-left: auto;
+      }
+
       /* Filter row */
       .filter-row {
         display: flex;
@@ -1279,6 +1296,37 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
+  private async handleDeleteIntegration(): Promise<void> {
+    if (!this.selectedAccountId) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      await credentialService.deleteAccountToken('github', this.selectedAccountId);
+      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+
+      await unifiedProfileService.loadUnifiedProfiles();
+      this.accounts = getAccountsByType('github');
+
+      this.selectedAccountId = this.accounts.length > 0 ? this.accounts[0].id : null;
+      this.connectionStatus = null;
+      this.pullRequests = [];
+      this.issues = [];
+      this.workflowRuns = [];
+      this.releases = [];
+      this.repoLabels = [];
+
+      if (this.accounts.length > 0) {
+        await this.loadInitialData();
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to delete integration';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
   private async handleCreatePR(): Promise<void> {
     if (!this.detectedRepo || !this.createPrTitle || !this.createPrHead || !this.createPrBase) return;
 
@@ -1480,9 +1528,10 @@ export class LvGitHubDialog extends LitElement {
               </div>
             ` : ''}
           </div>
-          <button class="btn btn-danger" @click=${() => this.handleDisconnect()} ?disabled=${this.isLoading}>
-            Disconnect
-          </button>
+          <div class="connection-actions">
+            <button class="btn btn-danger" @click=${() => this.handleDisconnect()} ?disabled=${this.isLoading}>Disconnect</button>
+            <button class="btn btn-danger-outline" @click=${() => this.handleDeleteIntegration()} ?disabled=${this.isLoading}>Delete</button>
+          </div>
         </div>
       `;
     }
@@ -1563,6 +1612,15 @@ export class LvGitHubDialog extends LitElement {
             </span>
           </div>
           <div class="btn-row">
+            ${this.selectedAccountId ? html`
+              <button
+                class="btn btn-danger-outline"
+                @click=${() => this.handleDeleteIntegration()}
+                ?disabled=${this.isLoading}
+              >
+                Delete Integration
+              </button>
+            ` : nothing}
             <button
               class="btn btn-primary"
               @click=${() => this.handleSaveToken()}

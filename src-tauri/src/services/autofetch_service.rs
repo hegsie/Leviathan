@@ -164,46 +164,9 @@ async fn perform_fetch(repo_path: &str) -> Result<RemoteStatus, String> {
             .find_remote(remote_name)
             .map_err(|e| format!("Failed to find remote: {}", e))?;
 
-        // Create fetch options with credentials
-        let mut fetch_opts = git2::FetchOptions::new();
-        let mut callbacks = git2::RemoteCallbacks::new();
-
-        // Try to use credential helper
-        callbacks.credentials(|_url, username_from_url, allowed_types| {
-            if allowed_types.contains(git2::CredentialType::SSH_KEY) {
-                // Try SSH agent first
-                if let Ok(cred) = git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-                {
-                    return Ok(cred);
-                }
-
-                // Try default SSH key
-                if let Some(home) = dirs::home_dir() {
-                    let ssh_dir = home.join(".ssh");
-                    for key_name in ["id_ed25519", "id_rsa", "id_ecdsa"] {
-                        let key_path = ssh_dir.join(key_name);
-                        if key_path.exists() {
-                            if let Ok(cred) = git2::Cred::ssh_key(
-                                username_from_url.unwrap_or("git"),
-                                None,
-                                &key_path,
-                                None,
-                            ) {
-                                return Ok(cred);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if allowed_types.contains(git2::CredentialType::DEFAULT) {
-                return git2::Cred::default();
-            }
-
-            Err(git2::Error::from_str("no authentication available"))
-        });
-
-        fetch_opts.remote_callbacks(callbacks);
+        // Use the shared credentials helper (reads from OS keyring via `security` CLI
+        // on macOS, avoiding Keychain authorization dialogs)
+        let mut fetch_opts = crate::services::credentials_service::get_fetch_options(None);
 
         // Perform fetch
         remote

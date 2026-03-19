@@ -1,7 +1,7 @@
 //! Bitbucket Integration Commands
 //!
 //! Provides integration with Bitbucket Cloud for pull requests, issues, and pipelines.
-//! Credential storage is handled by the frontend using Stronghold.
+//! Credential storage is handled by the frontend credential service (OS keyring).
 //! All API functions accept optional credentials from the frontend.
 
 use crate::error::{LeviathanError, Result};
@@ -12,28 +12,28 @@ use tauri::command;
 const BITBUCKET_API_BASE: &str = "https://api.bitbucket.org/2.0";
 
 // ============================================================================
-// Credential Management (handled by frontend Stronghold - these are stubs)
+// Credential Management (handled by frontend credential service via OS keyring - these are stubs)
 // ============================================================================
 
-/// Store Bitbucket credentials - handled by frontend Stronghold
+/// Store Bitbucket credentials - handled by frontend credential service (OS keyring)
 #[command]
 pub async fn store_bitbucket_credentials(_username: String, _app_password: String) -> Result<()> {
-    // Credential storage is now handled by frontend Stronghold
+    // Credential storage is now handled by frontend credential service (OS keyring)
     Ok(())
 }
 
-/// Get Bitbucket credentials - handled by frontend Stronghold
+/// Get Bitbucket credentials - handled by frontend credential service (OS keyring)
 #[command]
 pub async fn get_bitbucket_credentials() -> Result<Option<(String, String)>> {
-    // Credential storage is now handled by frontend Stronghold
+    // Credential storage is now handled by frontend credential service (OS keyring)
     // Return None - credentials should be passed from frontend
     Ok(None)
 }
 
-/// Delete Bitbucket credentials - handled by frontend Stronghold
+/// Delete Bitbucket credentials - handled by frontend credential service (OS keyring)
 #[command]
 pub async fn delete_bitbucket_credentials() -> Result<()> {
-    // Credential storage is now handled by frontend Stronghold
+    // Credential storage is now handled by frontend credential service (OS keyring)
     Ok(())
 }
 

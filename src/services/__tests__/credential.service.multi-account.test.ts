@@ -17,16 +17,22 @@ type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   const params = args as Record<string, unknown> | undefined;
 
-  if (command === 'plugin:stronghold|set_value') {
+  if (command === 'store_keyring_token') {
     const key = params?.key as string;
     const value = params?.value as string;
     credentialStorage.set(key, value);
     return null;
   }
 
-  if (command === 'plugin:stronghold|get_value') {
+  if (command === 'get_keyring_token') {
     const key = params?.key as string;
     return credentialStorage.get(key) ?? null;
+  }
+
+  if (command === 'delete_keyring_token') {
+    const key = params?.key as string;
+    credentialStorage.delete(key);
+    return null;
   }
 
   return null;

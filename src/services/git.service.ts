@@ -2471,6 +2471,40 @@ export async function deleteGitCredentials(
   return invokeCommand<void>("delete_git_credentials", { url });
 }
 
+
+// ============================================================================
+// Integration Token Storage (Keyring)
+// ============================================================================
+
+/**
+ * Store an integration token in the system keyring.
+ * Primary storage for integration tokens.
+ */
+export async function storeKeyringToken(
+  key: string,
+  value: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("store_keyring_token", { key, value });
+}
+
+/**
+ * Retrieve an integration token from the system keyring.
+ */
+export async function getKeyringToken(
+  key: string,
+): Promise<CommandResult<string | null>> {
+  return invokeCommand<string | null>("get_keyring_token", { key });
+}
+
+/**
+ * Delete an integration token from the system keyring.
+ */
+export async function deleteKeyringToken(
+  key: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("delete_keyring_token", { key });
+}
+
 // ============================================================================
 // GitHub Integration
 // ============================================================================
@@ -2592,7 +2626,7 @@ export interface CreatePullRequestInput {
   draft?: boolean;
 }
 
-// Authentication (using Stronghold secure storage)
+// Authentication (using OS keyring)
 export async function storeGitHubToken(
   token: string,
 ): Promise<CommandResult<void>> {
@@ -2610,6 +2644,15 @@ export async function storeGitHubToken(
 
 export async function getGitHubToken(): Promise<CommandResult<string | null>> {
   try {
+    // Try account-based keyring credentials first (new system)
+    const { getDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
+    const { AccountCredentials } = await import("./credential.service.ts");
+    const account = getDefaultGlobalAccount("github");
+    if (account) {
+      const token = await AccountCredentials.getToken("github", account.id);
+      if (token) return { success: true, data: token };
+    }
+    // Fall back to legacy single-account credentials
     const { GitHubCredentials } = await import("./credential.service.ts");
     const token = await GitHubCredentials.getToken();
     return { success: true, data: token };
@@ -2637,7 +2680,7 @@ export async function deleteGitHubToken(): Promise<CommandResult<void>> {
 export async function checkGitHubConnection(): Promise<
   CommandResult<GitHubConnectionStatus>
 > {
-  // Get token from Stronghold and pass to backend
+  // Get token from credential service and pass to backend
   const tokenResult = await getGitHubToken();
   const token = tokenResult.success ? tokenResult.data : null;
   return invokeCommand<GitHubConnectionStatus>("check_github_connection", {
@@ -3154,7 +3197,7 @@ export interface AdoPipelineRun {
   url: string;
 }
 
-// Azure DevOps Token Management (using Stronghold secure storage)
+// Azure DevOps Token Management (using OS keyring)
 
 export async function storeAdoToken(
   token: string,
@@ -3173,6 +3216,15 @@ export async function storeAdoToken(
 
 export async function getAdoToken(): Promise<CommandResult<string | null>> {
   try {
+    // Try account-based keyring credentials first (new system)
+    const { getDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
+    const { AccountCredentials } = await import("./credential.service.ts");
+    const account = getDefaultGlobalAccount("azure-devops");
+    if (account) {
+      const token = await AccountCredentials.getToken("azure-devops", account.id);
+      if (token) return { success: true, data: token };
+    }
+    // Fall back to legacy single-account credentials
     const { AzureDevOpsCredentials } = await import("./credential.service.ts");
     const token = await AzureDevOpsCredentials.getToken();
     return { success: true, data: token };
@@ -3202,7 +3254,7 @@ export async function deleteAdoToken(): Promise<CommandResult<void>> {
 export async function checkAdoConnection(
   organization: string,
 ): Promise<CommandResult<AdoConnectionStatus>> {
-  // Get token from Stronghold and pass to backend
+  // Get token from credential service and pass to backend
   const tokenResult = await getAdoToken();
   const token = tokenResult.success ? tokenResult.data : null;
   return invokeCommand<AdoConnectionStatus>("check_ado_connection", {
@@ -3403,7 +3455,7 @@ export interface GitLabPipeline {
   webUrl: string;
 }
 
-// GitLab Token Management (using Stronghold secure storage)
+// GitLab Token Management (using OS keyring)
 export async function storeGitLabToken(
   token: string,
 ): Promise<CommandResult<void>> {
@@ -3421,6 +3473,15 @@ export async function storeGitLabToken(
 
 export async function getGitLabToken(): Promise<CommandResult<string | null>> {
   try {
+    // Try account-based keyring credentials first (new system)
+    const { getDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
+    const { AccountCredentials } = await import("./credential.service.ts");
+    const account = getDefaultGlobalAccount("gitlab");
+    if (account) {
+      const token = await AccountCredentials.getToken("gitlab", account.id);
+      if (token) return { success: true, data: token };
+    }
+    // Fall back to legacy single-account credentials
     const { GitLabCredentials } = await import("./credential.service.ts");
     const token = await GitLabCredentials.getToken();
     return { success: true, data: token };
@@ -3450,7 +3511,7 @@ export async function deleteGitLabToken(): Promise<CommandResult<void>> {
 export async function checkGitLabConnection(
   instanceUrl: string,
 ): Promise<CommandResult<GitLabConnectionStatus>> {
-  // Get token from Stronghold and pass to backend
+  // Get token from credential service and pass to backend
   const tokenResult = await getGitLabToken();
   const token = tokenResult.success ? tokenResult.data : null;
   return invokeCommand<GitLabConnectionStatus>("check_gitlab_connection", {
@@ -3651,7 +3712,7 @@ export interface BitbucketPipeline {
   url: string;
 }
 
-// Bitbucket Credential Management (using Stronghold secure storage)
+// Bitbucket Credential Management (using OS keyring)
 
 export async function storeBitbucketCredentials(
   username: string,
@@ -3707,7 +3768,7 @@ export async function deleteBitbucketCredentials(): Promise<
 export async function checkBitbucketConnection(): Promise<
   CommandResult<BitbucketConnectionStatus>
 > {
-  // Get credentials from Stronghold and pass to backend
+  // Get credentials from credential service and pass to backend
   const credsResult = await getBitbucketCredentials();
   let username: string | null = null;
   let appPassword: string | null = null;

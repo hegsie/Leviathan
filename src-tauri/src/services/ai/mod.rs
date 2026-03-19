@@ -18,9 +18,11 @@ use tokio::sync::RwLock;
 
 pub use config::{AiConfig, ProviderSettings};
 pub use providers::{
-    AnthropicProvider, GeminiProvider, GithubCopilotProvider, LocalInferenceProvider,
-    OllamaProvider, OpenAiCompatibleProvider,
+    AnthropicProvider, GeminiProvider, GithubCopilotProvider, LoadedModelMeta,
+    LocalInferenceProvider, OllamaProvider, OpenAiCompatibleProvider,
 };
+
+use crate::commands::local_ai::SharedLocalAiState;
 
 /// AI provider types supported by the system
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -200,6 +202,8 @@ pub struct AiService {
     providers: HashMap<AiProviderType, Box<dyn AiProvider>>,
     /// Shared reference to the local inference provider (for loading models)
     local_provider: LocalInferenceProvider,
+    /// Shared local AI state for lazy model loading
+    local_ai_state: Option<SharedLocalAiState>,
 }
 
 impl AiService {
@@ -212,6 +216,7 @@ impl AiService {
             config,
             providers: HashMap::new(),
             local_provider: LocalInferenceProvider::new(),
+            local_ai_state: None,
         };
 
         // Initialize providers
@@ -422,6 +427,56 @@ impl AiService {
         self.save_config()
     }
 
+    /// Set the shared local AI state reference for lazy model loading.
+    /// Must be called after both AiState and SharedLocalAiState are created.
+    pub fn set_local_ai_state(&mut self, state: SharedLocalAiState) {
+        self.local_ai_state = Some(state);
+    }
+
+    /// Lazily load a local GGUF model if one is downloaded but not yet loaded.
+    ///
+    /// This defers model loading to avoid startup race conditions:
+    /// instead of loading the model at startup (which could race with other
+    /// initialization), we defer loading until the first inference request.
+    pub async fn ensure_local_model_loaded(&self) -> Result<(), String> {
+        // Already loaded or loading — nothing to do
+        let status = self.local_provider.get_status().await;
+        if status == providers::LocalModelStatus::Ready
+            || status == providers::LocalModelStatus::Loading
+        {
+            return Ok(());
+        }
+
+        let local_state = match &self.local_ai_state {
+            Some(s) => s.clone(),
+            None => return Err("Local AI state not available".to_string()),
+        };
+
+        let local = local_state.read().await;
+        let downloaded = local.model_manager.list_downloaded().unwrap_or_default();
+
+        if downloaded.is_empty() {
+            return Ok(()); // No models downloaded — nothing to load
+        }
+
+        // Pick the first (best) downloaded model and look up its registry entry
+        let model = &downloaded[0];
+        let meta = local
+            .registry
+            .get_by_id(&model.id)
+            .map(|entry| providers::LoadedModelMeta {
+                tier: entry.tier,
+                architecture: entry.architecture.clone(),
+                context_length: entry.context_length,
+            });
+        let model_path = model.path.clone();
+        let display_name = model.display_name.clone();
+        drop(local);
+
+        tracing::info!("Lazy-loading local model: {}", display_name);
+        self.load_local_model(&model_path, display_name, meta).await
+    }
+
     /// Find the first available provider, preferring the active one
     pub async fn find_available_provider(&self) -> Option<(&dyn AiProvider, AiProviderType)> {
         // Try the active provider first
@@ -433,7 +488,8 @@ impl AiService {
             }
         }
 
-        // Check local inference first (instant, no HTTP)
+        // Check local inference (only if already loaded — no lazy load here,
+        // as loading the model into GPU memory is expensive and should be deferred)
         if let Some(provider) = self.providers.get(&AiProviderType::LocalInference) {
             if provider.is_available().await {
                 return Some((provider.as_ref(), AiProviderType::LocalInference));
@@ -473,6 +529,11 @@ impl AiService {
         &self,
         diff: String,
     ) -> Result<GeneratedCommitMessage, String> {
+        // Lazy-load local model on first actual generation request
+        if let Err(e) = self.ensure_local_model_loaded().await {
+            tracing::debug!("Lazy model load skipped: {}", e);
+        }
+
         let (provider, provider_type) = self
             .find_available_provider()
             .await
@@ -510,6 +571,11 @@ impl AiService {
         user_prompt: &str,
         max_tokens: Option<u32>,
     ) -> Result<String, String> {
+        // Lazy-load local model on first actual generation request
+        if let Err(e) = self.ensure_local_model_loaded().await {
+            tracing::debug!("Lazy model load skipped: {}", e);
+        }
+
         let (provider, provider_type) = self
             .find_available_provider()
             .await

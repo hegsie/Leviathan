@@ -23,7 +23,7 @@ pub struct ProviderSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// API key for this provider (stored in config for now, could move to Stronghold)
+    /// API key for this provider (stored in config for now, could move to OS keyring)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }

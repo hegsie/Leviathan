@@ -625,6 +625,7 @@ export class AppShell extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
+
     this.unsubscribe = repositoryStore.subscribe((state) => {
       const newActiveRepo = state.getActiveRepository();
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;

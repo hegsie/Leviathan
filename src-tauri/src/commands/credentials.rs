@@ -507,93 +507,141 @@ pub async fn erase_credentials(path: String, host: String, protocol: String) -> 
     Ok(())
 }
 
-/// Get a machine-specific vault password
+const INTEGRATION_SERVICE: &str = "leviathan-integrations";
+
+/// Store an integration token in the system keyring.
 ///
-/// Derives a deterministic password from machine-specific information
-/// (hostname + username) to ensure each installation has a unique vault password.
-///
-/// **Stability note:** The derived password depends on the machine's hostname and
-/// the current OS username. If either changes (e.g., machine rename, user profile
-/// change), the existing vault will fail to decrypt. The frontend handles this by
-/// falling back to the legacy hardcoded password for existing vaults. A future
-/// improvement could persist a random vault key in the OS keyring for full stability.
+/// On macOS, uses the `security` CLI with `-T ""` to allow any application
+/// to access the item without triggering authorization prompts. The keyring
+/// crate's `set_password` restricts access to the calling binary's code
+/// signature, which changes on every dev build and causes repeated prompts.
 #[command]
-pub async fn get_machine_vault_password() -> Result<String> {
-    use sha2::{Digest, Sha256};
+pub async fn store_keyring_token(key: String, value: String) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // Delete existing entry first (add-generic-password fails if it exists)
+        let _ = std::process::Command::new("security")
+            .args([
+                "delete-generic-password",
+                "-s",
+                INTEGRATION_SERVICE,
+                "-a",
+                &key,
+            ])
+            .output();
 
-    // Gather machine-specific information
-    let mut components = Vec::new();
+        let output = std::process::Command::new("security")
+            .args([
+                "add-generic-password",
+                "-s",
+                INTEGRATION_SERVICE,
+                "-a",
+                &key,
+                "-w",
+                &value,
+                "-A", // Allow any application to access without prompt
+                "-U", // Update if exists
+            ])
+            .output()
+            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run security: {e}")))?;
 
-    // Use hostname
-    if let Ok(hostname) = hostname::get() {
-        if let Ok(hostname_str) = hostname.into_string() {
-            components.push(hostname_str);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(LeviathanError::OperationFailed(format!(
+                "Failed to store token: {stderr}"
+            )));
         }
     }
 
-    // Use username
-    if let Ok(username) = whoami::username() {
-        if !username.trim().is_empty() {
-            components.push(username);
-        }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let entry = keyring::Entry::new(INTEGRATION_SERVICE, &key)
+            .map_err(|e| LeviathanError::OperationFailed(format!("Keyring error: {e}")))?;
+        entry
+            .set_password(&value)
+            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to store token: {e}")))?;
     }
 
-    // Ensure we collected at least one machine-specific component
-    // before adding the static salt — otherwise the password would be
-    // SHA256("leviathan-vault-2024-v1"), identical across all installs.
-    if components.is_empty() {
-        return Err(LeviathanError::OperationFailed(
-            "Failed to gather machine-specific information for vault password".to_string(),
-        ));
-    }
-
-    // Use a static salt to make it harder to predict
-    components.push("leviathan-vault-2024-v1".to_string());
-
-    // Combine all components
-    let combined = components.join("||");
-
-    // Hash the combined string using SHA-256
-    let mut hasher = Sha256::new();
-    hasher.update(combined.as_bytes());
-    let hash = hasher.finalize();
-
-    // Convert to hex string (64 chars)
-    Ok(format!("{:x}", hash))
+    tracing::debug!("Stored keyring token for key: {}", key);
+    Ok(())
 }
 
-/// Migrate old vault file to new location if needed
-/// Old path was missing the / separator between app dir and filename
+/// Retrieve an integration token from the system keyring.
 #[command]
-pub async fn migrate_vault_if_needed(data_dir: String, new_vault_path: String) -> Result<()> {
-    use std::fs;
+pub async fn get_keyring_token(key: String) -> Result<Option<String>> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("security")
+            .args([
+                "find-generic-password",
+                "-s",
+                INTEGRATION_SERVICE,
+                "-a",
+                &key,
+                "-w",
+            ])
+            .output()
+            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run security: {e}")))?;
 
-    let new_path = Path::new(&new_vault_path);
-
-    // If new vault already exists, no migration needed
-    if new_path.exists() {
-        return Ok(());
+        if output.status.success() {
+            let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if password.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(password))
+            }
+        } else {
+            // Item not found
+            Ok(None)
+        }
     }
 
-    // Old path was missing the / separator
-    // data_dir is like: /Users/.../io.github.hegsie.leviathan/
-    // Old vault was at: /Users/.../io.github.hegsie.leviathancredentials.hold
-    let parent_dir = data_dir.trim_end_matches('/');
-    let old_vault_path = format!("{}credentials.hold", parent_dir);
-    let old_path = Path::new(&old_vault_path);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let entry = keyring::Entry::new(INTEGRATION_SERVICE, &key)
+            .map_err(|e| LeviathanError::OperationFailed(format!("Keyring error: {e}")))?;
+        match entry.get_password() {
+            Ok(password) => Ok(Some(password)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(LeviathanError::OperationFailed(format!(
+                "Failed to get token: {e}"
+            ))),
+        }
+    }
+}
 
-    if old_path.exists() {
-        tracing::info!(
-            "Migrating vault from old location: {} → {}",
-            old_vault_path,
-            new_vault_path
-        );
-        fs::rename(old_path, new_path).map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to migrate vault: {}", e))
-        })?;
-        tracing::info!("Vault migration complete");
+/// Delete an integration token from the system keyring.
+#[command]
+pub async fn delete_keyring_token(key: String) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("security")
+            .args([
+                "delete-generic-password",
+                "-s",
+                INTEGRATION_SERVICE,
+                "-a",
+                &key,
+            ])
+            .output();
     }
 
+    #[cfg(not(target_os = "macos"))]
+    {
+        let entry = keyring::Entry::new(INTEGRATION_SERVICE, &key)
+            .map_err(|e| LeviathanError::OperationFailed(format!("Keyring error: {e}")))?;
+        match entry.delete_credential() {
+            Ok(()) => (),
+            Err(keyring::Error::NoEntry) => (),
+            Err(e) => {
+                return Err(LeviathanError::OperationFailed(format!(
+                    "Failed to delete token: {e}"
+                )))
+            }
+        }
+    }
+
+    tracing::debug!("Deleted keyring token for key: {}", key);
     Ok(())
 }
 
@@ -601,33 +649,6 @@ pub async fn migrate_vault_if_needed(data_dir: String, new_vault_path: String) -
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
-    use tempfile::TempDir;
-
-    #[tokio::test]
-    async fn test_get_machine_vault_password_returns_value() {
-        // Should return a non-empty password
-        let password = get_machine_vault_password().await;
-        assert!(password.is_ok());
-        let password = password.unwrap();
-        assert!(!password.is_empty());
-        // SHA-256 produces 64 hex characters
-        assert_eq!(password.len(), 64);
-    }
-
-    #[tokio::test]
-    async fn test_get_machine_vault_password_is_deterministic() {
-        // Calling twice should return the same password
-        let password1 = get_machine_vault_password().await.unwrap();
-        let password2 = get_machine_vault_password().await.unwrap();
-        assert_eq!(password1, password2);
-    }
-
-    #[tokio::test]
-    async fn test_get_machine_vault_password_is_hex() {
-        // Result should be valid hexadecimal
-        let password = get_machine_vault_password().await.unwrap();
-        assert!(password.chars().all(|c| c.is_ascii_hexdigit()));
-    }
 
     #[test]
     fn test_extract_helper_name_simple() {
@@ -840,43 +861,6 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_migrate_vault_if_needed_no_old_vault() {
-        let dir = TempDir::new().expect("Failed to create temp dir");
-        let data_dir = dir.path().join("app_data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        let new_vault_path = data_dir.join("credentials.hold");
-
-        let result = migrate_vault_if_needed(
-            data_dir.to_string_lossy().to_string(),
-            new_vault_path.to_string_lossy().to_string(),
-        )
-        .await;
-        assert!(result.is_ok());
-        // New vault should not exist since there was no old vault
-        assert!(!new_vault_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_migrate_vault_if_needed_new_vault_exists() {
-        let dir = TempDir::new().expect("Failed to create temp dir");
-        let data_dir = dir.path().join("app_data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        let new_vault_path = data_dir.join("credentials.hold");
-        std::fs::write(&new_vault_path, "existing vault content").unwrap();
-
-        let result = migrate_vault_if_needed(
-            data_dir.to_string_lossy().to_string(),
-            new_vault_path.to_string_lossy().to_string(),
-        )
-        .await;
-        assert!(result.is_ok());
-        // Should still have the original content
-        assert!(new_vault_path.exists());
     }
 
     #[tokio::test]

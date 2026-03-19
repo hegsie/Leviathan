@@ -20,38 +20,11 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use commands::local_ai::create_local_ai_state;
 use commands::watcher::WatcherState;
 use services::ai::mcp::server::create_mcp_state;
+use services::ai::AiState;
 use services::commit_index::SharedCommitIndex;
 use services::{
     create_ai_state, create_autofetch_state, create_update_state, CancellationRegistry,
 };
-
-/// Derive a 32-byte key from password using argon2
-fn derive_stronghold_key(password: &str) -> [u8; 32] {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    // Create a simple derived key from the password
-    // In production, you'd use a proper KDF like argon2
-    let mut hasher = DefaultHasher::new();
-    password.hash(&mut hasher);
-    let hash1 = hasher.finish();
-
-    password.hash(&mut hasher);
-    let hash2 = hasher.finish();
-
-    password.hash(&mut hasher);
-    let hash3 = hasher.finish();
-
-    password.hash(&mut hasher);
-    let hash4 = hasher.finish();
-
-    let mut key = [0u8; 32];
-    key[0..8].copy_from_slice(&hash1.to_le_bytes());
-    key[8..16].copy_from_slice(&hash2.to_le_bytes());
-    key[16..24].copy_from_slice(&hash3.to_le_bytes());
-    key[24..32].copy_from_slice(&hash4.to_le_bytes());
-    key
-}
 
 /// Initialize the application
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -99,13 +72,6 @@ pub fn run() {
             "PANIC: Application crashed"
         );
 
-        // Stronghold's mprotect panic is non-fatal — don't capture a backtrace
-        // for it as that can trigger SIGABRT on macOS.
-        if message.contains("memory protection") {
-            eprintln!("(Stronghold mprotect panic — non-fatal, continuing)");
-            return;
-        }
-
         // Capture backtrace if available
         let backtrace = std::backtrace::Backtrace::force_capture();
         eprintln!("\nBacktrace:\n{}", backtrace);
@@ -128,13 +94,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(
-            tauri_plugin_stronghold::Builder::new(|password| {
-                derive_stronghold_key(password).to_vec()
-            })
-            .build(),
-        );
+        .plugin(tauri_plugin_updater::Builder::new().build());
 
     // Single-instance and deep-link plugins (desktop only)
     // Single-instance must be registered BEFORE deep-link for proper callback handling
@@ -170,70 +130,19 @@ pub fn run() {
 
             // Initialize local AI state with models directory
             let models_dir = app.path().app_data_dir().unwrap_or_default().join("models");
-            app.manage(create_local_ai_state(models_dir));
+            let local_ai_state = create_local_ai_state(models_dir);
+            app.manage(local_ai_state.clone());
+
+            // Wire local AI state into AiService for lazy model loading.
+            // Model loading is deferred to first inference request.
+            {
+                let ai_state: tauri::State<'_, AiState> = app.state();
+                let mut service = ai_state.blocking_write();
+                service.set_local_ai_state(local_ai_state);
+            }
 
             // Initialize MCP server state
             app.manage(create_mcp_state());
-
-            // Auto-load a downloaded model if available
-            {
-                let ai_state = app.state::<services::ai::AiState>().inner().clone();
-                let local_state = app
-                    .state::<commands::local_ai::SharedLocalAiState>()
-                    .inner()
-                    .clone();
-
-                tauri::async_runtime::spawn(async move {
-                    // Delay model loading to let Stronghold plugin finish its
-                    // secure memory initialization — avoids mprotect race condition.
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-                    let local = local_state.read().await;
-                    let downloaded = match local.model_manager.list_downloaded() {
-                        Ok(models) => models,
-                        Err(e) => {
-                            tracing::warn!("Failed to list downloaded models: {e}");
-                            return;
-                        }
-                    };
-
-                    // Prefer the smallest downloaded model to minimize memory usage
-                    let mut candidates: Vec<_> = downloaded
-                        .iter()
-                        .filter(|m| {
-                            m.status == services::ai::local::model_manager::ModelStatus::Downloaded
-                        })
-                        .collect();
-                    candidates.sort_by_key(|m| m.size_bytes);
-
-                    if let Some(model) = candidates.first() {
-                        let model_path = model.path.clone();
-                        let display_name = model.display_name.clone();
-                        let model_id = model.id.clone();
-
-                        // Look up full model metadata from the registry before dropping the lock
-                        let meta = local.registry.get_by_id(&model.id).map(|entry| {
-                            services::ai::providers::LoadedModelMeta {
-                                tier: entry.tier,
-                                architecture: entry.architecture.clone(),
-                                context_length: entry.context_length,
-                            }
-                        });
-                        drop(local);
-
-                        let service = ai_state.read().await;
-                        match service
-                            .load_local_model(&model_path, display_name, meta)
-                            .await
-                        {
-                            Ok(()) => tracing::info!("Auto-loaded local model: {model_id}"),
-                            Err(e) => {
-                                tracing::warn!("Failed to auto-load model {model_id}: {e}")
-                            }
-                        }
-                    }
-                });
-            }
 
             tracing::info!("Application setup complete");
 
@@ -598,8 +507,9 @@ pub fn run() {
             commands::credentials::erase_credentials,
             commands::credentials::store_git_credentials,
             commands::credentials::delete_git_credentials,
-            commands::credentials::migrate_vault_if_needed,
-            commands::credentials::get_machine_vault_password,
+            commands::credentials::store_keyring_token,
+            commands::credentials::get_keyring_token,
+            commands::credentials::delete_keyring_token,
             // GitHub integration
             commands::github::check_github_connection,
             commands::github::detect_github_repo,

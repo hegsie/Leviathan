@@ -171,6 +171,7 @@ pub async fn get_loaded_model_name(ai_state: State<'_, AiState>) -> Result<Optio
 /// Load a downloaded model into the inference engine, making it ready for use.
 #[command]
 pub async fn load_model(
+    app: tauri::AppHandle,
     local_state: State<'_, SharedLocalAiState>,
     ai_state: State<'_, AiState>,
     model_id: String,
@@ -218,6 +219,12 @@ pub async fn load_model(
                 service.set_active_provider(crate::services::ai::AiProviderType::LocalInference);
         }
     }
+
+    // Notify frontend so the commit panel can update its AI availability state
+    let _ = app.emit(
+        "model-download-complete",
+        serde_json::json!({ "modelId": model_id, "loaded": true }),
+    );
 
     Ok(())
 }

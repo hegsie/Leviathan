@@ -1,9 +1,10 @@
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { CommitTemplate, ConventionalType } from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
 
@@ -319,6 +320,16 @@ export class LvCommitPanel extends LitElement {
         height: 14px;
       }
 
+      .generate-btn.ai-ready {
+        color: var(--color-accent, #4fc3f7);
+        border-color: var(--color-accent, #4fc3f7);
+      }
+
+      .generate-btn.ai-ready:hover:not(:disabled) {
+        background: var(--color-accent, #4fc3f7);
+        color: var(--color-bg-primary, #1e1e1e);
+      }
+
       .generate-btn .spinner {
         animation: spin 1s linear infinite;
       }
@@ -482,10 +493,14 @@ export class LvCommitPanel extends LitElement {
   private readonly HISTORY_STORAGE_KEY = 'leviathan-commit-history';
   private readonly HISTORY_MAX_ENTRIES = 20;
 
+  // Per-repo draft cache: preserves commit form state when switching repos
+  private draftCache = new Map<string, { summary: string; description: string; conventionalMode: boolean; selectedType: string; scope: string }>();
+
   private boundHandleTriggerAmend = this.handleTriggerAmend.bind(this);
   private boundHandleAiSettingsChanged = () => this.checkAiAvailability();
   private unsubscribeStore?: () => void;
   private aiRetryTimer?: ReturnType<typeof setTimeout>;
+  private modelCompleteUnlisten?: UnlistenFn;
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -511,6 +526,13 @@ export class LvCommitPanel extends LitElement {
     // Re-check AI availability when settings change (browser event from settings dialog)
     window.addEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
 
+    // Also listen for Tauri backend event when a model download completes and auto-loads
+    listen<{ modelId: string; loaded?: boolean }>('model-download-complete', (event) => {
+      if (event.payload.loaded) {
+        this.checkAiAvailability();
+      }
+    }).then(unlisten => { this.modelCompleteUnlisten = unlisten; });
+
     // If AI isn't available yet, poll periodically to catch backend auto-loading
     // a model on startup (which can take 10-30 seconds)
     if (!this.aiAvailable) {
@@ -523,8 +545,49 @@ export class LvCommitPanel extends LitElement {
     document.removeEventListener('click', this._onDocumentClick);
     window.removeEventListener('trigger-amend', this.boundHandleTriggerAmend);
     window.removeEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
+    this.modelCompleteUnlisten?.();
     if (this.aiRetryTimer) clearTimeout(this.aiRetryTimer);
     this.unsubscribeStore?.();
+  }
+
+  willUpdate(changed: PropertyValues): void {
+    if (changed.has('repositoryPath')) {
+      const oldPath = changed.get('repositoryPath') as string | undefined;
+
+      // Save draft for the previous repo
+      if (oldPath) {
+        this.draftCache.set(oldPath, {
+          summary: this.summary,
+          description: this.description,
+          conventionalMode: this.conventionalMode,
+          selectedType: this.selectedType,
+          scope: this.scope,
+        });
+      }
+
+      // Restore draft for the new repo, or reset to empty
+      const draft = this.repositoryPath ? this.draftCache.get(this.repositoryPath) : undefined;
+      if (draft) {
+        this.summary = draft.summary;
+        this.description = draft.description;
+        this.conventionalMode = draft.conventionalMode;
+        this.selectedType = draft.selectedType;
+        this.scope = draft.scope;
+      } else {
+        this.summary = '';
+        this.description = '';
+        this.conventionalMode = false;
+        this.selectedType = 'feat';
+        this.scope = '';
+      }
+
+      // Clear transient state
+      this.error = null;
+      this.success = null;
+      this.generationError = null;
+      this.amend = false;
+      this.lastCommit = null;
+    }
   }
 
   /** Poll for AI availability until it becomes available or we give up. */
@@ -583,6 +646,7 @@ export class LvCommitPanel extends LitElement {
 
   private async checkAiAvailability(): Promise<void> {
     this.aiAvailable = await aiService.isAiAvailable();
+    console.log('[lv-commit-panel] checkAiAvailability:', this.aiAvailable);
   }
 
   private loadCommitHistory(): void {
@@ -930,22 +994,22 @@ export class LvCommitPanel extends LitElement {
         </span>
         <div class="header-actions">
           <button
-            class="generate-btn"
+            class="generate-btn ${this.aiAvailable ? 'ai-ready' : ''}"
             @click=${this.aiAvailable ? this.handleGenerateMessage : this.handleOpenSettings}
-            ?disabled=${this.isGenerating || (this.aiAvailable && this.stagedCount === 0)}
+            ?disabled=${this.isGenerating || this.stagedCount === 0}
             title=${this.aiAvailable
               ? (this.stagedCount === 0 ? 'Stage changes to generate a commit message' : 'Generate commit message using AI')
-              : 'Configure an AI provider in Settings to enable this feature'}
+              : (this.stagedCount > 0 ? 'Configure an AI provider in Settings' : 'Stage changes and configure AI to generate commit messages')}
           >
             ${this.isGenerating ? html`
               <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10" stroke-dasharray="60" stroke-dashoffset="20"></circle>
               </svg>
             ` : html`
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-                <path d="M2 17l10 5 10-5"/>
-                <path d="M2 12l10 5 10-5"/>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9.5 2l1 3.5L14 6.5l-3.5 1L9.5 11l-1-3.5L5 6.5l3.5-1z"/>
+                <path d="M17 12l.75 2.25L20 15l-2.25.75L17 18l-.75-2.25L14 15l2.25-.75z"/>
+                <path d="M6 16l.5 1.5L8 18l-1.5.5L6 20l-.5-1.5L4 18l1.5-.5z"/>
               </svg>
             `}
           </button>

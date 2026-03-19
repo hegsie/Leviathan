@@ -495,6 +495,23 @@ export class LvAzureDevOpsDialog extends LitElement {
         opacity: 0.9;
       }
 
+      .btn-danger-outline {
+        background: transparent;
+        color: var(--color-error);
+        border-color: var(--color-error);
+      }
+
+      .btn-danger-outline:hover:not(:disabled) {
+        background: var(--color-error);
+        color: white;
+      }
+
+      .connection-actions {
+        display: flex;
+        gap: var(--spacing-sm);
+        margin-left: auto;
+      }
+
       .empty-state {
         display: flex;
         flex-direction: column;
@@ -664,6 +681,12 @@ export class LvAzureDevOpsDialog extends LitElement {
       // Check connection if we have an organization
       if (this.detectedRepo?.organization || this.organizationInput) {
         await this.checkConnection();
+        if (generation !== this.loadGeneration) return;
+
+        // Load data now that we know the connection status
+        if (this.connectionStatus?.connected && this.detectedRepo) {
+          await this.loadAllData();
+        }
       }
     } catch (err) {
       if (generation !== this.loadGeneration) return;
@@ -676,16 +699,12 @@ export class LvAzureDevOpsDialog extends LitElement {
   }
 
   private async checkStoredToken(): Promise<void> {
-    log.debug('checkStoredToken called, selectedAccountId:', this.selectedAccountId);
     if (this.selectedAccountId) {
-      // First check account-specific token
       let token = await credentialService.getAccountToken('azure-devops', this.selectedAccountId);
-      log.debug('Account-specific token found:', !!token);
 
       // If not found, check legacy token and migrate it
       if (!token) {
         const legacyToken = await credentialService.AzureDevOpsCredentials.getToken();
-        log.debug('Legacy token found:', !!legacyToken);
         if (legacyToken) {
           await credentialService.storeAccountToken('azure-devops', this.selectedAccountId, legacyToken);
           token = legacyToken;
@@ -693,10 +712,8 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
 
       this.hasStoredToken = !!token;
-      log.debug('hasStoredToken set to:', this.hasStoredToken);
     } else {
       this.hasStoredToken = false;
-      log.debug('No selectedAccountId, hasStoredToken = false');
     }
   }
 
@@ -720,8 +737,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
 
       // Ensure git credentials are stored in keyring for push/pull operations
-      // This handles the case where token was previously stored only in Stronghold
-      if (result.data.connected && token && org) {
+      if (result.data.connected && org && token) {
         try {
           // Store for both dev.azure.com and {org}.visualstudio.com formats
           // Username must be non-empty for macOS Keychain - use 'pat' as a placeholder
@@ -732,6 +748,8 @@ export class LvAzureDevOpsDialog extends LitElement {
           console.warn('[AzureDevOps] Failed to sync git credentials to keyring:', err);
         }
       }
+    } else if (!result.success) {
+      log.error('checkConnection failed:', result.error?.message);
     }
   }
 
@@ -739,14 +757,23 @@ export class LvAzureDevOpsDialog extends LitElement {
    * Get the token for the currently selected account
    */
   private async getSelectedAccountToken(): Promise<string | null> {
-    log.debug('getSelectedAccountToken called, selectedAccountId:', this.selectedAccountId);
-    if (this.selectedAccountId) {
-      const token = await credentialService.getAccountToken('azure-devops', this.selectedAccountId);
-      log.debug('getSelectedAccountToken result:', !!token);
-      return token;
+    if (!this.selectedAccountId) return null;
+
+    // Check account-specific token
+    let token = await credentialService.getAccountToken('azure-devops', this.selectedAccountId);
+
+    // If not found, check legacy token and migrate it
+    if (!token) {
+      const legacyToken = await credentialService.AzureDevOpsCredentials.getToken();
+      if (legacyToken) {
+        try {
+          await credentialService.storeAccountToken('azure-devops', this.selectedAccountId, legacyToken);
+        } catch { /* migration failed, still use the token */ }
+        token = legacyToken;
+      }
     }
-    log.debug('getSelectedAccountToken: no selectedAccountId');
-    return null;
+
+    return token;
   }
 
   /**
@@ -1053,6 +1080,48 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
   }
 
+  private async handleDeleteIntegration(): Promise<void> {
+    if (!this.selectedAccountId) return;
+
+    this.isLoading = true;
+
+    try {
+      // Delete the stored token
+      await credentialService.deleteAccountToken('azure-devops', this.selectedAccountId);
+
+      // Delete git credentials from keyring
+      await gitService.deleteGitCredentials('https://dev.azure.com');
+      if (this.organizationInput) {
+        await gitService.deleteGitCredentials(`https://${this.organizationInput}.visualstudio.com`);
+      }
+
+      // Delete the account from unified profiles
+      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+
+      // Refresh accounts list
+      await unifiedProfileService.loadUnifiedProfiles();
+      this.accounts = getAccountsByType('azure-devops');
+
+      // Reset state
+      this.selectedAccountId = this.accounts.length > 0 ? this.accounts[0].id : null;
+      this.connectionStatus = null;
+      this.hasStoredToken = false;
+      this.pullRequests = [];
+      this.workItems = [];
+      this.pipelineRuns = [];
+      this.organizationInput = '';
+
+      // If there are remaining accounts, reload data for the first one
+      if (this.selectedAccountId) {
+        await this.loadInitialData();
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to delete integration';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
   private async handlePrFilterChange(e: Event): Promise<void> {
     this.prFilter = (e.target as HTMLSelectElement).value as 'active' | 'completed' | 'abandoned' | 'all';
     await this.loadPullRequests();
@@ -1150,9 +1219,14 @@ export class LvAzureDevOpsDialog extends LitElement {
             <div class="user-name">${user.displayName}</div>
             <div class="user-org">${this.connectionStatus.organization}</div>
           </div>
-          <button class="btn btn-danger" @click=${this.handleDisconnect} ?disabled=${this.isLoading}>
-            Disconnect
-          </button>
+          <div class="connection-actions">
+            <button class="btn btn-danger" @click=${this.handleDisconnect} ?disabled=${this.isLoading}>
+              Disconnect
+            </button>
+            <button class="btn btn-danger-outline" @click=${this.handleDeleteIntegration} ?disabled=${this.isLoading}>
+              Delete
+            </button>
+          </div>
         </div>
       `;
     }
@@ -1194,6 +1268,14 @@ export class LvAzureDevOpsDialog extends LitElement {
           </span>
         </div>
         <div class="btn-row">
+          ${this.selectedAccountId ? html`
+            <button
+              class="btn btn-danger-outline"
+              @click=${this.handleDeleteIntegration}
+            >
+              Delete Integration
+            </button>
+          ` : nothing}
           <button
             class="btn btn-primary"
             @click=${this.tokenInput.trim() ? this.handleSaveToken : this.handleConnectWithStoredToken}

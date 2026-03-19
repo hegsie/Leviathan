@@ -3,7 +3,7 @@
  *
  * Tests for OAuth token storage and management functions.
  * Note: These tests focus on the logic and interface, not actual storage
- * since Stronghold requires a Tauri runtime.
+ * since the keyring requires a Tauri runtime.
  */
 
 import { expect } from '@open-wc/testing';
@@ -58,7 +58,7 @@ describe('credential.service - OAuth Token Key Generation', () => {
 });
 
 // Note: Interface tests for storeAccountOAuthToken, getAccountOAuthToken, and
-// isOAuthTokenExpiring are skipped because these functions require Stronghold
+// isOAuthTokenExpiring are skipped because these functions require the OS keyring
 // which is only available in the Tauri runtime. The logic tests below verify
 // the algorithms used by these functions.
 

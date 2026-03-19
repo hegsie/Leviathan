@@ -373,7 +373,7 @@ npm run test:e2e
 - **Input Validation**: Validate all user input before Git operations
 - **Path Traversal**: Use safe path operations, avoid user-controlled paths
 - **Credentials**: Use platform keyring (keyring crate), never store in plaintext
-- **OAuth Tokens**: Store in Tauri secure storage (Stronghold plugin)
+- **OAuth Tokens**: Store in OS keyring via the `keyring` crate
 - **Shell Commands**: Sanitize inputs when invoking system Git
 - **GPG**: Validate GPG keys before signing
 

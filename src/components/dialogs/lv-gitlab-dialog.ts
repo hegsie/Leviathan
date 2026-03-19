@@ -124,6 +124,23 @@ export class LvGitLabDialog extends LitElement {
         background: var(--color-error-bg);
       }
 
+      .btn-danger-outline {
+        background: transparent;
+        color: var(--color-error);
+        border-color: var(--color-error);
+      }
+
+      .btn-danger-outline:hover:not(:disabled) {
+        background: var(--color-error);
+        color: white;
+      }
+
+      .connection-actions {
+        display: flex;
+        gap: var(--spacing-sm);
+        margin-left: auto;
+      }
+
       .tab-content {
         flex: 1;
         overflow: auto;
@@ -991,6 +1008,34 @@ export class LvGitLabDialog extends LitElement {
     }
   }
 
+  private async handleDeleteIntegration(): Promise<void> {
+    if (!this.selectedAccountId) return;
+
+    this.isLoading = true;
+
+    try {
+      await credentialService.deleteAccountToken('gitlab', this.selectedAccountId);
+      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+
+      await unifiedProfileService.loadUnifiedProfiles();
+      this.accounts = getAccountsByType('gitlab');
+
+      this.selectedAccountId = this.accounts.length > 0 ? this.accounts[0].id : null;
+      this.connectionStatus = null;
+      this.mergeRequests = [];
+      this.issues = [];
+      this.pipelines = [];
+
+      if (this.accounts.length > 0) {
+        await this.loadInitialData();
+      }
+    } catch (err) {
+      console.error('Failed to delete GitLab integration:', err);
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
   /**
    * Start OAuth flow for GitLab
    */
@@ -1268,9 +1313,10 @@ export class LvGitLabDialog extends LitElement {
             <div class="user-name">${user.name}</div>
             <div class="user-login">@${user.username}</div>
           </div>
-          <button class="btn btn-danger" @click=${this.handleDisconnect} ?disabled=${this.isLoading}>
-            Disconnect
-          </button>
+          <div class="connection-actions">
+            <button class="btn btn-danger" @click=${this.handleDisconnect} ?disabled=${this.isLoading}>Disconnect</button>
+            <button class="btn btn-danger-outline" @click=${this.handleDeleteIntegration} ?disabled=${this.isLoading}>Delete</button>
+          </div>
         </div>
       `;
     }
@@ -1357,6 +1403,15 @@ export class LvGitLabDialog extends LitElement {
           </span>
         </div>
         <div class="btn-row">
+          ${this.selectedAccountId ? html`
+            <button
+              class="btn btn-danger-outline"
+              @click=${this.handleDeleteIntegration}
+              ?disabled=${this.isLoading}
+            >
+              Delete Integration
+            </button>
+          ` : nothing}
           <button
             class="btn btn-primary"
             @click=${this.handleSaveToken}

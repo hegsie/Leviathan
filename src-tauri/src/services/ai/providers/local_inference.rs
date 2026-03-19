@@ -377,18 +377,42 @@ fn extract_file_diffs(diff: &str) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut current_path: Option<String> = None;
     let mut current_lines: Vec<String> = Vec::new();
+    // Track the path from "diff --git" for binary files that lack "+++ b/" lines
+    let mut pending_diff_path: Option<String> = None;
 
     for line in diff.lines() {
-        if let Some(path) = line.strip_prefix("+++ b/") {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            // Extract path from "diff --git a/foo b/foo" — take the "b/" part
+            if let Some(b_path) = rest.split(" b/").last() {
+                pending_diff_path = Some(b_path.to_string());
+            }
+            continue;
+        } else if let Some(path) = line.strip_prefix("+++ b/") {
             // Flush previous file
-            if let Some(path) = current_path.take() {
+            if let Some(prev) = current_path.take() {
                 files.push(FileDiff {
-                    path,
+                    path: prev,
                     content: std::mem::take(&mut current_lines).join("\n"),
                 });
             }
             current_path = Some(path.to_string());
-        } else if line.starts_with("--- ") || line.starts_with("diff ") {
+            pending_diff_path = None;
+        } else if line.contains("Binary files") || line.contains("GIT binary patch") {
+            // Binary file — use the path from the preceding "diff --git" line
+            if let Some(path) = pending_diff_path.take() {
+                // Flush any previous file first
+                if let Some(prev) = current_path.take() {
+                    files.push(FileDiff {
+                        path: prev,
+                        content: std::mem::take(&mut current_lines).join("\n"),
+                    });
+                }
+                files.push(FileDiff {
+                    path,
+                    content: "[binary file modified]".to_string(),
+                });
+            }
+        } else if line.starts_with("--- ") {
             continue;
         } else if current_path.is_some() {
             // Keep +/- lines, @@ headers, and surrounding context lines
@@ -1265,6 +1289,38 @@ diff --git a/src/b.rs b/src/b.rs
     fn test_extract_file_diffs_empty() {
         let files = extract_file_diffs("");
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_extract_file_diffs_binary_file() {
+        let diff = "\
+diff --git a/project.xcuserstate b/project.xcuserstate
+Binary files a/project.xcuserstate and b/project.xcuserstate differ";
+
+        let files = extract_file_diffs(diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "project.xcuserstate");
+        assert_eq!(files[0].content, "[binary file modified]");
+    }
+
+    #[test]
+    fn test_extract_file_diffs_mixed_text_and_binary() {
+        let diff = "\
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,1 +1,1 @@
+-old_code
++new_code
+diff --git a/assets/icon.png b/assets/icon.png
+Binary files a/assets/icon.png and b/assets/icon.png differ";
+
+        let files = extract_file_diffs(diff);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "src/main.rs");
+        assert!(files[0].content.contains("new_code"));
+        assert_eq!(files[1].path, "assets/icon.png");
+        assert_eq!(files[1].content, "[binary file modified]");
     }
 
     #[test]

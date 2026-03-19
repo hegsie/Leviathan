@@ -4,6 +4,7 @@
 //! via the `security` CLI tool (avoids permission prompts that the keyring crate triggers).
 
 use git2::{Cred, CredentialType, RemoteCallbacks};
+#[cfg(not(target_os = "macos"))]
 use keyring::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -34,28 +35,84 @@ fn cache_credentials(host: &str, username: &str, password: &str) {
 
 /// Get a password from the keyring
 fn keyring_get(service: &str, account: &str) -> Option<String> {
-    let entry = Entry::new(service, account).ok()?;
-    entry.get_password().ok()
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("security")
+            .args(["find-generic-password", "-s", service, "-a", account, "-w"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let pw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if pw.is_empty() {
+                None
+            } else {
+                Some(pw)
+            }
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let entry = Entry::new(service, account).ok()?;
+        entry.get_password().ok()
+    }
 }
 
-/// Store a password in the keyring
+/// Store a password in the keyring.
+/// On macOS uses the `security` CLI with `-A` to allow any application to access
+/// the item without triggering authorization prompts.
 fn keyring_set(service: &str, account: &str, password: &str) -> bool {
-    let entry = match Entry::new(service, account) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-
-    entry.set_password(password).is_ok()
+    #[cfg(target_os = "macos")]
+    {
+        // Delete existing entry first
+        let _ = std::process::Command::new("security")
+            .args(["delete-generic-password", "-s", service, "-a", account])
+            .output();
+        std::process::Command::new("security")
+            .args([
+                "add-generic-password",
+                "-s",
+                service,
+                "-a",
+                account,
+                "-w",
+                password,
+                "-A", // Allow any application to access without prompt
+                "-U",
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let entry = match Entry::new(service, account) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        entry.set_password(password).is_ok()
+    }
 }
 
 /// Delete a password from the keyring
 fn keyring_delete(service: &str, account: &str) -> bool {
-    let entry = match Entry::new(service, account) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-
-    entry.delete_credential().is_ok()
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("security")
+            .args(["delete-generic-password", "-s", service, "-a", account])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let entry = match Entry::new(service, account) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        entry.delete_credential().is_ok()
+    }
 }
 
 /// Credentials helper that provides git2 remote callbacks with authentication support
@@ -166,11 +223,9 @@ impl CredentialsHelper {
                 }
             }
 
-            // Try default credentials (for public repos or pre-configured git)
-            if allowed_types.contains(CredentialType::DEFAULT) {
-                tracing::debug!("Trying default credentials");
-                return Cred::default();
-            }
+            // Skip Cred::default() — it invokes the system git credential helper
+            // (osxkeychain on macOS) which triggers Keychain authorization dialogs.
+            // Our stored credentials and SSH keys above are sufficient.
 
             Err(git2::Error::from_str(
                 "No valid credentials found. For private repositories, configure SSH keys or store credentials.",

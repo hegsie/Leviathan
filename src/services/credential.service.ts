@@ -1,47 +1,17 @@
 /**
  * Credential Service
  *
- * Provides secure credential storage using Tauri Stronghold plugin.
- * All credentials are stored encrypted in a local vault file.
+ * Provides secure credential storage using the OS system keyring
+ * (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+ * Accessed via Tauri backend commands that use the `keyring` crate.
  */
 
-import { Client, Stronghold } from '@tauri-apps/plugin-stronghold';
-import { appDataDir } from '@tauri-apps/api/path';
 import { invoke } from '@tauri-apps/api/core';
 import { loggers } from '../utils/logger.ts';
 
 const log = loggers.credential;
 
-// Machine-specific vault password - fetched from backend
-let cachedVaultPassword: string | null = null;
-
-/**
- * Get the machine-specific vault password
- * This password is derived from machine-specific information (hostname, username)
- * to ensure each installation has a unique vault password
- */
-async function getVaultPassword(): Promise<string> {
-  if (cachedVaultPassword) {
-    return cachedVaultPassword;
-  }
-
-  try {
-    cachedVaultPassword = await invoke<string>('get_machine_vault_password');
-    if (!cachedVaultPassword) {
-      throw new Error('Backend returned empty vault password');
-    }
-    return cachedVaultPassword;
-  } catch (error) {
-    log.error('Failed to get machine vault password:', error);
-    throw new Error(
-      'Failed to initialize secure vault. Cannot proceed without machine-specific encryption key.'
-    );
-  }
-}
-
-const CLIENT_NAME = 'leviathan-credentials';
-
-// Credential keys
+// Credential keys (used for legacy single-account storage)
 export const CredentialKeys = {
   GITHUB_TOKEN: 'github_token',
   GITLAB_TOKEN: 'gitlab_token',
@@ -52,93 +22,39 @@ export const CredentialKeys = {
 
 export type CredentialKey = (typeof CredentialKeys)[keyof typeof CredentialKeys];
 
-let strongholdInstance: Stronghold | null = null;
-let clientInstance: Client | null = null;
-let initPromise: Promise<void> | null = null;
+// =============================================================================
+// Core keyring operations (via Tauri backend)
+// =============================================================================
 
-/**
- * Migrate old vault file to new location if needed
- * Old path: ~/Library/Application Support/io.github.hegsie.leviathancredentials.hold (missing /)
- * New path: ~/Library/Application Support/io.github.hegsie.leviathan/credentials.hold
- */
-async function migrateOldVaultIfNeeded(dataDir: string, newVaultPath: string): Promise<void> {
+async function keyringStore(key: string, value: string): Promise<void> {
+  await invoke<void>('store_keyring_token', { key, value });
+  log.debug(`Stored credential: ${key}`);
+}
+
+async function keyringGet(key: string): Promise<string | null> {
   try {
-    // Use Tauri command to check and migrate vault
-    await invoke('migrate_vault_if_needed', {
-      dataDir,
-      newVaultPath,
-    });
-  } catch (error) {
-    log.warn('Failed to migrate old vault (may not exist):', error);
-    // Continue - we'll create a new vault
+    const result = await invoke<string | null>('get_keyring_token', { key });
+    if (result) {
+      log.debug(`Retrieved credential: ${key}`);
+    }
+    return result;
+  } catch {
+    return null;
   }
 }
 
-// Legacy hardcoded password used before machine-specific derivation was added.
-// Kept as a fallback so existing vaults created with the old password can still be opened.
-const LEGACY_VAULT_PASSWORD = 'leviathan-secure-vault-2024';
-
-/**
- * Initialize the Stronghold vault
- */
-async function ensureInitialized(): Promise<Client> {
-  if (clientInstance) {
-    return clientInstance;
+async function keyringDelete(key: string): Promise<void> {
+  try {
+    await invoke<void>('delete_keyring_token', { key });
+    log.debug(`Deleted credential: ${key}`);
+  } catch {
+    log.debug(`Credential not found for deletion: ${key}`);
   }
-
-  if (initPromise) {
-    await initPromise;
-    if (clientInstance) {
-      return clientInstance;
-    }
-  }
-
-  initPromise = (async () => {
-    try {
-      const dataDir = await appDataDir();
-      const vaultPath = `${dataDir}/credentials.hold`;
-
-      // Migrate old vault if it exists at the wrong path
-      await migrateOldVaultIfNeeded(dataDir, vaultPath);
-
-      log.debug('Initializing vault at:', vaultPath);
-
-      // Try machine-specific password first, fall back to legacy password
-      // so existing vaults created before the security fix still work.
-      const vaultPassword = await getVaultPassword();
-
-      try {
-        strongholdInstance = await Stronghold.load(vaultPath, vaultPassword);
-      } catch {
-        log.warn(
-          'Failed to open vault with machine-specific password, trying legacy password'
-        );
-        strongholdInstance = await Stronghold.load(vaultPath, LEGACY_VAULT_PASSWORD);
-      }
-
-      // Try to load existing client or create new one
-      try {
-        clientInstance = await strongholdInstance.loadClient(CLIENT_NAME);
-        log.debug('Loaded existing client');
-      } catch {
-        // Client doesn't exist, create it
-        clientInstance = await strongholdInstance.createClient(CLIENT_NAME);
-        log.debug('Created new client');
-      }
-    } catch (error) {
-      log.error('Failed to initialize:', error);
-      throw error;
-    }
-  })();
-
-  await initPromise;
-
-  if (!clientInstance) {
-    throw new Error('Failed to initialize credential store');
-  }
-
-  return clientInstance;
 }
+
+// =============================================================================
+// Legacy single-credential functions (now backed by keyring)
+// =============================================================================
 
 /**
  * Store a credential
@@ -147,22 +63,7 @@ export async function storeCredential(
   key: CredentialKey,
   value: string
 ): Promise<void> {
-  try {
-    const client = await ensureInitialized();
-    const store = client.getStore();
-
-    // Convert string to byte array
-    const encoder = new TextEncoder();
-    const data = Array.from(encoder.encode(value));
-
-    await store.insert(key, data);
-    await strongholdInstance?.save();
-
-    log.debug(` Stored credential: ${key}`);
-  } catch (error) {
-    log.error(` Failed to store ${key}:`, error);
-    throw error;
-  }
+  return keyringStore(key, value);
 }
 
 /**
@@ -171,46 +72,14 @@ export async function storeCredential(
 export async function getCredential(
   key: CredentialKey
 ): Promise<string | null> {
-  try {
-    const client = await ensureInitialized();
-    const store = client.getStore();
-
-    const data = await store.get(key);
-
-    if (!data || data.length === 0) {
-      log.debug(` No credential found for: ${key}`);
-      return null;
-    }
-
-    // Convert byte array back to string
-    const decoder = new TextDecoder();
-    const value = decoder.decode(new Uint8Array(data));
-
-    log.debug(` Retrieved credential: ${key}`);
-    return value;
-  } catch {
-    // If key doesn't exist, return null instead of throwing
-    log.debug(` Credential not found: ${key}`);
-    return null;
-  }
+  return keyringGet(key);
 }
 
 /**
  * Delete a credential
  */
 export async function deleteCredential(key: CredentialKey): Promise<void> {
-  try {
-    const client = await ensureInitialized();
-    const store = client.getStore();
-
-    await store.remove(key);
-    await strongholdInstance?.save();
-
-    log.debug(` Deleted credential: ${key}`);
-  } catch {
-    // Ignore if key doesn't exist
-    log.debug(` Credential not found for deletion: ${key}`);
-  }
+  return keyringDelete(key);
 }
 
 /**
@@ -310,78 +179,6 @@ export function getAccountCredentialKey(
 }
 
 /**
- * Store a credential for a specific account (using dynamic key)
- */
-async function storeAccountCredentialInternal(key: string, value: string): Promise<void> {
-  try {
-    const client = await ensureInitialized();
-    const store = client.getStore();
-
-    const encoder = new TextEncoder();
-    const data = Array.from(encoder.encode(value));
-
-    await store.insert(key, data);
-    await strongholdInstance?.save();
-
-    log.debug(` Stored account credential: ${key}`);
-  } catch (error) {
-    log.error(` Failed to store account credential ${key}:`, error);
-    throw error;
-  }
-}
-
-/**
- * Get a credential for a specific account (using dynamic key)
- */
-async function getAccountCredentialInternal(key: string): Promise<string | null> {
-  try {
-    const client = await ensureInitialized();
-    const store = client.getStore();
-
-    const data = await store.get(key);
-
-    if (!data || data.length === 0) {
-      log.debug(` No account credential found for: ${key}`);
-      return null;
-    }
-
-    const decoder = new TextDecoder();
-    const value = decoder.decode(new Uint8Array(data));
-
-    log.debug(` Retrieved account credential: ${key}`);
-    return value;
-  } catch {
-    log.debug(` Account credential not found: ${key}`);
-    return null;
-  }
-}
-
-/**
- * Delete a credential for a specific account (using dynamic key)
- */
-async function deleteAccountCredentialInternal(key: string): Promise<void> {
-  try {
-    const client = await ensureInitialized();
-    const store = client.getStore();
-
-    await store.remove(key);
-    await strongholdInstance?.save();
-
-    log.debug(` Deleted account credential: ${key}`);
-  } catch {
-    log.debug(` Account credential not found for deletion: ${key}`);
-  }
-}
-
-/**
- * Check if a credential exists for a specific account (using dynamic key)
- */
-async function hasAccountCredentialInternal(key: string): Promise<boolean> {
-  const value = await getAccountCredentialInternal(key);
-  return value !== null && value.length > 0;
-}
-
-/**
  * Account-based credential management
  * Use these for the new multi-account system
  */
@@ -391,7 +188,7 @@ export const AccountCredentials = {
    */
   async getToken(integrationType: IntegrationType, accountId: string): Promise<string | null> {
     const key = getAccountCredentialKey(integrationType, accountId);
-    return getAccountCredentialInternal(key);
+    return keyringGet(key);
   },
 
   /**
@@ -403,7 +200,7 @@ export const AccountCredentials = {
     token: string
   ): Promise<void> {
     const key = getAccountCredentialKey(integrationType, accountId);
-    return storeAccountCredentialInternal(key, token);
+    return keyringStore(key, token);
   },
 
   /**
@@ -411,7 +208,7 @@ export const AccountCredentials = {
    */
   async deleteToken(integrationType: IntegrationType, accountId: string): Promise<void> {
     const key = getAccountCredentialKey(integrationType, accountId);
-    return deleteAccountCredentialInternal(key);
+    return keyringDelete(key);
   },
 
   /**
@@ -419,7 +216,8 @@ export const AccountCredentials = {
    */
   async hasToken(integrationType: IntegrationType, accountId: string): Promise<boolean> {
     const key = getAccountCredentialKey(integrationType, accountId);
-    return hasAccountCredentialInternal(key);
+    const value = await keyringGet(key);
+    return value !== null && value.length > 0;
   },
 
   /**
@@ -538,10 +336,10 @@ export async function storeAccountOAuthToken(
   const oauthKey = `${key}_oauth`;
 
   // Store the access token as the main credential (for backward compatibility)
-  await storeAccountCredentialInternal(key, accessToken);
+  await keyringStore(key, accessToken);
 
   // Store the full OAuth data separately for refresh handling
-  await storeAccountCredentialInternal(oauthKey, JSON.stringify(tokenData));
+  await keyringStore(oauthKey, JSON.stringify(tokenData));
 
   log.debug(` Stored OAuth token for ${integrationType} account ${accountId}`);
 }
@@ -556,10 +354,10 @@ export async function getAccountOAuthToken(
   const key = getAccountCredentialKey(integrationType, accountId);
   const oauthKey = `${key}_oauth`;
 
-  const data = await getAccountCredentialInternal(oauthKey);
+  const data = await keyringGet(oauthKey);
   if (!data) {
     // Fall back to just the access token if no OAuth data exists
-    const accessToken = await getAccountCredentialInternal(key);
+    const accessToken = await keyringGet(key);
     if (accessToken) {
       return { accessToken };
     }

@@ -1,7 +1,7 @@
 //! GitLab Integration Commands
 //!
 //! Provides integration with GitLab for merge requests, issues, and pipelines.
-//! Token storage is handled by the frontend using Stronghold.
+//! Token storage is handled by the frontend credential service (OS keyring).
 //! All API functions accept an optional token parameter from the frontend.
 
 use crate::error::{LeviathanError, Result};

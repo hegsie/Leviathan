@@ -50,7 +50,7 @@ impl GgufEngine {
 
         // Offload all layers to GPU when available (Metal on macOS, CUDA on Linux/Windows).
         // On CPU-only builds this is a no-op.
-        // Disable mmap to avoid virtual address space conflicts with Stronghold's mprotect.
+        // Disable mmap to avoid virtual address space conflicts with other subsystems.
         let model_params = LlamaModelParams::default()
             .with_n_gpu_layers(1000)
             .with_use_mmap(false);

@@ -98,20 +98,14 @@ test.describe('Bitbucket Dialog - Connection Flow', () => {
 
     // Inject mocks after dialog opens. Bitbucket handleSaveCredentials stores credentials
     // then calls checkConnection() which uses check_bitbucket_connection.
-    // Must also mock Stronghold plugin commands so credential storage succeeds.
     await startCommandCaptureWithMocks(page, {
       check_bitbucket_connection: {
         connected: true,
         user: { username: 'testuser', displayName: 'Test User', avatarUrl: '' },
       },
-      'plugin:stronghold|initialize': null,
-      'plugin:stronghold|load_client': null,
-      'plugin:stronghold|create_client': null,
-      'plugin:stronghold|save': null,
-      'plugin:stronghold|save_store_record': null,
-      'plugin:stronghold|insert_store_record': null,
-      'plugin:path|resolve_directory': '/mock/app/data',
-      'migrate_vault_if_needed': null,
+      store_keyring_token: null,
+      get_keyring_token: null,
+      delete_keyring_token: null,
     });
 
     // Switch to App Password mode and fill in credentials

@@ -108,7 +108,9 @@ pub async fn generate_commit_message(
 #[command]
 pub async fn is_ai_available(state: State<'_, AiState>) -> Result<bool> {
     let service = state.read().await;
-    Ok(service.find_available_provider().await.is_some())
+    let result = service.find_available_provider().await.is_some();
+    tracing::debug!("is_ai_available check: {}", result);
+    Ok(result)
 }
 
 /// Suggest a conflict resolution using AI
