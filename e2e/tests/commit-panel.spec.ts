@@ -466,7 +466,7 @@ test.describe('Commit Panel - Commit E2E', () => {
     });
 
     // Wait for the button text to change to "Generate with AI"
-    await expect(page.locator('lv-commit-panel .generate-btn')).toContainText('Generate with AI');
+    await expect(page.locator('lv-commit-panel .generate-btn')).toHaveAttribute('title', 'Generate commit message using AI');
 
     await startCommandCaptureWithMocks(page, {
       generate_commit_message: { summary: 'feat: auto-generated message', body: null },
@@ -585,7 +585,7 @@ test.describe('Commit Panel - UI Outcome Verification', () => {
     });
 
     // Wait for the button text to indicate AI is available
-    await expect(page.locator('lv-commit-panel .generate-btn')).toContainText('Generate with AI');
+    await expect(page.locator('lv-commit-panel .generate-btn')).toHaveAttribute('title', 'Generate commit message using AI');
 
     // Mock the AI response with a specific message
     await injectCommandMock(page, {
@@ -619,7 +619,7 @@ test.describe('Commit Panel - UI Outcome Verification', () => {
       }
     });
 
-    await expect(page.locator('lv-commit-panel .generate-btn')).toContainText('Generate with AI');
+    await expect(page.locator('lv-commit-panel .generate-btn')).toHaveAttribute('title', 'Generate commit message using AI');
 
     // Inject error for generate_commit_message
     await injectCommandError(page, 'generate_commit_message', 'AI service unavailable: rate limit exceeded');

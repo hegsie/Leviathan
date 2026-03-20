@@ -996,7 +996,7 @@ export class LvCommitPanel extends LitElement {
           <button
             class="generate-btn ${this.aiAvailable ? 'ai-ready' : ''}"
             @click=${this.aiAvailable ? this.handleGenerateMessage : this.handleOpenSettings}
-            ?disabled=${this.isGenerating || this.stagedCount === 0}
+            ?disabled=${this.isGenerating || (this.aiAvailable && this.stagedCount === 0)}
             title=${this.aiAvailable
               ? (this.stagedCount === 0 ? 'Stage changes to generate a commit message' : 'Generate commit message using AI')
               : (this.stagedCount > 0 ? 'Configure an AI provider in Settings' : 'Stage changes and configure AI to generate commit messages')}

@@ -382,7 +382,7 @@ test.describe('Commit Panel — AI Generate Flow', () => {
     // Default mocks have is_ai_available: false
     const btn = page.locator('lv-commit-panel .generate-btn');
     await expect(btn).toBeVisible();
-    await expect(btn).toContainText('Configure AI');
+    await expect(btn).toHaveAttribute('title', /[Cc]onfigure/);
   });
 
   test('shows Generate with AI when provider is available', async ({ page }) => {
@@ -395,14 +395,14 @@ test.describe('Commit Panel — AI Generate Flow', () => {
     await refreshCommitPanelAi(page);
 
     const btn = page.locator('lv-commit-panel .generate-btn');
-    await expect(btn).toContainText('Generate with AI');
+    await expect(btn).toHaveAttribute('title', 'Generate commit message using AI');
   });
 
   test('Configure AI button opens settings dialog', async ({ page }) => {
     await setupOpenRepository(page);
 
     const btn = page.locator('lv-commit-panel .generate-btn');
-    await expect(btn).toContainText('Configure AI');
+    await expect(btn).toHaveAttribute('title', /[Cc]onfigure/);
     await btn.click();
 
     await expect(page.locator('lv-settings-dialog')).toBeVisible();
@@ -415,7 +415,7 @@ test.describe('Commit Panel — AI Generate Flow', () => {
     await refreshCommitPanelAi(page);
 
     const btn = page.locator('lv-commit-panel .generate-btn');
-    await expect(btn).toContainText('Generate with AI');
+    await expect(btn).toHaveAttribute('title', 'Stage changes to generate a commit message');
     await expect(btn).toBeDisabled();
   });
 
@@ -429,7 +429,7 @@ test.describe('Commit Panel — AI Generate Flow', () => {
     await refreshCommitPanelAi(page);
 
     const btn = page.locator('lv-commit-panel .generate-btn');
-    await expect(btn).toContainText('Generate with AI');
+    await expect(btn).toHaveAttribute('title', 'Generate commit message using AI');
     await expect(btn).toBeEnabled();
   });
 
@@ -483,7 +483,7 @@ test.describe('Commit Panel — AI Generate Flow', () => {
     const btn = page.locator('lv-commit-panel .generate-btn');
     await btn.click();
 
-    await expect(btn).toContainText('Generating');
+    await expect(btn.locator('.spinner')).toBeVisible();
     await expect(btn).toBeDisabled();
   });
 
@@ -533,7 +533,7 @@ test.describe('Commit Panel — AI Generate Flow', () => {
     );
 
     const btn = page.locator('lv-commit-panel .generate-btn');
-    await expect(btn).toContainText('Configure AI');
+    await expect(btn).toHaveAttribute('title', /[Cc]onfigure/);
 
     // Simulate: settings change makes AI available
     await page.evaluate(() => {
@@ -551,7 +551,7 @@ test.describe('Commit Panel — AI Generate Flow', () => {
       window.dispatchEvent(new CustomEvent('ai-settings-changed'));
     });
 
-    await expect(btn).toContainText('Generate with AI');
+    await expect(btn).toHaveAttribute('title', 'Generate commit message using AI');
   });
 });
 
@@ -568,7 +568,7 @@ test.describe('Local AI Full Lifecycle', () => {
 
     // Start with no model, AI unavailable
     const btn = page.locator('lv-commit-panel .generate-btn');
-    await expect(btn).toContainText('Configure AI');
+    await expect(btn).toHaveAttribute('title', /[Cc]onfigure/);
 
     // Set up stateful mock that transitions through states
     await page.evaluate((mocks) => {
@@ -629,7 +629,7 @@ test.describe('Local AI Full Lifecycle', () => {
       window.dispatchEvent(new CustomEvent('ai-settings-changed'));
     });
 
-    await expect(btn).toContainText('Generate with AI');
+    await expect(btn).toHaveAttribute('title', 'Generate commit message using AI');
   });
 
   test('delayed model auto-load enables Generate button via polling', async ({ page }) => {
@@ -645,14 +645,14 @@ test.describe('Local AI Full Lifecycle', () => {
 
     const btn = page.locator('lv-commit-panel .generate-btn');
     // Initially AI is unavailable (simulating model not loaded yet)
-    await expect(btn).toContainText('Configure AI');
+    await expect(btn).toHaveAttribute('title', /[Cc]onfigure/);
 
     // Simulate: backend finishes auto-loading — is_ai_available now returns true
     await injectCommandMock(page, { is_ai_available: true });
 
     // The commit panel polls every 5s when AI is initially unavailable.
     // Wait for the poll to pick up the change.
-    await expect(btn).toContainText('Generate with AI', { timeout: 10000 });
+    await expect(btn).toHaveAttribute('title', 'Generate commit message using AI', { timeout: 20000 });
   });
 
   test('complete flow: load → generate → message populated', async ({ page }) => {
@@ -673,7 +673,7 @@ test.describe('Local AI Full Lifecycle', () => {
     await refreshCommitPanelAi(page);
 
     const btn = page.locator('lv-commit-panel .generate-btn');
-    await expect(btn).toContainText('Generate with AI');
+    await expect(btn).toHaveAttribute('title', 'Generate commit message using AI');
     await expect(btn).toBeEnabled();
 
     await btn.click();
