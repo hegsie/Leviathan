@@ -67,6 +67,7 @@ import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { searchIndexService } from './services/search-index.service.ts';
+import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
 import { emit, type UnlistenFn } from '@tauri-apps/api/event';
 
@@ -1604,9 +1605,10 @@ export class AppShell extends LitElement {
     }
     // Trigger refresh of the graph
     this.graphCanvas?.refresh?.();
-    // Refresh search index incrementally
+    // Refresh search indexes incrementally
     if (this.activeRepository) {
       searchIndexService.refresh(this.activeRepository.repository.path);
+      embeddingIndexService.refreshIndex(this.activeRepository.repository.path);
     }
     // Dispatch event for other components (like context dashboard) to update
     window.dispatchEvent(new CustomEvent('repository-refresh'));
@@ -1977,8 +1979,9 @@ export class AppShell extends LitElement {
         const result = await gitService.openRepository({ path: persisted.path });
         if (result.success && result.data) {
           repositoryStore.getState().addRepository(result.data);
-          // Build search index in background (non-blocking)
+          // Build search indexes in background (non-blocking)
           searchIndexService.buildIndex(persisted.path);
+          embeddingIndexService.buildIndex(persisted.path);
           // Load remotes for this repository
           await this.loadRepositoryRemotes(persisted.path);
         }

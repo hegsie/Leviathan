@@ -55,6 +55,12 @@ futures-util = "0.3"
 sysinfo = "0.38"
 llama-cpp-2 = { version = "0.1", default-features = false }
 
+# Embedding & semantic search (vector storage always available; ONNX inference optional)
+sqlite-vec = "0.1.8-alpha.1"
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray", "std", "load-dynamic"], optional = true }
+ndarray = { version = "0.17", features = ["std"], optional = true }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }
+
 # OAuth System
 sha2 = "0.10"
 rand = "0.8"
@@ -75,6 +81,7 @@ tempfile = "3"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 cuda = ["llama-cpp-2/cuda"]
+embedding-onnx = ["ort", "ndarray", "tokenizers"]
 
 [profile.release]
 panic = "abort"

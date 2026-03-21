@@ -144,6 +144,20 @@ pub fn run() {
             // Initialize MCP server state
             app.manage(create_mcp_state());
 
+            // Initialize embedding index state
+            let embedding_models_dir = app.path().app_data_dir().unwrap_or_default().join("models");
+            let embedding_indexes_dir = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_default()
+                .join("embedding-indexes");
+            app.manage(std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::services::embedding::EmbeddingIndexState::new(
+                    embedding_models_dir,
+                    embedding_indexes_dir,
+                ),
+            )));
+
             tracing::info!("Application setup complete");
 
             #[cfg(debug_assertions)]
@@ -691,6 +705,14 @@ pub fn run() {
             commands::search_index::build_search_index,
             commands::search_index::search_index,
             commands::search_index::refresh_search_index,
+            // Embedding index (semantic search)
+            commands::embedding_index::build_embedding_index,
+            commands::embedding_index::refresh_embedding_index,
+            commands::embedding_index::semantic_search,
+            commands::embedding_index::get_embedding_index_status,
+            commands::embedding_index::cancel_embedding_build,
+            commands::embedding_index::is_embedding_model_downloaded,
+            commands::embedding_index::download_embedding_model,
             // Sparse checkout
             commands::sparse_checkout::get_sparse_checkout_config,
             commands::sparse_checkout::enable_sparse_checkout,

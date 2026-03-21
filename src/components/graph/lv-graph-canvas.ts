@@ -31,6 +31,7 @@ import {
 import type { Commit, RefsByCommit, RefInfo } from '../../types/git.types.ts';
 import type { GraphPullRequest } from '../../graph/virtual-scroll.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
+import { embeddingIndexService } from '../../services/embedding-index.service.ts';
 
 export interface CommitSelectedEvent {
   commit: Commit | null;
@@ -421,7 +422,7 @@ export class LvGraphCanvas extends LitElement {
 
   @property({ type: Number }) commitCount = 1000;
   @property({ type: String }) repositoryPath = '';
-  @property({ type: Object }) searchFilter: { query: string; author: string; dateFrom: string; dateTo: string; filePath: string; branch: string } | null = null;
+  @property({ type: Object }) searchFilter: { query: string; author: string; dateFrom: string; dateTo: string; filePath: string; branch: string; searchMode?: string } | null = null;
 
   @state() private layout: GraphLayout | null = null;
   @state() private selectedNode: LayoutNode | null = null; // Primary selection (for details panel)
@@ -719,8 +720,29 @@ export class LvGraphCanvas extends LitElement {
 
       // If search is active, also fetch matching commits for highlighting
       this.matchedCommitOids.clear();
-      if (hasSearch) {
-        // Try the search index first for faster results
+      if (hasSearch && this.searchFilter?.searchMode === 'semantic' && this.searchFilter?.query) {
+        // Semantic search via embedding index
+        try {
+          const semanticResults = await embeddingIndexService.semanticSearch(
+            repoPath,
+            this.searchFilter.query,
+            this.commitCount,
+          );
+
+          // Abort if a newer load has started
+          if (this.loadVersion !== currentVersion) return;
+
+          for (const result of semanticResults) {
+            this.matchedCommitOids.add(result.oid);
+          }
+          log.debug(`Semantic search matched ${this.matchedCommitOids.size} commits`);
+        } catch (err) {
+          log.warn('Semantic search failed, falling back to keyword search:', err);
+          // Fall through to keyword search below
+        }
+      }
+      if (hasSearch && this.matchedCommitOids.size === 0 && this.searchFilter?.searchMode !== 'semantic') {
+        // Keyword search: try the search index first for faster results
         const indexResults = await searchIndexService.search(repoPath, {
           query: this.searchFilter?.query || undefined,
           author: this.searchFilter?.author || undefined,

@@ -21,6 +21,7 @@ pub mod credentials;
 pub mod describe;
 pub mod diff;
 pub mod difftool;
+pub mod embedding_index;
 pub mod encoding;
 pub mod file;
 pub mod gitattributes;

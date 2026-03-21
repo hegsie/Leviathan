@@ -8,6 +8,7 @@ pub mod autofetch_service;
 pub mod cancellation;
 pub mod commit_index;
 pub mod credentials_service;
+pub mod embedding;
 pub mod git_service;
 pub mod loopback_server;
 pub mod oauth;

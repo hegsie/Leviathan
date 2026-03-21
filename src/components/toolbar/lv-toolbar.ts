@@ -11,6 +11,7 @@ import { openRepository } from '../../services/git.service.ts';
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
+import { embeddingIndexService } from '../../services/embedding-index.service.ts';
 import { loggers } from '../../utils/logger.ts';
 
 const log = loggers.ui;
@@ -221,6 +222,7 @@ export class LvToolbar extends LitElement {
   @query('.tabs') private tabsContainer!: HTMLElement;
 
   @state() private showSearch = false;
+  @state() private semanticAvailable = false;
   @state() private canScrollLeft = false;
   @state() private canScrollRight = false;
 
@@ -231,8 +233,17 @@ export class LvToolbar extends LitElement {
     // Subscribe to store changes
     this.unsubscribe = repositoryStore.subscribe((state) => {
       this.openRepositories = state.openRepositories;
+      const prevIndex = this.activeIndex;
       this.activeIndex = state.activeIndex;
       this.isLoading = state.isLoading;
+
+      // Check semantic availability when active repo changes
+      if (state.activeIndex !== prevIndex && state.activeIndex >= 0) {
+        const activeRepo = state.openRepositories[state.activeIndex];
+        if (activeRepo) {
+          this.checkSemanticAvailability(activeRepo.repository.path);
+        }
+      }
     });
 
     // Listen for focus-search event from app-shell
@@ -265,6 +276,10 @@ export class LvToolbar extends LitElement {
           store.addRepository(result.data);
           // Build search index in background (non-blocking)
           searchIndexService.buildIndex(path);
+          // Build embedding index and check semantic availability
+          embeddingIndexService.buildIndex(path).then(() => {
+            this.checkSemanticAvailability(path);
+          });
         } else {
           store.setError(result.error?.message ?? 'Failed to open repository');
         }
@@ -309,6 +324,15 @@ export class LvToolbar extends LitElement {
     }
   }
 
+  private async checkSemanticAvailability(repoPath: string): Promise<void> {
+    try {
+      const status = await embeddingIndexService.getStatus(repoPath);
+      this.semanticAvailable = status.isReady;
+    } catch {
+      this.semanticAvailable = false;
+    }
+  }
+
   private handleSearchChange(e: CustomEvent<SearchFilter>): void {
     this.dispatchEvent(new CustomEvent('search-change', {
       detail: { filter: e.detail },
@@ -321,7 +345,7 @@ export class LvToolbar extends LitElement {
     this.showSearch = false;
     // Clear search
     this.dispatchEvent(new CustomEvent('search-change', {
-      detail: { filter: { query: '', author: '', dateFrom: '', dateTo: '', filePath: '', branch: '' } },
+      detail: { filter: { query: '', author: '', dateFrom: '', dateTo: '', filePath: '', branch: '', searchMode: 'keyword' as const } },
       bubbles: true,
       composed: true,
     }));
@@ -586,6 +610,7 @@ export class LvToolbar extends LitElement {
 
       ${this.showSearch && this.activeRepo ? html`
         <lv-search-bar
+          ?semanticAvailable=${this.semanticAvailable}
           @search-change=${this.handleSearchChange}
           @close=${this.handleSearchClose}
         ></lv-search-bar>

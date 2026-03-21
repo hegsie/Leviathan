@@ -2,6 +2,8 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 
+export type SearchMode = 'keyword' | 'semantic';
+
 export interface SearchFilter {
   query: string;
   author: string;
@@ -9,6 +11,7 @@ export interface SearchFilter {
   dateTo: string;
   filePath: string;
   branch: string;
+  searchMode: SearchMode;
 }
 
 export interface FilterPreset {
@@ -98,6 +101,29 @@ export class LvSearchBar extends LitElement {
       }
 
       .filter-btn.active {
+        color: var(--accent-color);
+        background: var(--accent-background);
+      }
+
+      .semantic-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+
+      .semantic-btn:hover {
+        background: var(--hover-background);
+      }
+
+      .semantic-btn.active {
         color: var(--accent-color);
         background: var(--accent-background);
       }
@@ -249,6 +275,7 @@ export class LvSearchBar extends LitElement {
   @property({ type: Boolean }) expanded = false;
   @property({ type: Number }) resultCount = 0;
   @property({ type: Boolean }) showResultCount = false;
+  @property({ type: Boolean }) semanticAvailable = false;
 
   @state() private query = '';
   @state() private author = '';
@@ -256,6 +283,7 @@ export class LvSearchBar extends LitElement {
   @state() private dateTo = '';
   @state() private filePath = '';
   @state() private branch = '';
+  @state() private searchMode: SearchMode = 'keyword';
   @state() private showFilters = false;
   @state() private presets: FilterPreset[] = [];
 
@@ -295,6 +323,7 @@ export class LvSearchBar extends LitElement {
         dateTo: this.dateTo,
         filePath: this.filePath,
         branch: this.branch,
+        searchMode: this.searchMode,
       },
     };
 
@@ -399,6 +428,11 @@ export class LvSearchBar extends LitElement {
     this.emitSearch();
   }
 
+  private toggleSearchMode(): void {
+    this.searchMode = this.searchMode === 'keyword' ? 'semantic' : 'keyword';
+    this.emitSearch();
+  }
+
   private emitSearch(): void {
     const filter: SearchFilter = {
       query: this.query,
@@ -407,6 +441,7 @@ export class LvSearchBar extends LitElement {
       dateTo: this.dateTo,
       filePath: this.filePath,
       branch: this.branch,
+      searchMode: this.searchMode,
     };
 
     this.dispatchEvent(
@@ -435,7 +470,7 @@ export class LvSearchBar extends LitElement {
 
           <input
             type="text"
-            placeholder="Search commits..."
+            placeholder="${this.searchMode === 'semantic' ? 'Search commits by meaning...' : 'Search commits...'}"
             .value=${this.query}
             @input=${this.handleInput}
             @keydown=${this.handleKeyDown}
@@ -454,6 +489,18 @@ export class LvSearchBar extends LitElement {
                 </button>
               `
             : null}
+
+          ${this.semanticAvailable ? html`
+            <button
+              class="semantic-btn ${this.searchMode === 'semantic' ? 'active' : ''}"
+              @click=${this.toggleSearchMode}
+              title="${this.searchMode === 'semantic' ? 'Switch to keyword search' : 'Switch to semantic search'}"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M8 1a3.5 3.5 0 0 0-3.5 3.5c0 1.193.603 2.26 1.5 2.898V9.5a1 1 0 0 0 .293.707l1 1a1 1 0 0 0 1.414 0l1-1A1 1 0 0 0 10 9.5V7.398A3.496 3.496 0 0 0 11.5 4.5 3.5 3.5 0 0 0 8 1zm0 1.5a2 2 0 0 1 2 2 2 2 0 0 1-2 2 2 2 0 0 1-2-2 2 2 0 0 1 2-2zM5.5 12a.5.5 0 0 0 0 1h5a.5.5 0 0 0 0-1h-5zm1 2a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1h-3z"/>
+              </svg>
+            </button>
+          ` : null}
 
           <button
             class="filter-btn ${hasFilters ? 'active' : ''}"
