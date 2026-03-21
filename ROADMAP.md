@@ -273,17 +273,22 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
   - Generate commit messages from staged changes
   - Conflict resolution suggestions with reasoning
 
-#### Phase 1: The "Sovereign Brain" (Q3 2026)
+#### Phase 1: The "Sovereign Brain" ✅
 
 *Establishing the hardware-accelerated foundation.*
 
-- **Adaptive Model Switching** — Instead of a static 2GB model, Leviathan detects system VRAM and selects the optimal model:
+- ✅ **Adaptive Model Switching** — Leviathan detects system VRAM/GPU and selects the optimal model:
   - **Ultra-light (8GB RAM):** Uses **Gemma 3 1B** (distilled) or **Llama 3.2 1B**
   - **Standard (16GB+ RAM):** Uses **Gemma 3 4B** or **Phi-4-mini** (3.8B)
+  - System capability detection (RAM, GPU vendor, VRAM) with tier-based recommendations
 
-- **WGPU-Native Inference** — Move away from generic `llama.cpp` wrappers to a custom Rust-based `wgpu` backend (via `burn` or `candle`). Native GPU acceleration on macOS (Metal), Windows (DirectX/Vulkan), and Linux without external dependencies.
+- ✅ **GPU-Accelerated Local Inference** — Rust-native GGUF inference via `llama-cpp-2` with hardware acceleration: Metal on macOS ARM64, CUDA on Linux/Windows, CPU fallback. Supports llama, gemma, phi, mistral, and qwen architectures.
 
-- **The "Context Proxy"** — A local-first implementation of the **Model Context Protocol (MCP)**. Leviathan serves as an MCP host, allowing other tools (like Cursor or VS Code) to "ask" Leviathan about the Git history via its local AI.
+- ✅ **The "Context Proxy" (MCP)** — Local-first implementation of the **Model Context Protocol**. Leviathan serves as an MCP host with HTTP/JSON-RPC server, exposing 6+ Git tools (`get_commit_history`, `get_branches`, `get_status`, `get_diff`, `get_file_blame`, `get_diff_stats`) for external tools to query.
+
+- ✅ **Local Model Management** — Download models from HuggingFace with SHA-256 verification, progress tracking, cancellation support. Load/unload/delete models. Settings UI with system capabilities display and model browser.
+
+- ✅ **7 Cloud AI Providers** — Ollama, LM Studio, OpenAI, Anthropic Claude, GitHub Copilot, Google Gemini, and embedded local inference. API key management, provider testing, per-provider model selection.
 
 #### Phase 2: Semantic Git History (Q4 2026)
 
@@ -354,7 +359,7 @@ By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits**
 
 ### Testing & Quality Assurance
 
-- ✅ **Unit tests** — 100+ test files, 1900+ tests via web-test-runner
+- ✅ **Unit tests** — 125+ test files, 2600+ tests via web-test-runner
 - ✅ **E2E tests** — 38 Playwright test files covering dialogs, git operations, UI components, OAuth flows
 - ✅ **Rust tests** — integration tests for Tauri commands with TestRepo helpers
 - ✅ **CI/CD** — GitHub Actions build workflow with signing for tagged releases
@@ -403,4 +408,4 @@ Remember: Leviathan's core value proposition is **privacy-first, offline-capable
 
 ---
 
-Last updated: 2026-03-11
+Last updated: 2026-03-21
