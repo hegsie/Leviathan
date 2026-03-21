@@ -430,6 +430,8 @@ export class LvCleanDialog extends LitElement {
           composed: true,
         }));
         this.close();
+      } else {
+        showToast(result.error?.message ?? 'Clean operation failed', 'error');
       }
     } catch (err) {
       console.error('Clean failed:', err);

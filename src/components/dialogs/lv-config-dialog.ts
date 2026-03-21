@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { ConfigEntry, GitAlias, UserIdentity } from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import './lv-modal.ts';
 
 type TabId = 'identity' | 'settings' | 'aliases';
@@ -432,6 +433,7 @@ export class LvConfigDialog extends LitElement {
       );
 
       if (result.success) {
+        showToast('Identity saved', 'success');
         await this.loadData();
       } else {
         this.error = result.error?.message || 'Failed to save identity';
@@ -476,6 +478,7 @@ export class LvConfigDialog extends LitElement {
       );
 
       if (result.success) {
+        showToast('Alias added', 'success');
         this.newAliasName = '';
         this.newAliasCommand = '';
         await this.loadData();
@@ -501,6 +504,7 @@ export class LvConfigDialog extends LitElement {
       );
 
       if (result.success) {
+        showToast('Alias deleted', 'success');
         await this.loadData();
       } else {
         this.error = result.error?.message || 'Failed to delete alias';

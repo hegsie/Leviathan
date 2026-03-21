@@ -467,7 +467,9 @@ export class LvWorktreeDialog extends LitElement {
     const result = await gitService.lockWorktree(this.repositoryPath, worktree.path);
 
     if (result.success) {
+      this.success = 'Worktree locked successfully';
       await this.loadWorktrees();
+      this.dispatchEvent(new CustomEvent('worktrees-changed'));
     } else {
       this.error = result.error?.message || 'Failed to lock worktree';
     }
@@ -482,7 +484,9 @@ export class LvWorktreeDialog extends LitElement {
     const result = await gitService.unlockWorktree(this.repositoryPath, worktree.path);
 
     if (result.success) {
+      this.success = 'Worktree unlocked successfully';
       await this.loadWorktrees();
+      this.dispatchEvent(new CustomEvent('worktrees-changed'));
     } else {
       this.error = result.error?.message || 'Failed to unlock worktree';
     }

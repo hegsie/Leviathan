@@ -486,6 +486,7 @@ export class LvLfsDialog extends LitElement {
     if (result.success) {
       this.success = 'LFS files pulled successfully';
       await this.loadFiles();
+      this.dispatchEvent(new CustomEvent('lfs-changed'));
     } else {
       this.error = result.error?.message || 'Failed to pull LFS files';
     }
@@ -503,6 +504,7 @@ export class LvLfsDialog extends LitElement {
     if (result.success) {
       this.success = result.data || 'LFS files pruned';
       await this.loadStatus();
+      this.dispatchEvent(new CustomEvent('lfs-changed'));
     } else {
       this.error = result.error?.message || 'Failed to prune LFS files';
     }

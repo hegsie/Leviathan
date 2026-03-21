@@ -426,6 +426,7 @@ export class LvSettingsDialog extends LitElement {
     const result = await aiService.setAiModel(providerType, model || null);
     if (result.success) {
       await this.loadAiProviders();
+      window.dispatchEvent(new CustomEvent('ai-settings-changed'));
     } else {
       this.aiError = result.error?.message ?? 'Failed to set model';
     }

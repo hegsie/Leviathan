@@ -8,6 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { Submodule } from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 
 type DialogMode = 'list' | 'add';
 
@@ -402,6 +403,7 @@ export class LvSubmoduleDialog extends LitElement {
 
     if (result.success) {
       this.success = 'Submodule added successfully';
+      showToast('Submodule added successfully', 'success');
       this.addUrl = '';
       this.addPath = '';
       this.addBranch = '';
@@ -410,6 +412,7 @@ export class LvSubmoduleDialog extends LitElement {
       this.dispatchEvent(new CustomEvent('submodules-changed'));
     } else {
       this.error = result.error?.message || 'Failed to add submodule';
+      showToast(result.error?.message || 'Failed to add submodule', 'error');
     }
 
     this.loading = false;
@@ -430,6 +433,7 @@ export class LvSubmoduleDialog extends LitElement {
       this.dispatchEvent(new CustomEvent('submodules-changed'));
     } else {
       this.error = result.error?.message || 'Failed to initialize submodule';
+      showToast(result.error?.message || 'Failed to initialize submodule', 'error');
     }
 
     this.loading = false;
@@ -449,6 +453,7 @@ export class LvSubmoduleDialog extends LitElement {
       this.dispatchEvent(new CustomEvent('submodules-changed'));
     } else {
       this.error = result.error?.message || 'Failed to update submodule';
+      showToast(result.error?.message || 'Failed to update submodule', 'error');
     }
 
     this.loading = false;
@@ -468,10 +473,12 @@ export class LvSubmoduleDialog extends LitElement {
 
     if (result.success) {
       this.success = 'Submodule removed successfully';
+      showToast('Submodule removed successfully', 'success');
       await this.loadSubmodules();
       this.dispatchEvent(new CustomEvent('submodules-changed'));
     } else {
       this.error = result.error?.message || 'Failed to remove submodule';
+      showToast(result.error?.message || 'Failed to remove submodule', 'error');
     }
 
     this.loading = false;
@@ -488,10 +495,12 @@ export class LvSubmoduleDialog extends LitElement {
 
     if (result.success) {
       this.success = 'All submodules updated';
+      showToast('All submodules updated', 'success');
       await this.loadSubmodules();
       this.dispatchEvent(new CustomEvent('submodules-changed'));
     } else {
       this.error = result.error?.message || 'Failed to update submodules';
+      showToast(result.error?.message || 'Failed to update submodules', 'error');
     }
 
     this.loading = false;

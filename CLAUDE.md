@@ -20,6 +20,27 @@ If this returns matches in object literals being passed to `invokeCommand` or `g
 Tauri automatically converts between Rust's snake_case and TypeScript's camelCase.
 - Example: Rust `target_ref: String` → TypeScript `targetRef: string`
 
+## UI Event Consistency Rules
+
+When adding or modifying component operations (handlers, service calls, dialog actions), you MUST ensure:
+
+### Event Dispatch Consistency
+- **All sibling handlers must follow the same pattern.** If `handleAdd()` dispatches a `foo-changed` event, then `handleRemove()`, `handleUpdate()`, and any other handlers in the same component that modify the same state MUST also dispatch `foo-changed`. Never leave a handler without an event dispatch when its siblings have one.
+- **Every dispatched event must have at least one listener.** Before dispatching a new CustomEvent, verify that a parent component (typically `app-shell.ts` or `lv-left-panel.ts`) has a corresponding `@event-name` handler. Orphaned events are dead code.
+- **State-modifying operations in `app-shell.ts` must call `handleRefresh()`**, not just `graphCanvas?.refresh?.()`. The `handleRefresh()` method updates the repository store, refreshes the graph, refreshes the search index, and dispatches `repository-refresh` for other listeners.
+
+### User Feedback Consistency
+- **Every user-initiated operation must provide feedback** — either a toast notification (`showToast()`) or an inline message (`this.success`/`this.error`), depending on whether the dialog stays open.
+- **Error paths must never be silent.** If `result.success` is checked, the `else` branch must show an error to the user. Console-only errors (`console.error`) are not sufficient — always pair with `showToast()` or `this.error`.
+- **Window-level events (e.g., `ai-settings-changed`) must be dispatched by ALL handlers that change the relevant state.** Check the file for other handlers that dispatch the same event and ensure yours does too.
+
+### Checklist Before Completing a UI Change
+1. Does every success path dispatch the appropriate event?
+2. Does every error path show user-visible feedback?
+3. Are all sibling handlers in the same component consistent?
+4. Is the dispatched event listened to by a parent?
+5. Does `app-shell.ts` call `handleRefresh()` (not just graph refresh) after state-modifying operations?
+
 ## Testing Requirements
 
 **CRITICAL: Tests must be written for every code change — not after, but as part of the change.** Do not consider any change done until tests exist for:

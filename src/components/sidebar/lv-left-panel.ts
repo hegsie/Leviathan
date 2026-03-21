@@ -236,6 +236,7 @@ export class LvLeftPanel extends LitElement {
               .repositoryPath=${this.repositoryPath}
               @tags-changed=${this.handleTagsChanged}
               @tag-checkout=${this.handleTagCheckout}
+              @tag-pushed=${this.handleTagsChanged}
               @tag-count-changed=${this.handleTagCountChanged}
             ></lv-tag-list>
           </div>

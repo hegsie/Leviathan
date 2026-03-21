@@ -1119,6 +1119,7 @@ export class AppShell extends LitElement {
     });
 
     if (result.success) {
+      await this.handleRefresh();
       showToast(`Pushed tag ${tagName}`, 'success');
     } else {
       log.error('Push tag failed:', result.error);
@@ -1195,7 +1196,7 @@ export class AppShell extends LitElement {
     );
 
     if (result.success) {
-      this.graphCanvas?.refresh?.();
+      await this.handleRefresh();
       showToast(`Reverted ${commit.oid.substring(0, 7)}`, 'success');
     } else if (result.error?.code === 'REVERT_CONFLICT') {
       // Show conflict resolution dialog
@@ -1257,9 +1258,9 @@ export class AppShell extends LitElement {
     const branchName = e.detail?.branchName;
     if (!branchName || !this.activeRepository) return;
 
-    gitService.deleteBranch(this.activeRepository.repository.path, branchName, true).then((result) => {
+    gitService.deleteBranch(this.activeRepository.repository.path, branchName, true).then(async (result) => {
       if (result.success) {
-        this.graphCanvas?.refresh?.();
+        await this.handleRefresh();
         showToast(`Force deleted branch ${branchName}`, 'success');
       } else {
         showToast(result.error?.message || 'Force delete failed', 'error');
@@ -2366,6 +2367,7 @@ export class AppShell extends LitElement {
                             .file=${this.diffFile}
                             .commitFile=${this.diffCommitFile}
                             .hasPartialStaging=${this.diffFilePartiallyStaged}
+                            @file-edited=${() => this.handleRefresh()}
                           ></lv-diff-view>
                         </div>
                       </div>
@@ -2756,6 +2758,7 @@ export class AppShell extends LitElement {
           ?open=${this.showGpg}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGpg = false; }}
+          @gpg-changed=${() => this.handleRefresh()}
         ></lv-gpg-dialog>
       ` : ''}
 
