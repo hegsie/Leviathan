@@ -759,7 +759,12 @@ export class LvGitHubDialog extends LitElement {
   @state() private issueFilter: 'open' | 'closed' | 'all' = 'open';
 
   // OAuth state
-  @state() private authMethod: 'oauth' | 'pat' = 'oauth';
+  @state() private authMethod: 'oauth' | 'pat' | 'app' = 'oauth';
+  @state() private appId = '';
+  @state() private appPrivateKey = '';
+  @state() private appInstallationId = '';
+  @state() private appInstallations: import('../../services/credential.service.ts').AppInstallation[] = [];
+  @state() private loadingInstallations = false;
   @state() private oauthState: OAuthFlowState = { status: 'idle' };
   private oauthUnsubscribe?: () => void;
   private boundOAuthComplete = this.handleOAuthComplete.bind(this);
@@ -1330,6 +1335,73 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
+  private async handleLoadInstallations(): Promise<void> {
+    if (!this.appId || !this.appPrivateKey) return;
+
+    this.loadingInstallations = true;
+    try {
+      const installations = await import('../../services/credential.service.ts').then(m =>
+        m.listGitHubAppInstallations(parseInt(this.appId, 10), this.appPrivateKey)
+      );
+      this.appInstallations = installations;
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to load installations', 'error');
+    }
+    this.loadingInstallations = false;
+  }
+
+  private async handleConnectGitHubApp(): Promise<void> {
+    if (!this.appId || !this.appPrivateKey || !this.appInstallationId) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const result = await import('../../services/credential.service.ts').then(m =>
+        m.configureGitHubApp(
+          parseInt(this.appId, 10),
+          this.appPrivateKey,
+          parseInt(this.appInstallationId, 10),
+        )
+      );
+
+      // Store the app config as the account token
+      const accountId = this.selectedAccountId || `github-app-${this.appId}`;
+
+      // Create account if needed
+      const unifiedProfile = await import('../../services/unified-profile.service.ts');
+      await unifiedProfile.saveGlobalAccount({
+        id: accountId,
+        name: `GitHub App ${this.appId}`,
+        integrationType: 'github',
+        config: { type: 'github' as const },
+        color: null,
+        cachedUser: null,
+        urlPatterns: [],
+        isDefault: !this.selectedAccountId,
+      } as import('../../types/unified-profile.types.ts').IntegrationAccount);
+
+      this.connectionStatus = {
+        connected: true,
+        user: null,
+        scopes: ['app-installation'],
+      };
+
+      showToast('Connected via GitHub App', 'success');
+
+      // Reset form
+      this.appId = '';
+      this.appPrivateKey = '';
+      this.appInstallationId = '';
+      this.appInstallations = [];
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to connect GitHub App';
+      showToast(this.error, 'error');
+    }
+
+    this.isLoading = false;
+  }
+
   private async handleGeneratePrDescription(): Promise<void> {
     if (!this.repositoryPath || !this.createPrHead || !this.createPrBase) return;
 
@@ -1579,10 +1651,16 @@ export class LvGitHubDialog extends LitElement {
           >
             Personal Access Token
           </button>
+          <button
+            class="auth-method-btn ${this.authMethod === 'app' ? 'active' : ''}"
+            @click=${() => this.authMethod = 'app'}
+          >
+            GitHub App
+          </button>
         </div>
 
         ${this.authMethod === 'oauth' ? html`
-          <!-- OAuth Flow -->
+          <!-- OAuth Flow (oauth) -->
           <div class="oauth-section">
             ${isOAuthPending ? html`
               <div class="oauth-pending">
@@ -1653,6 +1731,87 @@ export class LvGitHubDialog extends LitElement {
             </button>
           </div>
         `}
+
+        ${this.authMethod === 'app' ? html`
+          <!-- GitHub App Form -->
+          <div class="form-group">
+            <label>App ID</label>
+            <input
+              type="text"
+              placeholder="123456"
+              .value=${this.appId}
+              @input=${(e: Event) => {
+                this.appId = (e.target as HTMLInputElement).value;
+                this.appInstallations = [];
+              }}
+            />
+          </div>
+          <div class="form-group">
+            <label>Private Key (.pem)</label>
+            <textarea
+              placeholder="Paste your private key PEM content here..."
+              rows="4"
+              style="font-family: var(--font-mono, monospace); font-size: 11px; resize: vertical;"
+              .value=${this.appPrivateKey}
+              @input=${(e: Event) => {
+                this.appPrivateKey = (e.target as HTMLTextAreaElement).value;
+                this.appInstallations = [];
+              }}
+            ></textarea>
+            <span class="help-text">Paste the private key from your GitHub App settings, or drag and drop the .pem file.</span>
+          </div>
+
+          ${this.appId && this.appPrivateKey ? html`
+            <div class="form-group">
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <label>Installation</label>
+                <button
+                  class="btn btn-sm"
+                  style="font-size:12px;padding:2px 8px"
+                  @click=${this.handleLoadInstallations}
+                  ?disabled=${this.loadingInstallations}
+                >
+                  ${this.loadingInstallations ? 'Loading...' : 'Load Installations'}
+                </button>
+              </div>
+              ${this.appInstallations.length > 0 ? html`
+                <select
+                  .value=${this.appInstallationId}
+                  @change=${(e: Event) => this.appInstallationId = (e.target as HTMLSelectElement).value}
+                >
+                  <option value="">Select installation...</option>
+                  ${this.appInstallations.map(inst => html`
+                    <option value=${String(inst.id)}>
+                      ${inst.account.login} (${inst.targetType})
+                    </option>
+                  `)}
+                </select>
+              ` : html`
+                <input
+                  type="text"
+                  placeholder="Installation ID (click Load to discover)"
+                  .value=${this.appInstallationId}
+                  @input=${(e: Event) => this.appInstallationId = (e.target as HTMLInputElement).value}
+                />
+              `}
+            </div>
+          ` : nothing}
+
+          <div class="btn-row">
+            <button
+              class="btn btn-primary"
+              @click=${this.handleConnectGitHubApp}
+              ?disabled=${this.isLoading || !this.appId || !this.appPrivateKey || !this.appInstallationId}
+            >
+              Connect via GitHub App
+            </button>
+          </div>
+          <span class="help-text">
+            Create a GitHub App at
+            <a class="help-link" href="https://github.com/settings/apps/new" @click=${handleExternalLink}>github.com/settings/apps</a>
+            with the permissions your workflow needs.
+          </span>
+        ` : nothing}
       </div>
     `;
   }

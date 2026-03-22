@@ -406,6 +406,9 @@ export class LvCredentialsDialog extends LitElement {
   @state() private testing = false;
   @state() private testResult: CredentialTestResult | null = null;
 
+  // GCM status
+  @state() private gcmStatus: import('../../services/credential.service.ts').CredentialManagerStatus | null = null;
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
   }
@@ -440,6 +443,14 @@ export class LvCredentialsDialog extends LitElement {
         if (this.remotes.length > 0 && !this.selectedRemote) {
           this.selectedRemote = this.remotes[0];
         }
+      }
+
+      // Detect GCM status
+      try {
+        const { detectCredentialManager } = await import('../../services/credential.service.ts');
+        this.gcmStatus = await detectCredentialManager(this.repositoryPath);
+      } catch {
+        // GCM detection is best-effort
       }
     } catch (e) {
       this.error = e instanceof Error ? e.message : 'Failed to load data';
@@ -757,6 +768,19 @@ export class LvCredentialsDialog extends LitElement {
                 </div>
               `
             : ''}
+
+          ${this.gcmStatus ? html`
+            <div style="padding: 8px 12px; margin-bottom: 8px; border-radius: 6px; font-size: 12px;
+              background: ${this.gcmStatus.gcmAvailable || this.gcmStatus.configuredHelper ? 'var(--color-success-bg, #0d2818)' : 'var(--color-bg-secondary)'};
+              border: 1px solid ${this.gcmStatus.gcmAvailable || this.gcmStatus.configuredHelper ? 'var(--color-success, #2ea043)' : 'var(--color-border)'};
+              color: ${this.gcmStatus.gcmAvailable || this.gcmStatus.configuredHelper ? 'var(--color-success, #2ea043)' : 'var(--color-text-secondary)'};">
+              ${this.gcmStatus.gcmAvailable
+                ? html`<strong>Git Credential Manager</strong> detected${this.gcmStatus.gcmVersion ? html` (${this.gcmStatus.gcmVersion})` : ''} — credentials managed by GCM`
+                : this.gcmStatus.configuredHelper
+                  ? html`<strong>Credential helper</strong>: <code>${this.gcmStatus.configuredHelper}</code> — credentials managed by system`
+                  : html`No credential manager detected — using Leviathan's built-in credential storage`}
+            </div>
+          ` : ''}
 
           <div class="tabs">
             <button
