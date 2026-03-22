@@ -121,6 +121,9 @@ function setupStoreWithBranch(branchName: string): void {
     isBare: false,
     headRef: null,
     state: 'clean',
+    isShallow: false,
+    isPartialClone: false,
+    cloneFilter: null,
   });
   if (branchName) {
     repositoryStore.getState().setCurrentBranch({

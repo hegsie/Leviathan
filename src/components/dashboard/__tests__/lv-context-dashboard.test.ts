@@ -72,6 +72,9 @@ function makeRepository(overrides: Partial<Repository> = {}): Repository {
     isBare: false,
     headRef: 'refs/heads/main',
     state: 'clean',
+    isShallow: false,
+    isPartialClone: false,
+    cloneFilter: null,
     ...overrides,
   };
 }

@@ -180,6 +180,8 @@ export class LvCloneDialog extends LitElement {
   @state() private destination = '';
   @state() private repoName = '';
   @state() private depth: number | null = null;
+  @state() private filter: string | null = null;
+  @state() private singleBranch = false;
   @state() private isCloning = false;
   @state() private progress = 0;
   @state() private progressText = '';
@@ -316,6 +318,8 @@ export class LvCloneDialog extends LitElement {
         url: this.url.trim(),
         path: fullPath,
         ...(this.depth !== null ? { depth: this.depth } : {}),
+        ...(this.filter ? { filter: this.filter } : {}),
+        ...(this.singleBranch ? { singleBranch: true } : {}),
       });
 
       if (result.success && result.data) {
@@ -413,6 +417,31 @@ export class LvCloneDialog extends LitElement {
               @input=${this.handleDepthChange}
               ?disabled=${this.isCloning}
             />
+          </div>
+
+          <div class="field">
+            <label for="filter">Partial clone filter (optional)</label>
+            <select
+              id="filter"
+              .value=${this.filter ?? ''}
+              @change=${(e: Event) => { this.filter = (e.target as HTMLSelectElement).value || null; }}
+              ?disabled=${this.isCloning}
+            >
+              <option value="">None (full clone)</option>
+              <option value="blob:none">blob:none — Skip file contents, fetch on demand</option>
+              <option value="tree:0">tree:0 — Skip trees and blobs, minimal clone</option>
+            </select>
+          </div>
+
+          <div class="field" style="flex-direction:row;align-items:center;gap:8px">
+            <input
+              type="checkbox"
+              id="single-branch"
+              .checked=${this.singleBranch}
+              @change=${(e: Event) => { this.singleBranch = (e.target as HTMLInputElement).checked; }}
+              ?disabled=${this.isCloning}
+            />
+            <label for="single-branch" style="margin:0">Single branch only</label>
           </div>
 
           ${this.fullPath

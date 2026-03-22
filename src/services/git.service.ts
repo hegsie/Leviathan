@@ -166,6 +166,19 @@ export async function getCloneFilterInfo(
   return invokeCommand<CloneFilterInfo>("get_clone_filter_info", { path });
 }
 
+export async function deepenRepository(
+  path: string,
+  depth: number,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("deepen_repository", { path, depth });
+}
+
+export async function unshallowRepository(
+  path: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("unshallow_repository", { path });
+}
+
 export async function listTrackedFiles(
   path: string,
 ): Promise<CommandResult<string[]>> {

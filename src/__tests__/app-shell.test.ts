@@ -127,6 +127,9 @@ describe('App Shell - requiresRepository', () => {
         isBare: false,
         headRef: 'refs/heads/main',
         state: 'clean',
+        isShallow: false,
+        isPartialClone: false,
+        cloneFilter: null,
       });
 
       const activeRepo = repositoryStore.getState().getActiveRepository();
@@ -172,6 +175,9 @@ describe('App Shell - requiresRepository', () => {
         isBare: false,
         headRef: 'refs/heads/main',
         state: 'clean',
+        isShallow: false,
+        isPartialClone: false,
+        cloneFilter: null,
       });
 
       const repoAfterAdd = repositoryStore.getState().getActiveRepository();

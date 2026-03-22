@@ -203,12 +203,14 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 - ✅ **Sparse checkout** — initialize, add/remove paths, cone mode, disable
 - ✅ **Bundle operations** — create/verify/list/unbundle for offline transfer and air-gapped environments
 
-- **Shallow & partial clones** (planned)
-  - Shallow clone with configurable `--depth`
-  - Deepen shallow clones incrementally
-  - Partial clone with blob/tree filters
-  - Fetch missing objects on demand
-  - Convert between shallow and full clones
+- ✅ **Shallow & partial clones**
+  - Shallow clone with configurable `--depth` (clone dialog)
+  - Partial clone with `--filter` (blob:none, tree:0) via clone dialog dropdown
+  - Single-branch clone option
+  - Deepen shallow clones incrementally (`git fetch --deepen`)
+  - Convert shallow to full clone (`git fetch --unshallow`)
+  - Repository metadata: `isShallow`, `isPartialClone`, `cloneFilter` exposed in Repository struct
+  - Fetch missing objects handled transparently by git on demand
 
 ---
 

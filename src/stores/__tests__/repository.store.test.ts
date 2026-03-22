@@ -12,6 +12,9 @@ describe('repository.store', () => {
       isBare: false,
       headRef: 'main',
       state: 'clean',
+      isShallow: false,
+      isPartialClone: false,
+      cloneFilter: null,
     };
   }
 

@@ -324,6 +324,8 @@ pub fn run() {
             commands::remote::push,
             commands::remote::push_to_multiple_remotes,
             commands::remote::cancel_operation,
+            commands::remote::deepen_repository,
+            commands::remote::unshallow_repository,
             commands::merge::merge,
             commands::merge::abort_merge,
             commands::merge::rebase,

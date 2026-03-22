@@ -1315,3 +1315,51 @@ mod tests {
         assert!(json2.contains("\"message\":null"));
     }
 }
+
+// ========================================================================
+// Shallow/Partial Clone Operations
+// ========================================================================
+
+/// Deepen a shallow repository by fetching more history
+#[command]
+pub async fn deepen_repository(path: String, depth: u32) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .arg("fetch")
+        .arg(format!("--deepen={}", depth))
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to deepen: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LeviathanError::OperationFailed(format!(
+            "Deepen failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Convert a shallow repository to a full clone by fetching all history
+#[command]
+pub async fn unshallow_repository(path: String) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .arg("fetch")
+        .arg("--unshallow")
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to unshallow: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LeviathanError::OperationFailed(format!(
+            "Unshallow failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}

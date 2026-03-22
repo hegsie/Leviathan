@@ -12,6 +12,9 @@ pub struct Repository {
     pub is_bare: bool,
     pub head_ref: Option<String>,
     pub state: RepositoryState,
+    pub is_shallow: bool,
+    pub is_partial_clone: bool,
+    pub clone_filter: Option<String>,
 }
 
 /// Repository state

@@ -41,6 +41,9 @@ const mockRepository: Repository = {
   isBare: false,
   headRef: 'refs/heads/main',
   state: 'clean',
+  isShallow: false,
+  isPartialClone: false,
+  cloneFilter: null,
 };
 
 const mockOpenRepository: OpenRepository = {

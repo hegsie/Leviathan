@@ -53,6 +53,10 @@ pub async fn open_repository(path: String) -> Result<Repository> {
         })
     });
 
+    // Detect shallow and partial clone status
+    let is_shallow = repo.is_shallow();
+    let (is_partial_clone, clone_filter) = detect_partial_clone_status(&repo);
+
     Ok(Repository {
         path: path.display().to_string(),
         name,
@@ -60,7 +64,31 @@ pub async fn open_repository(path: String) -> Result<Repository> {
         is_bare: repo.is_bare(),
         head_ref,
         state: RepositoryState::from(repo.state()),
+        is_shallow,
+        is_partial_clone,
+        clone_filter,
     })
+}
+
+/// Detect if a repository is a partial clone and extract the filter
+fn detect_partial_clone_status(repo: &git2::Repository) -> (bool, Option<String>) {
+    let config = match repo.config() {
+        Ok(c) => c,
+        Err(_) => return (false, None),
+    };
+
+    // Check extensions.partialClone
+    let has_partial = config.get_bool("extensions.partialClone").unwrap_or(false);
+
+    // Check remote.origin.promisor
+    let has_promisor = config.get_bool("remote.origin.promisor").unwrap_or(false);
+
+    if has_partial || has_promisor {
+        let filter = config.get_string("remote.origin.partialclonefilter").ok();
+        (true, filter)
+    } else {
+        (false, None)
+    }
 }
 
 /// Clone a repository with progress reporting
@@ -178,6 +206,9 @@ pub async fn clone_repository(
                 },
             );
 
+            let is_shallow = repo.is_shallow();
+            let (is_partial_clone, clone_filter) = detect_partial_clone_status(&repo);
+
             Ok(Repository {
                 path: path.display().to_string(),
                 name,
@@ -185,6 +216,9 @@ pub async fn clone_repository(
                 is_bare: repo.is_bare(),
                 head_ref,
                 state: RepositoryState::from(repo.state()),
+                is_shallow,
+                is_partial_clone,
+                clone_filter,
             })
         } else {
             // Full clone: use git2 RepoBuilder with progress callbacks
@@ -292,6 +326,9 @@ pub async fn clone_repository(
                 is_bare: repo.is_bare(),
                 head_ref,
                 state: RepositoryState::from(repo.state()),
+                is_shallow: false, // Full clone via git2 is never shallow
+                is_partial_clone: false,
+                clone_filter: None,
             })
         }
     };
@@ -422,6 +459,9 @@ pub async fn init_repository(path: String, bare: Option<bool>) -> Result<Reposit
         is_bare: repo.is_bare(),
         head_ref: None,
         state: RepositoryState::Clean,
+        is_shallow: false,
+        is_partial_clone: false,
+        clone_filter: None,
     })
 }
 

@@ -9,6 +9,9 @@ export interface Repository {
   isBare: boolean;
   headRef: string | null;
   state: RepositoryState;
+  isShallow: boolean;
+  isPartialClone: boolean;
+  cloneFilter: string | null;
 }
 
 export type RepositoryState =
