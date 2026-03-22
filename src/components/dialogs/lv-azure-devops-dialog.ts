@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { loggers, openExternalUrl, handleExternalLink } from '../../utils/index.ts';
+import * as oauthService from '../../services/oauth.service.ts';
 
 const log = loggers.azureDevOps;
 import type {
@@ -575,6 +576,9 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private tokenInput = '';
   @state() private organizationInput = '';
   @state() private hasStoredToken = false;
+  @state() private authMethod: 'oauth' | 'pat' = 'pat';
+  @state() private oauthClientId = '';
+  @state() private oauthPending = false;
   @state() private prFilter: 'active' | 'completed' | 'abandoned' | 'all' = 'active';
   @state() private workItemFilter: string = '';
 
@@ -909,6 +913,60 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
     } catch {
       // Silent fail for pipelines
+    }
+  }
+
+  private async handleStartEntraOAuth(): Promise<void> {
+    if (!this.organizationInput.trim() || !this.oauthClientId.trim()) return;
+
+    this.oauthPending = true;
+    this.error = null;
+
+    try {
+      // Start OAuth flow with Entra ID
+      await oauthService.startOAuth('azure', this.oauthClientId);
+
+      // For Azure, deep link is used — wait for the oauth-complete event
+      const handleComplete = async (e: Event) => {
+        const detail = (e as CustomEvent).detail;
+        if (detail?.provider !== 'azure') return;
+
+        window.removeEventListener('oauth-complete', handleComplete);
+        this.oauthPending = false;
+
+        if (detail.error) {
+          this.error = detail.error;
+          showToast(`OAuth failed: ${detail.error}`, 'error');
+          return;
+        }
+
+        if (detail.tokens?.accessToken) {
+          // Store the OAuth token
+          const accountId = this.selectedAccountId || `ado-oauth-${Date.now()}`;
+
+          await credentialService.storeAccountToken('azure-devops', accountId, detail.tokens.accessToken);
+
+          // Verify connection
+          const result = await gitService.checkAdoConnectionWithToken(
+            this.organizationInput,
+            detail.tokens.accessToken,
+          );
+
+          if (result.success && result.data?.connected) {
+            this.connectionStatus = result.data;
+            showToast('Connected to Azure DevOps via Microsoft Entra ID', 'success');
+          } else {
+            this.error = 'Connection verification failed';
+            showToast('OAuth token received but connection verification failed', 'error');
+          }
+        }
+      };
+
+      window.addEventListener('oauth-complete', handleComplete);
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'OAuth flow failed';
+      showToast(this.error, 'error');
+      this.oauthPending = false;
     }
   }
 
@@ -1255,57 +1313,117 @@ export class LvAzureDevOpsDialog extends LitElement {
 
     return html`
       <div class="token-form">
-        <div class="form-group">
-          <label>Organization</label>
-          <input
-            type="text"
-            placeholder="my-organization"
-            .value=${this.organizationInput}
-            @input=${(e: Event) => this.organizationInput = (e.target as HTMLInputElement).value}
-          />
-          <span class="help-text">
-            Your Azure DevOps organization name (from dev.azure.com/{organization})
-          </span>
+        <!-- Auth method toggle -->
+        <div class="auth-method-toggle" style="display:flex;gap:0;margin-bottom:12px;border:1px solid var(--color-border);border-radius:6px;overflow:hidden">
+          <button
+            style="flex:1;padding:8px;border:none;cursor:pointer;font-size:13px;background:${this.authMethod === 'oauth' ? 'var(--color-accent)' : 'transparent'};color:${this.authMethod === 'oauth' ? 'white' : 'var(--color-text-secondary)'}"
+            @click=${() => { this.authMethod = 'oauth'; }}
+          >Sign in with Microsoft</button>
+          <button
+            style="flex:1;padding:8px;border:none;border-left:1px solid var(--color-border);cursor:pointer;font-size:13px;background:${this.authMethod === 'pat' ? 'var(--color-accent)' : 'transparent'};color:${this.authMethod === 'pat' ? 'white' : 'var(--color-text-secondary)'}"
+            @click=${() => { this.authMethod = 'pat'; }}
+          >Personal Access Token</button>
         </div>
 
-        <div class="form-group">
-          <label>Personal Access Token</label>
-          <input
-            type="password"
-            placeholder=${this.hasStoredToken ? '••••••••••••••••••••••••••••••••' : 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'}
-            .value=${this.tokenInput}
-            @input=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
-          />
-          <span class="help-text">
-            ${this.hasStoredToken
-              ? html`Token saved securely. Enter a new token to update, or click Connect to use the saved token.`
-              : html`Create a token at
-                <a
-                  class="help-link"
-                  href="https://dev.azure.com/${this.organizationInput || '{org}'}/_usersSettings/tokens"
-                  @click=${handleExternalLink}
-                >Azure DevOps Settings</a>.
-                Required scopes: <strong>Code (Read & Write)</strong>, <strong>Work Items (Read)</strong>, <strong>Build (Read)</strong>, and <strong>User Profile (Read)</strong>.`
-            }
-          </span>
-        </div>
-        <div class="btn-row">
-          ${this.selectedAccountId ? html`
+        ${this.authMethod === 'oauth' ? html`
+          <!-- Entra ID OAuth -->
+          <div class="form-group">
+            <label>Organization</label>
+            <input
+              type="text"
+              placeholder="my-organization"
+              .value=${this.organizationInput}
+              @input=${(e: Event) => this.organizationInput = (e.target as HTMLInputElement).value}
+            />
+          </div>
+          <div class="form-group">
+            <label>Entra ID Client ID</label>
+            <input
+              type="text"
+              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              .value=${this.oauthClientId}
+              @input=${(e: Event) => this.oauthClientId = (e.target as HTMLInputElement).value}
+            />
+            <span class="help-text">
+              Register an app at
+              <a class="help-link" href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" @click=${handleExternalLink}>Azure Portal</a>
+              → Entra ID → App registrations. Add redirect URI: <code>leviathan://oauth/azure/callback</code> (Public client/native).
+              Add API permission: Azure DevOps → user_impersonation.
+            </span>
+          </div>
+          ${this.oauthPending ? html`
+            <div style="display:flex;align-items:center;gap:8px;padding:12px;color:var(--color-text-secondary)">
+              <div style="width:16px;height:16px;border:2px solid var(--color-border);border-top-color:var(--color-accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
+              Waiting for Microsoft sign-in...
+              <button class="btn" @click=${() => { this.oauthPending = false; }}>Cancel</button>
+            </div>
+          ` : html`
+            <div class="btn-row">
+              <button
+                class="btn btn-primary"
+                @click=${this.handleStartEntraOAuth}
+                ?disabled=${this.isLoading || !this.organizationInput.trim() || !this.oauthClientId.trim()}
+              >
+                Sign in with Microsoft
+              </button>
+            </div>
+          `}
+        ` : html`
+          <!-- PAT Form -->
+          <div class="form-group">
+            <label>Organization</label>
+            <input
+              type="text"
+              placeholder="my-organization"
+              .value=${this.organizationInput}
+              @input=${(e: Event) => this.organizationInput = (e.target as HTMLInputElement).value}
+            />
+            <span class="help-text">
+              Your Azure DevOps organization name (from dev.azure.com/{organization})
+            </span>
+          </div>
+
+          <div class="form-group">
+            <label>Personal Access Token (org-scoped)</label>
+            <input
+              type="password"
+              placeholder=${this.hasStoredToken ? '••••••••••••••••••••••••••••••••' : 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'}
+              .value=${this.tokenInput}
+              @input=${(e: Event) => this.tokenInput = (e.target as HTMLInputElement).value}
+            />
+            <span class="help-text">
+              ${this.hasStoredToken
+                ? html`Token saved securely. Enter a new token to update, or click Connect to use the saved token.`
+                : html`Create an <strong>organization-scoped</strong> token at
+                  <a
+                    class="help-link"
+                    href="https://dev.azure.com/${this.organizationInput || '{org}'}/_usersSettings/tokens"
+                    @click=${handleExternalLink}
+                  >Azure DevOps Settings</a>.
+                  Required scopes: <strong>Code (Read & Write)</strong>, <strong>Work Items (Read)</strong>, <strong>Build (Read)</strong>, and <strong>User Profile (Read)</strong>.
+                  <br><br>
+                  <em>Note: Global PATs are deprecated (March 2026) and will stop working December 2026. Use organization-scoped tokens instead.</em>`
+              }
+            </span>
+          </div>
+          <div class="btn-row">
+            ${this.selectedAccountId ? html`
+              <button
+                class="btn btn-danger-outline"
+                @click=${this.handleDeleteIntegration}
+              >
+                Delete Integration
+              </button>
+            ` : nothing}
             <button
-              class="btn btn-danger-outline"
-              @click=${this.handleDeleteIntegration}
+              class="btn btn-primary"
+              @click=${this.tokenInput.trim() ? this.handleSaveToken : this.handleConnectWithStoredToken}
+              ?disabled=${this.isLoading || !this.organizationInput.trim() || (!this.tokenInput.trim() && !this.hasStoredToken)}
             >
-              Delete Integration
+              Connect
             </button>
-          ` : nothing}
-          <button
-            class="btn btn-primary"
-            @click=${this.tokenInput.trim() ? this.handleSaveToken : this.handleConnectWithStoredToken}
-            ?disabled=${this.isLoading || !this.organizationInput.trim() || (!this.tokenInput.trim() && !this.hasStoredToken)}
-          >
-            Connect
-          </button>
-        </div>
+          </div>
+        `}
       </div>
     `;
   }

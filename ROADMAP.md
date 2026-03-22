@@ -340,9 +340,7 @@ By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits**
 - ✅ **GitHub OAuth** — browser-based OAuth 2.0 with PKCE, automatic token refresh, scope management
 - ✅ **GitLab OAuth** — OAuth for GitLab.com and self-hosted instances, custom OAuth application configuration
 - ✅ **Bitbucket** — OAuth authentication, workspace and repository access, PRs/issues/pipelines
-- ✅ **Azure DevOps** — PAT authentication, PRs/work items/pipelines
-
-> **Note on Azure DevOps OAuth:** Microsoft deprecated Azure DevOps native OAuth in April 2025 (full removal 2026). Microsoft Entra ID OAuth only supports work/school accounts. Leviathan uses PAT authentication. We will monitor Microsoft's promised "native MSA support" for Entra ID OAuth. See: https://learn.microsoft.com/en-us/azure/devops/integrate/get-started/authentication/entra-oauth
+- ✅ **Azure DevOps** — Microsoft Entra ID OAuth (work/school accounts) + org-scoped PAT authentication, PRs/work items/pipelines. Global PATs deprecated March 2026, fully removed December 2026.
 
 - ✅ **GitHub App Installation** — users configure their own GitHub App (App ID, private key, installation ID). RS256 JWT authentication with automatic installation token refresh (1-hour tokens, cached with 5-min buffer). Fine-grained, org-level permissions that don't expire.
 - ✅ **Git Credential Manager Detection** — auto-detects GCM, osxkeychain, and configured credential helpers. Delegates credential resolution when available, falls back to Leviathan's built-in keyring storage.

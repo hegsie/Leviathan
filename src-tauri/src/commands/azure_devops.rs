@@ -114,9 +114,16 @@ pub struct AdoPipelineRun {
 // ============================================================================
 
 fn get_auth_header(token: &str) -> String {
-    // Azure DevOps uses Basic auth with empty username and PAT as password
-    let credentials = format!(":{}", token);
-    format!("Basic {}", BASE64.encode(credentials.as_bytes()))
+    // OAuth tokens (from Entra ID) use Bearer auth
+    // PATs use Basic auth with empty username
+    if token.starts_with("ey") {
+        // JWT/OAuth token — use Bearer
+        format!("Bearer {}", token)
+    } else {
+        // PAT — use Basic auth with empty username
+        let credentials = format!(":{}", token);
+        format!("Basic {}", BASE64.encode(credentials.as_bytes()))
+    }
 }
 
 fn build_api_url(organization: &str, project: &str, path: &str) -> String {
