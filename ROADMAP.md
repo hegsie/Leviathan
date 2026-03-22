@@ -164,48 +164,23 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 
 ---
 
-### 3. Long-term: Positioning & Ecosystem
+### 3. Long-term: Polish & Hardening
 
-**Goal:** Position Leviathan as a mature, extensible Git workstation that integrates into developer workflows without compromising privacy.
+**Goal:** Make Leviathan robust, accessible, and trusted for professional use.
 
-#### Extensibility & Customization
+#### Accessibility
 
-- **Plugin system**
-  - Extension API for custom panels and views
-  - Community plugins (without shipping cloud integrations in core)
-  - Plugin marketplace or registry
-  - Safe plugin sandboxing
+- Screen reader support (ARIA labels, semantic HTML)
+- ✅ Keyboard-only navigation
+- ✅ High-contrast theme
+- ✅ Configurable font sizes and density
+- Focus indicators and skip links
+- Full accessibility audit and compliance
 
-#### Opinionated Workflow Support
+#### Security Hardening
 
-- ✅ **Git Flow**
-  - Initialize Git Flow with configuration
-  - Feature/release/hotfix branch creation and finish operations
-  - Automatic branch naming conventions
-  - Version tagging with semantic versioning
-  - Customizable branch prefixes
-
-- **Additional workflow templates** (planned)
-  - GitHub Flow with PR-centric development
-  - GitLab Flow with environment branches
-  - Trunk-Based Development with feature flags
-  - Custom workflow definitions
-
-- **Guided workflows** (planned)
-  - "New feature" wizard (branch, commit, PR creation)
-  - "Release" wizard (tag, changelog, notes)
-  - "Hotfix" wizard (emergency branch, backport)
-  - Workflow-specific validation and guardrails
-
-#### Cross-Platform Excellence
-
-- **Accessibility**
-  - Screen reader support (ARIA labels, semantic HTML)
-  - ✅ Keyboard-only navigation
-  - ✅ High-contrast theme
-  - ✅ Configurable font sizes and density
-  - Focus indicators and skip links
-  - Full accessibility audit and compliance
+- **Paranoid mode** — explicit network operation prompts, remote whitelist/blacklist, offline mode toggle
+- **Supply chain security** — reproducible builds, dependency auditing, CVE monitoring
 
 ---
 
@@ -253,13 +228,6 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
   - Linux: DEB, AppImage, RPM packages
 
 - ✅ **Auto-updates** — Tauri updater with signing key, background download with install prompt
-
-- **Distribution improvements** (planned)
-  - Flatpak distribution on Flathub
-  - Snap package for Ubuntu Software
-  - Delta updates for reduced download size
-  - Update channels (stable, beta, nightly)
-  - Rollback support for failed updates
 
 ---
 
@@ -355,35 +323,6 @@ By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits**
 - ✅ **E2E tests** — 38 Playwright test files covering dialogs, git operations, UI components, OAuth flows
 - ✅ **Rust tests** — integration tests for Tauri commands with TestRepo helpers
 - ✅ **CI/CD** — GitHub Actions build workflow with signing for tagged releases
-
-- **Testing improvements** (planned)
-  - Visual regression testing with screenshot comparisons
-  - Accessibility (a11y) automated testing with axe-core
-  - Performance benchmarks for large repositories
-  - Code coverage thresholds and enforcement
-  - Multi-browser E2E execution (Chromium, Firefox, WebKit)
-
----
-
-### Future Explorations
-
-These are ideas for the distant future, to be evaluated based on user feedback and project maturity:
-
-- **Repository analytics** — commit frequency graphs, contributor visualization, code churn, file heatmaps (all local)
-- **Plugin/extension system** — extension API, community plugins, marketplace, sandboxing
-- **Internationalization (i18n)** — multi-language support, community translations, RTL support
-- **Mobile companion app** — view status, review PRs, approve/comment (read-only)
-
----
-
-## Security & Trust as Differentiators
-
-Reinforce Leviathan's privacy-first positioning through transparency and user control:
-
-- **Plain text storage** — all configuration in human-readable JSON/TOML, easy to inspect and version control
-- **Data locality** — all data stored locally, no cloud sync, clear documentation of what's stored where
-- **Paranoid mode** (planned) — explicit network operation prompts, remote whitelist/blacklist, offline mode
-- **Supply chain security** (planned) — reproducible builds, dependency auditing, CVE monitoring
 
 ---
 
