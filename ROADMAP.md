@@ -290,17 +290,15 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 
 - ✅ **7 Cloud AI Providers** — Ollama, LM Studio, OpenAI, Anthropic Claude, GitHub Copilot, Google Gemini, and embedded local inference. API key management, provider testing, per-provider model selection.
 
-#### Phase 2: Semantic Git History (Q4 2026)
+#### Phase 2: Semantic Git History ✅
 
 *Moving from keyword search to "Meaning Search."*
 
-- **Local RAG (Retrieval-Augmented Generation)**
-  - **Vectorized Commits:** Leviathan indexes every commit message and diff into a local **Qdrant** or **LanceDB** instance (embedded).
-  - **Natural Language History Search:** Users can ask: *"When did we last change the auth logic in the Tauri backend?"* or *"Why was the GPG signing logic moved to the Rust layer?"*
+- ✅ **Semantic Search Infrastructure** — Per-repository SQLite vector storage with sqlite-vec for cosine similarity search. Candle-based (pure Rust) BERT embedding engine using all-MiniLM-L6-v2 (384-dim vectors). Incremental indexing with background builds and progress events.
 
-- **Automatic Changelog Generation**
-  - Instead of regex-based tools like `git-cliff`, the local LLM analyzes a range of commits and generates **User-Facing vs. Developer-Facing** release notes.
-  - **Feature Grouping:** Automatically categorize changes into "Security," "Performance," and "UX" without requiring Conventional Commits.
+- ✅ **Natural Language History Search** — Semantic search mode toggle in the search bar. Embeds queries and finds semantically similar commits via vector similarity. Integrated into the commit graph with highlighting.
+
+- ✅ **Automatic Changelog Generation** — AI-powered release notes from commit history between any two refs. Standalone dialog with tag selectors and copy-to-clipboard. Accessible via command palette ("Generate Changelog").
 
 #### Phase 3: The "Local Bouncer" (Q1 2027)
 
@@ -359,7 +357,7 @@ By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits**
 
 ### Testing & Quality Assurance
 
-- ✅ **Unit tests** — 125+ test files, 2600+ tests via web-test-runner
+- ✅ **Unit tests** — 127+ test files, 2635+ tests via web-test-runner
 - ✅ **E2E tests** — 38 Playwright test files covering dialogs, git operations, UI components, OAuth flows
 - ✅ **Rust tests** — integration tests for Tauri commands with TestRepo helpers
 - ✅ **CI/CD** — GitHub Actions build workflow with signing for tagged releases
@@ -408,4 +406,4 @@ Remember: Leviathan's core value proposition is **privacy-first, offline-capable
 
 ---
 
-Last updated: 2026-03-21
+Last updated: 2026-03-22

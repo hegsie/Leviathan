@@ -6,7 +6,6 @@
 
 pub mod embedding_index;
 pub mod embedding_model;
-#[cfg(feature = "embedding-onnx")]
 pub mod onnx_engine;
 pub mod vector_store;
 

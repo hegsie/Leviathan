@@ -1,6 +1,6 @@
 //! Embedding index orchestrator
 //!
-//! Ties together the ONNX engine, commit walking, and vector store
+//! Ties together the embedding engine, commit walking, and vector store
 //! to build and query a semantic search index for a repository.
 
 use std::collections::HashMap;
@@ -10,10 +10,11 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::RwLock;
 
 use super::embedding_model;
+use super::onnx_engine::OnnxEmbeddingEngine;
 use super::vector_store::{EmbeddingIndexStatus, VectorSearchResult, VectorStore};
 
 /// Shared embedding index state (managed by Tauri)
@@ -33,8 +34,7 @@ pub struct EmbeddingIndexProgress {
 pub struct EmbeddingIndexState {
     models_dir: PathBuf,
     indexes_dir: PathBuf,
-    #[cfg(feature = "embedding-onnx")]
-    engine: Option<super::onnx_engine::OnnxEmbeddingEngine>,
+    engine: Option<OnnxEmbeddingEngine>,
     active_builds: HashMap<String, Arc<AtomicBool>>,
 }
 
@@ -44,7 +44,6 @@ impl EmbeddingIndexState {
         Self {
             models_dir,
             indexes_dir,
-            #[cfg(feature = "embedding-onnx")]
             engine: None,
             active_builds: HashMap::new(),
         }
@@ -69,16 +68,15 @@ impl EmbeddingIndexState {
         self.indexes_dir.join(format!("{}.db", short_hash))
     }
 
-    /// Ensure the ONNX engine is loaded (lazy init).
-    #[cfg(feature = "embedding-onnx")]
-    fn ensure_engine(&mut self) -> Result<&mut super::onnx_engine::OnnxEmbeddingEngine, String> {
+    /// Ensure the embedding engine is loaded (lazy init).
+    fn ensure_engine(&mut self) -> Result<&mut OnnxEmbeddingEngine, String> {
         if self.engine.is_none() {
             if !self.is_model_downloaded() {
                 return Err("Embedding model not downloaded. Please download it first.".to_string());
             }
 
             let model_dir = embedding_model::get_model_dir(&self.models_dir);
-            let engine = super::onnx_engine::OnnxEmbeddingEngine::load(&model_dir)?;
+            let engine = OnnxEmbeddingEngine::load(&model_dir)?;
             self.engine = Some(engine);
         }
 
@@ -115,14 +113,11 @@ impl EmbeddingIndexState {
 }
 
 /// Build the full embedding index for a repository.
-#[cfg(feature = "embedding-onnx")]
 pub async fn build_embedding_index(
     state: &SharedEmbeddingIndex,
     repo_path: String,
     app_handle: AppHandle,
 ) -> Result<usize, String> {
-    use tauri::Emitter;
-
     let (cancel_flag, db_path) = {
         let mut guard = state.write().await;
         guard.ensure_engine()?;
@@ -200,16 +195,6 @@ pub async fn build_embedding_index(
     Ok(total_count)
 }
 
-/// Build stub when ONNX feature is not enabled
-#[cfg(not(feature = "embedding-onnx"))]
-pub async fn build_embedding_index(
-    _state: &SharedEmbeddingIndex,
-    _repo_path: String,
-    _app_handle: AppHandle,
-) -> Result<usize, String> {
-    Err("Semantic search requires the 'embedding-onnx' feature. Rebuild with: cargo build --features embedding-onnx".to_string())
-}
-
 /// Incrementally update the embedding index with new commits.
 pub async fn update_embedding_index(
     state: &SharedEmbeddingIndex,
@@ -220,7 +205,6 @@ pub async fn update_embedding_index(
 }
 
 /// Perform a semantic search on the embedding index.
-#[cfg(feature = "embedding-onnx")]
 pub async fn semantic_search(
     state: &SharedEmbeddingIndex,
     repo_path: String,
@@ -240,17 +224,6 @@ pub async fn semantic_search(
 
     let store = VectorStore::open(&db_path)?;
     store.search_similar(&query_embedding, limit, 0.2)
-}
-
-/// Semantic search stub when ONNX feature is not enabled
-#[cfg(not(feature = "embedding-onnx"))]
-pub async fn semantic_search(
-    _state: &SharedEmbeddingIndex,
-    _repo_path: String,
-    _query: String,
-    _limit: usize,
-) -> Result<Vec<VectorSearchResult>, String> {
-    Err("Semantic search requires the 'embedding-onnx' feature. Rebuild with: cargo build --features embedding-onnx".to_string())
 }
 
 /// Get the status of the embedding index for a repository.
@@ -281,7 +254,6 @@ pub async fn get_embedding_status(
 }
 
 /// Collect all commits from a repository as (oid, text_for_embedding, summary) tuples.
-#[cfg(feature = "embedding-onnx")]
 fn collect_commits(repo_path: &str) -> Result<Vec<(String, String, String)>, String> {
     let repo =
         git2::Repository::open(repo_path).map_err(|e| format!("Failed to open repo: {}", e))?;

@@ -1,52 +1,77 @@
-//! ONNX-based sentence embedding engine
+//! Candle-based sentence embedding engine
 //!
-//! Loads an all-MiniLM-L6-v2 ONNX model and produces 384-dimensional
-//! normalized embeddings from text input.
+//! Loads an all-MiniLM-L6-v2 model via candle (pure Rust) and produces
+//! 384-dimensional normalized embeddings from text input.
 
 use std::path::Path;
 
-use ndarray::{Array1, Array2};
-use ort::session::Session;
-use ort::value::Value;
+use candle_core::{Device, Tensor};
+use candle_nn::VarBuilder;
+use candle_transformers::models::bert::{BertModel, Config};
 use tokenizers::Tokenizer;
 
-/// ONNX-based sentence embedding engine
+/// Candle-based sentence embedding engine
 pub struct OnnxEmbeddingEngine {
-    session: Session,
+    model: BertModel,
     tokenizer: Tokenizer,
+    device: Device,
     embedding_dim: usize,
 }
 
 impl OnnxEmbeddingEngine {
-    /// Load the ONNX model and tokenizer from a directory.
+    /// Load the model and tokenizer from a directory.
     ///
-    /// The directory must contain `model.onnx` and `tokenizer.json`.
+    /// The directory must contain `model.safetensors` (or `pytorch_model.bin`),
+    /// `tokenizer.json`, and `config.json`.
     pub fn load(model_dir: &Path) -> Result<Self, String> {
-        let model_path = model_dir.join("model.onnx");
-        let tokenizer_path = model_dir.join("tokenizer.json");
+        let device = Device::Cpu;
 
-        if !model_path.exists() {
-            return Err(format!("Model file not found: {}", model_path.display()));
+        // Load config
+        let config_path = model_dir.join("config.json");
+        if !config_path.exists() {
+            return Err(format!("Config file not found: {}", config_path.display()));
         }
+        let config_str = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read config: {}", e))?;
+        let config: Config = serde_json::from_str(&config_str)
+            .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+        let embedding_dim = config.hidden_size;
+
+        // Load model weights
+        let weights_path = model_dir.join("model.safetensors");
+        let vb = if weights_path.exists() {
+            unsafe {
+                VarBuilder::from_mmaped_safetensors(
+                    &[weights_path],
+                    candle_core::DType::F32,
+                    &device,
+                )
+                .map_err(|e| format!("Failed to load safetensors: {}", e))?
+            }
+        } else {
+            return Err("Model weights not found. Expected model.safetensors".to_string());
+        };
+
+        let model = BertModel::load(vb, &config)
+            .map_err(|e| format!("Failed to load BERT model: {}", e))?;
+
+        // Load tokenizer
+        let tokenizer_path = model_dir.join("tokenizer.json");
         if !tokenizer_path.exists() {
             return Err(format!(
                 "Tokenizer file not found: {}",
                 tokenizer_path.display()
             ));
         }
-
-        let session = Session::builder()
-            .map_err(|e| format!("Failed to create ONNX session builder: {}", e))?
-            .commit_from_file(&model_path)
-            .map_err(|e| format!("Failed to load ONNX model: {}", e))?;
-
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| format!("Failed to load tokenizer: {}", e))?;
 
         Ok(Self {
-            session,
+            model,
             tokenizer,
-            embedding_dim: 384,
+            device,
+            embedding_dim,
         })
     }
 
@@ -65,9 +90,6 @@ impl OnnxEmbeddingEngine {
     }
 
     /// Batch embed multiple texts for efficiency.
-    ///
-    /// Processes in chunks of `batch_size` texts at a time.
-    /// Returns a Vec of normalized embedding vectors.
     pub fn embed_batch(
         &mut self,
         texts: &[&str],
@@ -83,7 +105,7 @@ impl OnnxEmbeddingEngine {
         Ok(all_embeddings)
     }
 
-    /// Embed a single chunk of texts (no chunking logic)
+    /// Embed a single chunk of texts
     fn embed_chunk(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
         let batch_size = texts.len();
         if batch_size == 0 {
@@ -101,13 +123,17 @@ impl OnnxEmbeddingEngine {
             .iter()
             .map(|e| e.get_ids().len())
             .max()
-            .unwrap_or(0);
-        let max_len = max_len.min(512); // Cap at model's max sequence length
+            .unwrap_or(0)
+            .min(512);
+
+        if max_len == 0 {
+            return Ok(vec![vec![0.0; self.embedding_dim]; batch_size]);
+        }
 
         // Build input tensors
-        let mut input_ids = Array2::<i64>::zeros((batch_size, max_len));
-        let mut attention_mask = Array2::<i64>::zeros((batch_size, max_len));
-        let mut token_type_ids = Array2::<i64>::zeros((batch_size, max_len));
+        let mut input_ids_vec = vec![0u32; batch_size * max_len];
+        let mut attention_mask_vec = vec![0u32; batch_size * max_len];
+        let mut token_type_ids_vec = vec![0u32; batch_size * max_len];
 
         for (i, encoding) in encodings.iter().enumerate() {
             let ids = encoding.get_ids();
@@ -116,66 +142,45 @@ impl OnnxEmbeddingEngine {
             let len = ids.len().min(max_len);
 
             for j in 0..len {
-                input_ids[[i, j]] = ids[j] as i64;
-                attention_mask[[i, j]] = mask[j] as i64;
-                token_type_ids[[i, j]] = types[j] as i64;
+                input_ids_vec[i * max_len + j] = ids[j];
+                attention_mask_vec[i * max_len + j] = mask[j];
+                token_type_ids_vec[i * max_len + j] = types[j];
             }
         }
 
-        // Run inference — Value::from_array requires owned arrays
-        let input_ids_value = Value::from_array(input_ids.clone())
+        let input_ids = Tensor::from_vec(input_ids_vec, (batch_size, max_len), &self.device)
             .map_err(|e| format!("Failed to create input_ids tensor: {}", e))?;
-        let attention_mask_clone = attention_mask.clone();
-        let attention_mask_value = Value::from_array(attention_mask_clone)
-            .map_err(|e| format!("Failed to create attention_mask tensor: {}", e))?;
-        let token_type_ids_value = Value::from_array(token_type_ids.clone())
-            .map_err(|e| format!("Failed to create token_type_ids tensor: {}", e))?;
+        let attention_mask = Tensor::from_vec(
+            attention_mask_vec.clone(),
+            (batch_size, max_len),
+            &self.device,
+        )
+        .map_err(|e| format!("Failed to create attention_mask tensor: {}", e))?;
+        let token_type_ids =
+            Tensor::from_vec(token_type_ids_vec, (batch_size, max_len), &self.device)
+                .map_err(|e| format!("Failed to create token_type_ids tensor: {}", e))?;
 
-        let outputs = self
-            .session
-            .run(ort::inputs![
-                "input_ids" => input_ids_value,
-                "attention_mask" => attention_mask_value,
-                "token_type_ids" => token_type_ids_value,
-            ])
-            .map_err(|e| format!("ONNX inference failed: {}", e))?;
-
-        // Extract output tensor: shape [batch, seq_len, hidden_dim]
-        let output = &outputs[0];
-
-        let output_array = output
-            .try_extract_array::<f32>()
-            .map_err(|e| format!("Failed to extract output tensor: {}", e))?;
-
-        let shape = output_array.shape();
-
-        if shape.len() != 3 {
-            return Err(format!(
-                "Unexpected output shape: {:?}, expected [batch, seq, dim]",
-                shape
-            ));
-        }
-
-        let seq_len = shape[1];
-        let hidden_dim = shape[2];
+        // Run inference
+        let output = self
+            .model
+            .forward(&input_ids, &token_type_ids, Some(&attention_mask))
+            .map_err(|e| format!("Model forward pass failed: {}", e))?;
 
         // Mean pooling with attention mask
         let mut embeddings = Vec::with_capacity(batch_size);
 
         for i in 0..batch_size {
-            // Extract hidden states for this sample
-            let mut hidden = Array2::<f32>::zeros((seq_len, hidden_dim));
-            for s in 0..seq_len {
-                for d in 0..hidden_dim {
-                    hidden[[s, d]] = output_array[[i, s, d]];
-                }
-            }
+            let hidden = output
+                .get(i)
+                .map_err(|e| format!("Failed to get batch element: {}", e))?;
 
-            let mask = attention_mask.row(i).to_owned();
+            // Build mask for this sample
+            let mask_start = i * max_len;
+            let mask_slice = &attention_mask_vec[mask_start..mask_start + max_len];
 
-            let pooled = mean_pool(&hidden, &mask);
+            let pooled = mean_pool_tensor(&hidden, mask_slice, self.embedding_dim)?;
             let normalized = l2_normalize(&pooled);
-            embeddings.push(normalized.to_vec());
+            embeddings.push(normalized);
         }
 
         Ok(embeddings)
@@ -183,35 +188,48 @@ impl OnnxEmbeddingEngine {
 }
 
 /// Mean pooling: average hidden states weighted by attention mask
-fn mean_pool(hidden_states: &Array2<f32>, attention_mask: &Array1<i64>) -> Array1<f32> {
-    let seq_len = hidden_states.shape()[0];
-    let hidden_dim = hidden_states.shape()[1];
+fn mean_pool_tensor(
+    hidden_states: &Tensor,
+    attention_mask: &[u32],
+    hidden_dim: usize,
+) -> Result<Vec<f32>, String> {
+    let hidden_data: Vec<f32> = hidden_states
+        .flatten_all()
+        .map_err(|e| format!("Failed to flatten: {}", e))?
+        .to_vec1()
+        .map_err(|e| format!("Failed to convert to vec: {}", e))?;
 
-    let mut sum = Array1::<f32>::zeros(hidden_dim);
+    let seq_len = attention_mask.len();
+    let mut sum = vec![0.0f32; hidden_dim];
     let mut count: f32 = 0.0;
 
-    for i in 0..seq_len {
-        let mask_val = attention_mask[i] as f32;
+    for (i, &mask_val_u32) in attention_mask.iter().enumerate().take(seq_len) {
+        let mask_val = mask_val_u32 as f32;
         if mask_val > 0.0 {
-            sum += &(&hidden_states.row(i) * mask_val);
+            let offset = i * hidden_dim;
+            for j in 0..hidden_dim {
+                sum[j] += hidden_data[offset + j] * mask_val;
+            }
             count += mask_val;
         }
     }
 
     if count > 0.0 {
-        sum /= count;
+        for val in &mut sum {
+            *val /= count;
+        }
     }
 
-    sum
+    Ok(sum)
 }
 
 /// L2 normalize a vector
-fn l2_normalize(v: &Array1<f32>) -> Array1<f32> {
-    let norm = v.mapv(|x| x * x).sum().sqrt();
+fn l2_normalize(v: &[f32]) -> Vec<f32> {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
-        v / norm
+        v.iter().map(|x| x / norm).collect()
     } else {
-        v.clone()
+        v.to_vec()
     }
 }
 
@@ -220,20 +238,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_mean_pool() {
-        let hidden = Array2::from_shape_vec((3, 2), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        let mask = Array1::from_vec(vec![1, 1, 0]); // Only first two tokens
-
-        let result = mean_pool(&hidden, &mask);
-        assert!((result[0] - 2.0).abs() < 1e-6); // (1+3)/2
-        assert!((result[1] - 3.0).abs() < 1e-6); // (2+4)/2
-    }
-
-    #[test]
     fn test_l2_normalize() {
-        let v = Array1::from_vec(vec![3.0, 4.0]);
+        let v = vec![3.0, 4.0];
         let result = l2_normalize(&v);
-        let norm: f32 = result.mapv(|x| x * x).sum().sqrt();
+        let norm: f32 = result.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-6);
         assert!((result[0] - 0.6).abs() < 1e-6);
         assert!((result[1] - 0.8).abs() < 1e-6);
@@ -241,18 +249,33 @@ mod tests {
 
     #[test]
     fn test_l2_normalize_zero() {
-        let v = Array1::from_vec(vec![0.0, 0.0]);
+        let v = vec![0.0, 0.0];
         let result = l2_normalize(&v);
         assert!((result[0]).abs() < 1e-6);
         assert!((result[1]).abs() < 1e-6);
     }
 
     #[test]
-    fn test_mean_pool_all_masked() {
-        let hidden = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-        let mask = Array1::from_vec(vec![0, 0]);
+    fn test_mean_pool_tensor_basic() {
+        // Create a simple tensor: 3 tokens, 2 dims
+        let device = Device::Cpu;
+        let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let hidden = Tensor::from_vec(data, (3, 2), &device).unwrap();
+        let mask = vec![1u32, 1, 0]; // Only first two tokens
 
-        let result = mean_pool(&hidden, &mask);
+        let result = mean_pool_tensor(&hidden, &mask, 2).unwrap();
+        assert!((result[0] - 2.0).abs() < 1e-6); // (1+3)/2
+        assert!((result[1] - 3.0).abs() < 1e-6); // (2+4)/2
+    }
+
+    #[test]
+    fn test_mean_pool_tensor_all_masked() {
+        let device = Device::Cpu;
+        let data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let hidden = Tensor::from_vec(data, (2, 2), &device).unwrap();
+        let mask = vec![0u32, 0];
+
+        let result = mean_pool_tensor(&hidden, &mask, 2).unwrap();
         assert!((result[0]).abs() < 1e-6);
         assert!((result[1]).abs() < 1e-6);
     }

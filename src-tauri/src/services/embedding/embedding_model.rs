@@ -16,9 +16,9 @@ pub struct EmbeddingModelEntry {
     pub id: &'static str,
     pub display_name: &'static str,
     pub hf_repo: &'static str,
-    pub onnx_filename: &'static str,
+    pub weights_filename: &'static str,
     pub tokenizer_filename: &'static str,
-    pub sha256_onnx: &'static str,
+    pub config_filename: &'static str,
     pub size_bytes: u64,
     pub embedding_dim: usize,
 }
@@ -39,11 +39,10 @@ pub fn default_embedding_model() -> EmbeddingModelEntry {
         id: "all-minilm-l6-v2",
         display_name: "all-MiniLM-L6-v2",
         hf_repo: "sentence-transformers/all-MiniLM-L6-v2",
-        onnx_filename: "onnx/model.onnx",
+        weights_filename: "model.safetensors",
         tokenizer_filename: "tokenizer.json",
-        // TODO: Replace with actual SHA-256 hash after first download verification
-        sha256_onnx: "placeholder_sha256_minilm",
-        size_bytes: 22_700_000, // ~22MB
+        config_filename: "config.json",
+        size_bytes: 90_000_000, // ~90MB for safetensors
         embedding_dim: 384,
     }
 }
@@ -56,7 +55,9 @@ pub fn get_model_dir(models_dir: &Path) -> PathBuf {
 /// Check if the embedding model files are downloaded
 pub fn is_model_downloaded(models_dir: &Path) -> bool {
     let model_dir = get_model_dir(models_dir);
-    model_dir.join("model.onnx").exists() && model_dir.join("tokenizer.json").exists()
+    model_dir.join("model.safetensors").exists()
+        && model_dir.join("tokenizer.json").exists()
+        && model_dir.join("config.json").exists()
 }
 
 /// Download the embedding model files from HuggingFace.
@@ -75,19 +76,18 @@ pub async fn download_embedding_model(
     std::fs::create_dir_all(&model_dir)
         .map_err(|e| format!("Failed to create model directory: {}", e))?;
 
-    // Download model.onnx
+    // Download model.safetensors
     download_hf_file(
         model.hf_repo,
-        model.onnx_filename,
-        &model_dir.join("model.onnx"),
-        "model.onnx",
+        model.weights_filename,
+        &model_dir.join("model.safetensors"),
+        "model.safetensors",
         app_handle,
         cancel_flag,
     )
     .await?;
 
     if cancel_flag.load(Ordering::Relaxed) {
-        // Clean up partial downloads
         let _ = std::fs::remove_dir_all(&model_dir);
         return Err("Download cancelled".to_string());
     }
@@ -98,6 +98,22 @@ pub async fn download_embedding_model(
         model.tokenizer_filename,
         &model_dir.join("tokenizer.json"),
         "tokenizer.json",
+        app_handle,
+        cancel_flag,
+    )
+    .await?;
+
+    if cancel_flag.load(Ordering::Relaxed) {
+        let _ = std::fs::remove_dir_all(&model_dir);
+        return Err("Download cancelled".to_string());
+    }
+
+    // Download config.json
+    download_hf_file(
+        model.hf_repo,
+        model.config_filename,
+        &model_dir.join("config.json"),
+        "config.json",
         app_handle,
         cancel_flag,
     )
@@ -211,8 +227,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let model_dir = get_model_dir(tmp.path());
         std::fs::create_dir_all(&model_dir).unwrap();
-        std::fs::write(model_dir.join("model.onnx"), b"fake").unwrap();
+        std::fs::write(model_dir.join("model.safetensors"), b"fake").unwrap();
         std::fs::write(model_dir.join("tokenizer.json"), b"fake").unwrap();
+        std::fs::write(model_dir.join("config.json"), b"fake").unwrap();
         assert!(is_model_downloaded(tmp.path()));
     }
 }
