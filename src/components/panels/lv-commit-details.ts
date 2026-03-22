@@ -11,7 +11,6 @@ import { parseIssueReferences, isClosingKeyword } from '../../services/git.servi
 import type { IssueReference } from '../../services/git.service.ts';
 import type { Commit, RefInfo, CommitFileEntry, FileStatus } from '../../types/git.types.ts';
 import { loggers, openExternalUrl } from '../../utils/index.ts';
-import { showToast } from '../../services/notification.service.ts';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { join } from '@tauri-apps/api/path';
 
@@ -520,11 +519,9 @@ export class LvCommitDetails extends LitElement {
         log.debug('loadFiles: loaded', this.files.length, 'files');
       } else {
         console.error('loadFiles: failed', result.error);
-        showToast('Failed to load commit files', 'error');
       }
     } catch (err) {
       console.error('Failed to load commit files:', err);
-      showToast('Failed to load commit files', 'error');
     } finally {
       this.loadingFiles = false;
     }

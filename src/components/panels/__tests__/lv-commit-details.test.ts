@@ -1,7 +1,7 @@
 /**
  * Commit Details Panel Tests
  *
- * Tests error toast on loadFiles failure.
+ * Tests error handling on loadFiles failure.
  */
 
 import { expect, fixture, html } from '@open-wc/testing';
@@ -34,7 +34,6 @@ const mockInvoke: MockInvoke = async (command: string) => {
 // Import AFTER setting up the mock
 import '../lv-commit-details.ts';
 import type { LvCommitDetails } from '../lv-commit-details.ts';
-import { uiStore } from '../../../stores/ui.store.ts';
 
 const mockCommit: Commit = {
   oid: 'abc123def456',
@@ -51,8 +50,6 @@ const mockCommit: Commit = {
 describe('lv-commit-details', () => {
   beforeEach(() => {
     failingCommands = new Set();
-    const state = uiStore.getState();
-    state.toasts.forEach(t => state.removeToast(t.id));
   });
 
   it('renders with a commit', async () => {
@@ -63,7 +60,7 @@ describe('lv-commit-details', () => {
     expect(el).to.not.be.null;
   });
 
-  it('shows error toast on loadFiles API failure', async () => {
+  it('handles loadFiles failure gracefully', async () => {
     failingCommands.add('get_commit_files');
 
     const el = await fixture<LvCommitDetails>(
@@ -73,9 +70,11 @@ describe('lv-commit-details', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (el as any).loadFiles();
 
-    const toasts = uiStore.getState().toasts;
-    const errorToast = toasts.find(t => t.type === 'error');
-    expect(errorToast).to.not.be.undefined;
-    expect(errorToast!.message).to.include('Failed to load commit files');
+    // Files should remain empty after failure
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).files).to.have.length(0);
+    // Loading state should be cleared
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).loadingFiles).to.be.false;
   });
 });
