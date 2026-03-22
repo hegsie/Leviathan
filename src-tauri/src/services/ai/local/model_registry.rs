@@ -50,8 +50,9 @@ impl Default for ModelRegistry {
                     display_name: "Gemma 3 1B (Q4_K_M)".to_string(),
                     hf_repo: "unsloth/gemma-3-1b-it-GGUF".to_string(),
                     hf_filename: "gemma-3-1b-it-Q4_K_M.gguf".to_string(),
-                    sha256: String::new(), // SHA-256 verification skipped — computed on first download
-                    size_bytes: 700 * 1_048_576, // ~700 MB
+                    sha256: "8270790f3ab69fdfe860b7b64008d9a19986d8df7e407bb018184caa08798ebd"
+                        .to_string(),
+                    size_bytes: 806_058_272,
                     min_ram_bytes: 8 * GB,
                     tier: ModelTier::UltraLight,
                     architecture: "gemma3".to_string(),
@@ -62,8 +63,9 @@ impl Default for ModelRegistry {
                     display_name: "Llama 3.2 1B (Q4_K_M)".to_string(),
                     hf_repo: "unsloth/Llama-3.2-1B-Instruct-GGUF".to_string(),
                     hf_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf".to_string(),
-                    sha256: String::new(), // SHA-256 verification skipped — computed on first download
-                    size_bytes: 750 * 1_048_576, // ~750 MB
+                    sha256: "3f5a22426976ab26cfe84dba63c1d08391717abb1af893e10f1b2968d862dcc1"
+                        .to_string(),
+                    size_bytes: 750 * 1_048_576,
                     min_ram_bytes: 8 * GB,
                     tier: ModelTier::UltraLight,
                     architecture: "llama".to_string(),
@@ -74,8 +76,9 @@ impl Default for ModelRegistry {
                     display_name: "Phi-4 Mini 3.8B (Q4_K_M)".to_string(),
                     hf_repo: "unsloth/Phi-4-mini-instruct-GGUF".to_string(),
                     hf_filename: "Phi-4-mini-instruct-Q4_K_M.gguf".to_string(),
-                    sha256: String::new(), // SHA-256 verification skipped — computed on first download
-                    size_bytes: 2_300 * 1_048_576, // ~2.3 GB
+                    sha256: "88c00229914083cd112853aab84ed51b87bdf6b9ce42f532d8c85c7c63b1730a"
+                        .to_string(),
+                    size_bytes: 2_300 * 1_048_576,
                     min_ram_bytes: 16 * GB,
                     tier: ModelTier::Standard,
                     architecture: "phi".to_string(),
@@ -86,8 +89,9 @@ impl Default for ModelRegistry {
                     display_name: "Gemma 3 4B (Q4_K_M)".to_string(),
                     hf_repo: "unsloth/gemma-3-4b-it-GGUF".to_string(),
                     hf_filename: "gemma-3-4b-it-Q4_K_M.gguf".to_string(),
-                    sha256: String::new(), // SHA-256 verification skipped — computed on first download
-                    size_bytes: 2_500 * 1_048_576, // ~2.5 GB
+                    sha256: "04a43a22e8d2003deda5acc262f68ec1005fa76c735a9962a8c77042a74a7d19"
+                        .to_string(),
+                    size_bytes: 2_500 * 1_048_576,
                     min_ram_bytes: 16 * GB,
                     tier: ModelTier::Standard,
                     architecture: "gemma3".to_string(),
