@@ -285,9 +285,13 @@ export class LvToastContainer extends LitElement {
 
   render() {
     return html`
+      <div aria-live="polite" aria-atomic="false">
       ${this.toasts.map(
         (toast) => html`
-          <div class="toast ${toast.type} ${this.exitingToasts.has(toast.id) ? 'exiting' : ''}">
+          <div
+            class="toast ${toast.type} ${this.exitingToasts.has(toast.id) ? 'exiting' : ''}"
+            role="${toast.type === 'error' ? 'alert' : 'status'}"
+          >
             <div class="toast-icon">
               ${this.getIcon(toast.type)}
             </div>
@@ -317,6 +321,7 @@ export class LvToastContainer extends LitElement {
           </div>
         `
       )}
+      </div>
     `;
   }
 }

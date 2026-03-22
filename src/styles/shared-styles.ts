@@ -15,10 +15,24 @@ export const sharedStyles = css`
     box-sizing: inherit;
   }
 
-  /* Focus styles */
+  /* Focus styles — keyboard-only focus indicators (WCAG 2.4.7) */
   :focus-visible {
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
+  }
+
+  /* Ensure inputs/textareas/selects show focus ring on keyboard navigation
+     even when components suppress outline on :focus for mouse users */
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 0;
+  }
+
+  /* Suppress focus ring for mouse clicks (non-keyboard) */
+  :focus:not(:focus-visible) {
+    outline: none;
   }
 
   /* Button reset */

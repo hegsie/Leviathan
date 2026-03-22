@@ -170,12 +170,14 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 
 #### Accessibility
 
-- Screen reader support (ARIA labels, semantic HTML)
+- ✅ Screen reader support — `aria-live` toast announcements, `role="dialog"` with `aria-modal`, command palette `role="combobox"` with `role="listbox"`/`role="option"`, graph canvas `aria-label` with commit count
 - ✅ Keyboard-only navigation
 - ✅ High-contrast theme
 - ✅ Configurable font sizes and density
-- Focus indicators and skip links
-- Full accessibility audit and compliance
+- ✅ Focus indicators — global `:focus-visible` styles in shared stylesheet, keyboard-only outlines via `:focus:not(:focus-visible)` suppression
+- ✅ Skip link — "Skip to main content" link appears on Tab, jumps past toolbar
+- ✅ Focus trap in modals — Tab cycles within dialog, focus restored on close
+- ✅ Accessibility audit — addressed WCAG 2.4.7 (Focus Visible), 4.1.3 (Status Messages), 2.4.3 (Focus Order)
 
 #### Security Hardening
 

@@ -530,6 +530,8 @@ export class LvCommandPalette extends LitElement {
         sections.push(html`
           <div
             class="command ${index === this.selectedIndex ? 'selected' : ''}"
+            role="option"
+            aria-selected=${index === this.selectedIndex}
             @click=${() => this.handleCommandClick(index)}
             @mouseenter=${() => { this.selectedIndex = index; }}
           >
@@ -547,7 +549,7 @@ export class LvCommandPalette extends LitElement {
   render() {
     return html`
       <div class="overlay" @click=${this.handleOverlayClick}></div>
-      <div class="palette">
+      <div class="palette" role="dialog" aria-label="Command Palette">
         <div class="search-container">
           <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="11" cy="11" r="8"></circle>
@@ -560,9 +562,14 @@ export class LvCommandPalette extends LitElement {
             .value=${this.searchQuery}
             @input=${this.handleInput}
             @keydown=${this.handleKeyDown}
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="palette-results"
+            aria-autocomplete="list"
+            aria-label="Search commands"
           />
         </div>
-        <div class="results">
+        <div class="results" id="palette-results" role="listbox">
           ${this.renderCommands()}
         </div>
         <div class="footer">

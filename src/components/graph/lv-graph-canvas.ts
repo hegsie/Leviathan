@@ -2310,7 +2310,13 @@ export class LvGraphCanvas extends LitElement {
           <div class="scroll-container">
             <div class="scroll-content"></div>
           </div>
-          <canvas tabindex="0"></canvas>
+          <canvas
+            tabindex="0"
+            role="img"
+            aria-label="${this.totalLoadedCommits > 0
+              ? `Git commit history showing ${this.totalLoadedCommits} commits`
+              : 'Loading commit graph...'}"
+          ></canvas>
 
           ${handlePositions
             ? html`

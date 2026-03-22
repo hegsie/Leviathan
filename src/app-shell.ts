@@ -91,6 +91,23 @@ export class AppShell extends LitElement {
         color: var(--color-text-primary);
       }
 
+      .skip-link {
+        position: absolute;
+        top: -100%;
+        left: 16px;
+        z-index: 10000;
+        padding: 8px 16px;
+        background: var(--color-accent);
+        color: white;
+        text-decoration: none;
+        border-radius: 0 0 6px 6px;
+        font-size: 14px;
+      }
+
+      .skip-link:focus {
+        top: 0;
+      }
+
       .main-content {
         display: flex;
         flex: 1;
@@ -2303,6 +2320,12 @@ export class AppShell extends LitElement {
 
   render() {
     return html`
+      <a class="skip-link" href="#main-content" @click=${(e: Event) => {
+        e.preventDefault();
+        const main = this.shadowRoot?.querySelector('#main-content') as HTMLElement;
+        main?.focus();
+      }}>Skip to main content</a>
+
       <lv-toolbar
         @open-settings=${() => { this.showSettings = true; }}
         @open-shortcuts=${() => { this.showShortcuts = true; }}
@@ -2344,7 +2367,7 @@ export class AppShell extends LitElement {
                 ></div>
               ` : ''}
 
-              <main class="center-panel">
+              <main id="main-content" class="center-panel" tabindex="-1">
                 ${this.activeRepository.repository.state !== 'clean'
                   ? html`
                       <div class="operation-banner ${this.activeRepository.repository.state}">
