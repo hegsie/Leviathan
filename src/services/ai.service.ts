@@ -133,6 +133,30 @@ export async function suggestConflictResolution(
 }
 
 /**
+ * Generated changelog result
+ */
+export interface GeneratedChangelog {
+  content: string;
+}
+
+/**
+ * Generate a changelog from commits between two refs
+ */
+export async function generateChangelog(
+  repoPath: string,
+  baseRef: string,
+  compareRef: string,
+  maxCommits?: number,
+): Promise<CommandResult<GeneratedChangelog>> {
+  return invokeCommand<GeneratedChangelog>('generate_changelog', {
+    repoPath,
+    baseRef,
+    compareRef,
+    maxCommits: maxCommits ?? null,
+  });
+}
+
+/**
  * Check if AI is available (provider configured and working)
  */
 export async function isAiAvailable(): Promise<boolean> {

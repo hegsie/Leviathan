@@ -4,8 +4,9 @@
 
 use crate::error::{LeviathanError, Result};
 use crate::services::ai::{
-    AiProviderInfo, AiProviderType, AiState, ConflictResolutionSuggestion, GeneratedCommitMessage,
-    CONFLICT_RESOLUTION_PROMPT, MAX_CONFLICT_CONTEXT_CHARS,
+    AiProviderInfo, AiProviderType, AiState, ConflictResolutionSuggestion, GeneratedChangelog,
+    GeneratedCommitMessage, CHANGELOG_PROMPT, CONFLICT_RESOLUTION_PROMPT, MAX_CHANGELOG_CHARS,
+    MAX_CONFLICT_CONTEXT_CHARS,
 };
 use tauri::{command, State};
 
@@ -184,6 +185,68 @@ pub async fn suggest_conflict_resolution(
 
     // Try to parse as JSON
     parse_conflict_suggestion(&response)
+}
+
+/// Generate a changelog from commits between two refs
+#[command]
+pub async fn generate_changelog(
+    state: State<'_, AiState>,
+    repo_path: String,
+    base_ref: String,
+    compare_ref: String,
+    max_commits: Option<u32>,
+) -> Result<GeneratedChangelog> {
+    let max_commits = max_commits.unwrap_or(200);
+
+    // Get commits between the two refs using git log
+    let commits_text = get_commits_between_refs(&repo_path, &base_ref, &compare_ref, max_commits)?;
+
+    if commits_text.is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "No commits found between the specified refs".to_string(),
+        ));
+    }
+
+    // Truncate if too long
+    let truncated = truncate_content(&commits_text, MAX_CHANGELOG_CHARS);
+
+    let service = state.read().await;
+    let response = service
+        .generate_text(CHANGELOG_PROMPT, truncated, Some(2000))
+        .await
+        .map_err(LeviathanError::OperationFailed)?;
+
+    Ok(GeneratedChangelog {
+        content: response.trim().to_string(),
+    })
+}
+
+/// Get commit messages between two refs as a formatted text block
+fn get_commits_between_refs(
+    repo_path: &str,
+    base_ref: &str,
+    compare_ref: &str,
+    max_commits: u32,
+) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("log")
+        .arg("--format=%h %s%n%b%n---")
+        .arg(format!("-{}", max_commits))
+        .arg(format!("{}..{}", base_ref, compare_ref))
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git log: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LeviathanError::OperationFailed(format!(
+            "git log failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// Truncate content to a maximum character length at a line boundary

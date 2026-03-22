@@ -49,7 +49,10 @@ Leviathan is built for developers who value **privacy, performance, and control*
 | No account required | ✅ | ✅ | ❌ (free tier limit) | ❌ |
 | Open source | ✅ | ✅ | ❌ | ❌ |
 | Local AI features | ✅ | ❌ | ✅ (cloud only) | ❌ |
-| Cloud AI providers | ✅ | ❌ | ✅ | ❌ |
+| Cloud AI providers | ✅ (7) | ❌ | ✅ | ❌ |
+| AI changelog generation | ✅ | ❌ | ❌ | ❌ |
+| AI conflict resolution | ✅ | ❌ | ❌ | ❌ |
+| MCP server | ✅ | ❌ | ❌ | ❌ |
 | Interactive rebase UI | ✅ | ❌ | ✅ | ✅ |
 | 3-way merge editor | ✅ | ❌ | ✅ | ✅ |
 | GPG signing | ✅ | ✅ | ✅ | ✅ |
@@ -178,13 +181,16 @@ Leviathan is built for developers who value **privacy, performance, and control*
 
 ### AI-Powered Features
 - **Commit Message Generation** - generate conventional commit messages from staged diffs
-- **Multiple AI Providers** - supports local (Ollama, LM Studio) and cloud-based (OpenAI, Anthropic, GitHub Copilot) providers
-- **Embedded LLM (Default)** - uses [Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message) model (~2GB quantized)
+- **AI Merge Conflict Resolution** - per-conflict and batch AI suggestions with explanations in the 3-way merge editor
+- **Automatic Changelog Generation** - AI-powered release notes from commit history between any two refs
+- **Semantic Search** - embedding-based commit search using ONNX Runtime and sqlite-vec vector storage
+- **MCP Server** - Model Context Protocol server exposing Git tools for external AI tools (Cursor, VS Code, etc.)
+- **7 AI Providers** - Ollama, LM Studio, OpenAI, Anthropic, GitHub Copilot, Google Gemini, and embedded local inference
+- **Adaptive Model Selection** - detects system VRAM/GPU and recommends optimal model (4 curated models)
+- **Embedded LLM (Default)** - runs entirely on your machine with Metal (macOS) or CUDA (Windows/Linux) GPU acceleration
 - **Offline-First** - default embedded model and local providers work completely offline
-- **GPU Acceleration** - Metal on macOS, CUDA on Windows/Linux for embedded model (configurable via `LEVIATHAN_GPU_LAYERS`)
 - **Auto-Detection** - automatically discovers local LLM providers (Ollama, LM Studio)
 - **Provider Configuration** - test and configure AI providers with API key support
-- **Progress Feedback** - download progress and generation status in UI
 
 ### Unified Profiles
 - **Multiple Identities** - configure work/personal Git identities
@@ -470,7 +476,7 @@ For detailed OAuth setup instructions (for integration features), see [docs/oaut
 ### Additional Tools
 
 - **Git**: [libgit2](https://libgit2.org/) for core operations, system Git for advanced features
-- **AI Models**: [Tavernari/git-commit-message](https://huggingface.co/Tavernari/git-commit-message) (default embedded model, ~2GB quantized), supports Ollama, LM Studio, OpenAI, Anthropic, GitHub Copilot
+- **AI Models**: 4 curated models with adaptive selection (Gemma 3, Llama 3.2, Phi-4), supports Ollama, LM Studio, OpenAI, Anthropic, GitHub Copilot, Google Gemini
 - **Testing**: [Web Test Runner](https://modern-web.dev/docs/test-runner/overview/), [Playwright](https://playwright.dev/)
 - **Build**: [Vite](https://vitejs.dev/) for frontend, [Cargo](https://doc.rust-lang.org/cargo/) for backend
 - **CI/CD**: GitHub Actions for automated testing and releases
@@ -545,12 +551,11 @@ See [CLAUDE.md](CLAUDE.md) for detailed testing guidelines.
 
 See [ROADMAP.md](ROADMAP.md) for planned features including:
 
-- Inline file editing in diff view
-- Advanced commit message templates
-- External merge tool integration
-- Code review suggestions
-- Multi-repository workspaces
+- Semantic git history search (natural language commit search)
+- AI-powered pre-commit code review ("Local Bouncer")
+- Predictive rebase with conflict preview ("Rebase Pilot")
 - Plugin/extension system
+- Additional workflow templates (GitHub Flow, GitLab Flow)
 
 ## Troubleshooting
 

@@ -182,6 +182,38 @@ pub const MAX_DIFF_CHARS: usize = 12000;
 /// Maximum conflict context length to send to the AI provider
 pub const MAX_CONFLICT_CONTEXT_CHARS: usize = 16000;
 
+/// Maximum commit text length to send for changelog generation
+pub const MAX_CHANGELOG_CHARS: usize = 24000;
+
+/// Generated changelog result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedChangelog {
+    pub content: String,
+}
+
+/// System prompt for AI-powered changelog generation
+pub const CHANGELOG_PROMPT: &str = r#"Analyze the following git commits and generate structured release notes in Markdown.
+
+Group changes into these sections (omit empty sections):
+## Features
+## Bug Fixes
+## Performance
+## Documentation
+## Internal
+
+Rules:
+- Write from a user's perspective (what changed for them)
+- Use past tense ("Added", "Fixed", "Improved")
+- One bullet per logical change (merge related commits into a single bullet)
+- Skip merge commits and trivial dependency bumps unless significant
+- Include commit short hash in parentheses at end of each bullet, e.g. (abc1234)
+- Keep each bullet to one concise sentence
+- Do NOT include a title or version header — just the sections
+
+Commits:
+"#;
+
 /// System prompt for AI-powered conflict resolution
 pub const CONFLICT_RESOLUTION_PROMPT: &str = r#"You are a merge conflict resolution assistant. You will be given the "ours" (current branch) and "theirs" (incoming branch) versions of a conflicting code section, optionally with a common ancestor "base" version and surrounding context.
 

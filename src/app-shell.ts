@@ -21,6 +21,7 @@ import './components/dialogs/lv-command-palette.ts';
 import './components/dialogs/lv-reflog-dialog.ts';
 import './components/dialogs/lv-keyboard-shortcuts-dialog.ts';
 import './components/dialogs/lv-remote-dialog.ts';
+import './components/dialogs/lv-changelog-dialog.ts';
 import './components/dialogs/lv-clean-dialog.ts';
 import './components/dialogs/lv-bisect-dialog.ts';
 import './components/dialogs/lv-submodule-dialog.ts';
@@ -500,6 +501,9 @@ export class AppShell extends LitElement {
 
   // LFS dialog
   @state() private showLfs = false;
+
+  // Changelog dialog
+  @state() private showChangelog = false;
 
   // GPG dialog
   @state() private showGpg = false;
@@ -1764,6 +1768,16 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => { this.showRemotes = true; }),
       },
       {
+        id: 'changelog',
+        label: 'Generate Changelog',
+        category: 'action',
+        icon: 'tag',
+        action: this.requiresRepository(() => {
+          const dialog = this.shadowRoot?.querySelector('lv-changelog-dialog');
+          if (dialog) (dialog as import('./components/dialogs/lv-changelog-dialog.ts').LvChangelogDialog).open();
+        }),
+      },
+      {
         id: 'clean',
         label: 'Clean working directory',
         category: 'action',
@@ -2704,6 +2718,13 @@ export class AppShell extends LitElement {
           @close=${() => { this.showClean = false; }}
           @files-cleaned=${() => this.handleRefresh()}
         ></lv-clean-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-changelog-dialog
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showChangelog = false; }}
+        ></lv-changelog-dialog>
       ` : ''}
 
       ${this.activeRepository && this.showRepositoryHealth ? html`
