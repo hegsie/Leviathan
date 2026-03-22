@@ -905,3 +905,88 @@ mod tests {
         assert!(helper.available);
     }
 }
+
+// ========================================================================
+// Git Credential Manager Detection
+// ========================================================================
+
+/// Status of the system's credential manager
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialManagerStatus {
+    pub gcm_available: bool,
+    pub gcm_version: Option<String>,
+    pub configured_helper: Option<String>,
+    pub using_leviathan_fallback: bool,
+}
+
+/// Detect the system's Git Credential Manager and its configuration
+#[command]
+pub async fn detect_credential_manager(path: String) -> Result<CredentialManagerStatus> {
+    // Check for GCM by running `git credential-manager --version`
+    let gcm_result = std::process::Command::new("git")
+        .arg("credential-manager")
+        .arg("--version")
+        .output();
+
+    let (gcm_available, gcm_version) = match gcm_result {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (true, Some(version))
+        }
+        _ => (false, None),
+    };
+
+    // Check configured credential helper in git config
+    let helper_result = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .arg("config")
+        .arg("--get")
+        .arg("credential.helper")
+        .output();
+
+    let configured_helper = match helper_result {
+        Ok(output) if output.status.success() => {
+            let helper = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if helper.is_empty() {
+                None
+            } else {
+                Some(helper)
+            }
+        }
+        _ => None,
+    };
+
+    // Also check global config if local didn't find anything
+    let configured_helper = configured_helper.or_else(|| {
+        std::process::Command::new("git")
+            .arg("config")
+            .arg("--global")
+            .arg("--get")
+            .arg("credential.helper")
+            .output()
+            .ok()
+            .and_then(|output| {
+                if output.status.success() {
+                    let helper = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if helper.is_empty() {
+                        None
+                    } else {
+                        Some(helper)
+                    }
+                } else {
+                    None
+                }
+            })
+    });
+
+    let using_leviathan_fallback = !gcm_available && configured_helper.is_none();
+
+    Ok(CredentialManagerStatus {
+        gcm_available,
+        gcm_version,
+        configured_helper,
+        using_leviathan_fallback,
+    })
+}

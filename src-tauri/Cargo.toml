@@ -66,6 +66,9 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 # Secret detection
 regex = "1"
 
+# GitHub App JWT authentication
+jsonwebtoken = "9"
+
 # OAuth System
 sha2 = "0.10"
 rand = "0.8"

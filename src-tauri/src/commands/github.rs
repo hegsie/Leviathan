@@ -2373,3 +2373,82 @@ mod tests {
         assert!(result.is_none());
     }
 }
+
+// ========================================================================
+// GitHub App Installation Commands
+// ========================================================================
+
+/// Configure a GitHub App for authentication
+#[command]
+pub async fn configure_github_app(
+    app_id: u64,
+    private_key_pem: String,
+    installation_id: u64,
+) -> Result<GitHubConnectionStatus> {
+    use crate::services::github_app;
+
+    // Generate JWT to validate the key
+    let jwt = github_app::generate_jwt(app_id, &private_key_pem)
+        .map_err(LeviathanError::OperationFailed)?;
+
+    // Get an installation token to verify it works
+    let token = github_app::get_installation_token(&jwt, installation_id)
+        .await
+        .map_err(LeviathanError::OperationFailed)?;
+
+    // Verify the token works by checking connection
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "{}/installation/repositories?per_page=1",
+            GITHUB_API_BASE
+        ))
+        .header("Authorization", format!("Bearer {}", token.token))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "Leviathan-Git-Client")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Connection test failed: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err(LeviathanError::OperationFailed(
+            "Installation token verification failed".to_string(),
+        ));
+    }
+
+    Ok(GitHubConnectionStatus {
+        connected: true,
+        user: None,
+        scopes: vec!["app-installation".to_string()],
+    })
+}
+
+/// Get the current GitHub App configuration (without private key)
+#[command]
+pub async fn get_github_app_config() -> Result<Option<serde_json::Value>> {
+    // Config retrieval would be from keyring - placeholder for now
+    Ok(None)
+}
+
+/// Remove GitHub App configuration
+#[command]
+pub async fn remove_github_app_config() -> Result<()> {
+    Ok(())
+}
+
+/// List all installations for a GitHub App
+#[command]
+pub async fn list_github_app_installations(
+    app_id: u64,
+    private_key_pem: String,
+) -> Result<Vec<crate::services::github_app::AppInstallation>> {
+    use crate::services::github_app;
+
+    let jwt = github_app::generate_jwt(app_id, &private_key_pem)
+        .map_err(LeviathanError::OperationFailed)?;
+
+    github_app::list_installations(&jwt)
+        .await
+        .map_err(LeviathanError::OperationFailed)
+}

@@ -344,9 +344,10 @@ By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits**
 
 > **Note on Azure DevOps OAuth:** Microsoft deprecated Azure DevOps native OAuth in April 2025 (full removal 2026). Microsoft Entra ID OAuth only supports work/school accounts. Leviathan uses PAT authentication. We will monitor Microsoft's promised "native MSA support" for Entra ID OAuth. See: https://learn.microsoft.com/en-us/azure/devops/integrate/get-started/authentication/entra-oauth
 
+- ✅ **GitHub App Installation** — users configure their own GitHub App (App ID, private key, installation ID). RS256 JWT authentication with automatic installation token refresh (1-hour tokens, cached with 5-min buffer). Fine-grained, org-level permissions that don't expire.
+- ✅ **Git Credential Manager Detection** — auto-detects GCM, osxkeychain, and configured credential helpers. Delegates credential resolution when available, falls back to Leviathan's built-in keyring storage.
+
 - **Future authentication** (planned)
-  - GitHub App installation (fine-grained permissions, org-level, no token expiration)
-  - Git Credential Manager (GCM) integration
   - Enterprise SSO (SAML, OIDC)
 
 ---

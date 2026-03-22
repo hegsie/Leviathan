@@ -524,6 +524,7 @@ pub fn run() {
             commands::credentials::store_keyring_token,
             commands::credentials::get_keyring_token,
             commands::credentials::delete_keyring_token,
+            commands::credentials::detect_credential_manager,
             // GitHub integration
             commands::github::check_github_connection,
             commands::github::detect_github_repo,
@@ -548,6 +549,10 @@ pub fn run() {
             commands::github::get_latest_release,
             commands::github::create_release,
             commands::github::delete_release,
+            commands::github::configure_github_app,
+            commands::github::get_github_app_config,
+            commands::github::remove_github_app_config,
+            commands::github::list_github_app_installations,
             // Azure DevOps integration
             commands::azure_devops::check_ado_connection,
             commands::azure_devops::detect_ado_repo,

@@ -388,3 +388,59 @@ export async function isOAuthTokenExpiring(
   const fiveMinutes = 5 * 60 * 1000;
   return Date.now() > tokenData.expiresAt - fiveMinutes;
 }
+
+// ========================================================================
+// GitHub App Installation
+// ========================================================================
+
+export interface GitHubAppConfig {
+  appId: number;
+  installationId: number;
+}
+
+export interface AppInstallation {
+  id: number;
+  account: { login: string; id: number; type: string; avatarUrl: string | null };
+  appId: number;
+  targetType: string;
+}
+
+export async function configureGitHubApp(
+  appId: number,
+  privateKeyPem: string,
+  installationId: number,
+): Promise<unknown> {
+  return invoke('configure_github_app', { appId, privateKeyPem, installationId });
+}
+
+export async function getGitHubAppConfig(): Promise<GitHubAppConfig | null> {
+  return invoke<GitHubAppConfig | null>('get_github_app_config');
+}
+
+export async function removeGitHubAppConfig(): Promise<void> {
+  return invoke<void>('remove_github_app_config');
+}
+
+export async function listGitHubAppInstallations(
+  appId: number,
+  privateKeyPem: string,
+): Promise<AppInstallation[]> {
+  return invoke<AppInstallation[]>('list_github_app_installations', { appId, privateKeyPem });
+}
+
+// ========================================================================
+// Git Credential Manager Detection
+// ========================================================================
+
+export interface CredentialManagerStatus {
+  gcmAvailable: boolean;
+  gcmVersion: string | null;
+  configuredHelper: string | null;
+  usingLeviathanFallback: boolean;
+}
+
+export async function detectCredentialManager(
+  repoPath: string,
+): Promise<CredentialManagerStatus> {
+  return invoke<CredentialManagerStatus>('detect_credential_manager', { path: repoPath });
+}
