@@ -310,16 +310,15 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 
 - ✅ **AI-Assisted Staging** — Tangled commit detection via LLM analysis of staged diffs. Shows split suggestions with file groupings and conventional commit messages. One-click "Stage This Group" to stage only the files in each group.
 
-#### Phase 4: The "Rebase Pilot" (Q2 2027)
+#### Phase 4: The "Rebase Pilot" ✅
 
 *Eliminating Git anxiety through predictive resolution.*
 
-- **Conflict Explainer** — When a conflict occurs during a rebase or merge, the AI analyzes both sides (`HEAD` vs. `Incoming`):
-  - *"The incoming change adds a new parameter to `fetch_repo`, while your local change renamed the function to `get_repo`. I suggest keeping the rename and adding the parameter."*
+- ✅ **Conflict Explainer** — AI explains WHY a conflict occurred in the merge editor, summarizing what each branch changed. Provides plain-language explanation alongside the existing resolution suggestions.
 
-- **Predictive Rebase** — Before you hit "Rebase," Leviathan runs a "Ghost Rebase" in a temp worktree. The AI reports: *"This rebase will have 3 conflicts in `main.rs`. I can resolve 2 of them automatically based on your previous 10 conflict resolutions. Proceed?"*
+- ✅ **Predictive Rebase ("Ghost Rebase")** — Runs a dry-run rebase in a temporary detached worktree to predict conflicts before the real rebase. Reports total commits, clean vs conflicting, and lists affected files. Worktree is automatically cleaned up.
 
-- **Semantic "Undo" (Reflog Intelligence)** — Users can type in the Command Palette: *"I messed up the rebase, take me back to where I was 10 minutes ago."* Leviathan uses the reflog to find the exact state and restores it.
+- ✅ **Semantic Undo (Reflog Intelligence)** — "Smart Undo (AI)" command in the command palette accepts natural language queries ("before the rebase", "undo last 3 commits"). LLM matches the query to reflog entries and performs a soft reset with confirmation.
 
 #### Hardware & Model Specs (2026-2027)
 
@@ -354,7 +353,7 @@ By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits**
 
 ### Testing & Quality Assurance
 
-- ✅ **Unit tests** — 127+ test files, 2635+ tests via web-test-runner, 32+ Rust AI tests
+- ✅ **Unit tests** — 127+ test files, 2635+ tests via web-test-runner, 36+ Rust AI tests
 - ✅ **E2E tests** — 38 Playwright test files covering dialogs, git operations, UI components, OAuth flows
 - ✅ **Rust tests** — integration tests for Tauri commands with TestRepo helpers
 - ✅ **CI/CD** — GitHub Actions build workflow with signing for tagged releases

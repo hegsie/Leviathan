@@ -1778,6 +1778,38 @@ export class AppShell extends LitElement {
         }),
       },
       {
+        id: 'smart-undo',
+        label: 'Smart Undo (AI)',
+        category: 'action',
+        icon: 'undo',
+        action: this.requiresRepository(async () => {
+          const query = prompt('Describe what you want to undo (e.g., "before the rebase", "undo last 3 commits"):');
+          if (!query) return;
+
+          const result = await import('./services/ai.service.ts').then(m =>
+            m.findReflogEntry(this.activeRepository!.repository.path, query)
+          );
+
+          if (result.success && result.data) {
+            const match = result.data;
+            const confirmed = confirm(`${match.description}\n\nReset to HEAD@{${match.index}}? (soft reset — changes preserved as staged)`);
+            if (confirmed) {
+              const resetResult = await import('./services/git.service.ts').then(m =>
+                m.resetToReflog(this.activeRepository!.repository.path, match.index, 'soft')
+              );
+              if (resetResult.success) {
+                showToast('Undo successful', 'success');
+                await this.handleRefresh();
+              } else {
+                showToast(resetResult.error?.message ?? 'Undo failed', 'error');
+              }
+            }
+          } else {
+            showToast(result.error?.message ?? 'Could not find matching reflog entry', 'error');
+          }
+        }),
+      },
+      {
         id: 'clean',
         label: 'Clean working directory',
         category: 'action',

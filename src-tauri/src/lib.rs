@@ -618,6 +618,9 @@ pub fn run() {
             commands::ai::analyze_staged_changes,
             commands::ai::generate_pr_description,
             commands::ai::suggest_commit_splits,
+            commands::ai::explain_conflict,
+            commands::ai::find_reflog_entry,
+            commands::merge::preview_rebase,
             // Local AI model management
             commands::local_ai::get_system_capabilities,
             commands::local_ai::get_available_models,

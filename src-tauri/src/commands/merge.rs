@@ -142,6 +142,123 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
     Ok(())
 }
 
+/// Preview a rebase by running it in a temporary worktree (ghost rebase)
+#[command]
+pub async fn preview_rebase(
+    path: String,
+    onto: String,
+) -> Result<crate::services::ai::RebasePreview> {
+    use crate::services::ai::{PredictedConflict, RebasePreview};
+
+    // Create a temp directory for the ghost worktree
+    let temp_dir = tempfile::tempdir().map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to create temp dir: {}", e))
+    })?;
+    let temp_path = temp_dir.path().to_string_lossy().to_string();
+
+    // Add a detached worktree at HEAD
+    let add_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .arg("worktree")
+        .arg("add")
+        .arg("--detach")
+        .arg(&temp_path)
+        .arg("HEAD")
+        .output()
+        .map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to create worktree: {}", e))
+        })?;
+
+    if !add_output.status.success() {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Failed to create worktree: {}",
+            String::from_utf8_lossy(&add_output.stderr)
+        )));
+    }
+
+    // Run rebase in the temp worktree
+    let rebase_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&temp_path)
+        .arg("rebase")
+        .arg(&onto)
+        .output()
+        .map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to run ghost rebase: {}", e))
+        })?;
+
+    let mut conflicts = Vec::new();
+
+    if !rebase_output.status.success() {
+        let stderr = String::from_utf8_lossy(&rebase_output.stderr);
+
+        // Parse conflict file paths from stderr
+        for line in stderr.lines() {
+            if line.contains("CONFLICT") {
+                // Extract file path from conflict message
+                if let Some(path_start) = line.rfind("in ") {
+                    let file_path = line[path_start + 3..].trim().to_string();
+                    conflicts.push(PredictedConflict {
+                        file_path,
+                        commit_summary: String::new(),
+                    });
+                } else if let Some(path_start) = line.rfind("Merge conflict in ") {
+                    let file_path = line[path_start + 18..].trim().to_string();
+                    conflicts.push(PredictedConflict {
+                        file_path,
+                        commit_summary: String::new(),
+                    });
+                }
+            }
+        }
+
+        // Abort the failed rebase in the worktree
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&temp_path)
+            .arg("rebase")
+            .arg("--abort")
+            .output();
+    }
+
+    // Count total commits that would be rebased
+    let log_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .arg("log")
+        .arg("--oneline")
+        .arg(format!("{}..HEAD", onto))
+        .output()
+        .ok();
+
+    let total_commits = log_output
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+        .unwrap_or(0);
+
+    // Clean up: remove the temp worktree
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .arg("worktree")
+        .arg("remove")
+        .arg("--force")
+        .arg(&temp_path)
+        .output();
+
+    // The temp dir will be cleaned up when temp_dir is dropped
+
+    let conflicting_commits = conflicts.len();
+    let clean_commits = total_commits.saturating_sub(conflicting_commits);
+
+    Ok(RebasePreview {
+        total_commits,
+        clean_commits,
+        conflicting_commits,
+        conflicts,
+    })
+}
+
 /// Continue a paused rebase
 #[command]
 pub async fn continue_rebase(path: String) -> Result<()> {

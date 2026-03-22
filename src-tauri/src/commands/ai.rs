@@ -5,10 +5,11 @@
 use crate::error::{LeviathanError, Result};
 use crate::services::ai::{
     AiProviderInfo, AiProviderType, AiState, AnalysisFinding, CommitSplitSuggestion,
-    ConflictResolutionSuggestion, FindingCategory, GeneratedChangelog, GeneratedCommitMessage,
-    GeneratedPrDescription, RiskLevel, Severity, StagedAnalysis, CHANGELOG_PROMPT,
-    COMMIT_SPLIT_PROMPT, CONFLICT_RESOLUTION_PROMPT, MAX_CHANGELOG_CHARS,
-    MAX_CONFLICT_CONTEXT_CHARS, MAX_DIFF_CHARS, PR_DESCRIPTION_PROMPT, VIBE_CHECK_PROMPT,
+    ConflictExplanation, ConflictResolutionSuggestion, FindingCategory, GeneratedChangelog,
+    GeneratedCommitMessage, GeneratedPrDescription, ReflogMatch, RiskLevel, Severity,
+    StagedAnalysis, CHANGELOG_PROMPT, COMMIT_SPLIT_PROMPT, CONFLICT_EXPLAIN_PROMPT,
+    CONFLICT_RESOLUTION_PROMPT, MAX_CHANGELOG_CHARS, MAX_CONFLICT_CONTEXT_CHARS, MAX_DIFF_CHARS,
+    PR_DESCRIPTION_PROMPT, REFLOG_MATCH_PROMPT, VIBE_CHECK_PROMPT,
 };
 use tauri::{command, State};
 
@@ -220,6 +221,128 @@ pub async fn generate_changelog(
 
     Ok(GeneratedChangelog {
         content: response.trim().to_string(),
+    })
+}
+
+// ========================================================================
+// Phase 4: "Rebase Pilot" commands
+// ========================================================================
+
+/// Explain why a conflict occurred in plain language
+#[command]
+pub async fn explain_conflict(
+    state: State<'_, AiState>,
+    file_path: String,
+    ours_content: String,
+    theirs_content: String,
+    base_content: Option<String>,
+    our_ref: Option<String>,
+    their_ref: Option<String>,
+) -> Result<ConflictExplanation> {
+    let mut user_prompt = format!("File: {}\n\n", file_path);
+
+    if let Some(ref our_branch) = our_ref {
+        user_prompt.push_str(&format!("Current branch: {}\n", our_branch));
+    }
+    if let Some(ref their_branch) = their_ref {
+        user_prompt.push_str(&format!("Incoming branch: {}\n\n", their_branch));
+    }
+
+    if let Some(ref base) = base_content {
+        let truncated = truncate_content(base, MAX_CONFLICT_CONTEXT_CHARS / 4);
+        if !truncated.is_empty() {
+            user_prompt.push_str(&format!(
+                "Base (common ancestor):\n```\n{}\n```\n\n",
+                truncated
+            ));
+        }
+    }
+
+    let ours_truncated = truncate_content(&ours_content, MAX_CONFLICT_CONTEXT_CHARS / 3);
+    let theirs_truncated = truncate_content(&theirs_content, MAX_CONFLICT_CONTEXT_CHARS / 3);
+
+    user_prompt.push_str(&format!(
+        "Ours (current branch):\n```\n{}\n```\n\n",
+        ours_truncated
+    ));
+    user_prompt.push_str(&format!(
+        "Theirs (incoming branch):\n```\n{}\n```\n",
+        theirs_truncated
+    ));
+
+    let service = state.read().await;
+    let response = service
+        .generate_text(CONFLICT_EXPLAIN_PROMPT, &user_prompt, Some(500))
+        .await
+        .map_err(LeviathanError::OperationFailed)?;
+
+    parse_conflict_explanation(&response)
+}
+
+/// Find a reflog entry matching a natural language query
+#[command]
+pub async fn find_reflog_entry(
+    state: State<'_, AiState>,
+    repo_path: String,
+    query: String,
+) -> Result<ReflogMatch> {
+    // Get reflog entries
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_path)
+        .arg("reflog")
+        .arg("--format=%H %gd %gs %ci")
+        .arg("-50")
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to get reflog: {}", e)))?;
+
+    if !output.status.success() {
+        return Err(LeviathanError::OperationFailed(
+            "Failed to get reflog".to_string(),
+        ));
+    }
+
+    let reflog_text = String::from_utf8_lossy(&output.stdout).to_string();
+
+    if reflog_text.trim().is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "Reflog is empty".to_string(),
+        ));
+    }
+
+    let system_prompt = REFLOG_MATCH_PROMPT.replace("{query}", &query);
+
+    let service = state.read().await;
+    let response = service
+        .generate_text(&system_prompt, &reflog_text, Some(300))
+        .await
+        .map_err(LeviathanError::OperationFailed)?;
+
+    parse_reflog_match(&response)
+}
+
+/// Parse conflict explanation JSON response
+fn parse_conflict_explanation(response: &str) -> Result<ConflictExplanation> {
+    let json_str = strip_code_fences(response.trim());
+    serde_json::from_str::<ConflictExplanation>(json_str)
+        .map_err(|_| {
+            // Fallback: treat entire response as explanation
+            LeviathanError::Custom("Failed to parse explanation".to_string())
+        })
+        .or_else(|_| {
+            Ok(ConflictExplanation {
+                explanation: response.trim().to_string(),
+                ours_summary: String::new(),
+                theirs_summary: String::new(),
+            })
+        })
+}
+
+/// Parse reflog match JSON response
+fn parse_reflog_match(response: &str) -> Result<ReflogMatch> {
+    let json_str = strip_code_fences(response.trim());
+    serde_json::from_str::<ReflogMatch>(json_str).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to parse reflog match: {}", e))
     })
 }
 
@@ -899,5 +1022,52 @@ mod tests {
         assert_eq!(strip_code_fences("```json\n{}\n```"), "{}");
         assert_eq!(strip_code_fences("```\nhello\n```"), "hello");
         assert_eq!(strip_code_fences("no fences"), "no fences");
+    }
+
+    // ========================================================================
+    // Phase 4: parse_conflict_explanation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_conflict_explanation_valid() {
+        let response = r#"{"explanation": "Both branches modified the same function", "oursSummary": "Added a timeout parameter", "theirsSummary": "Renamed the function"}"#;
+        let result = parse_conflict_explanation(response);
+        assert!(result.is_ok());
+        let explanation = result.unwrap();
+        assert!(explanation.explanation.contains("Both branches"));
+        assert!(explanation.ours_summary.contains("timeout"));
+        assert!(explanation.theirs_summary.contains("Renamed"));
+    }
+
+    #[test]
+    fn test_parse_conflict_explanation_fallback() {
+        let response = "This conflict happened because both branches changed the same line.";
+        let result = parse_conflict_explanation(response);
+        assert!(result.is_ok());
+        let explanation = result.unwrap();
+        assert!(explanation.explanation.contains("both branches"));
+    }
+
+    // ========================================================================
+    // Phase 4: parse_reflog_match Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_reflog_match_valid() {
+        let response =
+            r#"{"index": 3, "description": "This will reset to the state before the rebase"}"#;
+        let result = parse_reflog_match(response);
+        assert!(result.is_ok());
+        let m = result.unwrap();
+        assert_eq!(m.index, 3);
+        assert!(m.description.contains("before the rebase"));
+    }
+
+    #[test]
+    fn test_parse_reflog_match_with_fences() {
+        let response = "```json\n{\"index\": 5, \"description\": \"Undo last commit\"}\n```";
+        let result = parse_reflog_match(response);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().index, 5);
     }
 }

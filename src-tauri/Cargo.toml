@@ -82,6 +82,10 @@ keyring = { version = "3", features = ["windows-native", "linux-native"] }
 [dev-dependencies]
 tempfile = "3"
 
+# Also needed at runtime for ghost rebase temp worktrees
+[dependencies.tempfile]
+version = "3"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

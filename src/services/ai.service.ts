@@ -228,6 +228,52 @@ export async function suggestCommitSplits(
   return invokeCommand<CommitSplitSuggestion>('suggest_commit_splits', { repoPath });
 }
 
+// ========================================================================
+// Phase 4: "Rebase Pilot" types and functions
+// ========================================================================
+
+export interface ConflictExplanation {
+  explanation: string;
+  oursSummary: string;
+  theirsSummary: string;
+}
+
+export interface ReflogMatch {
+  index: number;
+  description: string;
+}
+
+/**
+ * Explain why a conflict occurred in plain language
+ */
+export async function explainConflict(
+  filePath: string,
+  oursContent: string,
+  theirsContent: string,
+  baseContent?: string,
+  ourRef?: string,
+  theirRef?: string,
+): Promise<CommandResult<ConflictExplanation>> {
+  return invokeCommand<ConflictExplanation>('explain_conflict', {
+    filePath,
+    oursContent,
+    theirsContent,
+    baseContent: baseContent ?? null,
+    ourRef: ourRef ?? null,
+    theirRef: theirRef ?? null,
+  });
+}
+
+/**
+ * Find a reflog entry matching a natural language query
+ */
+export async function findReflogEntry(
+  repoPath: string,
+  query: string,
+): Promise<CommandResult<ReflogMatch>> {
+  return invokeCommand<ReflogMatch>('find_reflog_entry', { repoPath, query });
+}
+
 /**
  * Check if AI is available (provider configured and working)
  */

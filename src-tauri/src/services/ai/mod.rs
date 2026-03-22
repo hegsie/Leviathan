@@ -361,6 +361,77 @@ Respond with ONLY a JSON object (no markdown code fences) in this format:
 
 Do NOT include conflict markers (<<<<<<, =======, >>>>>>>) in the resolved content."#;
 
+// ========================================================================
+// Phase 4: "Rebase Pilot" types and prompts
+// ========================================================================
+
+/// AI-generated conflict explanation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictExplanation {
+    pub explanation: String,
+    pub ours_summary: String,
+    pub theirs_summary: String,
+}
+
+/// Result of a predictive rebase preview
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebasePreview {
+    pub total_commits: usize,
+    pub clean_commits: usize,
+    pub conflicting_commits: usize,
+    pub conflicts: Vec<PredictedConflict>,
+}
+
+/// A predicted conflict from a ghost rebase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PredictedConflict {
+    pub file_path: String,
+    pub commit_summary: String,
+}
+
+/// Result of matching a natural language query to a reflog entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflogMatch {
+    pub index: usize,
+    pub description: String,
+}
+
+/// System prompt for conflict explanation
+pub const CONFLICT_EXPLAIN_PROMPT: &str = r#"You are a git merge conflict analyst. Explain why this conflict occurred in plain language.
+
+Return ONLY a JSON object (no markdown fences):
+{"explanation": "plain language explanation of why the conflict exists", "oursSummary": "what the current branch changed", "theirsSummary": "what the incoming branch changed"}
+
+Rules:
+- Be concise — 1-2 sentences each
+- Focus on the semantic intent, not line-by-line differences
+- Use the branch names if provided
+- Mention if the changes are compatible (can coexist) or contradictory
+
+"#;
+
+/// System prompt for reflog entry matching
+pub const REFLOG_MATCH_PROMPT: &str = r#"Given the following git reflog entries and a user's natural language request, identify which reflog entry best matches their intent.
+
+Return ONLY a JSON object (no markdown fences):
+{"index": <reflog_index_number>, "description": "human-readable description of what resetting to this state will do"}
+
+Rules:
+- Match the user's intent to the closest reflog entry
+- For time-based queries ("10 minutes ago"), match by timestamp
+- For action-based queries ("before the rebase"), find the entry just before that action
+- For count-based queries ("undo last 3 commits"), count back from HEAD
+- The description should explain what will change in plain language
+
+User request: {query}
+
+Reflog:
+"#;
+
 /// AI Service managing providers and configuration
 pub struct AiService {
     config_dir: PathBuf,

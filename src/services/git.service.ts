@@ -904,6 +904,25 @@ export async function rebase(
   return invokeCommand<void>("rebase", args);
 }
 
+export interface RebasePreview {
+  totalCommits: number;
+  cleanCommits: number;
+  conflictingCommits: number;
+  conflicts: PredictedConflict[];
+}
+
+export interface PredictedConflict {
+  filePath: string;
+  commitSummary: string;
+}
+
+export async function previewRebase(
+  path: string,
+  onto: string,
+): Promise<CommandResult<RebasePreview>> {
+  return invokeCommand<RebasePreview>("preview_rebase", { path, onto });
+}
+
 export async function continueRebase(
   args: ContinueRebaseCommand,
 ): Promise<CommandResult<void>> {
