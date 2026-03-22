@@ -610,6 +610,7 @@ pub fn run() {
             commands::update::stop_auto_update_check,
             commands::update::is_auto_update_running,
             commands::update::get_app_version,
+            commands::update::get_build_info,
             // AI provider system
             commands::ai::get_ai_providers,
             commands::ai::get_active_ai_provider,

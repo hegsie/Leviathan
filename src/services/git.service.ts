@@ -8,6 +8,35 @@ import { showToast } from "./notification.service.ts";
 import { showErrorWithSuggestion } from "./error-suggestion.service.ts";
 import { commitStatsCache, commitSignatureCache, createCacheKey } from "./cache.service.ts";
 import { settingsStore } from "../stores/settings.store.ts";
+
+/**
+ * Check if a network operation is allowed based on security settings.
+ * Returns false if the operation should be blocked.
+ */
+function checkNetworkPermission(operation: string, remote?: string): boolean {
+  const settings = settingsStore.getState();
+
+  if (settings.offlineMode) {
+    showToast('Offline mode is enabled. Disable in Settings > Security.', 'warning');
+    return false;
+  }
+
+  if (settings.remoteAllowlist.length > 0 && remote) {
+    const allowed = settings.remoteAllowlist.some(domain =>
+      remote.toLowerCase().includes(domain.toLowerCase())
+    );
+    if (!allowed) {
+      showToast(`Remote "${remote}" is not in your allowlist`, 'error');
+      return false;
+    }
+  }
+
+  if (settings.confirmNetworkOps) {
+    return confirm(`Allow ${operation}${remote ? ` to ${remote}` : ''}?`);
+  }
+
+  return true;
+}
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Repository,
@@ -129,6 +158,10 @@ export async function openRepository(
 export async function cloneRepository(
   args: CloneRepositoryCommand,
 ): Promise<CommandResult<Repository>> {
+  if (!checkNetworkPermission('clone', args.url)) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
+
   // If no token is provided, try to find one based on the URL
   if (args && !args.token) {
     // We don't have a repo path yet (it's being cloned), so we can't detect by folder.
@@ -665,6 +698,10 @@ export async function setRemoteUrl(
 export async function fetch(
   args?: FetchCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
+  if (!checkNetworkPermission('fetch', args?.remote)) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
+
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
     const token = await getRepoToken(args.path, args.remote);
@@ -696,6 +733,10 @@ export async function fetch(
 export async function pull(
   args?: PullCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
+  if (!checkNetworkPermission('pull', args?.remote)) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
+
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
     const token = await getRepoToken(args.path, args.remote);
@@ -727,6 +768,10 @@ export async function pull(
 export async function push(
   args?: PushCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
+  if (!checkNetworkPermission('push', args?.remote)) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
+
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
     const token = await getRepoToken(args.path, args.remote);

@@ -181,8 +181,8 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 
 #### Security Hardening
 
-- **Paranoid mode** — explicit network operation prompts, remote whitelist/blacklist, offline mode toggle
-- **Supply chain security** — reproducible builds, dependency auditing, CVE monitoring
+- ✅ **Paranoid mode** — offline mode toggle blocks all network operations (fetch/push/pull/clone), confirmation prompts before network operations, remote domain allowlist. Guards enforced in the git service layer before any Tauri command.
+- ✅ **Supply chain transparency** — build info command exposes app version, Rust version, build target, and profile. Settings stored in Zustand with localStorage persistence.
 
 ---
 

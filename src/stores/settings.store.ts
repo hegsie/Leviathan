@@ -46,6 +46,11 @@ export interface SettingsState {
   // Network settings
   networkOperationTimeout: number; // Seconds before network operations time out (0 = disabled)
 
+  // Security & Privacy
+  offlineMode: boolean;           // Block all network operations
+  confirmNetworkOps: boolean;     // Prompt before fetch/push/pull
+  remoteAllowlist: string[];      // If non-empty, only these domains are allowed
+
   // System tray & notifications
   minimizeToTray: boolean;
   showNativeNotifications: boolean;
@@ -71,6 +76,9 @@ export interface SettingsState {
   setAutoStashOnCheckout: (enabled: boolean) => void;
   setStaleBranchDays: (days: number) => void;
   setNetworkOperationTimeout: (timeout: number) => void;
+  setOfflineMode: (enabled: boolean) => void;
+  setConfirmNetworkOps: (enabled: boolean) => void;
+  setRemoteAllowlist: (domains: string[]) => void;
   setMinimizeToTray: (enabled: boolean) => void;
   setShowNativeNotifications: (enabled: boolean) => void;
   resetToDefaults: () => void;
@@ -97,6 +105,9 @@ const defaultSettings = {
   autoStashOnCheckout: false,
   staleBranchDays: 90,
   networkOperationTimeout: 300,
+  offlineMode: false,
+  confirmNetworkOps: false,
+  remoteAllowlist: [] as string[],
   minimizeToTray: false,
   showNativeNotifications: true,
 };
@@ -157,6 +168,10 @@ export const settingsStore = createStore<SettingsState>()(
       setStaleBranchDays: (staleBranchDays) => set({ staleBranchDays }),
 
       setNetworkOperationTimeout: (networkOperationTimeout) => set({ networkOperationTimeout }),
+
+      setOfflineMode: (offlineMode) => set({ offlineMode }),
+      setConfirmNetworkOps: (confirmNetworkOps) => set({ confirmNetworkOps }),
+      setRemoteAllowlist: (remoteAllowlist) => set({ remoteAllowlist }),
 
       setMinimizeToTray: (minimizeToTray) => set({ minimizeToTray }),
 

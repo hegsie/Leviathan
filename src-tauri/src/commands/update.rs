@@ -61,6 +61,31 @@ pub fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Build information for supply chain transparency
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildInfo {
+    pub version: String,
+    pub rust_version: String,
+    pub target: String,
+    pub profile: String,
+}
+
+/// Get build information for security/transparency display
+#[command]
+pub fn get_build_info() -> BuildInfo {
+    BuildInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        rust_version: option_env!("RUSTC_VERSION").unwrap_or("unknown").to_string(),
+        target: option_env!("TARGET").unwrap_or("unknown").to_string(),
+        profile: if cfg!(debug_assertions) {
+            "debug".to_string()
+        } else {
+            "release".to_string()
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
