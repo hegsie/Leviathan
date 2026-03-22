@@ -426,3 +426,37 @@ export function getClientSecret(provider: OAuthProvider): string | undefined {
 export function isOAuthConfigured(provider: OAuthProvider): boolean {
   return !!getClientId(provider);
 }
+
+// ========================================================================
+// OIDC (Enterprise SSO)
+// ========================================================================
+
+export interface OidcDiscovery {
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  jwksUri: string | null;
+  issuer: string;
+  scopesSupported: string[];
+}
+
+export interface OidcUserInfo {
+  sub: string;
+  email: string | null;
+  name: string | null;
+  preferredUsername: string | null;
+  picture: string | null;
+}
+
+/**
+ * Discover OIDC provider configuration from an issuer URL
+ */
+export async function discoverOidcProvider(issuerUrl: string): Promise<OidcDiscovery> {
+  return invoke<OidcDiscovery>('discover_oidc_provider', { issuerUrl });
+}
+
+/**
+ * Decode an OIDC ID token to extract user identity
+ */
+export async function decodeOidcIdToken(idToken: string): Promise<OidcUserInfo> {
+  return invoke<OidcUserInfo>('decode_oidc_id_token', { idToken });
+}

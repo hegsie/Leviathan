@@ -1606,6 +1606,8 @@ export class LvProfileManagerDialog extends LitElement {
         return { type: 'azure-devops', organization: '' };
       case 'bitbucket':
         return { type: 'bitbucket', workspace: '' };
+      case 'oidc':
+        return { type: 'oidc', issuerUrl: '', clientId: '' };
     }
   }
 

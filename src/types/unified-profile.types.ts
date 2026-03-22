@@ -408,6 +408,7 @@ export function getGlobalAccountCountByType(
     gitlab: 0,
     'azure-devops': 0,
     bitbucket: 0,
+    oidc: 0,
   };
 
   for (const account of accounts) {
@@ -475,6 +476,7 @@ export function getAccountCountByType(
     gitlab: 0,
     'azure-devops': 0,
     bitbucket: 0,
+    oidc: 0,
   };
 
   for (const account of profile.integrationAccounts) {
@@ -499,4 +501,5 @@ export const INTEGRATION_TYPE_NAMES: Record<IntegrationType, string> = {
   gitlab: 'GitLab',
   'azure-devops': 'Azure DevOps',
   bitbucket: 'Bitbucket',
+  oidc: 'Enterprise SSO (OIDC)',
 };

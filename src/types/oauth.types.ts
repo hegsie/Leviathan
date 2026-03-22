@@ -3,7 +3,7 @@
  */
 
 /** OAuth provider types */
-export type OAuthProvider = 'github' | 'gitlab' | 'azure' | 'bitbucket';
+export type OAuthProvider = 'github' | 'gitlab' | 'azure' | 'bitbucket' | 'oidc';
 
 /** Response from starting an OAuth flow */
 export interface StartOAuthResponse {
@@ -24,6 +24,7 @@ export interface OAuthTokenResponse {
   expiresIn?: number;
   tokenType?: string;
   scope?: string;
+  idToken?: string;
 }
 
 /** Stored OAuth credential */

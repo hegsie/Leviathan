@@ -8,7 +8,7 @@
 /**
  * Integration service type
  */
-export type IntegrationType = 'github' | 'gitlab' | 'azure-devops' | 'bitbucket';
+export type IntegrationType = 'github' | 'gitlab' | 'azure-devops' | 'bitbucket' | 'oidc';
 
 /**
  * Integration-specific configuration
@@ -17,7 +17,8 @@ export type IntegrationConfig =
   | { type: 'github' }
   | { type: 'gitlab'; instanceUrl: string }
   | { type: 'azure-devops'; organization: string }
-  | { type: 'bitbucket'; workspace: string };
+  | { type: 'bitbucket'; workspace: string }
+  | { type: 'oidc'; issuerUrl: string; clientId: string };
 
 /**
  * Cached user information for quick display without API calls
@@ -99,6 +100,7 @@ export const INTEGRATION_TYPE_NAMES: Record<IntegrationType, string> = {
   gitlab: 'GitLab',
   'azure-devops': 'Azure DevOps',
   bitbucket: 'Bitbucket',
+  oidc: 'Enterprise SSO (OIDC)',
 };
 
 /**

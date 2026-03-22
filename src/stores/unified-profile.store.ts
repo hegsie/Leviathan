@@ -340,6 +340,7 @@ export function getAccountCountByType(): Record<IntegrationType, number> {
     gitlab: 0,
     'azure-devops': 0,
     bitbucket: 0,
+    oidc: 0,
   };
 
   for (const account of accounts) {

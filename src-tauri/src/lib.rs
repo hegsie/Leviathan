@@ -651,6 +651,8 @@ pub fn run() {
             commands::oauth::oauth_refresh_token,
             commands::oauth::oauth_wait_for_callback,
             commands::oauth::oauth_wait_for_github_callback,
+            commands::oauth::discover_oidc_provider,
+            commands::oauth::decode_oidc_id_token,
             // Git Flow
             commands::gitflow::get_gitflow_config,
             commands::gitflow::init_gitflow,

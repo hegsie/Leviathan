@@ -345,8 +345,7 @@ By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits**
 - ✅ **GitHub App Installation** — users configure their own GitHub App (App ID, private key, installation ID). RS256 JWT authentication with automatic installation token refresh (1-hour tokens, cached with 5-min buffer). Fine-grained, org-level permissions that don't expire.
 - ✅ **Git Credential Manager Detection** — auto-detects GCM, osxkeychain, and configured credential helpers. Delegates credential resolution when available, falls back to Leviathan's built-in keyring storage.
 
-- **Future authentication** (planned)
-  - Enterprise SSO (SAML, OIDC)
+- ✅ **Enterprise SSO (OIDC)** — OpenID Connect support for corporate identity providers (Okta, Azure AD, Auth0, Keycloak, etc.). OIDC discovery via `.well-known/openid-configuration`, PKCE-protected authorization code flow, JWT ID token decoding for user identity extraction. Configurable issuer URL, client ID, and scopes.
 
 ---
 

@@ -53,6 +53,7 @@ pub enum OAuthProvider {
     GitLab,
     Azure,
     Bitbucket,
+    Oidc,
 }
 
 impl std::fmt::Display for OAuthProvider {
@@ -62,6 +63,7 @@ impl std::fmt::Display for OAuthProvider {
             OAuthProvider::GitLab => write!(f, "gitlab"),
             OAuthProvider::Azure => write!(f, "azure"),
             OAuthProvider::Bitbucket => write!(f, "bitbucket"),
+            OAuthProvider::Oidc => write!(f, "oidc"),
         }
     }
 }
@@ -75,6 +77,7 @@ impl std::str::FromStr for OAuthProvider {
             "gitlab" => Ok(OAuthProvider::GitLab),
             "azure" => Ok(OAuthProvider::Azure),
             "bitbucket" => Ok(OAuthProvider::Bitbucket),
+            "oidc" => Ok(OAuthProvider::Oidc),
             _ => Err(format!("Unknown OAuth provider: {}", s)),
         }
     }
@@ -157,6 +160,23 @@ impl OAuthConfig {
         }
     }
 
+    /// Get OIDC provider configuration from discovery or direct endpoints
+    pub fn oidc(
+        client_id: &str,
+        authorize_url: &str,
+        token_url: &str,
+        scopes: Vec<String>,
+        redirect_port: u16,
+    ) -> Self {
+        Self {
+            client_id: client_id.to_string(),
+            authorize_url: authorize_url.to_string(),
+            token_url: token_url.to_string(),
+            scopes,
+            redirect_uri: format!("http://127.0.0.1:{}/callback", redirect_port),
+        }
+    }
+
     /// Build the authorization URL with PKCE challenge
     pub fn build_authorize_url(&self, pkce: &PKCEChallenge, state: &str) -> String {
         let scopes = self.scopes.join(" ");
@@ -187,6 +207,87 @@ pub struct OAuthTokenResponse {
     pub token_type: Option<String>,
     #[serde(default)]
     pub scope: Option<String>,
+    #[serde(default, alias = "id_token")]
+    pub id_token: Option<String>,
+}
+
+/// OIDC provider discovery response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcDiscovery {
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    pub issuer: String,
+    #[serde(default)]
+    pub scopes_supported: Vec<String>,
+}
+
+/// User info extracted from an OIDC ID token
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcUserInfo {
+    pub sub: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub preferred_username: Option<String>,
+    pub picture: Option<String>,
+}
+
+/// Discover OIDC provider configuration from the well-known endpoint
+pub async fn discover_oidc_config(issuer_url: &str) -> Result<OidcDiscovery, String> {
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer_url.trim_end_matches('/')
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&discovery_url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch OIDC discovery: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "OIDC discovery failed (HTTP {})",
+            response.status()
+        ));
+    }
+
+    response
+        .json::<OidcDiscovery>()
+        .await
+        .map_err(|e| format!("Failed to parse OIDC discovery: {}", e))
+}
+
+/// Decode an OIDC ID token JWT without signature verification.
+/// Safe because the token was received directly from the provider over TLS.
+pub fn decode_id_token(id_token: &str) -> Result<OidcUserInfo, String> {
+    // Split JWT into parts and decode the payload (middle part)
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("Invalid JWT format".to_string());
+    }
+
+    // Decode base64url payload
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|e| format!("Failed to decode JWT payload: {}", e))?;
+
+    let claims: serde_json::Value = serde_json::from_slice(&payload)
+        .map_err(|e| format!("Failed to parse JWT claims: {}", e))?;
+
+    Ok(OidcUserInfo {
+        sub: claims["sub"].as_str().unwrap_or_default().to_string(),
+        email: claims["email"].as_str().map(|s| s.to_string()),
+        name: claims["name"].as_str().map(|s| s.to_string()),
+        preferred_username: claims["preferred_username"].as_str().map(|s| s.to_string()),
+        picture: claims["picture"].as_str().map(|s| s.to_string()),
+    })
 }
 
 /// Response for authorization URL generation

@@ -130,6 +130,40 @@ pub async fn oauth_get_authorize_url(
 
             (config, Some(port))
         }
+        OAuthProvider::Oidc => {
+            // OIDC: instance_url is the issuer URL — discover endpoints
+            let issuer_url = instance_url.as_deref().ok_or_else(|| {
+                LeviathanError::OAuth(
+                    "OIDC requires an issuer URL (pass as instanceUrl)".to_string(),
+                )
+            })?;
+
+            let discovery = crate::services::oauth::discover_oidc_config(issuer_url)
+                .await
+                .map_err(LeviathanError::OAuth)?;
+
+            let server = LoopbackServer::new()?;
+            let port = server.port();
+            let scopes = vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ];
+            let config = OAuthConfig::oidc(
+                &client_id,
+                &discovery.authorization_endpoint,
+                &discovery.token_endpoint,
+                scopes,
+                port,
+            );
+
+            PENDING_SERVERS
+                .lock()
+                .map_err(|e| LeviathanError::OAuth(format!("Failed to store server: {}", e)))?
+                .insert(port, server);
+
+            (config, Some(port))
+        }
     };
 
     let authorize_url = config.build_authorize_url(&pkce, &state);
@@ -182,6 +216,16 @@ pub async fn oauth_exchange_code(
             )
         }
         OAuthProvider::Bitbucket => "https://bitbucket.org/site/oauth2/access_token".to_string(),
+        OAuthProvider::Oidc => {
+            // For OIDC, discover the token endpoint from the issuer URL
+            let issuer = instance_url
+                .as_deref()
+                .ok_or_else(|| LeviathanError::OAuth("OIDC requires issuer URL".to_string()))?;
+            let discovery = crate::services::oauth::discover_oidc_config(issuer)
+                .await
+                .map_err(LeviathanError::OAuth)?;
+            discovery.token_endpoint
+        }
     };
 
     // Build request body
@@ -272,6 +316,15 @@ pub async fn oauth_refresh_token(
             )
         }
         OAuthProvider::Bitbucket => "https://bitbucket.org/site/oauth2/access_token".to_string(),
+        OAuthProvider::Oidc => {
+            let issuer = instance_url
+                .as_deref()
+                .ok_or_else(|| LeviathanError::OAuth("OIDC requires issuer URL".to_string()))?;
+            let discovery = crate::services::oauth::discover_oidc_config(issuer)
+                .await
+                .map_err(LeviathanError::OAuth)?;
+            discovery.token_endpoint
+        }
     };
 
     // Build request body
@@ -659,4 +712,26 @@ mod tests {
         // GitHub scopes include "repo" and "read:user"
         assert!(response.authorize_url.contains("scope="));
     }
+}
+
+// ========================================================================
+// OIDC Commands
+// ========================================================================
+
+/// Discover an OIDC provider's configuration from its issuer URL
+#[tauri::command]
+pub async fn discover_oidc_provider(
+    issuer_url: String,
+) -> Result<crate::services::oauth::OidcDiscovery> {
+    crate::services::oauth::discover_oidc_config(&issuer_url)
+        .await
+        .map_err(LeviathanError::OperationFailed)
+}
+
+/// Decode an OIDC ID token to extract user identity
+#[tauri::command]
+pub async fn decode_oidc_id_token(
+    id_token: String,
+) -> Result<crate::services::oauth::OidcUserInfo> {
+    crate::services::oauth::decode_id_token(&id_token).map_err(LeviathanError::OperationFailed)
 }

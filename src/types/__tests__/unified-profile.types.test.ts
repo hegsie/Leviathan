@@ -74,6 +74,9 @@ describe('unified-profile.types', () => {
       case 'bitbucket':
         config = { type: 'bitbucket' as const, workspace: options.workspace ?? '' };
         break;
+      case 'oidc':
+        config = { type: 'oidc' as const, issuerUrl: '', clientId: '' };
+        break;
     }
 
     return {
