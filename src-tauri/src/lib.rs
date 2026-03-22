@@ -615,6 +615,9 @@ pub fn run() {
             commands::ai::is_ai_available,
             commands::ai::suggest_conflict_resolution,
             commands::ai::generate_changelog,
+            commands::ai::analyze_staged_changes,
+            commands::ai::generate_pr_description,
+            commands::ai::suggest_commit_splits,
             // Local AI model management
             commands::local_ai::get_system_capabilities,
             commands::local_ai::get_available_models,

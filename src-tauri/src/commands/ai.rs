@@ -4,9 +4,11 @@
 
 use crate::error::{LeviathanError, Result};
 use crate::services::ai::{
-    AiProviderInfo, AiProviderType, AiState, ConflictResolutionSuggestion, GeneratedChangelog,
-    GeneratedCommitMessage, CHANGELOG_PROMPT, CONFLICT_RESOLUTION_PROMPT, MAX_CHANGELOG_CHARS,
-    MAX_CONFLICT_CONTEXT_CHARS,
+    AiProviderInfo, AiProviderType, AiState, AnalysisFinding, CommitSplitSuggestion,
+    ConflictResolutionSuggestion, FindingCategory, GeneratedChangelog, GeneratedCommitMessage,
+    GeneratedPrDescription, RiskLevel, Severity, StagedAnalysis, CHANGELOG_PROMPT,
+    COMMIT_SPLIT_PROMPT, CONFLICT_RESOLUTION_PROMPT, MAX_CHANGELOG_CHARS,
+    MAX_CONFLICT_CONTEXT_CHARS, MAX_DIFF_CHARS, PR_DESCRIPTION_PROMPT, VIBE_CHECK_PROMPT,
 };
 use tauri::{command, State};
 
@@ -247,6 +249,257 @@ fn get_commits_between_refs(
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+// ========================================================================
+// Phase 3: "Local Bouncer" commands
+// ========================================================================
+
+/// Analyze staged changes for potential issues (secrets, complexity, quality)
+#[command]
+pub async fn analyze_staged_changes(
+    state: State<'_, AiState>,
+    repo_path: String,
+) -> Result<StagedAnalysis> {
+    let diff = get_staged_diff(&repo_path)?;
+
+    if diff.is_empty() {
+        return Ok(StagedAnalysis {
+            findings: vec![],
+            summary: "No staged changes".to_string(),
+            risk_level: RiskLevel::Low,
+        });
+    }
+
+    // Fast regex-based secret detection (no AI needed)
+    let mut findings = detect_secrets(&diff);
+
+    // AI analysis for complexity and quality
+    let truncated = truncate_content(&diff, MAX_DIFF_CHARS);
+    let service = state.read().await;
+
+    if let Ok(response) = service
+        .generate_text(VIBE_CHECK_PROMPT, truncated, Some(1000))
+        .await
+    {
+        if let Ok(ai_analysis) = parse_vibe_check_response(&response) {
+            findings.extend(ai_analysis.findings);
+        }
+    }
+
+    let risk_level = if findings
+        .iter()
+        .any(|f| matches!(f.severity, Severity::Error))
+    {
+        RiskLevel::High
+    } else if findings
+        .iter()
+        .any(|f| matches!(f.severity, Severity::Warning))
+    {
+        RiskLevel::Medium
+    } else {
+        RiskLevel::Low
+    };
+
+    let summary = if findings.is_empty() {
+        "No issues found".to_string()
+    } else {
+        format!(
+            "{} issue{} found",
+            findings.len(),
+            if findings.len() == 1 { "" } else { "s" }
+        )
+    };
+
+    Ok(StagedAnalysis {
+        findings,
+        summary,
+        risk_level,
+    })
+}
+
+/// Generate a PR description from branch commits
+#[command]
+pub async fn generate_pr_description(
+    state: State<'_, AiState>,
+    repo_path: String,
+    base_ref: String,
+    head_ref: String,
+    title: String,
+) -> Result<GeneratedPrDescription> {
+    // Get commits between refs
+    let commits_text = get_commits_between_refs(&repo_path, &base_ref, &head_ref, 100)?;
+
+    if commits_text.is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "No commits found between the specified refs".to_string(),
+        ));
+    }
+
+    // Get diff stats
+    let stats = get_diff_stats(&repo_path, &base_ref, &head_ref)?;
+
+    let user_prompt = format!("{}\n\nDiff statistics:\n{}", commits_text, stats);
+    let truncated = truncate_content(&user_prompt, MAX_CHANGELOG_CHARS);
+
+    // Replace {title} placeholder in prompt
+    let system_prompt = PR_DESCRIPTION_PROMPT.replace("{title}", &title);
+
+    let service = state.read().await;
+    let response = service
+        .generate_text(&system_prompt, truncated, Some(1500))
+        .await
+        .map_err(LeviathanError::OperationFailed)?;
+
+    Ok(GeneratedPrDescription {
+        body: response.trim().to_string(),
+    })
+}
+
+/// Suggest splitting staged changes into multiple commits
+#[command]
+pub async fn suggest_commit_splits(
+    state: State<'_, AiState>,
+    repo_path: String,
+) -> Result<CommitSplitSuggestion> {
+    let diff = get_staged_diff(&repo_path)?;
+
+    if diff.is_empty() {
+        return Ok(CommitSplitSuggestion {
+            should_split: false,
+            groups: vec![],
+            explanation: "No staged changes".to_string(),
+        });
+    }
+
+    // Only suggest splits for substantial changes
+    let line_count = diff.lines().count();
+    if line_count < 30 {
+        return Ok(CommitSplitSuggestion {
+            should_split: false,
+            groups: vec![],
+            explanation: "Changes are small enough for a single commit".to_string(),
+        });
+    }
+
+    let truncated = truncate_content(&diff, MAX_DIFF_CHARS);
+
+    let service = state.read().await;
+    let response = service
+        .generate_text(COMMIT_SPLIT_PROMPT, truncated, Some(1500))
+        .await
+        .map_err(LeviathanError::OperationFailed)?;
+
+    parse_split_suggestion(&response)
+}
+
+/// Get diff stats between two refs
+fn get_diff_stats(repo_path: &str, base_ref: &str, compare_ref: &str) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("diff")
+        .arg("--stat")
+        .arg(format!("{}..{}", base_ref, compare_ref))
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git diff: {}", e)))?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Detect secrets in a diff using regex patterns (fast, no AI needed)
+fn detect_secrets(diff: &str) -> Vec<AnalysisFinding> {
+    let mut findings = Vec::new();
+
+    let patterns: Vec<(&str, &str)> = vec![
+        (r"AKIA[0-9A-Z]{16}", "Possible AWS Access Key ID detected"),
+        (
+            r"-----BEGIN[A-Z ]*PRIVATE KEY-----",
+            "Private key detected in diff",
+        ),
+        (
+            r#"(?i)(password|passwd|pwd)\s*[:=]\s*['"][^'"]{4,}['"]"#,
+            "Possible hardcoded password detected",
+        ),
+        (
+            r#"(?i)(api[_-]?key|apikey|secret[_-]?key)\s*[:=]\s*['"][A-Za-z0-9]{16,}['"]"#,
+            "Possible hardcoded API key detected",
+        ),
+        (
+            r#"(?i)(token)\s*[:=]\s*['"][A-Za-z0-9_\-.]{20,}['"]"#,
+            "Possible hardcoded token detected",
+        ),
+    ];
+
+    for (pattern, message) in patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            for mat in re.find_iter(diff) {
+                // Try to find the file path from the nearest diff header
+                let before = &diff[..mat.start()];
+                let file_path = before
+                    .rfind("\n+++ b/")
+                    .and_then(|pos| {
+                        let line_start = pos + 7; // skip "\n+++ b/"
+                        before[line_start..]
+                            .find('\n')
+                            .map(|end| before[line_start..line_start + end].to_string())
+                    })
+                    .or_else(|| {
+                        before.rfind("\n+++ ").map(|pos| {
+                            let line_start = pos + 5;
+                            before[line_start..]
+                                .find('\n')
+                                .map(|end| before[line_start..line_start + end].to_string())
+                                .unwrap_or_default()
+                        })
+                    });
+
+                findings.push(AnalysisFinding {
+                    category: FindingCategory::Secret,
+                    severity: Severity::Error,
+                    message: message.to_string(),
+                    file_path,
+                });
+            }
+        }
+    }
+
+    findings
+}
+
+/// Parse the AI vibe check response
+fn parse_vibe_check_response(response: &str) -> Result<StagedAnalysis> {
+    let trimmed = response.trim();
+    let json_str = strip_code_fences(trimmed);
+
+    serde_json::from_str::<StagedAnalysis>(json_str).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to parse vibe check response: {}", e))
+    })
+}
+
+/// Parse the AI split suggestion response
+fn parse_split_suggestion(response: &str) -> Result<CommitSplitSuggestion> {
+    let trimmed = response.trim();
+    let json_str = strip_code_fences(trimmed);
+
+    serde_json::from_str::<CommitSplitSuggestion>(json_str).map_err(|e| {
+        // Fallback: no split needed
+        tracing::warn!("Failed to parse split suggestion: {}", e);
+        LeviathanError::OperationFailed(format!("Failed to parse split suggestion: {}", e))
+    })
+}
+
+/// Strip markdown code fences from a response
+fn strip_code_fences(s: &str) -> &str {
+    if s.starts_with("```") {
+        let inner = s
+            .strip_prefix("```json")
+            .or_else(|| s.strip_prefix("```"))
+            .unwrap_or(s);
+        inner.strip_suffix("```").unwrap_or(inner).trim()
+    } else {
+        s
+    }
 }
 
 /// Truncate content to a maximum character length at a line boundary
@@ -559,5 +812,92 @@ mod tests {
         let json = serde_json::to_string(&msg).expect("Failed to serialize");
         assert!(json.contains("summary"));
         assert!(json.contains("test commit"));
+    }
+
+    // ========================================================================
+    // detect_secrets Tests
+    // ========================================================================
+
+    #[test]
+    fn test_detect_secrets_aws_key() {
+        let diff = "+++ b/config.ts\n+const key = 'AKIAIOSFODNN7EXAMPLE';";
+        let findings = detect_secrets(diff);
+        assert!(!findings.is_empty());
+        assert!(findings
+            .iter()
+            .any(|f| matches!(f.category, FindingCategory::Secret)));
+    }
+
+    #[test]
+    fn test_detect_secrets_private_key() {
+        let diff = "+++ b/key.pem\n+-----BEGIN RSA PRIVATE KEY-----\n+MIIEo...";
+        let findings = detect_secrets(diff);
+        assert!(!findings.is_empty());
+    }
+
+    #[test]
+    fn test_detect_secrets_password() {
+        let diff = r#"+++ b/config.ts
++const password = "super_secret_123";"#;
+        let findings = detect_secrets(diff);
+        assert!(!findings.is_empty());
+    }
+
+    #[test]
+    fn test_detect_secrets_clean_diff() {
+        let diff = "+++ b/main.ts\n+console.log('hello world');";
+        let findings = detect_secrets(diff);
+        assert!(findings.is_empty());
+    }
+
+    // ========================================================================
+    // parse_vibe_check_response Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_vibe_check_valid_json() {
+        let response = r#"{"findings": [{"category": "quality", "severity": "info", "message": "TODO added", "filePath": "main.ts"}], "summary": "1 issue found", "riskLevel": "low"}"#;
+        let result = parse_vibe_check_response(response);
+        assert!(result.is_ok());
+        let analysis = result.unwrap();
+        assert_eq!(analysis.findings.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_vibe_check_with_code_fences() {
+        let response =
+            "```json\n{\"findings\": [], \"summary\": \"No issues\", \"riskLevel\": \"low\"}\n```";
+        let result = parse_vibe_check_response(response);
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // parse_split_suggestion Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_split_suggestion_should_split() {
+        let response = r#"{"shouldSplit": true, "groups": [{"label": "Bug fix", "files": ["auth.rs"], "suggestedMessage": "fix: resolve auth bug"}], "explanation": "Separate concerns"}"#;
+        let result = parse_split_suggestion(response);
+        assert!(result.is_ok());
+        let suggestion = result.unwrap();
+        assert!(suggestion.should_split);
+        assert_eq!(suggestion.groups.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_split_suggestion_no_split() {
+        let response =
+            r#"{"shouldSplit": false, "groups": [], "explanation": "Changes are cohesive"}"#;
+        let result = parse_split_suggestion(response);
+        assert!(result.is_ok());
+        assert!(!result.unwrap().should_split);
+    }
+
+    #[test]
+    fn test_strip_code_fences() {
+        assert_eq!(strip_code_fences("```json\n{}\n```"), "{}");
+        assert_eq!(strip_code_fences("```\nhello\n```"), "hello");
+        assert_eq!(strip_code_fences("no fences"), "no fences");
     }
 }

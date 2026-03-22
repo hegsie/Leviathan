@@ -7,6 +7,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import * as aiService from '../../services/ai.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import type {
   GitLabConnectionStatus,
@@ -625,6 +627,7 @@ export class LvGitLabDialog extends LitElement {
   @state() private createMrSource = '';
   @state() private createMrTarget = '';
   @state() private createMrDraft = false;
+  @state() private generatingMrDescription = false;
 
   // Create Issue form
   @state() private createIssueTitle = '';
@@ -1192,6 +1195,26 @@ export class LvGitLabDialog extends LitElement {
     await this.loadIssues();
   }
 
+  private async handleGenerateMrDescription(): Promise<void> {
+    if (!this.repositoryPath || !this.createMrSource || !this.createMrTarget) return;
+
+    this.generatingMrDescription = true;
+    const result = await aiService.generatePrDescription(
+      this.repositoryPath,
+      this.createMrTarget,
+      this.createMrSource,
+      this.createMrTitle || 'Untitled MR',
+    );
+
+    if (result.success && result.data) {
+      this.createMrDescription = result.data.body;
+    } else {
+      showToast(result.error?.message ?? 'Failed to generate description', 'error');
+    }
+
+    this.generatingMrDescription = false;
+  }
+
   private async handleCreateMr(): Promise<void> {
     if (!this.detectedRepo || !this.createMrTitle.trim() || !this.createMrSource.trim() || !this.createMrTarget.trim()) return;
 
@@ -1588,7 +1611,18 @@ export class LvGitLabDialog extends LitElement {
           />
         </div>
         <div class="form-group">
-          <label>Description</label>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <label>Description</label>
+            <button
+              class="btn btn-sm"
+              style="font-size:12px;padding:2px 8px;display:flex;align-items:center;gap:4px"
+              @click=${this.handleGenerateMrDescription}
+              ?disabled=${this.generatingMrDescription || !this.createMrSource || !this.createMrTarget}
+              title="Generate description using AI"
+            >
+              ${this.generatingMrDescription ? 'Generating...' : html`<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a3.5 3.5 0 0 0-3.5 3.5c0 1.193.603 2.26 1.5 2.898V9.5a1 1 0 0 0 .293.707l1 1a1 1 0 0 0 1.414 0l1-1A1 1 0 0 0 10 9.5V7.398A3.496 3.496 0 0 0 11.5 4.5 3.5 3.5 0 0 0 8 1z"/></svg> AI Generate`}
+            </button>
+          </div>
           <textarea
             placeholder="Describe your changes..."
             .value=${this.createMrDescription}

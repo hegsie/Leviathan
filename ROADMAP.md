@@ -300,18 +300,15 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 
 - ✅ **Automatic Changelog Generation** — AI-powered release notes from commit history between any two refs. Standalone dialog with tag selectors and copy-to-clipboard. Accessible via command palette ("Generate Changelog").
 
-#### Phase 3: The "Local Bouncer" (Q1 2027)
+#### Phase 3: The "Local Bouncer" ✅
 
 *Local AI Code Review before you push.*
 
-- **Pre-Commit "Vibe Check"** — As you stage files, a background worker runs a **Small Language Model (SLM)** to check for:
-  1. **Hardcoded Secrets:** Env files, API keys
-  2. **Complexity Spikes:** Flagging functions that grew significantly in a single commit
-  3. **Linter Violations:** Predicting CI failure before you commit
+- ✅ **Pre-Commit "Vibe Check"** — Regex-based secret detection (AWS keys, private keys, passwords, API keys, tokens) + LLM analysis for complexity spikes and quality issues. Risk badge (low/medium/high) in commit panel with expandable findings list.
 
-- **Automated PR Descriptions** — Generate a full markdown template for GitHub/GitLab PRs based on the *semantic intent* of the branch. Not just changed files — a summary of the *architectural impact*.
+- ✅ **Automated PR Descriptions** — AI Generate button on PR/MR body textarea in all 4 integration dialogs (GitHub, GitLab, Azure DevOps, Bitbucket). Analyzes branch commits + diff stats to produce structured PR descriptions.
 
-- **AI-Assisted Staging** — Leviathan identifies "tangled commits" (e.g., you're fixing a bug but also refactoring a CSS file). The AI suggests splitting the changes into two logical commits and offers to stage the lines accordingly.
+- ✅ **AI-Assisted Staging** — Tangled commit detection via LLM analysis of staged diffs. Shows split suggestions with file groupings and conventional commit messages. One-click "Stage This Group" to stage only the files in each group.
 
 #### Phase 4: The "Rebase Pilot" (Q2 2027)
 
@@ -357,7 +354,7 @@ By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits**
 
 ### Testing & Quality Assurance
 
-- ✅ **Unit tests** — 127+ test files, 2635+ tests via web-test-runner
+- ✅ **Unit tests** — 127+ test files, 2635+ tests via web-test-runner, 32+ Rust AI tests
 - ✅ **E2E tests** — 38 Playwright test files covering dialogs, git operations, UI components, OAuth flows
 - ✅ **Rust tests** — integration tests for Tauri commands with TestRepo helpers
 - ✅ **CI/CD** — GitHub Actions build workflow with signing for tagged releases

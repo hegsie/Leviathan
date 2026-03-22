@@ -2831,6 +2831,7 @@ dependencies = [
  "notify",
  "once_cell",
  "rand 0.8.5",
+ "regex",
  "reqwest 0.13.2",
  "rusqlite",
  "serde",

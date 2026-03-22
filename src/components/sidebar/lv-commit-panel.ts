@@ -3,6 +3,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { CommitTemplate, ConventionalType } from '../../services/git.service.ts';
@@ -276,6 +277,186 @@ export class LvCommitPanel extends LitElement {
         font-size: var(--font-size-xs);
       }
 
+      /* Vibe Check & Split Suggestion styles */
+      .ai-checks {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 0 var(--spacing-xs);
+      }
+
+      .check-buttons {
+        display: flex;
+        gap: 4px;
+      }
+
+      .check-btn {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-secondary);
+        font-size: 11px;
+        cursor: pointer;
+      }
+
+      .check-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .check-btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .vibe-result {
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        font-size: 11px;
+        overflow: hidden;
+      }
+
+      .vibe-result.high { border-color: var(--color-error); }
+      .vibe-result.medium { border-color: var(--color-warning); }
+
+      .vibe-summary {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+
+      .vibe-summary:hover { background: var(--color-bg-hover); }
+
+      .risk-badge {
+        padding: 1px 6px;
+        border-radius: 8px;
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+
+      .risk-badge.low { background: var(--color-success-bg); color: var(--color-success); }
+      .risk-badge.medium { background: var(--color-warning-bg); color: var(--color-warning); }
+      .risk-badge.high { background: var(--color-error-bg); color: var(--color-error); }
+
+      .findings-list {
+        border-top: 1px solid var(--color-border);
+        padding: 4px;
+      }
+
+      .finding {
+        display: flex;
+        gap: 6px;
+        align-items: baseline;
+        padding: 2px 4px;
+        font-size: 11px;
+      }
+
+      .finding.error { color: var(--color-error); }
+      .finding.warning { color: var(--color-warning); }
+
+      .finding-category {
+        font-weight: 600;
+        text-transform: uppercase;
+        font-size: 9px;
+        opacity: 0.7;
+        flex-shrink: 0;
+      }
+
+      .finding-file {
+        color: var(--color-text-muted);
+        font-size: 10px;
+        margin-left: auto;
+        flex-shrink: 0;
+      }
+
+      .split-result {
+        border: 1px solid var(--color-accent);
+        border-radius: var(--radius-sm);
+        font-size: 11px;
+        overflow: hidden;
+      }
+
+      .split-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        cursor: pointer;
+        color: var(--color-accent);
+      }
+
+      .split-header:hover { background: var(--color-bg-hover); }
+
+      .dismiss-btn {
+        margin-left: auto;
+        padding: 1px 6px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-secondary);
+        font-size: 10px;
+        cursor: pointer;
+      }
+
+      .split-groups {
+        border-top: 1px solid var(--color-border);
+        padding: 6px;
+      }
+
+      .split-explanation {
+        color: var(--color-text-secondary);
+        margin-bottom: 6px;
+        font-style: italic;
+      }
+
+      .split-group {
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        padding: 6px;
+        margin-bottom: 4px;
+      }
+
+      .group-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .stage-group-btn {
+        padding: 2px 8px;
+        border: 1px solid var(--color-accent);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-accent);
+        font-size: 10px;
+        cursor: pointer;
+      }
+
+      .stage-group-btn:hover {
+        background: var(--color-accent);
+        color: white;
+      }
+
+      .group-message {
+        color: var(--color-text-secondary);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        margin-top: 2px;
+      }
+
+      .group-files {
+        color: var(--color-text-muted);
+        font-size: 10px;
+        margin-top: 2px;
+      }
+
       .success {
         padding: var(--spacing-xs);
         background: var(--color-success-bg);
@@ -481,6 +662,16 @@ export class LvCommitPanel extends LitElement {
   @state() private aiAvailable: boolean = false;
   @state() private isGenerating: boolean = false;
   @state() private generationError: string | null = null;
+
+  // Vibe check state
+  @state() private vibeCheckResult: import('../../services/ai.service.ts').StagedAnalysis | null = null;
+  @state() private isAnalyzing: boolean = false;
+  @state() private showVibeDetails: boolean = false;
+
+  // Split suggestion state
+  @state() private splitSuggestion: import('../../services/ai.service.ts').CommitSplitSuggestion | null = null;
+  @state() private isAnalyzingSplit: boolean = false;
+  @state() private showSplitDetails: boolean = false;
 
   // History state
   @state() private commitHistory: string[] = [];
@@ -931,6 +1122,51 @@ export class LvCommitPanel extends LitElement {
     }
   }
 
+  private async handleVibeCheck(): Promise<void> {
+    if (!this.repositoryPath || this.stagedCount === 0) return;
+
+    this.isAnalyzing = true;
+    this.vibeCheckResult = null;
+
+    const result = await aiService.analyzeStagedChanges(this.repositoryPath);
+
+    if (result.success && result.data) {
+      this.vibeCheckResult = result.data;
+      this.showVibeDetails = result.data.findings.length > 0;
+    }
+
+    this.isAnalyzing = false;
+  }
+
+  private async handleSuggestSplits(): Promise<void> {
+    if (!this.repositoryPath || this.stagedCount === 0) return;
+
+    this.isAnalyzingSplit = true;
+    this.splitSuggestion = null;
+
+    const result = await aiService.suggestCommitSplits(this.repositoryPath);
+
+    if (result.success && result.data) {
+      this.splitSuggestion = result.data;
+      this.showSplitDetails = result.data.shouldSplit;
+    }
+
+    this.isAnalyzingSplit = false;
+  }
+
+  private async handleStageGroup(files: string[]): Promise<void> {
+    if (!this.repositoryPath) return;
+
+    // Unstage everything first, then stage only this group
+    const result = await gitService.stageFiles(this.repositoryPath, { paths: files });
+    if (result.success) {
+      showToast(`Staged ${files.length} files`, 'success');
+      window.dispatchEvent(new CustomEvent('status-refresh'));
+    } else {
+      showToast(result.error?.message ?? 'Failed to stage files', 'error');
+    }
+  }
+
   private async handleCommit(): Promise<void> {
     if (!this.canCommit) return;
 
@@ -1040,6 +1276,74 @@ export class LvCommitPanel extends LitElement {
               <option value=${t.id}>${t.name}</option>
             `)}
           </select>
+        </div>
+      ` : nothing}
+
+      ${this.aiAvailable && this.stagedCount > 0 ? html`
+        <div class="ai-checks">
+          <div class="check-buttons">
+            <button
+              class="check-btn"
+              @click=${this.handleVibeCheck}
+              ?disabled=${this.isAnalyzing}
+              title="Check staged changes for secrets, complexity, and quality issues"
+            >
+              ${this.isAnalyzing ? 'Checking...' : html`<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm3.28 5.78l-4 4a.75.75 0 0 1-1.06 0l-2-2a.75.75 0 1 1 1.06-1.06L6.75 8.19l3.47-3.47a.75.75 0 1 1 1.06 1.06z"/></svg> Vibe Check`}
+            </button>
+            <button
+              class="check-btn"
+              @click=${this.handleSuggestSplits}
+              ?disabled=${this.isAnalyzingSplit}
+              title="Check if staged changes should be split into separate commits"
+            >
+              ${this.isAnalyzingSplit ? 'Analyzing...' : html`<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.25a.25.25 0 0 1 .25-.25h5.5a.25.25 0 0 1 .25.25v5.5a.25.25 0 0 1-.25.25h-5.5a.25.25 0 0 1-.25-.25v-5.5zM5 11.75a.25.25 0 0 1 .25-.25h5.5a.25.25 0 0 1 .25.25v1.5a.25.25 0 0 1-.25.25h-5.5a.25.25 0 0 1-.25-.25v-1.5z"/></svg> Split Check`}
+            </button>
+          </div>
+
+          ${this.vibeCheckResult ? html`
+            <div class="vibe-result ${this.vibeCheckResult.riskLevel}">
+              <div class="vibe-summary" @click=${() => { this.showVibeDetails = !this.showVibeDetails; }}>
+                <span class="risk-badge ${this.vibeCheckResult.riskLevel}">${this.vibeCheckResult.riskLevel}</span>
+                <span>${this.vibeCheckResult.summary}</span>
+              </div>
+              ${this.showVibeDetails && this.vibeCheckResult.findings.length > 0 ? html`
+                <div class="findings-list">
+                  ${this.vibeCheckResult.findings.map(f => html`
+                    <div class="finding ${f.severity}">
+                      <span class="finding-category">${f.category}</span>
+                      <span class="finding-message">${f.message}</span>
+                      ${f.filePath ? html`<span class="finding-file">${f.filePath}</span>` : nothing}
+                    </div>
+                  `)}
+                </div>
+              ` : nothing}
+            </div>
+          ` : nothing}
+
+          ${this.splitSuggestion?.shouldSplit ? html`
+            <div class="split-result">
+              <div class="split-header" @click=${() => { this.showSplitDetails = !this.showSplitDetails; }}>
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.25a.25.25 0 0 1 .25-.25h5.5a.25.25 0 0 1 .25.25v5.5a.25.25 0 0 1-.25.25h-5.5a.25.25 0 0 1-.25-.25v-5.5z"/></svg>
+                <span>Split into ${this.splitSuggestion.groups.length} commits recommended</span>
+                <button class="dismiss-btn" @click=${(e: Event) => { e.stopPropagation(); this.splitSuggestion = null; }}>Dismiss</button>
+              </div>
+              ${this.showSplitDetails ? html`
+                <div class="split-groups">
+                  <div class="split-explanation">${this.splitSuggestion.explanation}</div>
+                  ${this.splitSuggestion.groups.map(g => html`
+                    <div class="split-group">
+                      <div class="group-header">
+                        <strong>${g.label}</strong>
+                        <button class="stage-group-btn" @click=${() => this.handleStageGroup(g.files)}>Stage</button>
+                      </div>
+                      <div class="group-message">${g.suggestedMessage}</div>
+                      <div class="group-files">${g.files.join(', ')}</div>
+                    </div>
+                  `)}
+                </div>
+              ` : nothing}
+            </div>
+          ` : nothing}
         </div>
       ` : nothing}
 

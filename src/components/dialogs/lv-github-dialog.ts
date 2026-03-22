@@ -27,6 +27,8 @@ import * as credentialService from '../../services/credential.service.ts';
 import * as oauthService from '../../services/oauth.service.ts';
 import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts';
 import type { OAuthFlowState, OAuthTokenResponse } from '../../types/oauth.types.ts';
+import * as aiService from '../../services/ai.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
@@ -775,6 +777,7 @@ export class LvGitHubDialog extends LitElement {
   @state() private createPrHead = '';
   @state() private createPrBase = '';
   @state() private createPrDraft = false;
+  @state() private generatingPrDescription = false;
 
   // Create Issue form
   @state() private createIssueTitle = '';
@@ -1325,6 +1328,26 @@ export class LvGitHubDialog extends LitElement {
     } finally {
       this.isLoading = false;
     }
+  }
+
+  private async handleGeneratePrDescription(): Promise<void> {
+    if (!this.repositoryPath || !this.createPrHead || !this.createPrBase) return;
+
+    this.generatingPrDescription = true;
+    const result = await aiService.generatePrDescription(
+      this.repositoryPath,
+      this.createPrBase,
+      this.createPrHead,
+      this.createPrTitle || 'Untitled PR',
+    );
+
+    if (result.success && result.data) {
+      this.createPrBody = result.data.body;
+    } else {
+      showToast(result.error?.message ?? 'Failed to generate description', 'error');
+    }
+
+    this.generatingPrDescription = false;
   }
 
   private async handleCreatePR(): Promise<void> {
@@ -2088,7 +2111,18 @@ export class LvGitHubDialog extends LitElement {
         </div>
 
         <div class="form-group">
-          <label>Description</label>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <label>Description</label>
+            <button
+              class="btn btn-sm"
+              style="font-size:12px;padding:2px 8px;display:flex;align-items:center;gap:4px"
+              @click=${this.handleGeneratePrDescription}
+              ?disabled=${this.generatingPrDescription || !this.createPrHead || !this.createPrBase}
+              title="Generate description using AI"
+            >
+              ${this.generatingPrDescription ? 'Generating...' : html`<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a3.5 3.5 0 0 0-3.5 3.5c0 1.193.603 2.26 1.5 2.898V9.5a1 1 0 0 0 .293.707l1 1a1 1 0 0 0 1.414 0l1-1A1 1 0 0 0 10 9.5V7.398A3.496 3.496 0 0 0 11.5 4.5 3.5 3.5 0 0 0 8 1z"/></svg> AI Generate`}
+            </button>
+          </div>
           <textarea
             placeholder="Describe your changes..."
             .value=${this.createPrBody}

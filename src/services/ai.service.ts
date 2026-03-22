@@ -156,6 +156,78 @@ export async function generateChangelog(
   });
 }
 
+// ========================================================================
+// Phase 3: "Local Bouncer" types and functions
+// ========================================================================
+
+export type FindingCategory = 'secret' | 'complexity' | 'quality';
+export type FindingSeverity = 'info' | 'warning' | 'error';
+export type RiskLevel = 'low' | 'medium' | 'high';
+
+export interface AnalysisFinding {
+  category: FindingCategory;
+  severity: FindingSeverity;
+  message: string;
+  filePath: string | null;
+}
+
+export interface StagedAnalysis {
+  findings: AnalysisFinding[];
+  summary: string;
+  riskLevel: RiskLevel;
+}
+
+export interface GeneratedPrDescription {
+  body: string;
+}
+
+export interface CommitGroup {
+  label: string;
+  files: string[];
+  suggestedMessage: string;
+}
+
+export interface CommitSplitSuggestion {
+  shouldSplit: boolean;
+  groups: CommitGroup[];
+  explanation: string;
+}
+
+/**
+ * Analyze staged changes for secrets, complexity, and quality issues
+ */
+export async function analyzeStagedChanges(
+  repoPath: string,
+): Promise<CommandResult<StagedAnalysis>> {
+  return invokeCommand<StagedAnalysis>('analyze_staged_changes', { repoPath });
+}
+
+/**
+ * Generate a PR description from branch commits
+ */
+export async function generatePrDescription(
+  repoPath: string,
+  baseRef: string,
+  headRef: string,
+  title: string,
+): Promise<CommandResult<GeneratedPrDescription>> {
+  return invokeCommand<GeneratedPrDescription>('generate_pr_description', {
+    repoPath,
+    baseRef,
+    headRef,
+    title,
+  });
+}
+
+/**
+ * Suggest splitting staged changes into multiple commits
+ */
+export async function suggestCommitSplits(
+  repoPath: string,
+): Promise<CommandResult<CommitSplitSuggestion>> {
+  return invokeCommand<CommitSplitSuggestion>('suggest_commit_splits', { repoPath });
+}
+
 /**
  * Check if AI is available (provider configured and working)
  */

@@ -214,6 +214,140 @@ Rules:
 Commits:
 "#;
 
+// ========================================================================
+// Phase 3: "Local Bouncer" types and prompts
+// ========================================================================
+
+/// Risk level for staged changes analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+/// Category of an analysis finding
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FindingCategory {
+    Secret,
+    Complexity,
+    Quality,
+}
+
+/// Severity of an analysis finding
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Severity {
+    Info,
+    Warning,
+    Error,
+}
+
+/// A single finding from staged changes analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisFinding {
+    pub category: FindingCategory,
+    pub severity: Severity,
+    pub message: String,
+    pub file_path: Option<String>,
+}
+
+/// Result of analyzing staged changes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedAnalysis {
+    pub findings: Vec<AnalysisFinding>,
+    pub summary: String,
+    pub risk_level: RiskLevel,
+}
+
+/// Generated PR description result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedPrDescription {
+    pub body: String,
+}
+
+/// A group of files that should be committed together
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitGroup {
+    pub label: String,
+    pub files: Vec<String>,
+    pub suggested_message: String,
+}
+
+/// Suggestion for splitting staged changes into multiple commits
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitSplitSuggestion {
+    pub should_split: bool,
+    pub groups: Vec<CommitGroup>,
+    pub explanation: String,
+}
+
+/// System prompt for pre-commit "vibe check"
+pub const VIBE_CHECK_PROMPT: &str = r#"Analyze the following git diff for potential issues. Return ONLY a JSON object (no markdown fences) with this structure:
+{"findings": [{"category": "secret|complexity|quality", "severity": "info|warning|error", "message": "description", "filePath": "path/to/file or null"}], "summary": "one-line summary", "riskLevel": "low|medium|high"}
+
+Check for:
+1. **Secrets**: Hardcoded API keys, tokens, passwords, connection strings, private keys
+2. **Complexity**: Functions that grew very large, deeply nested logic, high cyclomatic complexity
+3. **Quality**: Missing error handling, TODO/FIXME comments added, console.log/println left in
+
+Rules:
+- Be concise — one sentence per finding
+- Only flag genuine issues, not false positives
+- If no issues found, return empty findings array with riskLevel "low"
+- filePath should be the file path from the diff header (a/path or b/path)
+
+Diff:
+"#;
+
+/// System prompt for PR description generation
+pub const PR_DESCRIPTION_PROMPT: &str = r#"Generate a pull request description in Markdown based on the following commits and diff statistics. Return ONLY the markdown body (no JSON wrapper).
+
+Structure:
+## Summary
+2-3 sentences describing what this PR does and why.
+
+## Changes
+- Bulleted list of changes grouped by area (frontend, backend, tests, config)
+- One bullet per logical change
+
+## Test Plan
+- What should be tested
+- Any areas of risk
+
+Rules:
+- Focus on "what" and "why", not "how"
+- Keep it concise — no more than 15 bullets total
+- Use present tense ("Adds", "Fixes", "Updates")
+
+PR Title: {title}
+
+Commits and stats:
+"#;
+
+/// System prompt for tangled commit detection
+pub const COMMIT_SPLIT_PROMPT: &str = r#"Analyze the following staged diff and determine if it contains multiple logically separate concerns that should be split into separate commits.
+
+Return ONLY a JSON object (no markdown fences):
+{"shouldSplit": true|false, "groups": [{"label": "short description", "files": ["path1", "path2"], "suggestedMessage": "conventional commit message"}], "explanation": "why splitting is recommended or why changes are cohesive"}
+
+Rules:
+- Only suggest splitting if there are genuinely separate concerns (e.g., a bug fix mixed with a refactor, or a feature addition mixed with test updates for unrelated code)
+- Touching multiple files does NOT mean it should be split — related changes across files are normal
+- If changes are cohesive, set shouldSplit to false with an empty groups array
+- Each group's suggestedMessage should follow conventional commit format (feat:, fix:, refactor:, test:, docs:, chore:)
+- File paths should match the paths in the diff headers
+
+Diff:
+"#;
+
 /// System prompt for AI-powered conflict resolution
 pub const CONFLICT_RESOLUTION_PROMPT: &str = r#"You are a merge conflict resolution assistant. You will be given the "ours" (current branch) and "theirs" (incoming branch) versions of a conflicting code section, optionally with a common ancestor "base" version and surrounding context.
 

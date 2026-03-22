@@ -63,6 +63,9 @@ candle-transformers = "0.9"
 hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 
+# Secret detection
+regex = "1"
+
 # OAuth System
 sha2 = "0.10"
 rand = "0.8"
