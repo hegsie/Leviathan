@@ -117,6 +117,15 @@ export class LvChangelogDialog extends LitElement {
         border-color: var(--color-accent);
       }
 
+      .ai-warning {
+        padding: 8px 12px;
+        background: var(--color-bg-warning, #332b00);
+        border: 1px solid var(--color-border-warning, #665500);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-warning, #ffcc00);
+        font-size: var(--font-size-sm);
+      }
+
       .error-message {
         padding: 8px 12px;
         background: var(--color-bg-error);
@@ -280,8 +289,8 @@ export class LvChangelogDialog extends LitElement {
           </div>
 
           ${!this.aiAvailable ? html`
-            <div class="error-message">
-              No AI provider available. Configure one in Settings > AI Providers.
+            <div class="ai-warning">
+              No AI provider available. Configure one in Settings &gt; AI Providers.
             </div>
           ` : nothing}
 
