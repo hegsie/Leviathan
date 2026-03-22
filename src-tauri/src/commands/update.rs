@@ -76,8 +76,12 @@ pub struct BuildInfo {
 pub fn get_build_info() -> BuildInfo {
     BuildInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        rust_version: option_env!("RUSTC_VERSION").unwrap_or("unknown").to_string(),
-        target: option_env!("TARGET").unwrap_or("unknown").to_string(),
+        rust_version: option_env!("RUSTC_VERSION")
+            .unwrap_or("unknown")
+            .to_string(),
+        target: option_env!("TARGET")
+            .unwrap_or("unknown")
+            .to_string(),
         profile: if cfg!(debug_assertions) {
             "debug".to_string()
         } else {
