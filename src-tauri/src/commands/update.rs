@@ -79,9 +79,7 @@ pub fn get_build_info() -> BuildInfo {
         rust_version: option_env!("RUSTC_VERSION")
             .unwrap_or("unknown")
             .to_string(),
-        target: option_env!("TARGET")
-            .unwrap_or("unknown")
-            .to_string(),
+        target: option_env!("TARGET").unwrap_or("unknown").to_string(),
         profile: if cfg!(debug_assertions) {
             "debug".to_string()
         } else {
