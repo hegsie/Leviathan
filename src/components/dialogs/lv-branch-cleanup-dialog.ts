@@ -562,7 +562,12 @@ export class LvBranchCleanupDialog extends LitElement {
 
     // Prune remote tracking branches if requested
     if (this.pruneRemotes) {
-      await gitService.pruneRemoteTrackingBranches(this.repositoryPath);
+      try {
+        await gitService.pruneRemoteTrackingBranches(this.repositoryPath);
+      } catch (err) {
+        console.error('Failed to prune remote tracking branches:', err);
+        showToast(`Failed to prune remote branches: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      }
     }
 
     this.deleting = false;

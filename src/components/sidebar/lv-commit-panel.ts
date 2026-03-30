@@ -1066,6 +1066,7 @@ export class LvCommitPanel extends LitElement {
       }
     } catch (err) {
       console.error('Failed to fetch last commit:', err);
+      showToast(`Failed to fetch last commit: ${err instanceof Error ? err.message : String(err)}`, 'error');
     }
   }
 

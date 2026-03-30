@@ -7,6 +7,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import type { Worktree } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
 
@@ -389,6 +390,8 @@ export class LvWorktreeDialog extends LitElement {
       // Filter out branches already checked out in other worktrees
       const usedBranches = new Set(this.worktrees.map((wt) => wt.branch).filter(Boolean));
       this.branches = result.data.filter((b) => !usedBranches.has(b.name));
+    } else {
+      showToast(result.error?.message || 'Failed to load branches', 'error');
     }
   }
 

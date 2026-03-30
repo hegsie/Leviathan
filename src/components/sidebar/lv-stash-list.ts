@@ -192,6 +192,8 @@ export class LvStashList extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else {
+        showToast(result.error?.message || 'Failed to load stashes', 'error');
       }
     } catch (err) {
       console.error('Failed to load stashes:', err);
@@ -277,6 +279,14 @@ export class LvStashList extends LitElement {
     if (!stash || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
+
+    const confirmed = await showConfirm(
+      'Pop Stash',
+      `This will apply the stash "${stash.message}" and remove it from the stash list. Any conflicts will need to be resolved manually. Continue?`,
+      'warning'
+    );
+    if (!confirmed) return;
+
     this.operationInProgress = true;
 
     try {

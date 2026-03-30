@@ -366,6 +366,8 @@ export class LvTagList extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else {
+        showToast(result.error?.message || 'Failed to load tags', 'error');
       }
     } catch (err) {
       console.error('Failed to load tags:', err);
@@ -458,6 +460,13 @@ export class LvTagList extends LitElement {
     if (!tag) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
+
+    const confirmed = await showConfirm(
+      'Checkout Tag',
+      `Checking out tag "${tag.name}" will put you in 'detached HEAD' state. Any new commits won't belong to any branch. Continue?`,
+      'warning'
+    );
+    if (!confirmed) return;
 
     const result = await gitService.checkoutWithAutoStash(this.repositoryPath, tag.name);
 
