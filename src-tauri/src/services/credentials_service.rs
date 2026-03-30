@@ -8,18 +8,47 @@ use git2::{Cred, CredentialType, RemoteCallbacks};
 use keyring::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Instant;
 
 /// Service name for keychain storage
 const SERVICE_NAME: &str = "leviathan-git";
 
-/// In-memory credential cache (host -> (username, password))
-/// Used as a fast lookup before hitting keychain
-static CREDENTIAL_CACHE: Mutex<Option<HashMap<String, (String, String)>>> = Mutex::new(None);
+/// Time-to-live for cached credentials (30 minutes).
+/// Expired entries are lazily removed on the next cache read.
+const CREDENTIAL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-/// Get credentials from the in-memory cache
+/// A cached credential entry with an insertion timestamp for TTL enforcement.
+#[derive(Clone)]
+struct CachedCredential {
+    username: String,
+    password: String,
+    cached_at: Instant,
+}
+
+/// In-memory credential cache (host -> credential + timestamp).
+/// Used as a fast lookup before hitting keychain.
+static CREDENTIAL_CACHE: Mutex<Option<HashMap<String, CachedCredential>>> = Mutex::new(None);
+
+/// Remove all expired entries from the credential cache.
+fn cleanup_expired_credentials(map: &mut HashMap<String, CachedCredential>) {
+    let now = Instant::now();
+    map.retain(|host, entry| {
+        let alive = now.duration_since(entry.cached_at) < CREDENTIAL_CACHE_TTL;
+        if !alive {
+            tracing::debug!("Credential cache entry expired for host: {}", host);
+        }
+        alive
+    });
+}
+
+/// Get credentials from the in-memory cache.
+/// Performs lazy cleanup of expired entries before lookup.
 fn get_cached_credentials(host: &str) -> Option<(String, String)> {
-    let cache = CREDENTIAL_CACHE.lock().ok()?;
-    cache.as_ref()?.get(host).cloned()
+    let mut cache = CREDENTIAL_CACHE.lock().ok()?;
+    let map = cache.as_mut()?;
+    cleanup_expired_credentials(map);
+    map.get(host)
+        .map(|entry| (entry.username.clone(), entry.password.clone()))
 }
 
 /// Store credentials in the in-memory cache
@@ -28,7 +57,11 @@ fn cache_credentials(host: &str, username: &str, password: &str) {
         let map = cache.get_or_insert_with(HashMap::new);
         map.insert(
             host.to_string(),
-            (username.to_string(), password.to_string()),
+            CachedCredential {
+                username: username.to_string(),
+                password: password.to_string(),
+                cached_at: Instant::now(),
+            },
         );
     }
 }
@@ -413,6 +446,13 @@ fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a>
 mod tests {
     use super::*;
 
+    /// Clear the global credential cache between tests to avoid cross-contamination.
+    fn clear_cache() {
+        if let Ok(mut cache) = CREDENTIAL_CACHE.lock() {
+            *cache = None;
+        }
+    }
+
     #[test]
     fn test_extract_host_ssh() {
         assert_eq!(
@@ -427,5 +467,97 @@ mod tests {
             extract_host("https://github.com/user/repo.git"),
             Some("github.com".to_string())
         );
+    }
+
+    #[test]
+    fn test_cache_credentials_stores_and_retrieves() {
+        clear_cache();
+        cache_credentials("example.com", "user", "pass");
+        let creds = get_cached_credentials("example.com");
+        assert_eq!(creds, Some(("user".to_string(), "pass".to_string())));
+    }
+
+    #[test]
+    fn test_cache_credentials_returns_none_for_missing_host() {
+        clear_cache();
+        cache_credentials("a.com", "u", "p");
+        assert!(get_cached_credentials("b.com").is_none());
+    }
+
+    #[test]
+    fn test_cleanup_expired_credentials_removes_old_entries() {
+        let mut map = HashMap::new();
+        // Insert an entry that is already past TTL
+        map.insert(
+            "old.example.com".to_string(),
+            CachedCredential {
+                username: "user".to_string(),
+                password: "pass".to_string(),
+                cached_at: Instant::now() - CREDENTIAL_CACHE_TTL - std::time::Duration::from_secs(1),
+            },
+        );
+        // Insert a fresh entry
+        map.insert(
+            "fresh.example.com".to_string(),
+            CachedCredential {
+                username: "user2".to_string(),
+                password: "pass2".to_string(),
+                cached_at: Instant::now(),
+            },
+        );
+
+        cleanup_expired_credentials(&mut map);
+
+        assert!(!map.contains_key("old.example.com"), "expired entry should be removed");
+        assert!(map.contains_key("fresh.example.com"), "fresh entry should remain");
+    }
+
+    #[test]
+    fn test_get_cached_credentials_skips_expired() {
+        clear_cache();
+        // Manually insert an expired entry
+        if let Ok(mut cache) = CREDENTIAL_CACHE.lock() {
+            let map = cache.get_or_insert_with(HashMap::new);
+            map.insert(
+                "expired.example.com".to_string(),
+                CachedCredential {
+                    username: "user".to_string(),
+                    password: "pass".to_string(),
+                    cached_at: Instant::now() - CREDENTIAL_CACHE_TTL - std::time::Duration::from_secs(1),
+                },
+            );
+        }
+
+        // Should return None because the entry has expired
+        assert!(get_cached_credentials("expired.example.com").is_none());
+
+        // The entry should have been cleaned up
+        if let Ok(cache) = CREDENTIAL_CACHE.lock() {
+            let map = cache.as_ref().unwrap();
+            assert!(!map.contains_key("expired.example.com"));
+        }
+    }
+
+    #[test]
+    fn test_cleanup_preserves_fresh_entries() {
+        let mut map = HashMap::new();
+        map.insert(
+            "host.com".to_string(),
+            CachedCredential {
+                username: "u".to_string(),
+                password: "p".to_string(),
+                cached_at: Instant::now(),
+            },
+        );
+
+        cleanup_expired_credentials(&mut map);
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_cleanup_empty_map() {
+        let mut map: HashMap<String, CachedCredential> = HashMap::new();
+        cleanup_expired_credentials(&mut map);
+        assert!(map.is_empty());
     }
 }

@@ -126,6 +126,23 @@ pub async fn delete_custom_action(path: String, action_id: String) -> Result<Vec
 }
 
 /// Execute a custom action
+///
+/// # Security
+///
+/// This command executes arbitrary shell commands defined by the user in
+/// `.git/leviathan/custom_actions.json`. Because the action definitions live
+/// inside the repository's `.git/` directory (not tracked by Git) and the
+/// user must explicitly create them through the UI, the trust boundary is
+/// equivalent to the user running commands in their own terminal.
+///
+/// Safety measures in place:
+/// - The `action_id` is validated against the persisted action list before
+///   execution — only previously saved actions can be run.
+/// - The resolved command and working directory are logged at INFO level so
+///   unexpected executions are auditable.
+/// - Actions with `confirm_before_run` set to `true` are gated by a
+///   confirmation dialog in the frontend before this command is invoked.
+/// - Variable substitution (`$REPO`, `$BRANCH`) is limited to known tokens.
 #[command]
 pub async fn run_custom_action(path: String, action_id: String) -> Result<ActionResult> {
     let repo_path = Path::new(&path);
@@ -153,6 +170,16 @@ pub async fn run_custom_action(path: String, action_id: String) -> Result<Action
         Some("repo_root") | None => path.clone(),
         Some(custom_path) => substitute_variables(custom_path, &path, &branch),
     };
+
+    // Log the command being executed for auditability
+    tracing::info!(
+        action_id = %action_id,
+        action_name = %action.name,
+        command = %command_str,
+        arguments = %arguments_str,
+        working_dir = %working_dir,
+        "Executing custom action"
+    );
 
     // Build the command
     let output = if cfg!(target_os = "windows") {
