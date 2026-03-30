@@ -4,7 +4,7 @@
  */
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from './tauri-api.ts';
 
 /**
  * Represents an ongoing operation with progress tracking.
@@ -36,13 +36,21 @@ class ProgressService {
   private unlistenFns: UnlistenFn[] = [];
   private operationCounter = 0;
   private cancelledOperations: Set<string> = new Set();
+  private readyPromise: Promise<void>;
 
   constructor() {
-    // Note: setupListeners is async but we don't await it here.
-    // This is intentional - the service is usable immediately for local operations,
-    // and backend events will be captured once the listeners are ready.
-    // In practice, the listeners initialize within milliseconds.
-    this.setupListeners();
+    this.readyPromise = this.setupListeners().catch(() => {
+      // Listeners may fail in non-Tauri environments (e.g., tests).
+      // The service remains usable for local operation tracking.
+    });
+  }
+
+  /**
+   * Wait for the service to be fully initialized (listeners attached).
+   * Call this before operations that depend on backend event listeners.
+   */
+  async ready(): Promise<void> {
+    return this.readyPromise;
   }
 
   private async setupListeners(): Promise<void> {
@@ -150,7 +158,8 @@ class ProgressService {
   cancelOperation(id: string): void {
     this.cancelledOperations.add(id);
     this.removeOperation(id);
-    invoke('cancel_operation', { operationId: id }).catch(() => {});
+    // invokeCommand never throws, so no .catch() needed
+    invokeCommand<void>('cancel_operation', { operationId: id });
   }
 
   /**
@@ -234,6 +243,7 @@ export async function withProgress<T>(
   ) => Promise<T>,
   options?: { cancellable?: boolean }
 ): Promise<T> {
+  await progressService.ready();
   const id = progressService.startOperation(type, message, options);
 
   try {

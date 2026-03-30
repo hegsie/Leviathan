@@ -192,13 +192,17 @@ export function getOrganization(account: IntegrationAccount): string | null {
 /**
  * Get display label for an account (name + context info)
  */
-export function getAccountDisplayLabel(account: IntegrationAccount): string {
+export function getAccountDisplayLabel(account: Pick<IntegrationAccount, 'name' | 'config'>): string {
   const parts = [account.name];
 
   if (account.config.type === 'gitlab' && account.config.instanceUrl) {
-    const url = new URL(account.config.instanceUrl);
-    if (url.hostname !== 'gitlab.com') {
-      parts.push(`(${url.hostname})`);
+    try {
+      const url = new URL(account.config.instanceUrl);
+      if (url.hostname !== 'gitlab.com') {
+        parts.push(`(${url.hostname})`);
+      }
+    } catch {
+      // Invalid URL, ignore
     }
   } else if (account.config.type === 'azure-devops' && account.config.organization) {
     parts.push(`(${account.config.organization})`);

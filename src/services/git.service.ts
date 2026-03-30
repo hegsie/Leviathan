@@ -889,46 +889,68 @@ export async function getFetchStatus(
 
 /**
  * Helper to get authentication token for a repository
- * Checks if it's a GitHub or Azure DevOps repo and retrieves corresponding token
+ * Tries the multi-account system first, then falls back to legacy single-token methods
  */
 async function getRepoToken(
   repoPath: string,
   remoteName?: string,
 ): Promise<string | undefined> {
   try {
-    // Check if it's a GitHub repo
+    // --- Multi-account system (preferred) ---
+    const { getDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
+    const { AccountCredentials } = await import("./credential.service.ts");
+
+    // GitHub
     const ghRepoResult = await detectGitHubRepo(repoPath);
     if (
       ghRepoResult.success &&
       ghRepoResult.data &&
       (!remoteName || ghRepoResult.data.remoteName === remoteName)
     ) {
+      const account = getDefaultGlobalAccount("github");
+      if (account) {
+        const token = await AccountCredentials.getToken("github", account.id);
+        if (token) return token;
+      }
+      // Legacy fallback for GitHub
       const tokenResult = await getGitHubToken();
       if (tokenResult.success && tokenResult.data) {
         return tokenResult.data;
       }
     }
 
-    // Check if it's an Azure DevOps repo
+    // Azure DevOps
     const adoRepoResult = await detectAdoRepo(repoPath);
     if (
       adoRepoResult.success &&
       adoRepoResult.data &&
       (!remoteName || adoRepoResult.data.remoteName === remoteName)
     ) {
+      const account = getDefaultGlobalAccount("azure-devops");
+      if (account) {
+        const token = await AccountCredentials.getToken("azure-devops", account.id);
+        if (token) return token;
+      }
+      // Legacy fallback for Azure DevOps
       const tokenResult = await getAdoToken();
       if (tokenResult.success && tokenResult.data) {
         return tokenResult.data;
       }
     }
 
-    // Check if it's a GitLab repo
+    // GitLab
     const gitlabRepoResult = await detectGitLabRepo(repoPath);
     if (
       gitlabRepoResult.success &&
       gitlabRepoResult.data &&
       (!remoteName || gitlabRepoResult.data.remoteName === remoteName)
     ) {
+      const account = getDefaultGlobalAccount("gitlab");
+      if (account) {
+        const token = await AccountCredentials.getToken("gitlab", account.id);
+        if (token) return token;
+      }
+      // Legacy fallback for GitLab
       const tokenResult = await getGitLabToken();
       if (tokenResult.success && tokenResult.data) {
         return tokenResult.data;
@@ -2107,10 +2129,24 @@ export async function getCommitSignature(
   repoPath: string,
   commitOid: string,
 ): Promise<CommandResult<CommitSignature>> {
-  return invokeCommand<CommitSignature>("get_commit_signature", {
+  // Check the batch cache first to avoid redundant Tauri calls
+  const cacheKey = createCacheKey(repoPath, commitOid);
+  const cached = commitSignatureCache.get(cacheKey);
+  if (cached) {
+    return { success: true, data: cached as CommitSignature };
+  }
+
+  const result = await invokeCommand<CommitSignature>("get_commit_signature", {
     path: repoPath,
     commitOid,
   });
+
+  // Cache the result for future lookups
+  if (result.success && result.data) {
+    commitSignatureCache.set(cacheKey, result.data);
+  }
+
+  return result;
 }
 
 export async function getCommitsSignatures(
@@ -6396,21 +6432,10 @@ export interface PruneResult {
 export async function getRepositoryStats(
   repoPath: string,
 ): Promise<CommandResult<{ count: number; loose: number; sizeKb: number }>> {
-  // Try to get object count from git count-objects
-  const result = await invokeCommand<{ count: number; loose: number; sizeKb: number }>(
+  return invokeCommand<{ count: number; loose: number; sizeKb: number }>(
     "get_repository_stats",
     { path: repoPath },
   );
-
-  if (!result.success) {
-    // Return sensible defaults if command not available
-    return {
-      success: true,
-      data: { count: 0, loose: 0, sizeKb: 0 },
-    };
-  }
-
-  return result;
 }
 
 /**
@@ -6419,20 +6444,10 @@ export async function getRepositoryStats(
 export async function getPackInfo(
   repoPath: string,
 ): Promise<CommandResult<{ packCount: number; packSizeKb: number }>> {
-  const result = await invokeCommand<{ packCount: number; packSizeKb: number }>(
+  return invokeCommand<{ packCount: number; packSizeKb: number }>(
     "get_pack_info",
     { path: repoPath },
   );
-
-  if (!result.success) {
-    // Return sensible defaults if command not available
-    return {
-      success: true,
-      data: { packCount: 0, packSizeKb: 0 },
-    };
-  }
-
-  return result;
 }
 
 /**
@@ -6790,4 +6805,22 @@ export async function runPrune(
     }
   }
   return result;
+}
+
+/**
+ * @deprecated Use runGc instead. Kept for backward compatibility.
+ */
+export async function runGarbageCollection(
+  args: RunGcCommand & { silent?: boolean },
+): Promise<CommandResult<MaintenanceResult>> {
+  return runGc(args);
+}
+
+/**
+ * @deprecated Use runFsck instead. Kept for backward compatibility.
+ */
+export async function verifyRepository(
+  args: RunFsckCommand & { silent?: boolean },
+): Promise<CommandResult<MaintenanceResult>> {
+  return runFsck(args);
 }

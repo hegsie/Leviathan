@@ -311,6 +311,14 @@ export class LvToolbar extends LitElement {
     repositoryStore.getState().removeRepository(path);
   }
 
+  private handleTabCloseKeydown(e: KeyboardEvent, path: string): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      repositoryStore.getState().removeRepository(path);
+    }
+  }
+
   private get activeRepo(): OpenRepository | undefined {
     return this.openRepositories[this.activeIndex];
   }
@@ -465,20 +473,22 @@ export class LvToolbar extends LitElement {
         <button
           class="menu-btn"
           title="Open Repository"
+          aria-label="Open Repository"
           @click=${this.handleOpenRepo}
           ?disabled=${this.isLoading}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
           </svg>
         </button>
         <button
           class="menu-btn"
           title="Clone Repository"
+          aria-label="Clone Repository"
           @click=${this.handleCloneRepo}
           ?disabled=${this.isLoading}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
             <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
             <polyline points="10 9 13 12 10 15"></polyline>
@@ -487,10 +497,11 @@ export class LvToolbar extends LitElement {
         <button
           class="menu-btn"
           title="Init Repository"
+          aria-label="Init Repository"
           @click=${this.handleInitRepo}
           ?disabled=${this.isLoading}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <line x1="12" y1="5" x2="12" y2="19"></line>
             <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
@@ -498,9 +509,10 @@ export class LvToolbar extends LitElement {
         <button
           class="menu-btn"
           title="Workspaces"
+          aria-label="Workspaces"
           @click=${this.handleOpenWorkspaceManager}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <rect x="3" y="3" width="7" height="7"></rect>
             <rect x="14" y="3" width="7" height="7"></rect>
             <rect x="3" y="14" width="7" height="7"></rect>
@@ -514,27 +526,35 @@ export class LvToolbar extends LitElement {
           class="scroll-btn ${this.canScrollLeft ? 'visible' : ''}"
           @click=${this.handleScrollLeft}
           title="Scroll left"
+          aria-label="Scroll tabs left"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <polyline points="15 18 9 12 15 6"></polyline>
           </svg>
         </button>
-        <div class="tabs" @scroll=${this.handleTabsScroll}>
+        <div class="tabs" role="tablist" @scroll=${this.handleTabsScroll}>
           ${this.openRepositories.length === 0
             ? html`<span class="no-repos">No repositories open</span>`
             : this.openRepositories.map(
                 (repo, index) => html`
                   <button
                     class="tab ${index === this.activeIndex ? 'active' : ''}"
+                    role="tab"
+                    aria-selected=${index === this.activeIndex}
+                    aria-label="${repo.repository.name}"
                     @click=${() => this.handleTabClick(index)}
                   >
                     ${this.renderProviderIcon(repo)}
                     <span class="tab-name">${repo.repository.name}</span>
                     <span
                       class="tab-close"
+                      role="button"
+                      tabindex="0"
+                      aria-label="Close ${repo.repository.name} tab"
                       @click=${(e: Event) => this.handleTabClose(e, repo.repository.path)}
+                      @keydown=${(e: KeyboardEvent) => this.handleTabCloseKeydown(e, repo.repository.path)}
                     >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
                         <line x1="6" y1="6" x2="18" y2="18"></line>
                       </svg>
@@ -547,8 +567,9 @@ export class LvToolbar extends LitElement {
           class="scroll-btn ${this.canScrollRight ? 'visible' : ''}"
           @click=${this.handleScrollRight}
           title="Scroll right"
+          aria-label="Scroll tabs right"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <polyline points="9 18 15 12 9 6"></polyline>
           </svg>
         </button>
@@ -559,9 +580,10 @@ export class LvToolbar extends LitElement {
           <button
             class="menu-btn ${this.showSearch ? 'active' : ''}"
             title="Search commits (Ctrl+F)"
+            aria-label="Search commits"
             @click=${this.handleToggleSearch}
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <circle cx="11" cy="11" r="8"></circle>
               <path d="M21 21l-4.35-4.35"></path>
             </svg>
@@ -570,9 +592,10 @@ export class LvToolbar extends LitElement {
         <button
           class="menu-btn"
           title="Command Palette (Cmd+P)"
+          aria-label="Command Palette"
           @click=${this.handleOpenCommandPalette}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
             <line x1="9" y1="9" x2="15" y2="9"></line>
             <line x1="9" y1="15" x2="15" y2="15"></line>
@@ -582,9 +605,10 @@ export class LvToolbar extends LitElement {
         <button
           class="menu-btn"
           title="Keyboard Shortcuts (?)"
+          aria-label="Keyboard Shortcuts"
           @click=${this.handleOpenShortcuts}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <rect x="2" y="4" width="20" height="16" rx="2" ry="2"></rect>
             <path d="M6 8h.01"></path>
             <path d="M10 8h.01"></path>
@@ -599,9 +623,10 @@ export class LvToolbar extends LitElement {
         <button
           class="menu-btn"
           title="Settings"
+          aria-label="Settings"
           @click=${this.handleOpenSettings}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="12" cy="12" r="3"></circle>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
           </svg>

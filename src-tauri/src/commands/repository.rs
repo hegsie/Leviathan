@@ -10,6 +10,7 @@ use crate::models::{Repository, RepositoryState};
 
 /// Progress event payload for clone operations
 #[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CloneProgress {
     pub stage: String,
     pub received_objects: usize,

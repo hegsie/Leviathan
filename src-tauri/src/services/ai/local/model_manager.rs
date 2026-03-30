@@ -252,9 +252,17 @@ impl ModelManager {
             let mut hash_file = std::fs::File::open(&model_path_for_hash)
                 .map_err(|e| format!("Failed to open model file for verification: {e}"))?;
             let mut hasher = Sha256::new();
-            std::io::copy(&mut hash_file, &mut hasher)
-                .map_err(|e| format!("Failed to hash model file: {e}"))?;
-            let hex_hash = format!("{:x}", hasher.finalize());
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = std::io::Read::read(&mut hash_file, &mut buf)
+                    .map_err(|e| format!("Failed to hash model file: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            let hash = hasher.finalize();
+            let hex_hash: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
             if hex_hash != entry.sha256 {
                 return Err(format!(
                     "SHA-256 verification failed: expected {}, got {}",
@@ -314,11 +322,17 @@ impl ModelManager {
             .map_err(|e| format!("Failed to open model file: {e}"))?;
 
         let mut hasher = Sha256::new();
-        std::io::copy(&mut file, &mut hasher)
-            .map_err(|e| format!("Failed to read model file for hashing: {e}"))?;
-
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buf)
+                .map_err(|e| format!("Failed to read model file for hashing: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
         let hash = hasher.finalize();
-        let hex_hash = format!("{:x}", hash);
+        let hex_hash: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
 
         Ok(hex_hash == expected_sha256)
     }

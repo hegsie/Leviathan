@@ -1,5 +1,5 @@
 import { expect } from '@open-wc/testing';
-import { fuzzyScore, highlightMatch } from '../fuzzy-search.ts';
+import { fuzzyScore, highlightMatch, escapeHtml } from '../fuzzy-search.ts';
 
 describe('fuzzyScore', () => {
   it('returns 100 for exact match', () => {
@@ -93,5 +93,60 @@ describe('highlightMatch', () => {
   it('handles single character highlight', () => {
     const result = highlightMatch('hello', 'h');
     expect(result).to.equal('<mark>h</mark>ello');
+  });
+
+  it('escapes HTML in input to prevent XSS (substring match)', () => {
+    const result = highlightMatch('<script>alert(1)</script>', 'script');
+    expect(result).to.include('&lt;');
+    expect(result).to.not.include('<script>');
+    expect(result).to.include('<mark>');
+    expect(result).to.include('</mark>');
+  });
+
+  it('does not double-escape mark tags', () => {
+    const result = highlightMatch('<b>bold</b>', 'bold');
+    expect(result).to.equal('&lt;b&gt;<mark>bold</mark>&lt;/b&gt;');
+  });
+
+  it('escapes angle brackets in non-matching portions', () => {
+    const result = highlightMatch('a<b>c', 'a');
+    expect(result).to.equal('<mark>a</mark>&lt;b&gt;c');
+  });
+
+  it('escapes ampersands in input text', () => {
+    const result = highlightMatch('foo & bar', 'foo');
+    expect(result).to.equal('<mark>foo</mark> &amp; bar');
+  });
+
+  it('escapes HTML in fuzzy match path', () => {
+    const result = highlightMatch('<img src=x>', 'ix');
+    expect(result).to.include('&lt;');
+    expect(result).to.not.include('<img');
+    expect(result).to.include('<mark>i</mark>');
+  });
+
+  it('escapes HTML when query is empty', () => {
+    const result = highlightMatch('<script>', '');
+    expect(result).to.equal('&lt;script&gt;');
+  });
+
+  it('escapes HTML when no match is possible', () => {
+    const result = highlightMatch('<div>hello</div>', 'xyz');
+    expect(result).to.include('&lt;div&gt;');
+    expect(result).to.not.include('<div>');
+  });
+});
+
+describe('escapeHtml', () => {
+  it('escapes all HTML special characters', () => {
+    expect(escapeHtml('&<>"\'')).to.equal('&amp;&lt;&gt;&quot;&#39;');
+  });
+
+  it('returns plain text unchanged', () => {
+    expect(escapeHtml('hello world')).to.equal('hello world');
+  });
+
+  it('handles empty string', () => {
+    expect(escapeHtml('')).to.equal('');
   });
 });

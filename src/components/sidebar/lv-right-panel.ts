@@ -379,6 +379,7 @@ export class LvRightPanel extends LitElement {
 
   private handleCommitCreated(): void {
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 }
 

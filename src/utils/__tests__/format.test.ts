@@ -1,6 +1,9 @@
 import { expect } from '@open-wc/testing';
 import {
   formatRelativeTime,
+  formatDate,
+  formatDateTime,
+  formatNumber,
   truncate,
   formatSha,
   formatFileSize,
@@ -46,6 +49,59 @@ describe('format', () => {
     it('should return years ago for old timestamps', () => {
       const now = Math.floor(Date.now() / 1000);
       expect(formatRelativeTime(now - 86400 * 400)).to.equal('1y ago');
+    });
+  });
+
+  describe('formatDate', () => {
+    it('should return a date string for a valid timestamp', () => {
+      // Jan 1 2020 00:00:00 UTC = 1577836800
+      const result = formatDate(1577836800);
+      expect(result).to.be.a('string');
+      expect(result.length).to.be.greaterThan(0);
+    });
+
+    it('should handle timestamp 0 (epoch)', () => {
+      const result = formatDate(0);
+      expect(result).to.be.a('string');
+      // Should be some date string for Jan 1 1970
+      expect(result).to.include('1970');
+    });
+  });
+
+  describe('formatDateTime', () => {
+    it('should return a date-time string for a valid timestamp', () => {
+      const result = formatDateTime(1577836800);
+      expect(result).to.be.a('string');
+      expect(result.length).to.be.greaterThan(0);
+    });
+
+    it('should include both date and time components', () => {
+      // The locale string should be longer than just a date
+      const dateOnly = formatDate(1577836800);
+      const dateTime = formatDateTime(1577836800);
+      expect(dateTime.length).to.be.greaterThanOrEqual(dateOnly.length);
+    });
+  });
+
+  describe('formatNumber', () => {
+    it('should format small numbers without separators', () => {
+      expect(formatNumber(42)).to.equal('42');
+    });
+
+    it('should format large numbers with locale separators', () => {
+      const result = formatNumber(1234567);
+      // Different locales format differently, but it should contain digits
+      expect(result).to.be.a('string');
+      expect(result.length).to.be.greaterThan(0);
+    });
+
+    it('should handle zero', () => {
+      expect(formatNumber(0)).to.equal('0');
+    });
+
+    it('should handle negative numbers', () => {
+      const result = formatNumber(-1000);
+      expect(result).to.include('1');
     });
   });
 

@@ -4,6 +4,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showPrompt } from '../../services/dialog.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { CommitTemplate, ConventionalType } from '../../services/git.service.ts';
@@ -962,7 +963,7 @@ export class LvCommitPanel extends LitElement {
   }
 
   private async handleSaveTemplate(): Promise<void> {
-    const name = prompt('Enter template name:');
+    const name = await showPrompt('Save Template', 'Enter template name:');
     if (!name) return;
 
     const content = this.description
@@ -1066,6 +1067,7 @@ export class LvCommitPanel extends LitElement {
       }
     } catch (err) {
       console.error('Failed to fetch last commit:', err);
+      showToast(`Failed to fetch last commit: ${err instanceof Error ? err.message : String(err)}`, 'error');
     }
   }
 

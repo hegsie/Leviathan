@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import type {
   CredentialHelper,
   AvailableHelper,
@@ -487,7 +488,7 @@ export class LvCredentialsDialog extends LitElement {
   }
 
   private async handleRemoveHelper(helper: CredentialHelper): Promise<void> {
-    const confirmed = confirm(`Remove credential helper "${helper.name}"?`);
+    const confirmed = await showConfirm('Remove Helper', `Remove credential helper "${helper.name}"?`, 'warning');
     if (!confirmed) return;
 
     this.error = null;
@@ -537,8 +538,10 @@ export class LvCredentialsDialog extends LitElement {
   private async handleEraseCredentials(): Promise<void> {
     if (!this.testResult) return;
 
-    const confirmed = confirm(
-      `Erase stored credentials for ${this.testResult.host}?\n\nYou will need to re-authenticate on your next push/pull.`
+    const confirmed = await showConfirm(
+      'Erase Credentials',
+      `Erase stored credentials for ${this.testResult.host}?\n\nYou will need to re-authenticate on your next push/pull.`,
+      'warning'
     );
     if (!confirmed) return;
 

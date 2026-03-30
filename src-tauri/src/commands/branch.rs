@@ -125,7 +125,9 @@ pub async fn create_branch(
     if checkout.unwrap_or(false) {
         let obj = reference.peel(git2::ObjectType::Commit)?;
         repo.checkout_tree(&obj, None)?;
-        repo.set_head(reference.name().unwrap())?;
+        repo.set_head(reference.name().ok_or_else(|| {
+            LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+        })?)?;
     }
 
     Ok(Branch {
@@ -278,7 +280,9 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
 
     // Try to set HEAD to local branch first
     if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
-        repo.set_head(branch.get().name().unwrap())?;
+        repo.set_head(branch.get().name().ok_or_else(|| {
+            LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+        })?)?;
     } else if let Ok(remote_branch) = repo.find_branch(&ref_name, git2::BranchType::Remote) {
         // Checking out a remote branch - create a local tracking branch
         // Extract the branch name without the remote prefix (e.g., "origin/feature" -> "feature")
@@ -296,7 +300,9 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
             {
                 // Local branch exists, just check it out
                 let local_branch = repo.find_branch(local_name, git2::BranchType::Local)?;
-                repo.set_head(local_branch.get().name().unwrap())?;
+                repo.set_head(local_branch.get().name().ok_or_else(|| {
+                    LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+                })?)?;
             } else {
                 // Create new local branch from the remote branch
                 let mut new_branch = repo.branch(local_name, &commit, false)?;
@@ -305,7 +311,9 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
                 new_branch.set_upstream(Some(remote_name))?;
 
                 // Set HEAD to the new branch
-                repo.set_head(new_branch.get().name().unwrap())?;
+                repo.set_head(new_branch.get().name().ok_or_else(|| {
+                    LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+                })?)?;
             }
         } else {
             // Couldn't parse remote name, detach HEAD
@@ -339,7 +347,10 @@ pub async fn set_upstream_branch(
 
         // Normalize upstream to shorthand form (e.g., "refs/remotes/origin/main" -> "origin/main")
         let upstream_short = if upstream.starts_with("refs/remotes/") {
-            upstream.strip_prefix("refs/remotes/").unwrap().to_string()
+            upstream
+                .strip_prefix("refs/remotes/")
+                .unwrap_or(&upstream)
+                .to_string()
         } else {
             upstream.clone()
         };
@@ -709,7 +720,9 @@ pub async fn checkout_with_autostash(
     // Set HEAD
     if is_local_branch {
         if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
-            repo.set_head(branch.get().name().unwrap())?;
+            repo.set_head(branch.get().name().ok_or_else(|| {
+                LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+            })?)?;
         }
     } else if is_remote_branch {
         // Check out a remote branch by finding or creating a local tracking branch.
@@ -1325,5 +1338,174 @@ mod tests {
             !head_branch.unwrap().is_remote,
             "HEAD branch should be local, not remote"
         );
+    }
+
+    // ── Additional coverage for error paths and edge cases ─────────────
+
+    #[tokio::test]
+    async fn test_create_branch_invalid_start_point() {
+        let repo = TestRepo::with_initial_commit();
+        let result = create_branch(
+            repo.path_str(),
+            "new-branch".to_string(),
+            Some("nonexistent-ref-abc123".to_string()),
+            Some(false),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "Creating branch from invalid start point should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_branches_invalid_repo_path() {
+        let result = get_branches("/nonexistent/repo/path".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_checkout_invalid_repo_path() {
+        let result = checkout(
+            "/nonexistent/repo/path".to_string(),
+            "main".to_string(),
+            Some(false),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_invalid_repo_path() {
+        let result = create_branch(
+            "/nonexistent/repo/path".to_string(),
+            "branch".to_string(),
+            None,
+            Some(false),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_branch_invalid_repo_path() {
+        let result = delete_branch(
+            "/nonexistent/repo/path".to_string(),
+            "main".to_string(),
+            Some(true),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rename_branch_invalid_repo_path() {
+        let result = rename_branch(
+            "/nonexistent/repo/path".to_string(),
+            "old".to_string(),
+            "new".to_string(),
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_checkout_detached_head_to_another_commit() {
+        let repo = TestRepo::with_initial_commit();
+        let oid1 = repo.head_oid();
+        let oid2 = repo.create_commit("Second commit", &[("file2.txt", "content2")]);
+
+        // Checkout first commit (detached)
+        let result = checkout(repo.path_str(), oid1.to_string(), Some(false)).await;
+        assert!(result.is_ok());
+        assert!(repo.repo().head_detached().unwrap());
+
+        // Now checkout second commit (detached -> detached)
+        let result = checkout(repo.path_str(), oid2.to_string(), Some(false)).await;
+        assert!(result.is_ok());
+        assert!(repo.repo().head_detached().unwrap());
+
+        // HEAD should point to oid2
+        let head_oid = repo.repo().head().unwrap().target().unwrap();
+        assert_eq!(head_oid, oid2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_unmerged_branch_without_force_fails() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("diverged");
+
+        // Checkout the new branch and make a commit that diverges from main
+        repo.checkout_branch("diverged");
+        repo.create_commit("Diverged commit", &[("diverged.txt", "content")]);
+        repo.checkout_branch("main");
+
+        // Delete without force should fail because the branch is not merged
+        let result = delete_branch(repo.path_str(), "diverged".to_string(), Some(false)).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("not fully merged"),
+            "Error should mention branch is not merged, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_merged_branch_without_force_succeeds() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("merged-feature");
+
+        // Advance main past the branch point so HEAD is a true descendant
+        repo.create_commit("Advance main", &[("advance.txt", "content")]);
+
+        let result =
+            delete_branch(repo.path_str(), "merged-feature".to_string(), Some(false)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_detached_head_ref() {
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+        repo.create_commit("Second commit", &[("file2.txt", "data")]);
+
+        // Checkout a commit hash via autostash should detach HEAD
+        let result = checkout_with_autostash(repo.path_str(), oid.to_string()).await;
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!(data.success);
+        assert!(repo.repo().head_detached().unwrap());
+    }
+
+    #[test]
+    fn test_checkout_with_stash_result_serialization() {
+        let result = CheckoutWithStashResult {
+            success: true,
+            stashed: true,
+            stash_applied: false,
+            stash_conflict: true,
+            message: "test message".to_string(),
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        // Verify camelCase serialization
+        assert!(json.contains("stashApplied"));
+        assert!(json.contains("stashConflict"));
+    }
+
+    #[tokio::test]
+    async fn test_branch_shorthand_for_remote() {
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+        repo.create_remote_branch("feature/nested", oid);
+
+        let branches = get_branches(repo.path_str()).await.unwrap();
+        let remote_branch = branches.iter().find(|b| b.name == "origin/feature/nested");
+        assert!(remote_branch.is_some());
+        // shorthand should strip "origin/" prefix
+        assert_eq!(remote_branch.unwrap().shorthand, "feature/nested");
     }
 }

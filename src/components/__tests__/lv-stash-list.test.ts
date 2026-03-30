@@ -183,6 +183,24 @@ describe('lv-stash-list', () => {
 
   // ── 5. Stash operations ─────────────────────────────────────────────
   describe('stash operations', () => {
+    it('create stash dispatches stash-created event on success', async () => {
+      setupDefaultMocks();
+      const el = await renderStashList();
+      clearHistory();
+
+      let stashCreatedFired = false;
+      el.addEventListener('stash-created', () => { stashCreatedFired = true; });
+
+      // Call the private handleCreateStash method
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleCreateStash();
+      await el.updateComplete;
+
+      const createCalls = findCommands('create_stash');
+      expect(createCalls.length).to.equal(1);
+      expect(stashCreatedFired).to.be.true;
+    });
+
     it('click Apply calls apply_stash with correct index', async () => {
       const el = await renderStashList();
 

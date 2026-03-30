@@ -67,6 +67,7 @@ import * as workspaceService from './services/workspace.service.ts';
 import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
+import { showConfirm, showPrompt } from './services/dialog.service.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
@@ -97,6 +98,32 @@ export class AppShell extends LitElement {
         left: 16px;
         z-index: 10000;
         padding: 8px 16px;
+
+      .global-loading-bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+        z-index: 9999;
+        overflow: hidden;
+        background: var(--color-bg-tertiary);
+      }
+
+      .global-loading-bar::after {
+        content: '';
+        display: block;
+        height: 100%;
+        width: 40%;
+        background: var(--color-primary);
+        animation: loading-slide 1.2s ease-in-out infinite;
+      }
+
+      @keyframes loading-slide {
+        0% { transform: translateX(-100%); }
+        50% { transform: translateX(150%); }
+        100% { transform: translateX(350%); }
+      }
         background: var(--color-accent);
         color: white;
         text-decoration: none;
@@ -556,6 +583,9 @@ export class AppShell extends LitElement {
   @state() private showWorkspaceManager = false;
   @state() private showHooksDialog = false;
 
+  // Right panel tab tracking
+  @state() private activeRightPanelTab: string | undefined;
+
   // Panel dimensions
   @state() private leftPanelWidth = 220;
   @state() private rightPanelWidth = 350;
@@ -563,6 +593,7 @@ export class AppShell extends LitElement {
   // Panel visibility
   @state() private leftPanelVisible = true;
   @state() private rightPanelVisible = true;
+  @state() private globalLoading = false;
 
   // Resize state
   private resizing: 'left' | 'right' | null = null;
@@ -645,6 +676,11 @@ export class AppShell extends LitElement {
     }
   };
 
+  // Handle settings-changed events from settings dialog to re-render with new settings
+  private handleSettingsChanged = (): void => {
+    this.requestUpdate();
+  };
+
   connectedCallback(): void {
     super.connectedCallback();
 
@@ -693,6 +729,7 @@ export class AppShell extends LitElement {
     this.unsubscribeUi = uiStore.subscribe((state) => {
       this.leftPanelVisible = state.panels.left.isVisible;
       this.rightPanelVisible = state.panels.right.isVisible;
+      this.globalLoading = state.globalLoading;
     });
     // Subscribe to file watcher for refs-changed events (e.g., external pull/fetch)
     this.unsubscribeWatcher = watcherService.onFileChange((event) => {
@@ -713,6 +750,7 @@ export class AppShell extends LitElement {
     this.addEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.addEventListener('gitflow-operation', this.handleGitflowEvent);
     this.addEventListener('show-commit', this.handleShowCommitEvent);
+    window.addEventListener('settings-changed', this.handleSettingsChanged);
 
     // Load vim mode from keyboard service
     this.vimMode = keyboardService.isVimMode();
@@ -817,6 +855,7 @@ export class AppShell extends LitElement {
     this.removeEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.removeEventListener('gitflow-operation', this.handleGitflowEvent);
     this.removeEventListener('show-commit', this.handleShowCommitEvent);
+    window.removeEventListener('settings-changed', this.handleSettingsChanged);
     gitService.cleanupRemoteOperationListeners();
     // Clean up auto-fetch
     this.autoFetchUnsubscribe?.();
@@ -1210,6 +1249,13 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    const confirmed = await showConfirm(
+      'Revert Commit',
+      `Are you sure you want to revert commit ${commit.oid.substring(0, 7)}? This will create a new commit that undoes the changes.`,
+      'warning'
+    );
+    if (!confirmed) return;
+
     const result = await import('./services/git.service.ts').then((m) =>
       m.revert({
         path: this.activeRepository!.repository.path,
@@ -1304,10 +1350,25 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    // Confirm for hard reset
+    // Confirm reset based on mode
     if (mode === 'hard') {
-      const confirmed = confirm(
-        `Are you sure you want to hard reset to "${commit.summary}"?\n\nThis will discard all uncommitted changes.`
+      const confirmed = await showConfirm(
+        'Hard Reset',
+        `Are you sure you want to hard reset to "${commit.summary}"?\n\nThis will discard all uncommitted changes.`,
+        'warning'
+      );
+      if (!confirmed) return;
+    } else if (mode === 'mixed') {
+      const confirmed = await showConfirm(
+        'Mixed Reset',
+        `Reset to "${commit.summary}"?\n\nThis will move HEAD to the selected commit. Your changes will be unstaged but preserved in the working directory.`,
+        'warning'
+      );
+      if (!confirmed) return;
+    } else if (mode === 'soft') {
+      const confirmed = await showConfirm(
+        'Soft Reset',
+        `Reset to "${commit.summary}"?\n\nThis will move HEAD to the selected commit. Your changes will remain staged.`
       );
       if (!confirmed) return;
     }
@@ -1321,7 +1382,7 @@ export class AppShell extends LitElement {
     );
 
     if (result.success) {
-      this.graphCanvas?.refresh?.();
+      await this.handleRefresh();
     } else {
       log.error('Reset failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Reset failed');
@@ -1375,7 +1436,7 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       showToast(`Created fixup commit for ${commit.shortId}`, 'success');
-      this.graphCanvas?.refresh?.();
+      await this.handleRefresh();
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
       showErrorWithSuggestion(result.error?.message || '', 'Failed to create fixup commit');
@@ -1412,7 +1473,7 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       showToast(`Created squash commit for ${commit.shortId}`, 'success');
-      this.graphCanvas?.refresh?.();
+      await this.handleRefresh();
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
       showErrorWithSuggestion(result.error?.message || '', 'Failed to create squash commit');
@@ -1800,7 +1861,7 @@ export class AppShell extends LitElement {
         category: 'action',
         icon: 'undo',
         action: this.requiresRepository(async () => {
-          const query = prompt('Describe what you want to undo (e.g., "before the rebase", "undo last 3 commits"):');
+          const query = await showPrompt('Smart Undo (AI)', 'Describe what you want to undo (e.g., "before the rebase", "undo last 3 commits"):');
           if (!query) return;
 
           const result = await import('./services/ai.service.ts').then(m =>
@@ -1809,7 +1870,7 @@ export class AppShell extends LitElement {
 
           if (result.success && result.data) {
             const match = result.data;
-            const confirmed = confirm(`${match.description}\n\nReset to HEAD@{${match.index}}? (soft reset — changes preserved as staged)`);
+            const confirmed = await showConfirm('Smart Undo', `${match.description}\n\nReset to HEAD@{${match.index}}? (soft reset — changes preserved as staged)`);
             if (confirmed) {
               const resetResult = await import('./services/git.service.ts').then(m =>
                 m.resetToReflog(this.activeRepository!.repository.path, match.index, 'soft')
@@ -2035,31 +2096,36 @@ export class AppShell extends LitElement {
 
     // Set flag to prevent duplicate notifications during restore
     this.isRestoringRepositories = true;
+    uiStore.getState().setGlobalLoading(true);
 
-    // Open each persisted repository
-    for (const persisted of persistedRepos) {
-      try {
-        const result = await gitService.openRepository({ path: persisted.path });
-        if (result.success && result.data) {
-          repositoryStore.getState().addRepository(result.data);
-          // Build search indexes in background (non-blocking)
-          searchIndexService.buildIndex(persisted.path);
-          embeddingIndexService.buildIndex(persisted.path);
-          // Load remotes for this repository
-          await this.loadRepositoryRemotes(persisted.path);
+    try {
+      // Open each persisted repository
+      for (const persisted of persistedRepos) {
+        try {
+          const result = await gitService.openRepository({ path: persisted.path });
+          if (result.success && result.data) {
+            repositoryStore.getState().addRepository(result.data);
+            // Build search indexes in background (non-blocking)
+            searchIndexService.buildIndex(persisted.path);
+            embeddingIndexService.buildIndex(persisted.path);
+            // Load remotes for this repository
+            await this.loadRepositoryRemotes(persisted.path);
+          }
+        } catch (error) {
+          console.warn(`Failed to restore repository: ${persisted.path}`, error);
         }
-      } catch (error) {
-        console.warn(`Failed to restore repository: ${persisted.path}`, error);
       }
-    }
 
-    // Restore active index (already persisted, will be set from storage)
-    this.isRestoringRepositories = false;
+      // Restore active index (already persisted, will be set from storage)
+      this.isRestoringRepositories = false;
 
-    // Check integration for the final active repo only
-    const activeRepo = repositoryStore.getState().getActiveRepository();
-    if (activeRepo) {
-      this.checkRepositoryIntegration(activeRepo.repository.path);
+      // Check integration for the final active repo only
+      const activeRepo = repositoryStore.getState().getActiveRepository();
+      if (activeRepo) {
+        this.checkRepositoryIntegration(activeRepo.repository.path);
+      }
+    } finally {
+      uiStore.getState().setGlobalLoading(false);
     }
   }
 
@@ -2326,6 +2392,8 @@ export class AppShell extends LitElement {
         main?.focus();
       }}>Skip to main content</a>
 
+      ${this.globalLoading ? html`<div class="global-loading-bar"></div>` : ''}
+
       <lv-toolbar
         @open-settings=${() => { this.showSettings = true; }}
         @open-shortcuts=${() => { this.showShortcuts = true; }}
@@ -2491,6 +2559,7 @@ export class AppShell extends LitElement {
                     .commit=${this.selectedCommit}
                     .refs=${this.selectedCommitRefs}
                     @open-settings=${() => { this.showSettings = true; }}
+                    @tab-changed=${(e: CustomEvent) => { this.activeRightPanelTab = e.detail?.tab; }}
                   ></lv-right-panel>
                 </aside>
               ` : ''}

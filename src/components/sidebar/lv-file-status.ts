@@ -533,6 +533,41 @@ export class LvFileStatus extends LitElement {
     }
   };
 
+  private handleKeydownForContextMenu = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
+
+  private handleContextMenuKeydown(e: KeyboardEvent): void {
+    const menu = this.renderRoot.querySelector(".context-menu") as HTMLElement;
+    if (!menu) return;
+
+    const items = Array.from(
+      menu.querySelectorAll(".context-menu-item:not([disabled])"),
+    ) as HTMLElement[];
+    const currentIndex = items.indexOf(e.target as HTMLElement);
+
+    switch (e.key) {
+      case "ArrowDown": {
+        e.preventDefault();
+        const next = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
+        items[next]?.focus();
+        break;
+      }
+      case "ArrowUp": {
+        e.preventDefault();
+        const prev = currentIndex > 0 ? currentIndex - 1 : items.length - 1;
+        items[prev]?.focus();
+        break;
+      }
+      case "Escape":
+        e.preventDefault();
+        this.contextMenu = { ...this.contextMenu, visible: false };
+        break;
+    }
+  }
+
   /** Tree node structure for tree view */
   private buildFileTree(
     files: StatusEntry[],
@@ -698,6 +733,7 @@ export class LvFileStatus extends LitElement {
 
     // Add document click listener for closing context menu
     document.addEventListener("click", this.handleDocumentClick);
+    document.addEventListener("keydown", this.handleKeydownForContextMenu);
 
     // Subscribe to file change events with debouncing
     // Note: refs-changed is handled globally by app-shell to ensure it works
@@ -893,6 +929,7 @@ export class LvFileStatus extends LitElement {
 
     // Remove document click listener
     document.removeEventListener("click", this.handleDocumentClick);
+    document.removeEventListener("keydown", this.handleKeydownForContextMenu);
 
     // Clear debounce timeout
     if (this.statusRefreshTimeout) {
@@ -1429,6 +1466,7 @@ export class LvFileStatus extends LitElement {
                 <button
                   class="file-action"
                   title="Unstage"
+                  aria-label="Unstage ${name}"
                   @click=${(e: Event) => this.handleUnstageFile(file, e)}
                 >
                   <svg
@@ -1447,6 +1485,7 @@ export class LvFileStatus extends LitElement {
                 <button
                   class="file-action"
                   title="Stage"
+                  aria-label="Stage ${name}"
                   @click=${(e: Event) => this.handleStageFile(file, e)}
                 >
                   <svg
@@ -1464,6 +1503,7 @@ export class LvFileStatus extends LitElement {
                 <button
                   class="file-action"
                   title="Discard changes"
+                  aria-label="Discard changes for ${name}"
                   @click=${(e: Event) => this.handleDiscardFile(file, e)}
                 >
                   <svg
@@ -1619,6 +1659,7 @@ export class LvFileStatus extends LitElement {
                 <button
                   class="file-action"
                   title="Unstage directory"
+                  aria-label="Unstage directory ${path}"
                   @click=${(e: Event) => this.handleUnstageDirectory(path, e)}
                 >
                   <svg
@@ -1637,6 +1678,7 @@ export class LvFileStatus extends LitElement {
                 <button
                   class="file-action"
                   title="Stage directory"
+                  aria-label="Stage directory ${path}"
                   @click=${(e: Event) => this.handleStageDirectory(path, e)}
                 >
                   <svg
@@ -1654,6 +1696,7 @@ export class LvFileStatus extends LitElement {
                 <button
                   class="file-action"
                   title="Discard directory changes"
+                  aria-label="Discard changes for directory ${path}"
                   @click=${(e: Event) => this.handleDiscardDirectory(path, e)}
                 >
                   <svg
@@ -1750,7 +1793,7 @@ export class LvFileStatus extends LitElement {
       let currentIndex = indexOffset;
 
       return html`
-        <ul class="file-list">
+        <ul class="file-list" role="list">
           ${Array.from(tree.entries()).map(([name, node]) => {
             const result = this.renderTreeNode(
               name,
@@ -1768,7 +1811,7 @@ export class LvFileStatus extends LitElement {
     }
 
     return html`
-      <ul class="file-list">
+      <ul class="file-list" role="list">
         ${files.map((f, i) => this.renderFileItem(f, staged, indexOffset + i))}
       </ul>
     `;
@@ -1780,11 +1823,14 @@ export class LvFileStatus extends LitElement {
     const { x, y, isStaged } = this.contextMenu;
 
     return html`
-      <div class="context-menu" style="left: ${x}px; top: ${y}px">
+      <div class="context-menu" role="menu" aria-label="File actions" style="left: ${x}px; top: ${y}px"
+        @keydown=${(e: KeyboardEvent) => this.handleContextMenuKeydown(e)}
+      >
         ${isStaged
           ? html`
               <button
                 class="context-menu-item"
+                role="menuitem"
                 @click=${this.handleContextUnstage}
               >
                 <svg
@@ -1801,6 +1847,7 @@ export class LvFileStatus extends LitElement {
           : html`
               <button
                 class="context-menu-item"
+                role="menuitem"
                 @click=${this.handleContextStage}
               >
                 <svg
@@ -1815,7 +1862,7 @@ export class LvFileStatus extends LitElement {
                 Stage
               </button>
             `}
-        <button class="context-menu-item" @click=${this.handleContextViewDiff}>
+        <button class="context-menu-item" role="menuitem" @click=${this.handleContextViewDiff}>
           <svg
             viewBox="0 0 24 24"
             fill="none"
@@ -1828,6 +1875,7 @@ export class LvFileStatus extends LitElement {
         </button>
         <button
           class="context-menu-item"
+          role="menuitem"
           @click=${this.handleContextOpenInEditor}
         >
           <svg
@@ -1846,6 +1894,7 @@ export class LvFileStatus extends LitElement {
         </button>
         <button
           class="context-menu-item"
+          role="menuitem"
           @click=${this.handleContextRevealInFinder}
         >
           <svg
@@ -1864,7 +1913,7 @@ export class LvFileStatus extends LitElement {
               ? "Reveal in File Manager"
               : "Reveal in Finder"}
         </button>
-        <button class="context-menu-item" @click=${this.handleContextCopyPath}>
+        <button class="context-menu-item" role="menuitem" @click=${this.handleContextCopyPath}>
           <svg
             viewBox="0 0 24 24"
             fill="none"
@@ -1878,9 +1927,10 @@ export class LvFileStatus extends LitElement {
           </svg>
           Copy file path
         </button>
-        <div class="context-menu-divider"></div>
+        <div class="context-menu-divider" role="separator"></div>
         <button
           class="context-menu-item danger"
+          role="menuitem"
           @click=${this.handleContextDiscard}
         >
           <svg
@@ -1961,7 +2011,12 @@ export class LvFileStatus extends LitElement {
       <div class="section">
         <div
           class="section-header"
+          role="button"
+          tabindex="0"
+          aria-expanded=${this.stagedExpanded}
+          aria-label="Staged changes, ${this.stagedFiles.length} files"
           @click=${() => (this.stagedExpanded = !this.stagedExpanded)}
+          @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.stagedExpanded = !this.stagedExpanded; } }}
         >
           <svg
             class="chevron ${this.stagedExpanded ? "expanded" : ""}"
@@ -1983,6 +2038,7 @@ export class LvFileStatus extends LitElement {
                   <button
                     class="section-action"
                     title="Unstage all"
+                    aria-label="Unstage all files"
                     @click=${this.handleUnstageAll}
                   >
                     <svg
@@ -2010,7 +2066,12 @@ export class LvFileStatus extends LitElement {
       <div class="section">
         <div
           class="section-header"
+          role="button"
+          tabindex="0"
+          aria-expanded=${this.unstagedExpanded}
+          aria-label="Unstaged changes, ${this.unstagedFiles.length} files"
           @click=${() => (this.unstagedExpanded = !this.unstagedExpanded)}
+          @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.unstagedExpanded = !this.unstagedExpanded; } }}
         >
           <svg
             class="chevron ${this.unstagedExpanded ? "expanded" : ""}"
@@ -2032,6 +2093,7 @@ export class LvFileStatus extends LitElement {
                   <button
                     class="section-action"
                     title="Stage all"
+                    aria-label="Stage all files"
                     @click=${this.handleStageAll}
                   >
                     <svg

@@ -227,4 +227,80 @@ describe('workflow.store', () => {
       });
     });
   });
+
+  describe('unifiedProfileStore delegation (Task 4A)', () => {
+    it('addProfile should sync to unifiedProfileStore', async () => {
+      const { unifiedProfileStore } = await import('../unified-profile.store.ts');
+      unifiedProfileStore.getState().reset();
+      workflowStore.getState().reset();
+
+      const profile = createMockProfile({ id: 'sync-1', name: 'Sync Test' });
+      workflowStore.getState().addProfile(profile);
+
+      const unified = unifiedProfileStore.getState().profiles.find((p) => p.id === 'sync-1');
+      expect(unified).to.not.be.undefined;
+      expect(unified!.name).to.equal('Sync Test');
+      expect(unified!.gitName).to.equal(profile.gitName);
+    });
+
+    it('removeProfile should sync removal to unifiedProfileStore', async () => {
+      const { unifiedProfileStore } = await import('../unified-profile.store.ts');
+      unifiedProfileStore.getState().reset();
+      workflowStore.getState().reset();
+
+      const profile = createMockProfile({ id: 'rm-1' });
+      workflowStore.getState().addProfile(profile);
+      workflowStore.getState().removeProfile('rm-1');
+
+      const unified = unifiedProfileStore.getState().profiles.find((p) => p.id === 'rm-1');
+      expect(unified).to.be.undefined;
+    });
+
+    it('updateProfile should sync to unifiedProfileStore', async () => {
+      const { unifiedProfileStore } = await import('../unified-profile.store.ts');
+      unifiedProfileStore.getState().reset();
+      workflowStore.getState().reset();
+
+      const profile = createMockProfile({ id: 'upd-1', name: 'Before' });
+      workflowStore.getState().addProfile(profile);
+      workflowStore.getState().updateProfile({ ...profile, name: 'After' });
+
+      const unified = unifiedProfileStore.getState().profiles.find((p) => p.id === 'upd-1');
+      expect(unified!.name).to.equal('After');
+    });
+
+    it('reset should clear unifiedProfileStore profiles', async () => {
+      const { unifiedProfileStore } = await import('../unified-profile.store.ts');
+      unifiedProfileStore.getState().reset();
+      workflowStore.getState().reset();
+
+      workflowStore.getState().addProfile(createMockProfile({ id: 'rst-1' }));
+      workflowStore.getState().reset();
+
+      expect(unifiedProfileStore.getState().profiles).to.have.lengthOf(0);
+    });
+
+    it('getProfileById should read from unifiedProfileStore', async () => {
+      const { unifiedProfileStore } = await import('../unified-profile.store.ts');
+      unifiedProfileStore.getState().reset();
+      workflowStore.getState().reset();
+
+      // Add directly to unifiedProfileStore
+      unifiedProfileStore.getState().addProfile({
+        id: 'direct-1',
+        name: 'Direct',
+        gitName: 'Direct User',
+        gitEmail: 'direct@example.com',
+        signingKey: null,
+        urlPatterns: [],
+        isDefault: false,
+        color: '#3b82f6',
+        defaultAccounts: {},
+      });
+
+      const result = getProfileById('direct-1');
+      expect(result).to.not.be.undefined;
+      expect(result!.name).to.equal('Direct');
+    });
+  });
 });

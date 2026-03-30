@@ -63,7 +63,8 @@ impl EmbeddingIndexState {
     pub fn db_path_for_repo(&self, repo_path: &str) -> PathBuf {
         let mut hasher = Sha256::new();
         hasher.update(repo_path.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        let result = hasher.finalize();
+        let hash: String = result.iter().map(|b| format!("{:02x}", b)).collect();
         let short_hash = &hash[..16];
         self.indexes_dir.join(format!("{}.db", short_hash))
     }

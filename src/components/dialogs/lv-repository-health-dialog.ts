@@ -19,6 +19,11 @@ interface HealthStats {
   stashCount: number;
   lastGcDate: string | null;
   recommendations: string[];
+  // Overview stats from getRepoStats
+  totalCommits: number | null;
+  totalContributors: number | null;
+  firstCommitDate: number | null;
+  latestCommitDate: number | null;
 }
 
 @customElement('lv-repository-health-dialog')
@@ -223,12 +228,13 @@ export class LvRepositoryHealthDialog extends LitElement {
 
     try {
       // Get repository statistics
-      const [countResult, packsResult, branchesResult, tagsResult, stashesResult] = await Promise.all([
+      const [countResult, packsResult, branchesResult, tagsResult, stashesResult, repoStatsResult] = await Promise.all([
         gitService.getRepositoryStats(this.repositoryPath),
         gitService.getPackInfo(this.repositoryPath),
         gitService.getBranches(this.repositoryPath),
         gitService.getTags(this.repositoryPath),
         gitService.getStashes(this.repositoryPath),
+        gitService.getRepoStats(this.repositoryPath, 10000),
       ]);
 
       // Calculate recommendations
@@ -280,6 +286,20 @@ export class LvRepositoryHealthDialog extends LitElement {
         recommendations.push('Many stashes detected. Consider cleaning up old stashes.');
       }
 
+      // Extract overview stats
+      const totalCommits = repoStatsResult.success && repoStatsResult.data
+        ? repoStatsResult.data.totalCommits
+        : null;
+      const totalContributors = repoStatsResult.success && repoStatsResult.data
+        ? repoStatsResult.data.totalContributors
+        : null;
+      const firstCommitDate = repoStatsResult.success && repoStatsResult.data
+        ? repoStatsResult.data.firstCommitDate
+        : null;
+      const latestCommitDate = repoStatsResult.success && repoStatsResult.data
+        ? repoStatsResult.data.latestCommitDate
+        : null;
+
       this.stats = {
         objectCount: totalObjects,
         packCount,
@@ -290,6 +310,10 @@ export class LvRepositoryHealthDialog extends LitElement {
         stashCount,
         lastGcDate: null, // Would need to check git logs
         recommendations,
+        totalCommits,
+        totalContributors,
+        firstCommitDate,
+        latestCommitDate,
       };
     } catch (error) {
       console.error('Failed to load health stats:', error);
@@ -392,6 +416,14 @@ export class LvRepositoryHealthDialog extends LitElement {
         <div>
           <div class="section-title">Repository Statistics</div>
           <div class="stats-grid">
+            <div class="stat-card">
+              <span class="stat-label">Total Commits</span>
+              <span class="stat-value">${this.stats.totalCommits != null ? this.stats.totalCommits.toLocaleString() : '—'}</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Contributors</span>
+              <span class="stat-value">${this.stats.totalContributors != null ? this.stats.totalContributors.toLocaleString() : '—'}</span>
+            </div>
             <div class="stat-card">
               <span class="stat-label">Total Objects</span>
               <span class="stat-value">${this.stats.objectCount.toLocaleString()}</span>

@@ -7,7 +7,7 @@ if (!(globalThis as Record<string, unknown>).__TAURI_INTERNALS__) {
   };
 }
 
-import { handleExternalLink } from '../external-link.ts';
+import { handleExternalLink, openExternalUrl } from '../external-link.ts';
 
 describe('external-link', () => {
   describe('handleExternalLink', () => {
@@ -33,6 +33,33 @@ describe('external-link', () => {
       } as unknown as Event;
 
       expect(() => handleExternalLink(event)).to.not.throw();
+    });
+
+    it('should not throw when href is a valid URL', () => {
+      const event = {
+        preventDefault: () => {},
+        currentTarget: {
+          href: 'https://github.com/test/repo',
+        } as HTMLAnchorElement,
+      } as unknown as Event;
+
+      expect(() => handleExternalLink(event)).to.not.throw();
+    });
+  });
+
+  describe('openExternalUrl', () => {
+    it('should not throw for a valid URL', async () => {
+      // In test environment, Tauri open will fail but it should fall back to window.open
+      await openExternalUrl('https://example.com');
+    });
+
+    it('should not throw for empty string', async () => {
+      await openExternalUrl('');
+    });
+
+    it('should handle various URL protocols', async () => {
+      await openExternalUrl('https://example.com');
+      await openExternalUrl('http://example.com');
     });
   });
 });
