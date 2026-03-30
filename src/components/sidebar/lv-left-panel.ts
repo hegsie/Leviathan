@@ -256,33 +256,40 @@ export class LvLeftPanel extends LitElement {
 
   private handleStashApplied(): void {
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private handleStashCreated(): void {
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private handleStashDropped(): void {
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private handleTagCheckout(): void {
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private handleBranchCheckout(): void {
     // Refresh repository state after branch checkout
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private handleBranchesChanged(): void {
     // Refresh repository state after branches changed
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private handleTagsChanged(): void {
     // Refresh repository state after tags changed
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private toggleSection(section: string): void {

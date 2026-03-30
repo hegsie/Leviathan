@@ -3,8 +3,8 @@
  * Watches for file system changes in the repository and emits events
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { invokeCommand } from './tauri-api.ts';
 
 export interface FileChangeEvent {
   eventType: 'workdir-changed' | 'index-changed' | 'refs-changed' | 'config-changed';
@@ -35,14 +35,20 @@ export async function startWatching(path: string): Promise<void> {
   }
 
   // Start watching on the backend
-  await invoke('start_watching', { path });
+  const result = await invokeCommand<void>('start_watching', { path });
+  if (!result.success) {
+    throw new Error(result.error?.message ?? 'Failed to start watching');
+  }
 }
 
 /**
  * Stop watching the current repository
  */
 export async function stopWatching(): Promise<void> {
-  await invoke('stop_watching');
+  const result = await invokeCommand<void>('stop_watching');
+  if (!result.success) {
+    throw new Error(result.error?.message ?? 'Failed to stop watching');
+  }
 }
 
 /**

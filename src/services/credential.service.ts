@@ -6,7 +6,7 @@
  * Accessed via Tauri backend commands that use the `keyring` crate.
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from './tauri-api.ts';
 import { loggers } from '../utils/logger.ts';
 
 const log = loggers.credential;
@@ -27,27 +27,27 @@ export type CredentialKey = (typeof CredentialKeys)[keyof typeof CredentialKeys]
 // =============================================================================
 
 async function keyringStore(key: string, value: string): Promise<void> {
-  await invoke<void>('store_keyring_token', { key, value });
+  const result = await invokeCommand<void>('store_keyring_token', { key, value });
+  if (!result.success) {
+    throw new Error(result.error?.message ?? 'Failed to store credential');
+  }
   log.debug(`Stored credential: ${key}`);
 }
 
 async function keyringGet(key: string): Promise<string | null> {
-  try {
-    const result = await invoke<string | null>('get_keyring_token', { key });
-    if (result) {
-      log.debug(`Retrieved credential: ${key}`);
-    }
-    return result;
-  } catch {
-    return null;
+  const result = await invokeCommand<string | null>('get_keyring_token', { key });
+  if (result.success && result.data) {
+    log.debug(`Retrieved credential: ${key}`);
+    return result.data;
   }
+  return null;
 }
 
 async function keyringDelete(key: string): Promise<void> {
-  try {
-    await invoke<void>('delete_keyring_token', { key });
+  const result = await invokeCommand<void>('delete_keyring_token', { key });
+  if (result.success) {
     log.debug(`Deleted credential: ${key}`);
-  } catch {
+  } else {
     log.debug(`Credential not found for deletion: ${key}`);
   }
 }
@@ -410,22 +410,37 @@ export async function configureGitHubApp(
   privateKeyPem: string,
   installationId: number,
 ): Promise<unknown> {
-  return invoke('configure_github_app', { appId, privateKeyPem, installationId });
+  const result = await invokeCommand<unknown>('configure_github_app', { appId, privateKeyPem, installationId });
+  if (!result.success) {
+    throw new Error(result.error?.message ?? 'Failed to configure GitHub App');
+  }
+  return result.data;
 }
 
 export async function getGitHubAppConfig(): Promise<GitHubAppConfig | null> {
-  return invoke<GitHubAppConfig | null>('get_github_app_config');
+  const result = await invokeCommand<GitHubAppConfig | null>('get_github_app_config');
+  if (!result.success) {
+    throw new Error(result.error?.message ?? 'Failed to get GitHub App config');
+  }
+  return result.data ?? null;
 }
 
 export async function removeGitHubAppConfig(): Promise<void> {
-  return invoke<void>('remove_github_app_config');
+  const result = await invokeCommand<void>('remove_github_app_config');
+  if (!result.success) {
+    throw new Error(result.error?.message ?? 'Failed to remove GitHub App config');
+  }
 }
 
 export async function listGitHubAppInstallations(
   appId: number,
   privateKeyPem: string,
 ): Promise<AppInstallation[]> {
-  return invoke<AppInstallation[]>('list_github_app_installations', { appId, privateKeyPem });
+  const result = await invokeCommand<AppInstallation[]>('list_github_app_installations', { appId, privateKeyPem });
+  if (!result.success) {
+    throw new Error(result.error?.message ?? 'Failed to list GitHub App installations');
+  }
+  return result.data ?? [];
 }
 
 // ========================================================================
@@ -442,5 +457,9 @@ export interface CredentialManagerStatus {
 export async function detectCredentialManager(
   repoPath: string,
 ): Promise<CredentialManagerStatus> {
-  return invoke<CredentialManagerStatus>('detect_credential_manager', { path: repoPath });
+  const result = await invokeCommand<CredentialManagerStatus>('detect_credential_manager', { path: repoPath });
+  if (!result.success) {
+    throw new Error(result.error?.message ?? 'Failed to detect credential manager');
+  }
+  return result.data!;
 }
