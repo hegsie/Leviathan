@@ -34,6 +34,18 @@ describe('progress.service', () => {
     invokeCallArgs.length = 0;
   });
 
+  describe('ready', () => {
+    it('should resolve the ready promise', async () => {
+      // ready() should resolve without error even when listeners fail to set up
+      await progressService.ready();
+    });
+
+    it('should be callable multiple times', async () => {
+      await progressService.ready();
+      await progressService.ready();
+    });
+  });
+
   describe('startOperation', () => {
     it('should return a unique operation ID', () => {
       const id1 = progressService.startOperation('fetch', 'Fetching...');
