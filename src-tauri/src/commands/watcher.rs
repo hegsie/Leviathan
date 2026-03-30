@@ -79,6 +79,8 @@ pub async fn start_watching(
             // Poll for events
             let events = {
                 let Ok(service) = service.lock() else {
+                    // Mutex poisoned — sleep to avoid CPU spin, then retry
+                    thread::sleep(Duration::from_millis(500));
                     continue;
                 };
                 service.poll_events()
