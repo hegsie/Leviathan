@@ -44,8 +44,12 @@ pub async fn start_watching(
 
     // Stop any existing watcher
     {
-        let mut service = state.service.lock().unwrap();
-        let mut watching = state.watching_path.lock().unwrap();
+        let mut service = state.service.lock().map_err(|_| {
+            crate::error::LeviathanError::OperationFailed("Watcher lock poisoned".to_string())
+        })?;
+        let mut watching = state.watching_path.lock().map_err(|_| {
+            crate::error::LeviathanError::OperationFailed("Watcher lock poisoned".to_string())
+        })?;
 
         if let Some(ref old_path) = *watching {
             let _ = service.unwatch(Path::new(old_path));
@@ -64,7 +68,9 @@ pub async fn start_watching(
         loop {
             // Check if we're still watching
             {
-                let watching = watching_path.lock().unwrap();
+                let Ok(watching) = watching_path.lock() else {
+                    break;
+                };
                 if watching.is_none() {
                     break;
                 }
@@ -72,7 +78,9 @@ pub async fn start_watching(
 
             // Poll for events
             let events = {
-                let service = service.lock().unwrap();
+                let Ok(service) = service.lock() else {
+                    continue;
+                };
                 service.poll_events()
             };
 
@@ -114,8 +122,12 @@ pub async fn start_watching(
 /// Stop watching the current repository
 #[command]
 pub async fn stop_watching(state: State<'_, WatcherState>) -> Result<()> {
-    let mut service = state.service.lock().unwrap();
-    let mut watching = state.watching_path.lock().unwrap();
+    let mut service = state.service.lock().map_err(|_| {
+        crate::error::LeviathanError::OperationFailed("Watcher lock poisoned".to_string())
+    })?;
+    let mut watching = state.watching_path.lock().map_err(|_| {
+        crate::error::LeviathanError::OperationFailed("Watcher lock poisoned".to_string())
+    })?;
 
     if let Some(ref path) = *watching {
         service.unwatch(Path::new(path))?;
@@ -365,4 +377,91 @@ mod tests {
     // a Tauri State wrapper which is only available in a running Tauri application context.
     // These functions are better tested through integration tests.
     // However, we can test the underlying WatcherService functionality directly.
+
+    #[test]
+    fn test_watcher_state_concurrent_read_write() {
+        use std::thread;
+
+        let state = WatcherState::default();
+        let watching_clone = Arc::clone(&state.watching_path);
+
+        // Writer thread sets a path
+        let writer = thread::spawn(move || {
+            let mut watching = watching_clone.lock().unwrap();
+            *watching = Some("/test/concurrent".to_string());
+        });
+
+        writer.join().unwrap();
+
+        // Verify the write was visible
+        let watching = state.watching_path.lock().unwrap();
+        assert_eq!(watching.as_ref().unwrap(), "/test/concurrent");
+    }
+
+    #[test]
+    fn test_watcher_state_multiple_path_transitions() {
+        let state = WatcherState::default();
+
+        // Simulate a sequence of watch path changes
+        let paths = vec!["/repo/one", "/repo/two", "/repo/three"];
+        for p in &paths {
+            let mut watching = state.watching_path.lock().unwrap();
+            *watching = Some(p.to_string());
+        }
+
+        // Final state should be the last path
+        let watching = state.watching_path.lock().unwrap();
+        assert_eq!(watching.as_ref().unwrap(), "/repo/three");
+    }
+
+    #[test]
+    fn test_file_change_event_all_event_types() {
+        let event_types = vec![
+            "workdir-changed",
+            "index-changed",
+            "refs-changed",
+            "config-changed",
+        ];
+
+        for event_type in event_types {
+            let event = FileChangeEvent {
+                event_type: event_type.to_string(),
+                paths: vec![],
+            };
+
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(json.contains(event_type));
+        }
+    }
+
+    #[test]
+    fn test_watcher_service_watch_unwatch_different_paths() {
+        let repo1 = TestRepo::with_initial_commit();
+        let repo2 = TestRepo::with_initial_commit();
+        let mut service = WatcherService::new();
+
+        // Watch first path
+        assert!(service.watch(&repo1.path).is_ok());
+        assert!(service.unwatch(&repo1.path).is_ok());
+
+        // Watch second path
+        assert!(service.watch(&repo2.path).is_ok());
+        assert!(service.unwatch(&repo2.path).is_ok());
+    }
+
+    #[test]
+    fn test_watcher_state_service_and_path_independent() {
+        // Verify that service and watching_path are independent Arcs
+        let state = WatcherState::default();
+
+        let service_ptr = Arc::as_ptr(&state.service);
+        let path_ptr = Arc::as_ptr(&state.watching_path);
+
+        // They should be different allocations
+        assert_ne!(service_ptr as *const u8, path_ptr as *const u8);
+
+        // Each should have reference count of 1
+        assert_eq!(Arc::strong_count(&state.service), 1);
+        assert_eq!(Arc::strong_count(&state.watching_path), 1);
+    }
 }

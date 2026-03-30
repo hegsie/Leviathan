@@ -35,10 +35,7 @@ fn cleanup_expired_pending_servers(map: &mut HashMap<u16, PendingServer>) {
     map.retain(|port, entry| {
         let alive = now.duration_since(entry.created_at) < PENDING_SERVER_TTL;
         if !alive {
-            tracing::debug!(
-                "Cleaned up expired pending OAuth server on port {}",
-                port
-            );
+            tracing::debug!("Cleaned up expired pending OAuth server on port {}", port);
         }
         alive
     });
@@ -118,7 +115,13 @@ pub async fn oauth_get_authorize_url(
                 .lock()
                 .map_err(|e| LeviathanError::OAuth(format!("Failed to store server: {}", e)))?;
             cleanup_expired_pending_servers(&mut servers);
-            servers.insert(port, PendingServer { server, created_at: std::time::Instant::now() });
+            servers.insert(
+                port,
+                PendingServer {
+                    server,
+                    created_at: std::time::Instant::now(),
+                },
+            );
 
             (config, Some(port))
         }
@@ -133,7 +136,13 @@ pub async fn oauth_get_authorize_url(
                 .lock()
                 .map_err(|e| LeviathanError::OAuth(format!("Failed to store server: {}", e)))?;
             cleanup_expired_pending_servers(&mut servers);
-            servers.insert(port, PendingServer { server, created_at: std::time::Instant::now() });
+            servers.insert(
+                port,
+                PendingServer {
+                    server,
+                    created_at: std::time::Instant::now(),
+                },
+            );
 
             (config, Some(port))
         }
@@ -155,7 +164,13 @@ pub async fn oauth_get_authorize_url(
                 .lock()
                 .map_err(|e| LeviathanError::OAuth(format!("Failed to store server: {}", e)))?;
             cleanup_expired_pending_servers(&mut servers);
-            servers.insert(port, PendingServer { server, created_at: std::time::Instant::now() });
+            servers.insert(
+                port,
+                PendingServer {
+                    server,
+                    created_at: std::time::Instant::now(),
+                },
+            );
 
             (config, Some(port))
         }
@@ -191,7 +206,13 @@ pub async fn oauth_get_authorize_url(
                 .lock()
                 .map_err(|e| LeviathanError::OAuth(format!("Failed to store server: {}", e)))?;
             cleanup_expired_pending_servers(&mut servers);
-            servers.insert(port, PendingServer { server, created_at: std::time::Instant::now() });
+            servers.insert(
+                port,
+                PendingServer {
+                    server,
+                    created_at: std::time::Instant::now(),
+                },
+            );
 
             (config, Some(port))
         }
@@ -801,7 +822,9 @@ mod tests {
             old_port,
             PendingServer {
                 server: old_server,
-                created_at: std::time::Instant::now() - PENDING_SERVER_TTL - Duration::from_secs(60),
+                created_at: std::time::Instant::now()
+                    - PENDING_SERVER_TTL
+                    - Duration::from_secs(60),
             },
         );
 
@@ -820,6 +843,114 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&new_port));
         assert!(!map.contains_key(&old_port));
+    }
+
+    // ==========================================================================
+    // decode_oidc_id_token Command Tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_decode_oidc_id_token_valid() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+        let payload = serde_json::json!({
+            "sub": "user-456",
+            "email": "test@example.com",
+            "name": "OIDC User"
+        });
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
+        let header_b64 = URL_SAFE_NO_PAD.encode(b"{}");
+        let token = format!("{}.{}.sig", header_b64, payload_b64);
+
+        let result = decode_oidc_id_token(token).await;
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_eq!(info.sub, "user-456");
+        assert_eq!(info.email, Some("test@example.com".to_string()));
+        assert_eq!(info.name, Some("OIDC User".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_decode_oidc_id_token_invalid() {
+        let result = decode_oidc_id_token("not.valid".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    // ==========================================================================
+    // Multiple OAuth Flows Tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_multiple_concurrent_github_flows() {
+        // Start multiple GitHub OAuth flows — each should get a unique port/state
+        let result1 =
+            oauth_get_authorize_url("github".to_string(), None, "client1".to_string()).await;
+        let result2 =
+            oauth_get_authorize_url("github".to_string(), None, "client2".to_string()).await;
+
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+
+        let r1 = result1.unwrap();
+        let r2 = result2.unwrap();
+
+        // Different ports and states
+        assert_ne!(r1.loopback_port, r2.loopback_port);
+        assert_ne!(r1.state, r2.state);
+        assert_ne!(r1.verifier, r2.verifier);
+    }
+
+    #[test]
+    fn test_oauth_state_pending_operations() {
+        let state = OAuthState::default();
+
+        // Insert a pending flow
+        {
+            let mut pending = state.pending.lock().unwrap();
+            pending.insert(
+                "test-state".to_string(),
+                (OAuthProvider::GitHub, "verifier".to_string(), None),
+            );
+        }
+
+        // Retrieve it
+        {
+            let pending = state.pending.lock().unwrap();
+            assert!(pending.contains_key("test-state"));
+            let (provider, verifier, instance_url) = pending.get("test-state").unwrap();
+            assert_eq!(*provider, OAuthProvider::GitHub);
+            assert_eq!(verifier, "verifier");
+            assert!(instance_url.is_none());
+        }
+
+        // Remove it
+        {
+            let mut pending = state.pending.lock().unwrap();
+            pending.remove("test-state");
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_exchange_code_request_all_fields() {
+        let request = ExchangeCodeRequest {
+            provider: "oidc".to_string(),
+            code: "auth-code-123".to_string(),
+            verifier: "pkce-verifier".to_string(),
+            instance_url: Some("https://auth.example.com".to_string()),
+            redirect_uri: "http://127.0.0.1:9090/callback".to_string(),
+        };
+
+        // Round-trip serialization
+        let json = serde_json::to_string(&request).unwrap();
+        let deserialized: ExchangeCodeRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.provider, "oidc");
+        assert_eq!(deserialized.code, "auth-code-123");
+        assert_eq!(deserialized.verifier, "pkce-verifier");
+        assert_eq!(
+            deserialized.instance_url,
+            Some("https://auth.example.com".to_string())
+        );
     }
 }
 

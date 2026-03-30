@@ -493,7 +493,9 @@ mod tests {
             CachedCredential {
                 username: "user".to_string(),
                 password: "pass".to_string(),
-                cached_at: Instant::now() - CREDENTIAL_CACHE_TTL - std::time::Duration::from_secs(1),
+                cached_at: Instant::now()
+                    - CREDENTIAL_CACHE_TTL
+                    - std::time::Duration::from_secs(1),
             },
         );
         // Insert a fresh entry
@@ -508,8 +510,14 @@ mod tests {
 
         cleanup_expired_credentials(&mut map);
 
-        assert!(!map.contains_key("old.example.com"), "expired entry should be removed");
-        assert!(map.contains_key("fresh.example.com"), "fresh entry should remain");
+        assert!(
+            !map.contains_key("old.example.com"),
+            "expired entry should be removed"
+        );
+        assert!(
+            map.contains_key("fresh.example.com"),
+            "fresh entry should remain"
+        );
     }
 
     #[test]
@@ -523,7 +531,9 @@ mod tests {
                 CachedCredential {
                     username: "user".to_string(),
                     password: "pass".to_string(),
-                    cached_at: Instant::now() - CREDENTIAL_CACHE_TTL - std::time::Duration::from_secs(1),
+                    cached_at: Instant::now()
+                        - CREDENTIAL_CACHE_TTL
+                        - std::time::Duration::from_secs(1),
                 },
             );
         }
@@ -559,5 +569,163 @@ mod tests {
         let mut map: HashMap<String, CachedCredential> = HashMap::new();
         cleanup_expired_credentials(&mut map);
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_cache_overwrite_updates_credentials() {
+        clear_cache();
+        cache_credentials("host.com", "old_user", "old_pass");
+        cache_credentials("host.com", "new_user", "new_pass");
+
+        let creds = get_cached_credentials("host.com");
+        assert_eq!(
+            creds,
+            Some(("new_user".to_string(), "new_pass".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_cache_multiple_hosts() {
+        clear_cache();
+        cache_credentials("github.com", "gh_user", "gh_pass");
+        cache_credentials("gitlab.com", "gl_user", "gl_pass");
+        cache_credentials("bitbucket.org", "bb_user", "bb_pass");
+
+        assert_eq!(
+            get_cached_credentials("github.com"),
+            Some(("gh_user".to_string(), "gh_pass".to_string()))
+        );
+        assert_eq!(
+            get_cached_credentials("gitlab.com"),
+            Some(("gl_user".to_string(), "gl_pass".to_string()))
+        );
+        assert_eq!(
+            get_cached_credentials("bitbucket.org"),
+            Some(("bb_user".to_string(), "bb_pass".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_extract_host_ssh_with_port() {
+        // git@github.com:user/repo.git pattern
+        assert_eq!(
+            extract_host("git@gitlab.example.com:group/repo.git"),
+            Some("gitlab.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_https_with_port() {
+        assert_eq!(
+            extract_host("https://gitlab.example.com:8443/user/repo.git"),
+            Some("gitlab.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_http_url() {
+        assert_eq!(
+            extract_host("http://gitserver.local/repo.git"),
+            Some("gitserver.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_empty_string() {
+        assert!(extract_host("").is_none());
+    }
+
+    #[test]
+    fn test_extract_host_plain_text() {
+        assert!(extract_host("not-a-url").is_none());
+    }
+
+    #[test]
+    fn test_store_credentials_invalid_url_returns_error() {
+        let result = store_credentials("not-a-url", "user", "pass");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Invalid URL");
+    }
+
+    #[test]
+    fn test_delete_credentials_invalid_url_returns_error() {
+        let result = delete_credentials("not-a-url");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Invalid URL");
+    }
+
+    #[test]
+    fn test_delete_credentials_removes_from_cache() {
+        clear_cache();
+        cache_credentials("delete-test.com", "user", "pass");
+        assert!(get_cached_credentials("delete-test.com").is_some());
+
+        let _ = delete_credentials("https://delete-test.com/repo.git");
+        assert!(get_cached_credentials("delete-test.com").is_none());
+    }
+
+    #[test]
+    fn test_store_credentials_populates_cache() {
+        clear_cache();
+        let _ = store_credentials("https://store-test.com/repo.git", "myuser", "mypass");
+
+        let cached = get_cached_credentials("store-test.com");
+        assert_eq!(cached, Some(("myuser".to_string(), "mypass".to_string())));
+    }
+
+    #[test]
+    fn test_credentials_helper_default() {
+        let helper = CredentialsHelper::default();
+        assert!(helper.try_ssh_agent);
+        assert!(helper.try_ssh_key);
+        assert!(helper.token.is_none());
+    }
+
+    #[test]
+    fn test_credentials_helper_new_with_token() {
+        let helper = CredentialsHelper::new_with_token(Some("my-token".to_string()));
+        assert!(helper.try_ssh_agent);
+        assert!(helper.try_ssh_key);
+        assert_eq!(helper.token, Some("my-token".to_string()));
+    }
+
+    #[test]
+    fn test_credentials_helper_new_with_none_token() {
+        let helper = CredentialsHelper::new_with_token(None);
+        assert!(helper.token.is_none());
+    }
+
+    #[test]
+    fn test_cleanup_all_expired() {
+        let mut map = HashMap::new();
+        let expired_time =
+            Instant::now() - CREDENTIAL_CACHE_TTL - std::time::Duration::from_secs(10);
+
+        map.insert(
+            "a.com".to_string(),
+            CachedCredential {
+                username: "u1".to_string(),
+                password: "p1".to_string(),
+                cached_at: expired_time,
+            },
+        );
+        map.insert(
+            "b.com".to_string(),
+            CachedCredential {
+                username: "u2".to_string(),
+                password: "p2".to_string(),
+                cached_at: expired_time,
+            },
+        );
+
+        cleanup_expired_credentials(&mut map);
+        assert!(map.is_empty(), "all expired entries should be removed");
+    }
+
+    #[test]
+    fn test_get_cached_credentials_returns_none_when_cache_uninitialized() {
+        clear_cache();
+        // After clear, cache is None — get should return None without panic
+        assert!(get_cached_credentials("any.host.com").is_none());
     }
 }
