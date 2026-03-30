@@ -556,6 +556,9 @@ export class AppShell extends LitElement {
   @state() private showWorkspaceManager = false;
   @state() private showHooksDialog = false;
 
+  // Right panel tab tracking
+  @state() private activeRightPanelTab: string | undefined;
+
   // Panel dimensions
   @state() private leftPanelWidth = 220;
   @state() private rightPanelWidth = 350;
@@ -645,6 +648,11 @@ export class AppShell extends LitElement {
     }
   };
 
+  // Handle settings-changed events from settings dialog to re-render with new settings
+  private handleSettingsChanged = (): void => {
+    this.requestUpdate();
+  };
+
   connectedCallback(): void {
     super.connectedCallback();
 
@@ -713,6 +721,7 @@ export class AppShell extends LitElement {
     this.addEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.addEventListener('gitflow-operation', this.handleGitflowEvent);
     this.addEventListener('show-commit', this.handleShowCommitEvent);
+    window.addEventListener('settings-changed', this.handleSettingsChanged);
 
     // Load vim mode from keyboard service
     this.vimMode = keyboardService.isVimMode();
@@ -817,6 +826,7 @@ export class AppShell extends LitElement {
     this.removeEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.removeEventListener('gitflow-operation', this.handleGitflowEvent);
     this.removeEventListener('show-commit', this.handleShowCommitEvent);
+    window.removeEventListener('settings-changed', this.handleSettingsChanged);
     gitService.cleanupRemoteOperationListeners();
     // Clean up auto-fetch
     this.autoFetchUnsubscribe?.();
@@ -1321,7 +1331,7 @@ export class AppShell extends LitElement {
     );
 
     if (result.success) {
-      this.graphCanvas?.refresh?.();
+      await this.handleRefresh();
     } else {
       log.error('Reset failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Reset failed');
@@ -1375,7 +1385,7 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       showToast(`Created fixup commit for ${commit.shortId}`, 'success');
-      this.graphCanvas?.refresh?.();
+      await this.handleRefresh();
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
       showErrorWithSuggestion(result.error?.message || '', 'Failed to create fixup commit');
@@ -1412,7 +1422,7 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       showToast(`Created squash commit for ${commit.shortId}`, 'success');
-      this.graphCanvas?.refresh?.();
+      await this.handleRefresh();
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
       showErrorWithSuggestion(result.error?.message || '', 'Failed to create squash commit');
@@ -2491,6 +2501,7 @@ export class AppShell extends LitElement {
                     .commit=${this.selectedCommit}
                     .refs=${this.selectedCommitRefs}
                     @open-settings=${() => { this.showSettings = true; }}
+                    @tab-changed=${(e: CustomEvent) => { this.activeRightPanelTab = e.detail?.tab; }}
                   ></lv-right-panel>
                 </aside>
               ` : ''}

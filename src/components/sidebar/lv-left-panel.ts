@@ -197,6 +197,7 @@ export class LvLeftPanel extends LitElement {
             <lv-stash-list
               .repositoryPath=${this.repositoryPath}
               @stash-applied=${this.handleStashApplied}
+              @stash-created=${this.handleStashCreated}
               @stash-dropped=${this.handleStashDropped}
               @stash-count-changed=${this.handleStashCountChanged}
             ></lv-stash-list>
@@ -208,6 +209,7 @@ export class LvLeftPanel extends LitElement {
           style="display: none;"
           .repositoryPath=${this.repositoryPath}
           @stash-applied=${this.handleStashApplied}
+          @stash-created=${this.handleStashCreated}
           @stash-dropped=${this.handleStashDropped}
           @stash-count-changed=${this.handleStashCountChanged}
         ></lv-stash-list>
@@ -236,7 +238,6 @@ export class LvLeftPanel extends LitElement {
               .repositoryPath=${this.repositoryPath}
               @tags-changed=${this.handleTagsChanged}
               @tag-checkout=${this.handleTagCheckout}
-              @tag-pushed=${this.handleTagsChanged}
               @tag-count-changed=${this.handleTagCountChanged}
             ></lv-tag-list>
           </div>
@@ -254,6 +255,10 @@ export class LvLeftPanel extends LitElement {
   }
 
   private handleStashApplied(): void {
+    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
+  }
+
+  private handleStashCreated(): void {
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
   }
 

@@ -552,8 +552,8 @@ export class LvTagList extends LitElement {
     });
 
     if (result.success) {
-      this.dispatchEvent(new CustomEvent('tag-pushed', {
-        detail: { tag },
+      await this.loadTags();
+      this.dispatchEvent(new CustomEvent('tags-changed', {
         bubbles: true,
         composed: true,
       }));

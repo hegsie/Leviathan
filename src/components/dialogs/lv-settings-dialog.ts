@@ -486,30 +486,35 @@ export class LvSettingsDialog extends LitElement {
     const select = e.target as HTMLSelectElement;
     this.theme = select.value as Theme;
     settingsStore.getState().setTheme(this.theme);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private handleFontSizeChange(e: Event): void {
     const select = e.target as HTMLSelectElement;
     this.fontSize = select.value as FontSize;
     settingsStore.getState().setFontSize(this.fontSize);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private handleDensityChange(e: Event): void {
     const select = e.target as HTMLSelectElement;
     this.density = select.value as Density;
     settingsStore.getState().setDensity(this.density);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private handleGraphColorSchemeChange(e: Event): void {
     const select = e.target as HTMLSelectElement;
     this.graphColorScheme = select.value as GraphColorScheme;
     settingsStore.getState().setGraphColorScheme(this.graphColorScheme);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private handleBranchNameChange(e: Event): void {
     const input = e.target as HTMLInputElement;
     this.defaultBranchName = input.value;
     settingsStore.getState().setDefaultBranchName(this.defaultBranchName);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private async loadExternalToolsConfig(): Promise<void> {
@@ -568,6 +573,7 @@ export class LvSettingsDialog extends LitElement {
     this.mergeToolName = value;
     this.mergeToolCmd = null;
     await gitService.setMergeToolConfig(repo.repository.path, value);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private async handleMergeToolCmdChange(e: Event): Promise<void> {
@@ -577,6 +583,7 @@ export class LvSettingsDialog extends LitElement {
     if (!repo || !this.mergeToolCmd) return;
 
     await gitService.setMergeToolConfig(repo.repository.path, 'custom', this.mergeToolCmd);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private async handleDiffToolChange(e: Event): Promise<void> {
@@ -600,6 +607,7 @@ export class LvSettingsDialog extends LitElement {
     this.diffToolName = value;
     this.diffToolCmd = null;
     await gitService.setDiffTool(repo.repository.path, value);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private async handleDiffToolCmdChange(e: Event): Promise<void> {
@@ -609,6 +617,7 @@ export class LvSettingsDialog extends LitElement {
     if (!repo || !this.diffToolCmd) return;
 
     await gitService.setDiffTool(repo.repository.path, 'custom', this.diffToolCmd);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private handleStaleBranchDaysChange(e: Event): void {
@@ -616,6 +625,7 @@ export class LvSettingsDialog extends LitElement {
     const value = Math.max(0, parseInt(input.value, 10) || 0);
     this.staleBranchDays = value;
     settingsStore.getState().setStaleBranchDays(value);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private handleNetworkOperationTimeoutChange(e: Event): void {
@@ -623,6 +633,7 @@ export class LvSettingsDialog extends LitElement {
     const value = Math.max(0, parseInt(input.value, 10) || 0);
     this.networkOperationTimeout = value;
     settingsStore.getState().setNetworkOperationTimeout(value);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private handleAutoFetchIntervalChange(e: Event): void {
@@ -630,6 +641,7 @@ export class LvSettingsDialog extends LitElement {
     const value = Math.max(0, parseInt(input.value, 10) || 0);
     this.autoFetchInterval = value;
     settingsStore.getState().setAutoFetchInterval(value);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private handleToggle(setting: string, e: Event): void {
@@ -671,6 +683,7 @@ export class LvSettingsDialog extends LitElement {
         store.setShowNativeNotifications(value);
         break;
     }
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   // =====================================================
