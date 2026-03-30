@@ -2,6 +2,87 @@
 
 Comprehensive code review covering broken/incomplete features, UX issues, event wiring problems, architectural inconsistencies, and test coverage gaps.
 
+**Static Analysis Baseline:**
+- ESLint: ✅ Clean (0 errors, 0 warnings)
+- TypeScript: ✅ Clean (0 errors)
+- Unit Tests: ✅ 2,635 tests passing
+
+---
+
+## 0. CRITICAL - Security & Memory Issues
+
+### 0.1 XSS Vulnerability in Command Palette via `highlightMatch()`
+
+**Severity: CRITICAL**
+
+The `highlightMatch()` function in `src/utils/fuzzy-search.ts:55-86` generates HTML strings with `<mark>` tags but **does not escape user-controlled input**. This HTML is rendered via Lit's `unsafeHTML` or `.innerHTML` in the command palette (`src/components/dialogs/lv-command-palette.ts`).
+
+Malicious content in branch names, file names, or commit messages could inject arbitrary HTML/JavaScript:
+
+```typescript
+// fuzzy-search.ts:64-68 - No escaping before HTML insertion
+return (
+  text.slice(0, index) +
+  '<mark>' + text.slice(index, index + query.length) + '</mark>' +
+  text.slice(index + query.length)
+);
+```
+
+A branch named `<img src=x onerror=alert(1)>` would execute JavaScript when searched.
+
+**Fix:** Escape HTML entities (`<`, `>`, `&`, `"`, `'`) in the input text segments (not the `<mark>` tags) before concatenation.
+
+### 0.2 Memory Leak - Graph Canvas Event Listeners Never Removed
+
+**Severity: CRITICAL**
+
+Seven event listeners are added to canvas/scroll DOM elements in `setupEventListeners()` (`src/components/graph/lv-graph-canvas.ts:603-621`) using `.bind(this)` which creates new function references. These are **never removed** — the `cleanup()` method (lines 624-639) only removes resize-related listeners.
+
+```typescript
+// Lines 609-621: ADDED but never removed
+this.canvasEl.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
+this.scrollEl.addEventListener('scroll', this.handleNativeScroll.bind(this));
+this.canvasEl.addEventListener('mousemove', this.handleMouseMove.bind(this));
+this.canvasEl.addEventListener('click', this.handleClick.bind(this));
+this.canvasEl.addEventListener('mouseleave', this.handleMouseLeave.bind(this));
+this.canvasEl.addEventListener('contextmenu', this.handleContextMenu.bind(this));
+this.canvasEl.addEventListener('keydown', this.handleKeyDown.bind(this));
+```
+
+**Impact:** Component remains in memory after unmounting. Repeated mount/unmount cycles cause exponential memory growth and ghost event handlers.
+
+**Fix:** Convert handlers to arrow functions or store bound references, then remove all listeners in `cleanup()`.
+
+### 0.3 Memory Leak - Avatar Cache Grows Unbounded
+
+**Severity: HIGH**
+
+`src/graph/canvas-renderer.ts:287-288` maintains an `avatarCache: Map<string, HTMLImageElement | null>` and `avatarLoadingSet: Set<string>` that accumulate entries forever. The `destroy()` method (line 1853) does not clear these caches.
+
+- In a 1000-contributor repo: 1000+ Image objects (~64KB each = 64MB+ of GPU memory never freed)
+- Switching repositories accumulates more images
+
+**Fix:** Clear caches in `destroy()` and implement LRU eviction with a max size limit (e.g., 500 entries).
+
+### 0.4 Unregistered Tauri Command Modules - Frontend Calls Will Fail
+
+**Severity: CRITICAL**
+
+Four command modules exist as complete Rust implementations but are **not declared in `src-tauri/src/commands/mod.rs`**, meaning they don't compile and their commands are unavailable at runtime:
+
+| Module | Frontend calls (all broken) |
+|---|---|
+| `bookmarks.rs` | `get_bookmarks`, `add_bookmark`, `remove_bookmark`, `update_bookmark`, `get_recent_repos`, `record_repo_opened` |
+| `custom_actions.rs` | `get_custom_actions`, `save_custom_action`, `delete_custom_action`, `run_custom_action` |
+| `advanced_search.rs` | `filter_commits`, `get_file_log`, `get_branch_diff_commits` |
+| `jira.rs` | JIRA integration commands (not yet called from frontend) |
+
+Frontend actively calls these in `src/services/git.service.ts` (lines 5528-5816). All calls fail silently.
+
+**Fix:**
+1. Add to `src-tauri/src/commands/mod.rs`: `pub mod advanced_search; pub mod bookmarks; pub mod custom_actions; pub mod jira;`
+2. Register all commands in `src-tauri/src/lib.rs` invoke_handler
+
 ---
 
 ## 1. BUGS - Broken Event Wiring
@@ -93,6 +174,48 @@ When selecting a commit in the file history panel, `selectedCommit` is set direc
 - `src/app-shell.ts` `handleFileHistoryCommitSelected` sets `this.selectedCommit` but doesn't call `graphCanvas.selectCommit()`
 - `handleBlameCommitClick` correctly navigates the graph
 
+### 1.9 `stash-created` Event from Stash List is Orphaned
+
+**Severity: LOW**
+
+`src/components/sidebar/lv-stash-list.ts:218` dispatches `stash-created` but no parent component listens for it.
+
+### 1.10 `tab-changed` Event from Right Panel is Orphaned
+
+**Severity: LOW**
+
+`src/components/sidebar/lv-right-panel.ts:268` dispatches `tab-changed` on `switchTab()` but no parent listens.
+
+### 1.11 Settings Dialog Has Inconsistent Event Dispatch
+
+**Severity: HIGH**
+
+In `src/components/dialogs/lv-settings-dialog.ts`, 3 AI-related handlers dispatch `ai-settings-changed` on window, but 13 sibling handlers that modify other settings dispatch no events at all:
+
+**Missing events:** `handleThemeChange`, `handleFontSizeChange`, `handleDensityChange`, `handleGraphColorSchemeChange`, `handleBranchNameChange`, `handleToggle` (8 settings), `handleMergeToolChange`, `handleDiffToolChange`, `handleStaleBranchDaysChange`, `handleNetworkOperationTimeoutChange`, `handleAutoFetchIntervalChange`.
+
+Per CLAUDE.md: "All sibling handlers must follow the same pattern."
+
+### 1.12 Tag List Inconsistent Event Dispatch Between Delete and Push
+
+**Severity: MEDIUM**
+
+In `src/components/sidebar/lv-tag-list.ts`:
+- `handleDeleteTag()` (line 485): ✅ Calls `loadTags()` + dispatches `tags-changed`
+- `handlePushTag()` (line 543): ❌ Does NOT call `loadTags()` + dispatches `tag-pushed` (different event name)
+
+Both modify tag state and should follow the same pattern.
+
+### 1.13 `app-shell.ts` Uses `graphCanvas.refresh()` Instead of `handleRefresh()` in 3 Handlers
+
+**Severity: HIGH**
+
+Per CLAUDE.md: state-modifying operations must call `handleRefresh()`. Three handlers only call `graphCanvas?.refresh?.()`, skipping repository store updates, search index refresh, and `repository-refresh` event:
+
+- Line 1324: `handleResetToCommit()` — after reset
+- Line 1378: `handleFixupCommit()` — after fixup
+- Line 1415: `handleSquashCommit()` — after squash
+
 ---
 
 ## 2. BUGS - Snake_case Tauri Parameters
@@ -131,6 +254,19 @@ file_path: filePath,   // Should be: filePath
 
 ```typescript
 file_path: filePath,   // Should be: filePath
+```
+
+### 2.5 `CloneProgress` Interface Uses snake_case Properties
+
+**File:** `src/components/dialogs/lv-clone-dialog.ts:16-23`
+
+```typescript
+interface CloneProgress {
+  received_objects: number;  // Should be: receivedObjects
+  total_objects: number;     // Should be: totalObjects
+  indexed_objects: number;   // Should be: indexedObjects
+  received_bytes: number;    // Should be: receivedBytes
+}
 ```
 
 ---
@@ -281,6 +417,12 @@ Numerous operations log errors to `console.error` but show no user-visible feedb
 **lv-clean-dialog.ts:**
 - Load files failure (line 359)
 - Clean failure (line 433)
+
+**lv-branch-cleanup-dialog.ts:**
+- `pruneRemoteTrackingBranches()` (line 564) — no try-catch, completely silent on failure
+
+**lv-worktree-dialog.ts:**
+- `loadBranches()` (line 386) — no error handling, no else branch on `result.success` check
 
 ### 4.2 Native `confirm()`/`prompt()` Instead of Themed Dialogs (~20 instances)
 
@@ -439,6 +581,35 @@ These functions are defined but appear only in the service definition and/or tes
 
 `src-tauri/src/services/oauth.rs`: The `PENDING_SERVERS` HashMap grows unboundedly if OAuth callbacks don't execute. No TTL or cleanup timer.
 
+### 6.5 Potential Panics on Git Reference Names (Rust)
+
+**Severity: HIGH**
+
+Multiple calls to `reference.name().unwrap()` and `branch.get().name().unwrap()` in `src-tauri/src/commands/branch.rs` (lines 128, 281, 299, 308, 712) can panic if the reference name contains invalid UTF-8. In git2-rs, `Reference::name()` returns `Option<&str>`.
+
+```rust
+repo.set_head(reference.name().unwrap())?;  // Panics on non-UTF-8
+repo.set_head(branch.get().name().unwrap())?;  // Panics on non-UTF-8
+```
+
+**Fix:** Use `.ok_or_else(|| LeviathanError::OperationFailed("Invalid reference name encoding".to_string()))?`
+
+### 6.6 Potential Panic on `strip_prefix` in Branch Upstream Handling (Rust)
+
+**Severity: MEDIUM**
+
+`src-tauri/src/commands/branch.rs:342` uses `.strip_prefix("refs/remotes/").unwrap()` which panics if upstream is exactly `"refs/remotes/"` with no trailing content.
+
+**Fix:** Use `.unwrap_or(&upstream)` or proper error handling.
+
+### 6.7 Mutex Poisoning Not Handled in Watcher Service (Rust)
+
+**Severity: MEDIUM**
+
+Multiple `.lock().unwrap()` calls on mutexes in `src-tauri/src/commands/watcher.rs` (lines 47, 48, 67, 75, 117-118) will panic if any thread panics while holding the lock. The spawned background thread (line 63) uses these locks in a loop, and any panic in event handling poisons the mutex permanently.
+
+**Fix:** Use `.lock().map_err(|_| LeviathanError::OperationFailed("Lock poisoned".to_string()))?` pattern.
+
 ---
 
 ## 7. Test Coverage Gaps
@@ -475,37 +646,49 @@ Only 7 integration tests exist in `src-tauri/tests/`. Missing tests for:
 
 ## 8. Summary: Prioritized Action Items
 
-### Critical (Functionality Broken)
-1. Fix `clean-complete` / `files-cleaned` event name mismatch
-2. Fix 4 snake_case Tauri parameter bugs in `git.service.ts`
-3. Wire up `merge-conflict` event from branch list to open conflict dialog
-4. Wire up `gitflow-initialized`/`gitflow-operation` events to trigger refresh
-5. Fix `show-toast` events (replace with direct `showToast()` calls)
-6. Wire up `show-commit` from reflog dialog to navigate graph
-7. Fix Repository Health dialog `title` -> `modalTitle`
+### Critical (Security / Data Loss / Functionality Broken)
+1. **NEW** Fix XSS vulnerability in `highlightMatch()` — escape HTML entities in user input
+2. **NEW** Fix memory leak in graph canvas — 7 event listeners never removed
+3. **NEW** Register 4 missing Tauri command modules (`bookmarks`, `custom_actions`, `advanced_search`, `jira`)
+4. Fix `clean-complete` / `files-cleaned` event name mismatch
+5. Fix 5 snake_case Tauri parameter bugs in `git.service.ts` and `lv-clone-dialog.ts`
+6. Wire up `merge-conflict` event from branch list to open conflict dialog
+7. Wire up `gitflow-initialized`/`gitflow-operation` events to trigger refresh
+8. Fix `show-toast` events (replace with direct `showToast()` calls)
+9. Wire up `show-commit` from reflog dialog to navigate graph
+10. Fix Repository Health dialog `title` -> `modalTitle`
 
-### High Priority (Data Integrity / UX)
-8. Add user-visible error feedback to ~25 silent-failure operations
-9. Add confirmation dialogs for destructive operations (clean, revert, soft/mixed reset)
-10. Remove or consolidate `workflowStore` with `unifiedProfileStore`
-11. Remove duplicate `recentRepositories` from `settingsStore`
-12. Consolidate triplicate `IntegrationAccount` type definitions
+### High Priority (Panics / Data Integrity / UX)
+11. **NEW** Fix 5 potential panics from `.unwrap()` on `reference.name()` in `branch.rs`
+12. **NEW** Fix avatar cache memory leak — add cleanup in `destroy()` and LRU eviction
+13. **NEW** Fix `app-shell.ts` to use `handleRefresh()` instead of `graphCanvas.refresh()` in 3 handlers
+14. **NEW** Fix inconsistent event dispatch in settings dialog (13 handlers missing events)
+15. Add user-visible error feedback to ~27 silent-failure operations
+16. Add confirmation dialogs for destructive operations (clean, revert, soft/mixed reset)
+17. Remove or consolidate `workflowStore` with `unifiedProfileStore`
+18. Remove duplicate `recentRepositories` from `settingsStore`
+19. Consolidate triplicate `IntegrationAccount` type definitions
 
-### Medium Priority (Quality / Consistency)
-13. Replace ~20 native `confirm()`/`prompt()` calls with themed dialogs
-14. Add loading states to async operations in branch/tag/stash lists
-15. Add disabled states to prevent double-clicking operations
-16. Consolidate duplicate maintenance functions in git.service.ts
-17. Standardize Tauri IPC usage (use `invokeCommand` everywhere)
-18. Consolidate window events vs component events for refresh
-19. Remove unused `uiStore` modal system
-20. Add missing notification toasts for merge/rebase/cherry-pick/stash operations
+### Medium Priority (Quality / Consistency / Robustness)
+20. **NEW** Handle mutex poisoning in watcher service (`.lock().unwrap()` → proper error handling)
+21. **NEW** Fix `strip_prefix().unwrap()` potential panic in branch upstream handling
+22. **NEW** Fix tag list inconsistent event dispatch (delete vs push)
+23. Replace ~20 native `confirm()`/`prompt()` calls with themed dialogs
+24. Add loading states to async operations in branch/tag/stash lists
+25. Add disabled states to prevent double-clicking operations
+26. Consolidate duplicate maintenance functions in git.service.ts
+27. Standardize Tauri IPC usage (use `invokeCommand` everywhere)
+28. Consolidate window events vs component events for refresh
+29. Remove unused `uiStore` modal system
+30. Add missing notification toasts for merge/rebase/cherry-pick/stash operations
 
 ### Low Priority (Polish / Maintenance)
-21. Improve keyboard accessibility (aria-labels, tab navigation, context menu keyboard support)
-22. Add cache consistency for `getCommitSignature()` singular
-23. Fix error masking in `getRepositoryStats()` and `getPackInfo()`
-24. Increase component unit test coverage (currently 21%)
-25. Increase utility test coverage (currently 20%)
-26. Remove unused functions from git.service.ts
-27. Move inline types from git.service.ts to proper type files
+31. **NEW** Remove orphaned `stash-created` and `tab-changed` events
+32. Improve keyboard accessibility (aria-labels, tab navigation, context menu keyboard support)
+33. Add cache consistency for `getCommitSignature()` singular
+34. Fix error masking in `getRepositoryStats()` and `getPackInfo()`
+35. Increase component unit test coverage (currently ~47-53%)
+36. Increase utility test coverage (currently 20%)
+37. Remove unused functions from git.service.ts
+38. Move inline types from git.service.ts to proper type files
+39. Add Rust tests for `search_index.rs` and `embedding_index.rs`

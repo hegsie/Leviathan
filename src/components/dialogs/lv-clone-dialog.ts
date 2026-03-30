@@ -15,10 +15,10 @@ import type { LvModal } from './lv-modal.ts';
 
 interface CloneProgress {
   stage: string;
-  received_objects: number;
-  total_objects: number;
-  indexed_objects: number;
-  received_bytes: number;
+  receivedObjects: number;
+  totalObjects: number;
+  indexedObjects: number;
+  receivedBytes: number;
   percent: number;
 }
 
@@ -297,13 +297,13 @@ export class LvCloneDialog extends LitElement {
     try {
       // Set up progress listener before starting clone
       this.unlistenProgress = await listen<CloneProgress>('clone-progress', (event) => {
-        const { stage, received_objects, total_objects, received_bytes, percent } = event.payload;
+        const { stage, receivedObjects, totalObjects, receivedBytes, percent } = event.payload;
         this.progress = percent;
 
         if (stage === 'Complete') {
           this.progressText = 'Clone complete!';
-        } else if (total_objects > 0) {
-          this.progressText = `${stage}: ${received_objects}/${total_objects} (${this.formatBytes(received_bytes)})`;
+        } else if (totalObjects > 0) {
+          this.progressText = `${stage}: ${receivedObjects}/${totalObjects} (${this.formatBytes(receivedBytes)})`;
         } else {
           this.progressText = stage;
         }

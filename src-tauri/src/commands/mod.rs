@@ -1,5 +1,6 @@
 //! Tauri command handlers
 
+pub mod advanced_search;
 pub mod ai;
 pub mod archive;
 pub mod autofetch;
@@ -7,6 +8,7 @@ pub mod avatar;
 pub mod azure_devops;
 pub mod bisect;
 pub mod bitbucket;
+pub mod bookmarks;
 pub mod branch;
 pub mod branch_cleanup;
 pub mod branch_rules;
@@ -18,6 +20,7 @@ pub mod commit;
 pub mod compare;
 pub mod config;
 pub mod credentials;
+pub mod custom_actions;
 pub mod describe;
 pub mod diff;
 pub mod difftool;
@@ -33,6 +36,7 @@ pub mod gpg;
 pub mod graph;
 pub mod hooks;
 pub mod issue_templates;
+pub mod jira;
 pub mod lfs;
 pub mod local_ai;
 pub mod maintenance;

@@ -7,6 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
 
 interface ReflogContextMenuState {
@@ -386,8 +387,10 @@ export class LvReflogDialog extends LitElement {
 
     // Confirm hard reset
     if (mode === 'hard') {
-      const confirmed = window.confirm(
-        `Are you sure you want to hard reset to ${entry.shortId}? This will discard all uncommitted changes.`
+      const confirmed = await showConfirm(
+        'Hard Reset',
+        `Are you sure you want to hard reset to ${entry.shortId}? This will discard all uncommitted changes.`,
+        'warning'
       );
       if (!confirmed) return;
     }

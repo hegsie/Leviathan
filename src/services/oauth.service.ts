@@ -6,10 +6,10 @@
  * - Azure uses deep links (leviathan://oauth/...)
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { onOpenUrl, getCurrent } from '@tauri-apps/plugin-deep-link';
 import { open } from '@tauri-apps/plugin-shell';
 import { listen } from '@tauri-apps/api/event';
+import { invokeCommand } from './tauri-api.ts';
 import type {
   OAuthProvider,
   StartOAuthResponse,
@@ -221,11 +221,15 @@ export async function startOAuth(
   try {
     notifyStateChange({ status: 'pending', provider });
 
-    const response = await invoke<StartOAuthResponse>('oauth_get_authorize_url', {
+    const cmdResult = await invokeCommand<StartOAuthResponse>('oauth_get_authorize_url', {
       provider,
       clientId,
       instanceUrl,
     });
+    if (!cmdResult.success || !cmdResult.data) {
+      throw new Error(cmdResult.error?.message ?? 'Failed to get authorize URL');
+    }
+    const response = cmdResult.data;
 
     pendingAuth = {
       verifier: response.verifier,
@@ -263,9 +267,13 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
 
   try {
     // Wait for the callback on the loopback server
-    const code = await invoke<string>('oauth_wait_for_callback', {
+    const codeResult = await invokeCommand<string>('oauth_wait_for_callback', {
       port,
     });
+    if (!codeResult.success || !codeResult.data) {
+      throw new Error(codeResult.error?.message ?? 'Failed to receive OAuth callback');
+    }
+    const code = codeResult.data;
 
     console.log(`[OAuth ${provider}] Received callback code:`, code?.substring(0, 10) + '...');
 
@@ -331,7 +339,7 @@ export async function exchangeCode(
 
   console.log('[OAuth] exchangeCode params:', { provider, redirectUri, hasClientId: !!clientId, hasClientSecret: !!clientSecret });
 
-  const result = await invoke<OAuthTokenResponse>('oauth_exchange_code', {
+  const cmdResult = await invokeCommand<OAuthTokenResponse>('oauth_exchange_code', {
     provider,
     code,
     verifier,
@@ -340,7 +348,11 @@ export async function exchangeCode(
     clientSecret,
     instanceUrl,
   });
+  if (!cmdResult.success || !cmdResult.data) {
+    throw new Error(cmdResult.error?.message ?? 'Failed to exchange OAuth code');
+  }
 
+  const result = cmdResult.data;
   console.log('[OAuth] exchangeCode raw result:', result);
   console.log('[OAuth] exchangeCode result type:', typeof result);
   console.log('[OAuth] exchangeCode result keys:', result ? Object.keys(result) : 'null');
@@ -371,12 +383,16 @@ export async function refreshToken(
 ): Promise<OAuthTokenResponse> {
   const clientId = getClientId(provider);
 
-  return invoke<OAuthTokenResponse>('oauth_refresh_token', {
+  const result = await invokeCommand<OAuthTokenResponse>('oauth_refresh_token', {
     provider,
     refreshToken: refreshTokenValue,
     clientId,
     instanceUrl,
   });
+  if (!result.success || !result.data) {
+    throw new Error(result.error?.message ?? 'Failed to refresh OAuth token');
+  }
+  return result.data;
 }
 
 /**
@@ -451,12 +467,20 @@ export interface OidcUserInfo {
  * Discover OIDC provider configuration from an issuer URL
  */
 export async function discoverOidcProvider(issuerUrl: string): Promise<OidcDiscovery> {
-  return invoke<OidcDiscovery>('discover_oidc_provider', { issuerUrl });
+  const result = await invokeCommand<OidcDiscovery>('discover_oidc_provider', { issuerUrl });
+  if (!result.success || !result.data) {
+    throw new Error(result.error?.message ?? 'Failed to discover OIDC provider');
+  }
+  return result.data;
 }
 
 /**
  * Decode an OIDC ID token to extract user identity
  */
 export async function decodeOidcIdToken(idToken: string): Promise<OidcUserInfo> {
-  return invoke<OidcUserInfo>('decode_oidc_id_token', { idToken });
+  const result = await invokeCommand<OidcUserInfo>('decode_oidc_id_token', { idToken });
+  if (!result.success || !result.data) {
+    throw new Error(result.error?.message ?? 'Failed to decode OIDC ID token');
+  }
+  return result.data;
 }

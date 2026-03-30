@@ -1,7 +1,78 @@
 import { expect } from '@open-wc/testing';
-import { formatShortcut, matchesShortcut } from '../platform.ts';
+import {
+  getPlatform,
+  isMacOS,
+  isWindows,
+  isLinux,
+  getModifierKey,
+  getModifierKeyDisplay,
+  formatShortcut,
+  matchesShortcut,
+} from '../platform.ts';
 
 describe('platform', () => {
+  describe('getPlatform', () => {
+    it('should return a valid platform string', () => {
+      const platform = getPlatform();
+      expect(['macos', 'windows', 'linux', 'unknown']).to.include(platform);
+    });
+
+    it('should be consistent across calls', () => {
+      expect(getPlatform()).to.equal(getPlatform());
+    });
+  });
+
+  describe('isMacOS / isWindows / isLinux', () => {
+    it('should return booleans', () => {
+      expect(isMacOS()).to.be.a('boolean');
+      expect(isWindows()).to.be.a('boolean');
+      expect(isLinux()).to.be.a('boolean');
+    });
+
+    it('should have at most one platform be true (or all false for unknown)', () => {
+      const trueCount = [isMacOS(), isWindows(), isLinux()].filter(Boolean).length;
+      expect(trueCount).to.be.at.most(1);
+    });
+
+    it('should be consistent with getPlatform', () => {
+      const platform = getPlatform();
+      if (platform === 'macos') expect(isMacOS()).to.be.true;
+      if (platform === 'windows') expect(isWindows()).to.be.true;
+      if (platform === 'linux') expect(isLinux()).to.be.true;
+    });
+  });
+
+  describe('getModifierKey', () => {
+    it('should return meta or ctrl', () => {
+      const key = getModifierKey();
+      expect(['meta', 'ctrl']).to.include(key);
+    });
+
+    it('should return meta on macOS, ctrl otherwise', () => {
+      if (isMacOS()) {
+        expect(getModifierKey()).to.equal('meta');
+      } else {
+        expect(getModifierKey()).to.equal('ctrl');
+      }
+    });
+  });
+
+  describe('getModifierKeyDisplay', () => {
+    it('should return a non-empty string', () => {
+      const display = getModifierKeyDisplay();
+      expect(display).to.be.a('string');
+      expect(display.length).to.be.greaterThan(0);
+    });
+
+    it('should return ⌘ on macOS, Ctrl otherwise', () => {
+      if (isMacOS()) {
+        expect(getModifierKeyDisplay()).to.equal('⌘');
+      } else {
+        expect(getModifierKeyDisplay()).to.equal('Ctrl');
+      }
+    });
+  });
+
   describe('formatShortcut', () => {
     it('should format simple key names', () => {
       // On non-macOS (linux test env), should use + separator

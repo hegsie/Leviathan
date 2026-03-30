@@ -126,6 +126,23 @@ pub async fn delete_custom_action(path: String, action_id: String) -> Result<Vec
 }
 
 /// Execute a custom action
+///
+/// # Security
+///
+/// This command executes arbitrary shell commands defined by the user in
+/// `.git/leviathan/custom_actions.json`. Because the action definitions live
+/// inside the repository's `.git/` directory (not tracked by Git) and the
+/// user must explicitly create them through the UI, the trust boundary is
+/// equivalent to the user running commands in their own terminal.
+///
+/// Safety measures in place:
+/// - The `action_id` is validated against the persisted action list before
+///   execution — only previously saved actions can be run.
+/// - The resolved command and working directory are logged at INFO level so
+///   unexpected executions are auditable.
+/// - Actions with `confirm_before_run` set to `true` are gated by a
+///   confirmation dialog in the frontend before this command is invoked.
+/// - Variable substitution (`$REPO`, `$BRANCH`) is limited to known tokens.
 #[command]
 pub async fn run_custom_action(path: String, action_id: String) -> Result<ActionResult> {
     let repo_path = Path::new(&path);
@@ -153,6 +170,16 @@ pub async fn run_custom_action(path: String, action_id: String) -> Result<Action
         Some("repo_root") | None => path.clone(),
         Some(custom_path) => substitute_variables(custom_path, &path, &branch),
     };
+
+    // Log the command being executed for auditability
+    tracing::info!(
+        action_id = %action_id,
+        action_name = %action.name,
+        command = %command_str,
+        arguments = %arguments_str,
+        working_dir = %working_dir,
+        "Executing custom action"
+    );
 
     // Build the command
     let output = if cfg!(target_os = "windows") {
@@ -400,5 +427,150 @@ mod tests {
         let result = run_custom_action(repo.path_str(), "1".to_string()).await;
         assert!(result.is_ok());
         assert!(result.unwrap().success);
+    }
+
+    #[test]
+    fn test_substitute_variables_both_placeholders() {
+        let result =
+            substitute_variables("$REPO is on $BRANCH and $REPO again", "/my/repo", "develop");
+        assert_eq!(result, "/my/repo is on develop and /my/repo again");
+    }
+
+    #[test]
+    fn test_substitute_variables_empty_input() {
+        let result = substitute_variables("", "/repo", "main");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_substitute_variables_empty_branch() {
+        let result = substitute_variables("branch is $BRANCH", "/repo", "");
+        assert_eq!(result, "branch is ");
+    }
+
+    #[tokio::test]
+    async fn test_action_result_serialization() {
+        let result = ActionResult {
+            exit_code: 0,
+            stdout: "output".to_string(),
+            stderr: "".to_string(),
+            success: true,
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        // Verify camelCase serialization
+        assert!(json.contains("exitCode"));
+        assert!(json.contains("stdout"));
+        assert!(json.contains("stderr"));
+        assert!(json.contains("success"));
+    }
+
+    #[tokio::test]
+    async fn test_custom_action_serialization_camel_case() {
+        let action = CustomAction {
+            id: "1".to_string(),
+            name: "Test".to_string(),
+            command: "echo".to_string(),
+            arguments: Some("hello".to_string()),
+            working_directory: Some("repo_root".to_string()),
+            shortcut: Some("Ctrl+Shift+T".to_string()),
+            show_in_toolbar: true,
+            open_in_terminal: false,
+            confirm_before_run: true,
+        };
+
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains("showInToolbar"));
+        assert!(json.contains("openInTerminal"));
+        assert!(json.contains("confirmBeforeRun"));
+        assert!(json.contains("workingDirectory"));
+    }
+
+    #[tokio::test]
+    async fn test_run_custom_action_with_custom_working_directory() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Create a subdirectory
+        std::fs::create_dir_all(repo.path.join("subdir")).unwrap();
+
+        let mut action = make_action("1", "Pwd", "pwd");
+        action.working_directory = Some(format!("{}/subdir", repo.path_str()));
+        save_custom_action(repo.path_str(), action).await.unwrap();
+
+        let result = run_custom_action(repo.path_str(), "1".to_string()).await;
+        assert!(result.is_ok());
+        let action_result = result.unwrap();
+        assert!(action_result.success);
+        assert!(action_result.stdout.contains("subdir"));
+    }
+
+    #[tokio::test]
+    async fn test_run_custom_action_with_repo_variable_in_working_dir() {
+        let repo = TestRepo::with_initial_commit();
+        let mut action = make_action("1", "Echo", "echo ok");
+        action.working_directory = Some("$REPO".to_string());
+        save_custom_action(repo.path_str(), action).await.unwrap();
+
+        let result = run_custom_action(repo.path_str(), "1".to_string()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+    }
+
+    #[tokio::test]
+    async fn test_save_custom_action_without_git_repo() {
+        let result = save_custom_action(
+            "/nonexistent/path".to_string(),
+            make_action("1", "Build", "cargo build"),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_custom_action_without_git_repo() {
+        let result = delete_custom_action("/nonexistent/path".to_string(), "1".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_custom_action_without_git_repo() {
+        let result = run_custom_action("/nonexistent/path".to_string(), "1".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_read_actions_malformed_json() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Write malformed JSON to the actions file
+        let actions_dir = repo.path.join(".git").join("leviathan");
+        std::fs::create_dir_all(&actions_dir).unwrap();
+        std::fs::write(actions_dir.join("custom_actions.json"), "not valid json").unwrap();
+
+        let result = get_custom_actions(repo.path_str()).await;
+        assert!(result.is_err(), "Malformed JSON should return an error");
+    }
+
+    #[test]
+    fn test_actions_file_path() {
+        let path = Path::new("/my/repo");
+        let result = actions_file_path(path);
+        assert_eq!(
+            result,
+            Path::new("/my/repo/.git/leviathan/custom_actions.json")
+        );
+    }
+
+    #[test]
+    fn test_get_current_branch_invalid_path() {
+        let branch = get_current_branch(Path::new("/nonexistent/repo"));
+        assert_eq!(branch, "");
+    }
+
+    #[test]
+    fn test_get_current_branch_valid_repo() {
+        let repo = TestRepo::with_initial_commit();
+        let branch = get_current_branch(&repo.path);
+        assert_eq!(branch, "main");
     }
 }

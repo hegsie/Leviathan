@@ -16,6 +16,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
@@ -889,8 +890,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const segments = this.parseOutputSegments();
     const unresolvedCount = segments.filter(s => s.type === 'conflict').length;
     if (unresolvedCount > 0) {
-      const proceed = confirm(
-        `There ${unresolvedCount === 1 ? 'is' : 'are'} ${unresolvedCount} unresolved conflict${unresolvedCount === 1 ? '' : 's'}. Are you sure you want to mark this as resolved?`
+      const proceed = await showConfirm(
+        'Unresolved Conflicts',
+        `There ${unresolvedCount === 1 ? 'is' : 'are'} ${unresolvedCount} unresolved conflict${unresolvedCount === 1 ? '' : 's'}. Are you sure you want to mark this as resolved?`,
+        'warning'
       );
       if (!proceed) return;
     }

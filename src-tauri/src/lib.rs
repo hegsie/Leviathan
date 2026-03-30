@@ -794,6 +794,30 @@ pub fn run() {
             commands::workspace::search_workspace,
             commands::workspace::export_workspace,
             commands::workspace::import_workspace,
+            // Bookmarks & recent repos
+            commands::bookmarks::get_bookmarks,
+            commands::bookmarks::add_bookmark,
+            commands::bookmarks::remove_bookmark,
+            commands::bookmarks::update_bookmark,
+            commands::bookmarks::get_recent_repos,
+            commands::bookmarks::record_repo_opened,
+            // Custom actions
+            commands::custom_actions::get_custom_actions,
+            commands::custom_actions::save_custom_action,
+            commands::custom_actions::delete_custom_action,
+            commands::custom_actions::run_custom_action,
+            // Advanced search
+            commands::advanced_search::filter_commits,
+            commands::advanced_search::get_branch_diff_commits,
+            commands::advanced_search::get_file_log,
+            // JIRA integration
+            commands::jira::get_jira_config,
+            commands::jira::save_jira_config,
+            commands::jira::get_jira_issues,
+            commands::jira::get_jira_issue,
+            commands::jira::get_jira_transitions,
+            commands::jira::transition_jira_issue,
+            commands::jira::create_branch_from_jira,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

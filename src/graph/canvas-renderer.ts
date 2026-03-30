@@ -284,6 +284,7 @@ export class CanvasRenderer {
   private pendingFrame: number = 0;
 
   // Avatar cache
+  private static readonly MAX_AVATAR_CACHE_SIZE = 500;
   private avatarCache: Map<string, HTMLImageElement | null> = new Map();
   private avatarLoadingSet: Set<string> = new Set();
 
@@ -441,12 +442,22 @@ export class CanvasRenderer {
     img.onload = () => {
       this.avatarCache.set(email, img);
       this.avatarLoadingSet.delete(email);
+      // Evict oldest entries when cache exceeds limit
+      if (this.avatarCache.size > CanvasRenderer.MAX_AVATAR_CACHE_SIZE) {
+        const firstKey = this.avatarCache.keys().next().value;
+        if (firstKey) this.avatarCache.delete(firstKey);
+      }
       this.markDirty();
     };
 
     img.onerror = () => {
       this.avatarCache.set(email, null);
       this.avatarLoadingSet.delete(email);
+      // Evict oldest entries when cache exceeds limit
+      if (this.avatarCache.size > CanvasRenderer.MAX_AVATAR_CACHE_SIZE) {
+        const firstKey = this.avatarCache.keys().next().value;
+        if (firstKey) this.avatarCache.delete(firstKey);
+      }
     };
 
     img.src = this.getGravatarUrl(email, 64);
@@ -1852,5 +1863,11 @@ export class CanvasRenderer {
    */
   destroy(): void {
     this.cancelRender();
+    this.avatarCache.clear();
+    this.avatarLoadingSet.clear();
+    this.commitStats.clear();
+    this.commitSignatures.clear();
+    this.ciStatuses.clear();
+    this.highlightedOids.clear();
   }
 }
