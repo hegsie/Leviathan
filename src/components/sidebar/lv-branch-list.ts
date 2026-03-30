@@ -2,7 +2,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { showConfirm } from '../../services/dialog.service.ts';
+import { showConfirm, showPrompt } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { dragDropService, type DragItem } from '../../services/drag-drop.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
@@ -546,6 +546,7 @@ export class LvBranchList extends LitElement {
   @state() private showFilter = false;
   @state() private hiddenBranches = new Set<string>();
   @state() private showSortMenu = false;
+  @state() private operationInProgress = false;
 
   @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
   @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
@@ -930,34 +931,39 @@ export class LvBranchList extends LitElement {
   }
 
   private async handleCheckout(branch: Branch): Promise<void> {
-    if (branch.isHead) return;
+    if (branch.isHead || this.operationInProgress) return;
 
+    this.operationInProgress = true;
     // Close context menu immediately
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    // Use branch.name for both local and remote branches
-    // - For local branches: branch.name is the branch name (e.g., "main", "feature/my-branch")
-    // - For remote branches: branch.name is the full remote reference (e.g., "origin/feature/my-branch")
-    const result = await gitService.checkoutWithAutoStash(this.repositoryPath, branch.name);
+    try {
+      // Use branch.name for both local and remote branches
+      // - For local branches: branch.name is the branch name (e.g., "main", "feature/my-branch")
+      // - For remote branches: branch.name is the full remote reference (e.g., "origin/feature/my-branch")
+      const result = await gitService.checkoutWithAutoStash(this.repositoryPath, branch.name);
 
-    if (result.success && result.data?.success) {
-      const data = result.data;
-      if (data.stashed && data.stashConflict) {
-        showToast(`Switched to ${branch.shorthand} — stash conflicts need resolution`, 'warning');
-      } else if (data.stashed && data.stashApplied) {
-        showToast(`Switched to ${branch.shorthand} (changes re-applied)`, 'info');
-      } else if (data.stashed && !data.stashApplied) {
-        showToast(data.message, 'warning');
+      if (result.success && result.data?.success) {
+        const data = result.data;
+        if (data.stashed && data.stashConflict) {
+          showToast(`Switched to ${branch.shorthand} — stash conflicts need resolution`, 'warning');
+        } else if (data.stashed && data.stashApplied) {
+          showToast(`Switched to ${branch.shorthand} (changes re-applied)`, 'info');
+        } else if (data.stashed && !data.stashApplied) {
+          showToast(data.message, 'warning');
+        }
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branch-checkout', {
+          detail: { branch },
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Checkout failed:', result.data?.message || result.error);
+        showToast(`Checkout failed: ${result.data?.message || result.error?.message || 'Unknown error'}`, 'error');
       }
-      await this.loadBranches();
-      this.dispatchEvent(new CustomEvent('branch-checkout', {
-        detail: { branch },
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      console.error('Checkout failed:', result.data?.message || result.error);
-      showToast(`Checkout failed: ${result.data?.message || result.error?.message || 'Unknown error'}`, 'error');
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
@@ -975,7 +981,7 @@ export class LvBranchList extends LitElement {
 
   private async handleRenameBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
-    if (!branch) return;
+    if (!branch || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -984,31 +990,37 @@ export class LvBranchList extends LitElement {
       return;
     }
 
-    const newName = prompt(`Rename branch "${branch.name}" to:`, branch.name);
+    const newName = await showPrompt('Rename Branch', `Rename branch "${branch.name}" to:`, branch.name);
     if (!newName || newName === branch.name) {
       return;
     }
 
-    const result = await gitService.renameBranch(this.repositoryPath, {
-      oldName: branch.name,
-      newName: newName.trim(),
-    });
+    this.operationInProgress = true;
 
-    if (result.success) {
-      await this.loadBranches();
-      this.dispatchEvent(new CustomEvent('branches-changed', {
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      console.error('Rename branch failed:', result.error);
-      showToast(`Failed to rename branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
+    try {
+      const result = await gitService.renameBranch(this.repositoryPath, {
+        oldName: branch.name,
+        newName: newName.trim(),
+      });
+
+      if (result.success) {
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branches-changed', {
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Rename branch failed:', result.error);
+        showToast(`Failed to rename branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      }
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
   private async handleDeleteBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
-    if (!branch) return;
+    if (!branch || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -1025,27 +1037,33 @@ export class LvBranchList extends LitElement {
 
     if (!confirmed) return;
 
-    const result = await gitService.deleteBranch(
-      this.repositoryPath,
-      branch.name,
-      false
-    );
+    this.operationInProgress = true;
 
-    if (result.success) {
-      await this.loadBranches();
-      this.dispatchEvent(new CustomEvent('branches-changed', {
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      console.error('Delete branch failed:', result.error);
-      showToast(`Failed to delete branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
+    try {
+      const result = await gitService.deleteBranch(
+        this.repositoryPath,
+        branch.name,
+        false
+      );
+
+      if (result.success) {
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branches-changed', {
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Delete branch failed:', result.error);
+        showToast(`Failed to delete branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      }
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
   private async handleMergeBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
-    if (!branch) return;
+    if (!branch || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -1057,38 +1075,44 @@ export class LvBranchList extends LitElement {
 
     if (!confirmed) return;
 
-    const result = await gitService.merge({
-      path: this.repositoryPath,
-      sourceRef: branch.shorthand,
-    });
+    this.operationInProgress = true;
 
-    if (result.success) {
-      await this.loadBranches();
-      this.dispatchEvent(new CustomEvent('branches-changed', {
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      // Check if it's a merge conflict
-      if (result.error?.code === 'MERGE_CONFLICT') {
-        const abortConfirmed = await showConfirm(
-          'Merge Conflict',
-          'There are merge conflicts. Would you like to abort the merge?',
-          'warning'
-        );
-        if (abortConfirmed) {
-          await gitService.abortMerge({ path: this.repositoryPath });
-        }
+    try {
+      const result = await gitService.merge({
+        path: this.repositoryPath,
+        sourceRef: branch.shorthand,
+      });
+
+      if (result.success) {
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branches-changed', {
+          bubbles: true,
+          composed: true,
+        }));
       } else {
-        console.error('Merge failed:', result.error);
-        showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        // Check if it's a merge conflict
+        if (result.error?.code === 'MERGE_CONFLICT') {
+          const abortConfirmed = await showConfirm(
+            'Merge Conflict',
+            'There are merge conflicts. Would you like to abort the merge?',
+            'warning'
+          );
+          if (abortConfirmed) {
+            await gitService.abortMerge({ path: this.repositoryPath });
+          }
+        } else {
+          console.error('Merge failed:', result.error);
+          showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        }
       }
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
   private async handleRebaseBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
-    if (!branch) return;
+    if (!branch || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -1100,32 +1124,38 @@ export class LvBranchList extends LitElement {
 
     if (!confirmed) return;
 
-    const result = await gitService.rebase({
-      path: this.repositoryPath,
-      onto: branch.shorthand,
-    });
+    this.operationInProgress = true;
 
-    if (result.success) {
-      await this.loadBranches();
-      this.dispatchEvent(new CustomEvent('branches-changed', {
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      // Check if it's a rebase conflict
-      if (result.error?.code === 'REBASE_CONFLICT') {
-        const abortConfirmed = await showConfirm(
-          'Rebase Conflict',
-          'There are rebase conflicts. Would you like to abort the rebase?',
-          'warning'
-        );
-        if (abortConfirmed) {
-          await gitService.abortRebase({ path: this.repositoryPath });
-        }
+    try {
+      const result = await gitService.rebase({
+        path: this.repositoryPath,
+        onto: branch.shorthand,
+      });
+
+      if (result.success) {
+        await this.loadBranches();
+        this.dispatchEvent(new CustomEvent('branches-changed', {
+          bubbles: true,
+          composed: true,
+        }));
       } else {
-        console.error('Rebase failed:', result.error);
-        showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        // Check if it's a rebase conflict
+        if (result.error?.code === 'REBASE_CONFLICT') {
+          const abortConfirmed = await showConfirm(
+            'Rebase Conflict',
+            'There are rebase conflicts. Would you like to abort the rebase?',
+            'warning'
+          );
+          if (abortConfirmed) {
+            await gitService.abortRebase({ path: this.repositoryPath });
+          }
+        } else {
+          console.error('Rebase failed:', result.error);
+          showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        }
       }
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
@@ -1199,7 +1229,7 @@ export class LvBranchList extends LitElement {
     this.contextMenu = { ...this.contextMenu, visible: false };
 
     const defaultUpstream = branch.upstream ?? `origin/${branch.shorthand}`;
-    const upstream = prompt(`Set upstream for "${branch.shorthand}":`, defaultUpstream);
+    const upstream = await showPrompt('Set Upstream', `Set upstream for "${branch.shorthand}":`, defaultUpstream);
     if (!upstream) return;
 
     try {
@@ -1669,7 +1699,7 @@ export class LvBranchList extends LitElement {
         @click=${(e: Event) => e.stopPropagation()}
       >
         ${!isHead ? html`
-          <button class="context-menu-item" @click=${() => this.handleCheckout(branch)}>
+          <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${() => this.handleCheckout(branch)}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="20 6 9 17 4 12"></polyline>
             </svg>
@@ -1708,7 +1738,7 @@ export class LvBranchList extends LitElement {
         </button>
 
         ${!isHead ? html`
-          <button class="context-menu-item" @click=${this.handleMergeBranch}>
+          <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handleMergeBranch}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="18" cy="18" r="3"></circle>
               <circle cx="6" cy="6" r="3"></circle>
@@ -1716,7 +1746,7 @@ export class LvBranchList extends LitElement {
             </svg>
             Merge into current branch
           </button>
-          <button class="context-menu-item" @click=${this.handleRebaseBranch}>
+          <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handleRebaseBranch}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="6" cy="6" r="3"></circle>
               <circle cx="6" cy="18" r="3"></circle>
@@ -1756,13 +1786,13 @@ export class LvBranchList extends LitElement {
             </button>
           ` : ''}
           <div class="context-menu-divider"></div>
-          <button class="context-menu-item" @click=${this.handleRenameBranch}>
+          <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handleRenameBranch}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M17 3a2.828 2.828 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
             </svg>
             Rename
           </button>
-          <button class="context-menu-item danger" @click=${this.handleDeleteBranch}>
+          <button class="context-menu-item danger" ?disabled=${this.operationInProgress} @click=${this.handleDeleteBranch}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="3 6 5 6 21 6"></polyline>
               <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>

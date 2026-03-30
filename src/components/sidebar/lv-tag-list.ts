@@ -318,6 +318,7 @@ export class LvTagList extends LitElement {
   @state() private showFilter = false;
   @state() private showSortMenu = false;
   @state() private collapsedGroups = new Set<string>();
+  @state() private operationInProgress = false;
 
   @query('lv-create-tag-dialog') private createTagDialog!: LvCreateTagDialog;
 
@@ -457,7 +458,7 @@ export class LvTagList extends LitElement {
 
   private async handleCheckoutTag(): Promise<void> {
     const tag = this.contextMenu.tag;
-    if (!tag) return;
+    if (!tag || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -468,32 +469,38 @@ export class LvTagList extends LitElement {
     );
     if (!confirmed) return;
 
-    const result = await gitService.checkoutWithAutoStash(this.repositoryPath, tag.name);
+    this.operationInProgress = true;
 
-    if (result.success && result.data?.success) {
-      const data = result.data;
-      if (data.stashed && data.stashConflict) {
-        showToast(`Switched to ${tag.name} — stash conflicts need resolution`, 'warning');
-      } else if (data.stashed && data.stashApplied) {
-        showToast(`Switched to ${tag.name} (changes re-applied)`, 'info');
-      } else if (data.stashed && !data.stashApplied) {
-        showToast(data.message, 'warning');
+    try {
+      const result = await gitService.checkoutWithAutoStash(this.repositoryPath, tag.name);
+
+      if (result.success && result.data?.success) {
+        const data = result.data;
+        if (data.stashed && data.stashConflict) {
+          showToast(`Switched to ${tag.name} — stash conflicts need resolution`, 'warning');
+        } else if (data.stashed && data.stashApplied) {
+          showToast(`Switched to ${tag.name} (changes re-applied)`, 'info');
+        } else if (data.stashed && !data.stashApplied) {
+          showToast(data.message, 'warning');
+        }
+        this.dispatchEvent(new CustomEvent('tag-checkout', {
+          detail: { tag },
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        const errorMsg = result.data?.message || result.error || 'Unknown error';
+        console.error('Failed to checkout tag:', errorMsg);
+        showToast(`Failed to checkout tag: ${errorMsg}`, 'error');
       }
-      this.dispatchEvent(new CustomEvent('tag-checkout', {
-        detail: { tag },
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      const errorMsg = result.data?.message || result.error || 'Unknown error';
-      console.error('Failed to checkout tag:', errorMsg);
-      showToast(`Failed to checkout tag: ${errorMsg}`, 'error');
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
   private async handleDeleteTag(): Promise<void> {
     const tag = this.contextMenu.tag;
-    if (!tag) return;
+    if (!tag || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -505,20 +512,26 @@ export class LvTagList extends LitElement {
 
     if (!confirmed) return;
 
-    const result = await gitService.deleteTag({
-      path: this.repositoryPath,
-      name: tag.name,
-    });
+    this.operationInProgress = true;
 
-    if (result.success) {
-      await this.loadTags();
-      this.dispatchEvent(new CustomEvent('tags-changed', {
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      console.error('Failed to delete tag:', result.error);
-      showToast(`Failed to delete tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
+    try {
+      const result = await gitService.deleteTag({
+        path: this.repositoryPath,
+        name: tag.name,
+      });
+
+      if (result.success) {
+        await this.loadTags();
+        this.dispatchEvent(new CustomEvent('tags-changed', {
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Failed to delete tag:', result.error);
+        showToast(`Failed to delete tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      }
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
@@ -551,24 +564,29 @@ export class LvTagList extends LitElement {
 
   private async handlePushTag(): Promise<void> {
     const tag = this.contextMenu.tag;
-    if (!tag) return;
+    if (!tag || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
+    this.operationInProgress = true;
 
-    const result = await gitService.pushTag({
-      path: this.repositoryPath,
-      name: tag.name,
-    });
+    try {
+      const result = await gitService.pushTag({
+        path: this.repositoryPath,
+        name: tag.name,
+      });
 
-    if (result.success) {
-      await this.loadTags();
-      this.dispatchEvent(new CustomEvent('tags-changed', {
-        bubbles: true,
-        composed: true,
-      }));
-    } else {
-      console.error('Failed to push tag:', result.error);
-      showToast(`Failed to push tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      if (result.success) {
+        await this.loadTags();
+        this.dispatchEvent(new CustomEvent('tags-changed', {
+          bubbles: true,
+          composed: true,
+        }));
+      } else {
+        console.error('Failed to push tag:', result.error);
+        showToast(`Failed to push tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      }
+    } finally {
+      this.operationInProgress = false;
     }
   }
 
@@ -615,7 +633,7 @@ export class LvTagList extends LitElement {
         style="left: ${this.contextMenu.x}px; top: ${this.contextMenu.y}px;"
         @click=${(e: Event) => e.stopPropagation()}
       >
-        <button class="context-menu-item" @click=${this.handleCheckoutTag}>
+        <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handleCheckoutTag}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="20 6 9 17 4 12"></polyline>
           </svg>
@@ -630,7 +648,7 @@ export class LvTagList extends LitElement {
           </svg>
           Create Tag Here
         </button>
-        <button class="context-menu-item" @click=${this.handlePushTag}>
+        <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handlePushTag}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="12" y1="19" x2="12" y2="5"></line>
             <polyline points="5 12 12 5 19 12"></polyline>
@@ -638,7 +656,7 @@ export class LvTagList extends LitElement {
           Push to Remote
         </button>
         <div class="context-menu-divider" style="height: 1px; background: var(--color-border); margin: var(--spacing-xs) 0;"></div>
-        <button class="context-menu-item danger" @click=${this.handleDeleteTag}>
+        <button class="context-menu-item danger" ?disabled=${this.operationInProgress} @click=${this.handleDeleteTag}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="3 6 5 6 21 6"></polyline>
             <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>

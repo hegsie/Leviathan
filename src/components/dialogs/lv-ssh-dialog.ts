@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import type { SshKey, SshConfig, SshTestResult } from '../../services/git.service.ts';
 import './lv-modal.ts';
 
@@ -478,8 +479,10 @@ export class LvSshDialog extends LitElement {
   }
 
   private async handleDeleteKey(key: SshKey): Promise<void> {
-    const confirmed = confirm(
-      `Are you sure you want to delete the SSH key "${key.name}"?\n\nThis will delete both the private and public key files.`
+    const confirmed = await showConfirm(
+      'Delete SSH Key',
+      `Are you sure you want to delete the SSH key "${key.name}"?\n\nThis will delete both the private and public key files.`,
+      'warning'
     );
 
     if (!confirmed) return;
