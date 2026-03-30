@@ -556,6 +556,7 @@ export class LvBranchList extends LitElement {
     super.connectedCallback();
     await this.loadBranches();
     document.addEventListener('click', this.handleDocumentClick);
+    document.addEventListener('keydown', this.handleKeydown);
     window.addEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
   }
@@ -563,6 +564,7 @@ export class LvBranchList extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('click', this.handleDocumentClick);
+    document.removeEventListener('keydown', this.handleKeydown);
     window.removeEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
   }
@@ -580,6 +582,39 @@ export class LvBranchList extends LitElement {
       this.contextMenu = { ...this.contextMenu, visible: false };
     }
   };
+
+  private handleKeydown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape' && this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
+
+  private handleContextMenuKeydown(e: KeyboardEvent): void {
+    const menu = this.renderRoot.querySelector('.context-menu') as HTMLElement;
+    if (!menu) return;
+
+    const items = Array.from(menu.querySelectorAll('.context-menu-item:not([disabled])')) as HTMLElement[];
+    const currentIndex = items.indexOf(e.target as HTMLElement);
+
+    switch (e.key) {
+      case 'ArrowDown': {
+        e.preventDefault();
+        const next = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
+        items[next]?.focus();
+        break;
+      }
+      case 'ArrowUp': {
+        e.preventDefault();
+        const prev = currentIndex > 0 ? currentIndex - 1 : items.length - 1;
+        items[prev]?.focus();
+        break;
+      }
+      case 'Escape':
+        e.preventDefault();
+        this.contextMenu = { ...this.contextMenu, visible: false };
+        break;
+    }
+  }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
@@ -1369,6 +1404,7 @@ export class LvBranchList extends LitElement {
     return html`
       <li
         class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''} ${isDragging ? 'dragging' : ''} ${dropClass} ${staleClass} ${this.contextMenu.visible && this.contextMenu.branch?.name === branch.name ? 'context-target' : ''}"
+        role="listitem"
         draggable=${!branch.isHead ? 'true' : 'false'}
         @click=${() => this.handleBranchClick(branch)}
         @dblclick=${() => this.handleCheckout(branch)}
@@ -1575,7 +1611,7 @@ export class LvBranchList extends LitElement {
     // For ungrouped branches (no prefix), render them directly
     if (group.prefix === null) {
       return html`
-        <ul class="branch-list">
+        <ul class="branch-list" role="list">
           ${filteredBranches.map((b) => this.renderBranchItem(b))}
         </ul>
       `;
@@ -1587,7 +1623,14 @@ export class LvBranchList extends LitElement {
 
     return html`
       <div class="subgroup">
-        <div class="subgroup-header" @click=${() => this.toggleGroup(groupId)}>
+        <div class="subgroup-header"
+          role="button"
+          tabindex="0"
+          aria-expanded=${expanded}
+          aria-label="${group.displayName} branch group, ${filteredBranches.length} branches"
+          @click=${() => this.toggleGroup(groupId)}
+          @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.toggleGroup(groupId); } }}
+        >
           <svg class="chevron ${expanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="9 18 15 12 9 6"></polyline>
           </svg>
@@ -1596,7 +1639,7 @@ export class LvBranchList extends LitElement {
           <span class="group-count">${filteredBranches.length}</span>
         </div>
         ${expanded ? html`
-          <ul class="branch-list">
+          <ul class="branch-list" role="list">
             ${filteredBranches.map((b) => this.renderBranchItem(b, true, group.prefix))}
           </ul>
         ` : nothing}
@@ -1613,7 +1656,7 @@ export class LvBranchList extends LitElement {
     // For ungrouped branches (no prefix), render them directly
     if (subgroup.prefix === null) {
       return html`
-        <ul class="branch-list">
+        <ul class="branch-list" role="list">
           ${filteredBranches.map((b) => this.renderBranchItem(b))}
         </ul>
       `;
@@ -1625,7 +1668,14 @@ export class LvBranchList extends LitElement {
 
     return html`
       <div class="subgroup">
-        <div class="subgroup-header" @click=${() => this.toggleGroup(groupId)}>
+        <div class="subgroup-header"
+          role="button"
+          tabindex="0"
+          aria-expanded=${expanded}
+          aria-label="${subgroup.displayName} branch group, ${filteredBranches.length} branches"
+          @click=${() => this.toggleGroup(groupId)}
+          @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.toggleGroup(groupId); } }}
+        >
           <svg class="chevron ${expanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="9 18 15 12 9 6"></polyline>
           </svg>
@@ -1634,7 +1684,7 @@ export class LvBranchList extends LitElement {
           <span class="group-count">${filteredBranches.length}</span>
         </div>
         ${expanded ? html`
-          <ul class="branch-list">
+          <ul class="branch-list" role="list">
             ${filteredBranches.map((b) => this.renderBranchItem(b, true, subgroup.prefix))}
           </ul>
         ` : nothing}
@@ -1695,20 +1745,23 @@ export class LvBranchList extends LitElement {
     return html`
       <div
         class="context-menu"
+        role="menu"
+        aria-label="Branch actions"
         style="left: ${this.contextMenu.x}px; top: ${this.contextMenu.y}px;"
         @click=${(e: Event) => e.stopPropagation()}
+        @keydown=${(e: KeyboardEvent) => this.handleContextMenuKeydown(e)}
       >
         ${!isHead ? html`
-          <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${() => this.handleCheckout(branch)}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${() => this.handleCheckout(branch)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <polyline points="20 6 9 17 4 12"></polyline>
             </svg>
             Checkout
           </button>
         ` : ''}
 
-        <button class="context-menu-item" @click=${this.handleCreateBranchFrom}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button class="context-menu-item" role="menuitem" @click=${this.handleCreateBranchFrom}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <line x1="12" y1="5" x2="12" y2="19"></line>
             <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
@@ -1716,8 +1769,8 @@ export class LvBranchList extends LitElement {
         </button>
 
         ${!isLocal ? html`
-          <button class="context-menu-item" @click=${this.handleTrackRemoteBranch}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <button class="context-menu-item" role="menuitem" @click=${this.handleTrackRemoteBranch}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"></path>
               <circle cx="8.5" cy="7" r="4"></circle>
               <line x1="20" y1="8" x2="20" y2="14"></line>
@@ -1727,8 +1780,8 @@ export class LvBranchList extends LitElement {
           </button>
         ` : ''}
 
-        <button class="context-menu-item" @click=${() => { this.toggleHideBranch(branch.name); this.contextMenu = { ...this.contextMenu, visible: false }; }}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button class="context-menu-item" role="menuitem" @click=${() => { this.toggleHideBranch(branch.name); this.contextMenu = { ...this.contextMenu, visible: false }; }}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             ${this.hiddenBranches.has(branch.name)
               ? html`<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>`
               : html`<path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line>`
@@ -1738,16 +1791,16 @@ export class LvBranchList extends LitElement {
         </button>
 
         ${!isHead ? html`
-          <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handleMergeBranch}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handleMergeBranch}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <circle cx="18" cy="18" r="3"></circle>
               <circle cx="6" cy="6" r="3"></circle>
               <path d="M6 21V9a9 9 0 009 9"></path>
             </svg>
             Merge into current branch
           </button>
-          <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handleRebaseBranch}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handleRebaseBranch}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <circle cx="6" cy="6" r="3"></circle>
               <circle cx="6" cy="18" r="3"></circle>
               <line x1="6" y1="9" x2="6" y2="15"></line>
@@ -1755,8 +1808,8 @@ export class LvBranchList extends LitElement {
             </svg>
             Rebase current onto this
           </button>
-          <button class="context-menu-item" @click=${this.handleInteractiveRebase}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <button class="context-menu-item" role="menuitem" @click=${this.handleInteractiveRebase}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
               <line x1="9" y1="9" x2="15" y2="9"></line>
               <line x1="9" y1="13" x2="15" y2="13"></line>
@@ -1767,9 +1820,9 @@ export class LvBranchList extends LitElement {
         ` : ''}
 
         ${isLocal && !isHead ? html`
-          <div class="context-menu-divider"></div>
-          <button class="context-menu-item" @click=${this.handleSetUpstream}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <div class="context-menu-divider" role="separator"></div>
+          <button class="context-menu-item" role="menuitem" @click=${this.handleSetUpstream}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <polyline points="15 3 21 3 21 9"></polyline>
               <line x1="21" y1="3" x2="14" y2="10"></line>
               <path d="M10 14L3 21"></path>
@@ -1777,23 +1830,23 @@ export class LvBranchList extends LitElement {
             ${branch.upstream ? 'Change Upstream...' : 'Set Upstream...'}
           </button>
           ${branch.upstream ? html`
-            <button class="context-menu-item" @click=${this.handleUnsetUpstream}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button class="context-menu-item" role="menuitem" @click=${this.handleUnsetUpstream}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
               </svg>
               Unset Upstream
             </button>
           ` : ''}
-          <div class="context-menu-divider"></div>
-          <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handleRenameBranch}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <div class="context-menu-divider" role="separator"></div>
+          <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handleRenameBranch}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M17 3a2.828 2.828 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
             </svg>
             Rename
           </button>
-          <button class="context-menu-item danger" ?disabled=${this.operationInProgress} @click=${this.handleDeleteBranch}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <button class="context-menu-item danger" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handleDeleteBranch}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <polyline points="3 6 5 6 21 6"></polyline>
               <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
             </svg>
@@ -1810,9 +1863,10 @@ export class LvBranchList extends LitElement {
         <button
           class="controls-btn ${this.showFilter ? 'active' : ''}"
           title="Filter branches"
+          aria-label="Filter branches"
           @click=${this.toggleFilter}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="11" cy="11" r="8"></circle>
             <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
           </svg>
@@ -1820,9 +1874,10 @@ export class LvBranchList extends LitElement {
         <button
           class="controls-btn ${this.showSortMenu ? 'active' : ''}"
           title="Sort branches"
+          aria-label="Sort branches"
           @click=${this.toggleSortMenu}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <line x1="4" y1="6" x2="20" y2="6"></line>
             <line x1="4" y1="12" x2="16" y2="12"></line>
             <line x1="4" y1="18" x2="12" y2="18"></line>
@@ -1832,23 +1887,24 @@ export class LvBranchList extends LitElement {
         <button
           class="controls-btn"
           title="Create branch"
+          aria-label="Create branch"
           @click=${this.handleCreateBranch}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <line x1="12" y1="5" x2="12" y2="19"></line>
             <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
         </button>
         ${this.showSortMenu ? html`
-          <div class="sort-menu" @click=${(e: Event) => e.stopPropagation()}>
-            <button class="sort-option ${this.sortMode === 'name' ? 'active' : ''}" @click=${() => this.setSortMode('name')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <div class="sort-menu" role="menu" aria-label="Sort options" @click=${(e: Event) => e.stopPropagation()}>
+            <button class="sort-option ${this.sortMode === 'name' ? 'active' : ''}" role="menuitem" @click=${() => this.setSortMode('name')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <path d="M4 6h7M4 12h5M4 18h3M17 6v12M14 18l3 3 3-3"></path>
               </svg>
               Name (A-Z)
             </button>
-            <button class="sort-option ${this.sortMode === 'date' ? 'active' : ''}" @click=${() => this.setSortMode('date')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button class="sort-option ${this.sortMode === 'date' ? 'active' : ''}" role="menuitem" @click=${() => this.setSortMode('date')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
                 <line x1="16" y1="2" x2="16" y2="6"></line>
                 <line x1="8" y1="2" x2="8" y2="6"></line>
@@ -1856,8 +1912,8 @@ export class LvBranchList extends LitElement {
               </svg>
               Date (Newest)
             </button>
-            <button class="sort-option ${this.sortMode === 'date-asc' ? 'active' : ''}" @click=${() => this.setSortMode('date-asc')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button class="sort-option ${this.sortMode === 'date-asc' ? 'active' : ''}" role="menuitem" @click=${() => this.setSortMode('date-asc')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
                 <line x1="16" y1="2" x2="16" y2="6"></line>
                 <line x1="8" y1="2" x2="8" y2="6"></line>
@@ -1870,7 +1926,7 @@ export class LvBranchList extends LitElement {
       </div>
       ${this.showFilter ? html`
         <div class="filter-bar">
-          <svg style="width:14px;height:14px;color:var(--color-text-muted);margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg style="width:14px;height:14px;color:var(--color-text-muted);margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="11" cy="11" r="8"></circle>
             <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
           </svg>
@@ -1878,12 +1934,13 @@ export class LvBranchList extends LitElement {
             class="filter-input"
             type="text"
             placeholder="Filter branches..."
+            aria-label="Filter branches"
             .value=${this.filterText}
             @input=${this.handleFilterInput}
           />
           ${this.filterText ? html`
-            <button class="filter-clear" @click=${this.clearFilter}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button class="filter-clear" aria-label="Clear filter" @click=${this.clearFilter}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
               </svg>
@@ -1952,7 +2009,14 @@ export class LvBranchList extends LitElement {
 
         return html`
           <div class="group">
-            <div class="group-header" @click=${() => this.toggleGroup(groupId)}>
+            <div class="group-header"
+              role="button"
+              tabindex="0"
+              aria-expanded=${expanded}
+              aria-label="${group.name} remote, ${group.branches.length} branches"
+              @click=${() => this.toggleGroup(groupId)}
+              @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.toggleGroup(groupId); } }}
+            >
               <svg class="chevron ${expanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="9 18 15 12 9 6"></polyline>
               </svg>

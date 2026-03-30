@@ -1,4 +1,4 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, query } from 'lit/decorators.js';
 import { sharedStyles, inputStyles } from '../../styles/shared-styles.ts';
 
@@ -103,24 +103,30 @@ export class LvInput extends LitElement {
   @query('input') private inputElement!: HTMLInputElement;
 
   render() {
+    const inputId = this.name || 'lv-input';
+    const errorId = `${inputId}-error`;
+
     return html`
       <div class="input-wrapper ${this.error ? 'error' : ''}">
-        ${this.label ? html`<label>${this.label}</label>` : ''}
+        ${this.label ? html`<label for=${inputId}>${this.label}</label>` : ''}
         <div class="input-container">
           <slot name="prefix" class="prefix"></slot>
           <input
+            id=${inputId}
             type=${this.type}
             .value=${this.value}
             placeholder=${this.placeholder}
             ?disabled=${this.disabled}
             ?required=${this.required}
             name=${this.name}
+            aria-invalid=${this.error ? 'true' : nothing}
+            aria-describedby=${this.error ? errorId : nothing}
             @input=${this._handleInput}
             @change=${this._handleChange}
           />
           <slot name="suffix" class="suffix"></slot>
         </div>
-        ${this.error ? html`<span class="error-message">${this.error}</span>` : ''}
+        ${this.error ? html`<span class="error-message" id=${errorId}>${this.error}</span>` : ''}
       </div>
     `;
   }

@@ -326,11 +326,13 @@ export class LvTagList extends LitElement {
     super.connectedCallback();
     await this.loadTags();
     document.addEventListener('click', this.handleDocumentClick);
+    document.addEventListener('keydown', this.handleKeydown);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('click', this.handleDocumentClick);
+    document.removeEventListener('keydown', this.handleKeydown);
   }
 
   private handleDocumentClick = (): void => {
@@ -341,6 +343,46 @@ export class LvTagList extends LitElement {
       this.showSortMenu = false;
     }
   };
+
+  private handleKeydown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape' && this.contextMenu.visible) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+    }
+  };
+
+  private handleContextMenuKeydown(e: KeyboardEvent): void {
+    const menu = this.renderRoot.querySelector('.context-menu') as HTMLElement;
+    if (!menu) return;
+
+    const items = Array.from(menu.querySelectorAll('.context-menu-item:not([disabled])')) as HTMLElement[];
+    const currentIndex = items.indexOf(e.target as HTMLElement);
+
+    switch (e.key) {
+      case 'ArrowDown': {
+        e.preventDefault();
+        const next = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
+        items[next]?.focus();
+        break;
+      }
+      case 'ArrowUp': {
+        e.preventDefault();
+        const prev = currentIndex > 0 ? currentIndex - 1 : items.length - 1;
+        items[prev]?.focus();
+        break;
+      }
+      case 'Escape':
+        e.preventDefault();
+        this.contextMenu = { ...this.contextMenu, visible: false };
+        break;
+    }
+  }
+
+  private handleTagItemKeydown(e: KeyboardEvent, tag: Tag): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      this.handleTagClick(tag);
+    }
+  }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
@@ -630,17 +672,20 @@ export class LvTagList extends LitElement {
     return html`
       <div
         class="context-menu"
+        role="menu"
+        aria-label="Tag actions"
         style="left: ${this.contextMenu.x}px; top: ${this.contextMenu.y}px;"
         @click=${(e: Event) => e.stopPropagation()}
+        @keydown=${(e: KeyboardEvent) => this.handleContextMenuKeydown(e)}
       >
-        <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handleCheckoutTag}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handleCheckoutTag}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <polyline points="20 6 9 17 4 12"></polyline>
           </svg>
           Checkout
         </button>
-        <button class="context-menu-item" @click=${this.handleCreateTagFromContext}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button class="context-menu-item" role="menuitem" @click=${this.handleCreateTagFromContext}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"></path>
             <line x1="7" y1="7" x2="7.01" y2="7"></line>
             <line x1="12" y1="8" x2="12" y2="14"></line>
@@ -648,16 +693,16 @@ export class LvTagList extends LitElement {
           </svg>
           Create Tag Here
         </button>
-        <button class="context-menu-item" ?disabled=${this.operationInProgress} @click=${this.handlePushTag}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handlePushTag}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <line x1="12" y1="19" x2="12" y2="5"></line>
             <polyline points="5 12 12 5 19 12"></polyline>
           </svg>
           Push to Remote
         </button>
-        <div class="context-menu-divider" style="height: 1px; background: var(--color-border); margin: var(--spacing-xs) 0;"></div>
-        <button class="context-menu-item danger" ?disabled=${this.operationInProgress} @click=${this.handleDeleteTag}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <div class="context-menu-divider" role="separator" style="height: 1px; background: var(--color-border); margin: var(--spacing-xs) 0;"></div>
+        <button class="context-menu-item danger" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handleDeleteTag}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <polyline points="3 6 5 6 21 6"></polyline>
             <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
           </svg>
@@ -671,11 +716,14 @@ export class LvTagList extends LitElement {
     return html`
       <li
         class="tag-item"
+        role="listitem"
+        tabindex="0"
         @click=${() => this.handleTagClick(tag)}
         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, tag)}
+        @keydown=${(e: KeyboardEvent) => this.handleTagItemKeydown(e, tag)}
         title="${tag.message || tag.name}"
       >
-        <svg class="tag-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <svg class="tag-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"></path>
           <line x1="7" y1="7" x2="7.01" y2="7"></line>
         </svg>
@@ -693,9 +741,10 @@ export class LvTagList extends LitElement {
         <button
           class="controls-btn ${this.showFilter ? 'active' : ''}"
           title="Filter tags"
+          aria-label="Filter tags"
           @click=${this.toggleFilter}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="11" cy="11" r="8"></circle>
             <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
           </svg>
@@ -703,24 +752,25 @@ export class LvTagList extends LitElement {
         <button
           class="controls-btn ${this.showSortMenu ? 'active' : ''}"
           title="Sort tags"
+          aria-label="Sort tags"
           @click=${(e: Event) => this.toggleSortMenu(e)}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <line x1="4" y1="6" x2="20" y2="6"></line>
             <line x1="4" y1="12" x2="16" y2="12"></line>
             <line x1="4" y1="18" x2="12" y2="18"></line>
           </svg>
         </button>
         ${this.showSortMenu ? html`
-          <div class="sort-menu" @click=${(e: Event) => e.stopPropagation()}>
-            <button class="sort-option ${this.sortMode === 'name' ? 'active' : ''}" @click=${() => this.setSortMode('name')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <div class="sort-menu" role="menu" aria-label="Sort options" @click=${(e: Event) => e.stopPropagation()}>
+            <button class="sort-option ${this.sortMode === 'name' ? 'active' : ''}" role="menuitem" @click=${() => this.setSortMode('name')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <path d="M4 6h7M4 12h5M4 18h3M17 6v12M14 18l3 3 3-3"></path>
               </svg>
               Name (A-Z)
             </button>
-            <button class="sort-option ${this.sortMode === 'date' ? 'active' : ''}" @click=${() => this.setSortMode('date')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button class="sort-option ${this.sortMode === 'date' ? 'active' : ''}" role="menuitem" @click=${() => this.setSortMode('date')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
                 <line x1="16" y1="2" x2="16" y2="6"></line>
                 <line x1="8" y1="2" x2="8" y2="6"></line>
@@ -728,8 +778,8 @@ export class LvTagList extends LitElement {
               </svg>
               Date (Newest)
             </button>
-            <button class="sort-option ${this.sortMode === 'date-asc' ? 'active' : ''}" @click=${() => this.setSortMode('date-asc')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button class="sort-option ${this.sortMode === 'date-asc' ? 'active' : ''}" role="menuitem" @click=${() => this.setSortMode('date-asc')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
                 <line x1="16" y1="2" x2="16" y2="6"></line>
                 <line x1="8" y1="2" x2="8" y2="6"></line>
@@ -742,7 +792,7 @@ export class LvTagList extends LitElement {
       </div>
       ${this.showFilter ? html`
         <div class="filter-bar">
-          <svg style="width:14px;height:14px;color:var(--color-text-muted);margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg style="width:14px;height:14px;color:var(--color-text-muted);margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="11" cy="11" r="8"></circle>
             <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
           </svg>
@@ -750,12 +800,13 @@ export class LvTagList extends LitElement {
             class="filter-input"
             type="text"
             placeholder="Filter tags..."
+            aria-label="Filter tags"
             .value=${this.filterText}
             @input=${this.handleFilterInput}
           />
           ${this.filterText ? html`
-            <button class="filter-clear" @click=${this.clearFilter}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button class="filter-clear" aria-label="Clear filter" @click=${this.clearFilter}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
               </svg>
@@ -793,22 +844,29 @@ export class LvTagList extends LitElement {
         ? html`<div class="empty">No matching tags</div>`
         : groups.length === 1 && groups[0].name === ''
           ? html`
-              <ul class="tag-list">
+              <ul class="tag-list" role="list">
                 ${groups[0].tags.map((tag) => this.renderTagItem(tag))}
               </ul>
             `
           : groups.map((group) => {
               const collapsed = this.collapsedGroups.has(group.name);
               return html`
-                <div class="group-header" @click=${() => this.toggleGroupCollapse(group.name)}>
-                  <svg class="chevron ${collapsed ? '' : 'expanded'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <div class="group-header"
+                  role="button"
+                  tabindex="0"
+                  aria-expanded=${!collapsed}
+                  aria-label="${group.name} tags group, ${group.tags.length} tags"
+                  @click=${() => this.toggleGroupCollapse(group.name)}
+                  @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.toggleGroupCollapse(group.name); } }}
+                >
+                  <svg class="chevron ${collapsed ? '' : 'expanded'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                     <polyline points="9 18 15 12 9 6"></polyline>
                   </svg>
                   <span class="group-name">${group.name}</span>
                   <span class="group-count">${group.tags.length}</span>
                 </div>
                 ${!collapsed ? html`
-                  <ul class="tag-list">
+                  <ul class="tag-list" role="list">
                     ${group.tags.map((tag) => this.renderTagItem(tag))}
                   </ul>
                 ` : nothing}

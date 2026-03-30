@@ -1,4 +1,4 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { sharedStyles, buttonStyles } from '../../styles/shared-styles.ts';
 
@@ -102,6 +102,7 @@ export class LvButton extends LitElement {
   @property({ type: Boolean }) disabled = false;
   @property({ type: Boolean, attribute: 'icon-only' }) iconOnly = false;
   @property({ type: String }) type: 'button' | 'submit' | 'reset' = 'button';
+  @property({ type: String, attribute: 'aria-label' }) ariaLabel = '';
 
   render() {
     const classes = [
@@ -117,6 +118,7 @@ export class LvButton extends LitElement {
         class=${classes}
         ?disabled=${this.disabled}
         type=${this.type}
+        aria-label=${this.ariaLabel || nothing}
         @click=${this._handleClick}
       >
         <slot></slot>
