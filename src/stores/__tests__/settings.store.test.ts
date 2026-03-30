@@ -85,6 +85,61 @@ describe('settings.store', () => {
   });
 
   describe('setters', () => {
+    it('should set theme to light', () => {
+      settingsStore.getState().setTheme('light');
+      expect(settingsStore.getState().theme).to.equal('light');
+    });
+
+    it('should set theme to system', () => {
+      settingsStore.getState().setTheme('system');
+      expect(settingsStore.getState().theme).to.equal('system');
+    });
+
+    it('should apply theme to document element', () => {
+      settingsStore.getState().setTheme('light');
+      expect(document.documentElement.getAttribute('data-theme')).to.equal('light');
+    });
+
+    it('should set density to compact', () => {
+      settingsStore.getState().setDensity('compact');
+      expect(settingsStore.getState().density).to.equal('compact');
+    });
+
+    it('should set density to spacious', () => {
+      settingsStore.getState().setDensity('spacious');
+      expect(settingsStore.getState().density).to.equal('spacious');
+    });
+
+    it('should apply density to document element', () => {
+      settingsStore.getState().setDensity('compact');
+      expect(document.documentElement.getAttribute('data-density')).to.equal('compact');
+    });
+
+    it('should set graph color scheme', () => {
+      settingsStore.getState().setGraphColorScheme('vibrant');
+      expect(settingsStore.getState().graphColorScheme).to.equal('vibrant');
+    });
+
+    it('should apply graph color scheme to document', () => {
+      settingsStore.getState().setGraphColorScheme('pastel');
+      expect(document.documentElement.getAttribute('data-graph-scheme')).to.equal('pastel');
+    });
+
+    it('should set offline mode', () => {
+      settingsStore.getState().setOfflineMode(true);
+      expect(settingsStore.getState().offlineMode).to.be.true;
+    });
+
+    it('should set confirm network ops', () => {
+      settingsStore.getState().setConfirmNetworkOps(true);
+      expect(settingsStore.getState().confirmNetworkOps).to.be.true;
+    });
+
+    it('should set remote allowlist', () => {
+      settingsStore.getState().setRemoteAllowlist(['github.com', 'gitlab.com']);
+      expect(settingsStore.getState().remoteAllowlist).to.deep.equal(['github.com', 'gitlab.com']);
+    });
+
     it('should set font size', () => {
       settingsStore.getState().setFontSize('large');
       expect(settingsStore.getState().fontSize).to.equal('large');
@@ -192,6 +247,59 @@ describe('settings.store', () => {
       expect(settingsStore.getState().fontSize).to.equal('medium');
       expect(settingsStore.getState().autoFetchInterval).to.equal(0);
       expect(settingsStore.getState().confirmBeforeDiscard).to.be.true;
+    });
+
+    it('should reset theme to dark', () => {
+      settingsStore.getState().setTheme('light');
+      settingsStore.getState().resetToDefaults();
+      expect(settingsStore.getState().theme).to.equal('dark');
+    });
+
+    it('should reset density to comfortable', () => {
+      settingsStore.getState().setDensity('compact');
+      settingsStore.getState().resetToDefaults();
+      expect(settingsStore.getState().density).to.equal('comfortable');
+    });
+
+    it('should reset graph color scheme to default', () => {
+      settingsStore.getState().setGraphColorScheme('vibrant');
+      settingsStore.getState().resetToDefaults();
+      expect(settingsStore.getState().graphColorScheme).to.equal('default');
+    });
+
+    it('should reset security settings', () => {
+      settingsStore.getState().setOfflineMode(true);
+      settingsStore.getState().setConfirmNetworkOps(true);
+      settingsStore.getState().setRemoteAllowlist(['github.com']);
+
+      settingsStore.getState().resetToDefaults();
+
+      expect(settingsStore.getState().offlineMode).to.be.false;
+      expect(settingsStore.getState().confirmNetworkOps).to.be.false;
+      expect(settingsStore.getState().remoteAllowlist).to.deep.equal([]);
+    });
+
+    it('should re-apply DOM side effects on reset', () => {
+      settingsStore.getState().setTheme('light');
+      settingsStore.getState().setDensity('compact');
+      settingsStore.getState().resetToDefaults();
+      expect(document.documentElement.getAttribute('data-theme')).to.equal('dark');
+      expect(document.documentElement.getAttribute('data-density')).to.equal('comfortable');
+    });
+  });
+
+  describe('persistence', () => {
+    it('should use leviathan-settings as storage key', () => {
+      settingsStore.getState().setFontSize('large');
+      const stored = localStorage.getItem('leviathan-settings');
+      expect(stored).to.be.a('string');
+      expect(stored).to.not.be.null;
+    });
+
+    it('should store changed values in localStorage', () => {
+      settingsStore.getState().setAutoFetchInterval(15);
+      const stored = JSON.parse(localStorage.getItem('leviathan-settings')!);
+      expect(stored.state.autoFetchInterval).to.equal(15);
     });
   });
 
