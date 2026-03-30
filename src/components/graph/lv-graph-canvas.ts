@@ -606,22 +606,31 @@ export class LvGraphCanvas extends LitElement {
     }
 
     // Wheel scrolling on canvas
-    this.canvasEl.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
+    this.canvasEl.addEventListener('wheel', this.handleWheel, { passive: false });
 
     // Native scroll on scrollbar container - sync with internal state
-    this.scrollEl.addEventListener('scroll', this.handleNativeScroll.bind(this));
+    this.scrollEl.addEventListener('scroll', this.handleNativeScroll);
 
     // Mouse interactions
-    this.canvasEl.addEventListener('mousemove', this.handleMouseMove.bind(this));
-    this.canvasEl.addEventListener('click', this.handleClick.bind(this));
-    this.canvasEl.addEventListener('mouseleave', this.handleMouseLeave.bind(this));
-    this.canvasEl.addEventListener('contextmenu', this.handleContextMenu.bind(this));
+    this.canvasEl.addEventListener('mousemove', this.handleMouseMove);
+    this.canvasEl.addEventListener('click', this.handleClick);
+    this.canvasEl.addEventListener('mouseleave', this.handleMouseLeave);
+    this.canvasEl.addEventListener('contextmenu', this.handleContextMenu);
 
     // Keyboard navigation
-    this.canvasEl.addEventListener('keydown', this.handleKeyDown.bind(this));
+    this.canvasEl.addEventListener('keydown', this.handleKeyDown);
   }
 
   private cleanup(): void {
+    // Remove canvas event listeners
+    this.canvasEl?.removeEventListener('wheel', this.handleWheel);
+    this.scrollEl?.removeEventListener('scroll', this.handleNativeScroll);
+    this.canvasEl?.removeEventListener('mousemove', this.handleMouseMove);
+    this.canvasEl?.removeEventListener('click', this.handleClick);
+    this.canvasEl?.removeEventListener('mouseleave', this.handleMouseLeave);
+    this.canvasEl?.removeEventListener('contextmenu', this.handleContextMenu);
+    this.canvasEl?.removeEventListener('keydown', this.handleKeyDown);
+
     if (this.animationFrame) {
       cancelAnimationFrame(this.animationFrame);
     }
@@ -1177,7 +1186,7 @@ export class LvGraphCanvas extends LitElement {
     this.checkLoadMore();
   }
 
-  private handleWheel(e: WheelEvent): void {
+  private handleWheel = (e: WheelEvent): void => {
     e.preventDefault();
 
     if (!this.scrollState || !this.virtualScroll) {
@@ -1196,7 +1205,7 @@ export class LvGraphCanvas extends LitElement {
     this.syncScrollbarPosition();
   }
 
-  private handleNativeScroll(): void {
+  private handleNativeScroll = (): void => {
     if (!this.scrollEl || !this.scrollState || this.isSyncingScroll) {
       return;
     }
@@ -1227,7 +1236,7 @@ export class LvGraphCanvas extends LitElement {
     });
   }
 
-  private handleMouseMove(e: MouseEvent): void {
+  private handleMouseMove = (e: MouseEvent): void => {
     const result = this.hitTest(e);
 
     if (result.type === 'node' && result.node) {
@@ -1289,7 +1298,7 @@ export class LvGraphCanvas extends LitElement {
     this.scheduleRender();
   }
 
-  private handleClick(e: MouseEvent): void {
+  private handleClick = (e: MouseEvent): void => {
     // Check for ref label click first (checkout on branch label click)
     if (this.renderer) {
       const rect = this.canvasEl.getBoundingClientRect();
@@ -1390,7 +1399,7 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
-  private handleMouseLeave(): void {
+  private handleMouseLeave = (): void => {
     this.hoveredNode = null;
     this.tooltipVisible = false;
     this.canvasEl.classList.remove('pointer');
@@ -1399,7 +1408,7 @@ export class LvGraphCanvas extends LitElement {
     this.scheduleRender();
   }
 
-  private handleContextMenu(e: MouseEvent): void {
+  private handleContextMenu = (e: MouseEvent): void => {
     e.preventDefault();
     e.stopPropagation();
 
@@ -1466,7 +1475,7 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
-  private handleKeyDown(e: KeyboardEvent): void {
+  private handleKeyDown = (e: KeyboardEvent): void => {
     if (this.sortedNodesByRow.length === 0) return;
 
     let newIndex = -1;
