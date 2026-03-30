@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import type { ConfigEntry, GitAlias, UserIdentity } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import './lv-modal.ts';
@@ -491,7 +492,7 @@ export class LvConfigDialog extends LitElement {
   }
 
   private async handleDeleteAlias(alias: GitAlias): Promise<void> {
-    const confirmed = confirm(`Delete alias "${alias.name}"?`);
+    const confirmed = await showConfirm('Delete Alias', `Delete alias "${alias.name}"?`, 'warning');
     if (!confirmed) return;
 
     this.error = null;

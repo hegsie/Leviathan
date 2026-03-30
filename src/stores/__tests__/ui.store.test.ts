@@ -13,6 +13,7 @@ describe('ui.store', () => {
       viewMode: 'graph',
       splitDiffMode: true,
       showLineNumbers: true,
+      globalLoading: false,
       toasts: [],
     });
   });
@@ -44,6 +45,10 @@ describe('ui.store', () => {
 
     it('should start with no toasts', () => {
       expect(uiStore.getState().toasts).to.have.lengthOf(0);
+    });
+
+    it('should have globalLoading false by default', () => {
+      expect(uiStore.getState().globalLoading).to.be.false;
     });
   });
 
@@ -134,6 +139,32 @@ describe('ui.store', () => {
     it('should disable line numbers', () => {
       uiStore.getState().setShowLineNumbers(false);
       expect(uiStore.getState().showLineNumbers).to.be.false;
+    });
+  });
+
+  describe('setGlobalLoading', () => {
+    it('should set globalLoading to true', () => {
+      uiStore.getState().setGlobalLoading(true);
+      expect(uiStore.getState().globalLoading).to.be.true;
+    });
+
+    it('should set globalLoading to false', () => {
+      uiStore.getState().setGlobalLoading(true);
+      uiStore.getState().setGlobalLoading(false);
+      expect(uiStore.getState().globalLoading).to.be.false;
+    });
+
+    it('should notify subscribers when globalLoading changes', () => {
+      const values: boolean[] = [];
+      const unsub = uiStore.subscribe((state) => {
+        values.push(state.globalLoading);
+      });
+
+      uiStore.getState().setGlobalLoading(true);
+      uiStore.getState().setGlobalLoading(false);
+
+      expect(values).to.deep.equal([true, false]);
+      unsub();
     });
   });
 

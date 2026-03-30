@@ -41,6 +41,8 @@ const mockInvoke: MockInvoke = async (command: string) => {
       return null;
     case 'remove_submodule':
       return null;
+    case 'plugin:dialog|confirm':
+      return true;
     default:
       return null;
   }
@@ -110,9 +112,6 @@ describe('lv-submodule-dialog', () => {
   });
 
   it('shows success toast on remove', async () => {
-    const originalConfirm = globalThis.confirm;
-    globalThis.confirm = () => true;
-
     const el = await fixture<LvSubmoduleDialog>(
       html`<lv-submodule-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-submodule-dialog>`,
     );
@@ -124,14 +123,10 @@ describe('lv-submodule-dialog', () => {
     const successToast = toasts.find(t => t.type === 'success');
     expect(successToast).to.not.be.undefined;
     expect(successToast!.message).to.include('Submodule removed');
-
-    globalThis.confirm = originalConfirm;
   });
 
   it('shows error toast on remove failure', async () => {
     failingCommands.add('remove_submodule');
-    const originalConfirm = globalThis.confirm;
-    globalThis.confirm = () => true;
 
     const el = await fixture<LvSubmoduleDialog>(
       html`<lv-submodule-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-submodule-dialog>`,
@@ -144,8 +139,6 @@ describe('lv-submodule-dialog', () => {
     const errorToast = toasts.find(t => t.type === 'error');
     expect(errorToast).to.not.be.undefined;
     expect(errorToast!.message).to.include('Operation failed');
-
-    globalThis.confirm = originalConfirm;
   });
 
   it('shows success toast on update all', async () => {

@@ -356,6 +356,8 @@ export class LvCleanDialog extends LitElement {
         this.entries = result.data;
         // Select all by default
         this.selectedPaths = new Set(this.entries.map(e => e.path));
+      } else if (!result.success) {
+        showToast(result.error?.message || 'Failed to load cleanable files', 'error');
       }
     } catch (err) {
       console.error('Failed to load cleanable files:', err);

@@ -32,6 +32,8 @@ const mockInvoke: MockInvoke = async (command: string) => {
       return null;
     case 'set_config_value':
       return null;
+    case 'plugin:dialog|confirm':
+      return true;
     default:
       return null;
   }
@@ -117,9 +119,6 @@ describe('lv-config-dialog', () => {
   });
 
   it('shows success toast on alias delete', async () => {
-    const originalConfirm = globalThis.confirm;
-    globalThis.confirm = () => true;
-
     const el = await fixture<LvConfigDialog>(
       html`<lv-config-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-config-dialog>`,
     );
@@ -131,7 +130,5 @@ describe('lv-config-dialog', () => {
     const successToast = toasts.find(t => t.type === 'success');
     expect(successToast).to.not.be.undefined;
     expect(successToast!.message).to.equal('Alias deleted');
-
-    globalThis.confirm = originalConfirm;
   });
 });

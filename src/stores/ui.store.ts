@@ -18,6 +18,9 @@ export interface UIState {
   splitDiffMode: boolean;
   showLineNumbers: boolean;
 
+  // Global loading
+  globalLoading: boolean;
+
   // Toasts
   toasts: Toast[];
 
@@ -28,6 +31,7 @@ export interface UIState {
   setViewMode: (mode: ViewMode) => void;
   setSplitDiffMode: (split: boolean) => void;
   setShowLineNumbers: (show: boolean) => void;
+  setGlobalLoading: (loading: boolean) => void;
   addToast: (toast: Omit<Toast, 'id'>) => void;
   removeToast: (id: string) => void;
 }
@@ -56,6 +60,7 @@ export const uiStore = createStore<UIState>((set) => ({
   viewMode: 'graph',
   splitDiffMode: true,
   showLineNumbers: true,
+  globalLoading: false,
   toasts: [],
 
   togglePanel: (panel) =>
@@ -90,6 +95,8 @@ export const uiStore = createStore<UIState>((set) => ({
   setSplitDiffMode: (splitDiffMode) => set({ splitDiffMode }),
 
   setShowLineNumbers: (showLineNumbers) => set({ showLineNumbers }),
+
+  setGlobalLoading: (globalLoading) => set({ globalLoading }),
 
   addToast: (toast) =>
     set((state) => ({

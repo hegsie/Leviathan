@@ -138,3 +138,28 @@ export async function showAsk(
 ): Promise<boolean> {
   return await ask(messageText, { title, kind });
 }
+
+/**
+ * Show a themed prompt dialog using the lv-prompt-dialog singleton.
+ * Returns the entered string, or null if cancelled.
+ */
+export async function showPrompt(
+  title: string,
+  messageText: string,
+  defaultValue?: string,
+  placeholder?: string
+): Promise<string | null> {
+  // Lazy-import to avoid circular dependencies; side-effect import registers the element
+  await import('../components/dialogs/lv-prompt-dialog.ts');
+
+  type PromptDialog = import('../components/dialogs/lv-prompt-dialog.ts').LvPromptDialog;
+
+  let dialog = document.querySelector<PromptDialog>('lv-prompt-dialog');
+  if (!dialog) {
+    dialog = document.createElement('lv-prompt-dialog') as PromptDialog;
+    document.body.appendChild(dialog);
+    await dialog.updateComplete;
+  }
+
+  return dialog.open({ title, message: messageText, defaultValue, placeholder });
+}

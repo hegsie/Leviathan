@@ -3,6 +3,18 @@
  */
 
 /**
+ * Escape HTML special characters to prevent XSS when inserting user text into HTML.
+ */
+export function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
  * Calculate a fuzzy match score between text and a query.
  * Returns 0 if no match, higher scores for better matches.
  */
@@ -53,7 +65,7 @@ export function fuzzyScore(text: string, query: string): number {
  * Generate HTML string with `<mark>` tags highlighting matched characters.
  */
 export function highlightMatch(text: string, query: string): string {
-  if (!query) return text;
+  if (!query) return escapeHtml(text);
 
   const textLower = text.toLowerCase();
   const queryLower = query.toLowerCase();
@@ -62,9 +74,9 @@ export function highlightMatch(text: string, query: string): string {
   const index = textLower.indexOf(queryLower);
   if (index !== -1) {
     return (
-      text.slice(0, index) +
-      '<mark>' + text.slice(index, index + query.length) + '</mark>' +
-      text.slice(index + query.length)
+      escapeHtml(text.slice(0, index)) +
+      '<mark>' + escapeHtml(text.slice(index, index + query.length)) + '</mark>' +
+      escapeHtml(text.slice(index + query.length))
     );
   }
 
@@ -74,13 +86,13 @@ export function highlightMatch(text: string, query: string): string {
 
   for (const char of queryLower) {
     const foundIndex = textLower.indexOf(char, textIndex);
-    if (foundIndex === -1) return text;
+    if (foundIndex === -1) return escapeHtml(text);
 
-    result += text.slice(textIndex, foundIndex);
-    result += '<mark>' + text[foundIndex] + '</mark>';
+    result += escapeHtml(text.slice(textIndex, foundIndex));
+    result += '<mark>' + escapeHtml(text[foundIndex]) + '</mark>';
     textIndex = foundIndex + 1;
   }
 
-  result += text.slice(textIndex);
+  result += escapeHtml(text.slice(textIndex));
   return result;
 }

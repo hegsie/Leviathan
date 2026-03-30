@@ -393,7 +393,7 @@ describe('lv-tag-list', () => {
       expect(getTagsCalls.length).to.be.greaterThan(0);
     });
 
-    it('push tag calls push_tag command', async () => {
+    it('push tag calls push_tag command and dispatches tags-changed', async () => {
       const el = await renderTagList();
 
       // Find the tag item for v2.1.0
@@ -405,6 +405,10 @@ describe('lv-tag-list', () => {
       await el.updateComplete;
 
       clearHistory();
+
+      // Listen for the tags-changed event (not tag-pushed)
+      let tagsChangedFired = false;
+      el.addEventListener('tags-changed', () => { tagsChangedFired = true; });
 
       const menuItems = el.shadowRoot!.querySelectorAll('.context-menu-item');
       const pushBtn = Array.from(menuItems).find(
@@ -418,6 +422,11 @@ describe('lv-tag-list', () => {
       const pushCalls = findCommands('push_tag');
       expect(pushCalls.length).to.equal(1);
       expect(pushCalls[0].args).to.deep.include({ name: 'v2.1.0', path: REPO_PATH });
+
+      // Verify it reloads tags and fires tags-changed (consistent with handleDeleteTag)
+      const getTagsCalls = findCommands('get_tags');
+      expect(getTagsCalls.length).to.be.greaterThan(0);
+      expect(tagsChangedFired).to.be.true;
     });
 
     it('checkout tag calls checkout_with_autostash with tag name', async () => {
