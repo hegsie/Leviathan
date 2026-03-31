@@ -3,6 +3,7 @@
 use std::path::Path;
 use tauri::command;
 
+use super::path_utils::validate_path_within_repo;
 use crate::error::{LeviathanError, Result};
 use crate::models::{
     ConflictDetails, ConflictEntry, ConflictFile, ConflictMarker, ConflictMarkerFile,
@@ -454,7 +455,7 @@ pub async fn resolve_conflict(path: String, file_path: String, content: String) 
     let repo = git2::Repository::open(Path::new(&path))?;
 
     // Write the resolved content to the working directory
-    let full_path = Path::new(&path).join(&file_path);
+    let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
     std::fs::write(&full_path, &content)?;
 
     // Stage the resolved file
@@ -497,7 +498,10 @@ pub async fn detect_conflict_markers(
     let mut result = Vec::new();
 
     for file in files_to_check {
-        let full_path = Path::new(&path).join(&file);
+        let full_path = match validate_path_within_repo(Path::new(&path), &file) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         if !full_path.exists() {
             continue;
         }
@@ -531,7 +535,7 @@ pub async fn get_conflict_details(path: String, file_path: String) -> Result<Con
     let (our_ref, their_ref, base_ref) = get_conflict_refs(&repo)?;
 
     // Read file content and parse markers
-    let full_path = Path::new(&path).join(&file_path);
+    let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
     let content = std::fs::read_to_string(&full_path)
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to read file: {}", e)))?;
 

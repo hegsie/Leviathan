@@ -807,6 +807,9 @@ export async function push(
 export async function pushToMultipleRemotes(
   args: PushToMultipleRemotesCommand & { silent?: boolean },
 ): Promise<CommandResult<MultiPushResult>> {
+  if (!await checkNetworkPermission('push')) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
     const token = await getRepoToken(args.path);
@@ -849,6 +852,9 @@ export async function pushToMultipleRemotes(
 export async function fetchAllRemotes(
   args: FetchAllRemotesCommand & { silent?: boolean },
 ): Promise<CommandResult<FetchAllResult>> {
+  if (!await checkNetworkPermission('fetch')) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
     const token = await getRepoToken(args.path);

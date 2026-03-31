@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use tauri::command;
 
+use super::path_utils::validate_path_within_repo;
 use crate::error::Result;
 use crate::models::{
     FileHunks, FileStatus, HunkDiffLine, IndexedDiffHunk, SortedFileStatus, SortedStatusEntry,
@@ -330,7 +331,7 @@ pub async fn stage_files(path: String, paths: Vec<String>) -> Result<()> {
     let mut index = repo.index()?;
 
     for file_path in paths {
-        let full_path = Path::new(&path).join(&file_path);
+        let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
         if full_path.exists() {
             index.add_path(Path::new(&file_path))?;
         } else {
@@ -539,7 +540,7 @@ pub async fn write_file_content(
     content: String,
     stage_after: Option<bool>,
 ) -> Result<()> {
-    let full_path = Path::new(&repo_path).join(&file_path);
+    let full_path = validate_path_within_repo(Path::new(&repo_path), &file_path)?;
 
     // Ensure parent directory exists
     if let Some(parent) = full_path.parent() {
@@ -583,7 +584,7 @@ pub async fn read_file_content(
         ))
     } else {
         // Read from working directory
-        let full_path = Path::new(&repo_path).join(&file_path);
+        let full_path = validate_path_within_repo(Path::new(&repo_path), &file_path)?;
         let content = std::fs::read_to_string(&full_path)?;
         Ok(content)
     }
@@ -597,7 +598,7 @@ pub async fn strip_trailing_whitespace(path: String, file_paths: Vec<String>) ->
     let repo_path = Path::new(&path);
 
     for file_path in &file_paths {
-        let full_path = repo_path.join(file_path);
+        let full_path = validate_path_within_repo(repo_path, file_path)?;
 
         if !full_path.exists() || !full_path.is_file() {
             continue;

@@ -5,6 +5,7 @@
 use std::path::Path;
 use tauri::command;
 
+use super::path_utils::validate_path_within_repo;
 use crate::error::{LeviathanError, Result};
 
 /// Result of viewing a file at a specific commit
@@ -69,48 +70,6 @@ fn is_binary_content(content: &[u8]) -> bool {
     // Check first 8000 bytes for null bytes (same heuristic as git)
     let check_len = content.len().min(8000);
     content[..check_len].contains(&0)
-}
-
-/// Validate that a file path stays within the repository directory.
-/// Prevents directory traversal attacks (CWE-22).
-fn validate_path_within_repo(repo_path: &Path, file_path: &str) -> Result<std::path::PathBuf> {
-    let rel = Path::new(file_path);
-    if rel.is_absolute() || file_path.contains("..") {
-        return Err(LeviathanError::InvalidPath(
-            "File path must be relative and cannot contain '..'".to_string(),
-        ));
-    }
-
-    let abs_path = repo_path.join(rel);
-
-    // For writes, the file may not exist yet so we canonicalize the
-    // deepest existing ancestor and verify it is inside the repo.
-    let canonical_repo = repo_path.canonicalize().map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to resolve repo path: {}", e))
-    })?;
-
-    // Walk up until we find an existing ancestor we can canonicalize
-    let mut check = abs_path.clone();
-    loop {
-        if check.exists() {
-            let canonical = check.canonicalize().map_err(|e| {
-                LeviathanError::OperationFailed(format!("Failed to resolve path: {}", e))
-            })?;
-            if !canonical.starts_with(&canonical_repo) {
-                return Err(LeviathanError::InvalidPath(
-                    "File path resolves to outside the repository".to_string(),
-                ));
-            }
-            break;
-        }
-        if !check.pop() {
-            return Err(LeviathanError::InvalidPath(
-                "Cannot resolve file path".to_string(),
-            ));
-        }
-    }
-
-    Ok(abs_path)
 }
 
 /// Checkout a file from a specific commit, restoring it in the working directory

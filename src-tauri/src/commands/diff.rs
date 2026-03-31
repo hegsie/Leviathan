@@ -4,6 +4,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use std::path::Path;
 use tauri::command;
 
+use super::path_utils::validate_path_within_repo;
 use crate::error::Result;
 use crate::models::diff::{get_image_type, is_image_file};
 use crate::models::{DiffFile, DiffHunk, DiffLine, DiffLineOrigin, FileStatus};
@@ -354,7 +355,7 @@ pub async fn get_file_diff(
 
     // File not found in diff - it might be untracked or have no changes
     // Try to read the file and generate a synthetic diff for new/untracked files
-    let full_path = Path::new(&path).join(&normalized_file_path);
+    let full_path = validate_path_within_repo(Path::new(&path), &normalized_file_path)?;
     if full_path.exists() {
         // Check if file is untracked
         let statuses = repo.statuses(Some(
@@ -844,7 +845,7 @@ pub async fn get_file_blame(
         String::from_utf8_lossy(blob.content()).to_string()
     } else {
         // Read from working directory
-        let full_path = Path::new(&path).join(&file_path);
+        let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
         std::fs::read_to_string(full_path).unwrap_or_default()
     };
 
@@ -977,7 +978,7 @@ pub async fn get_image_versions(
         get_blob_base64(&repo, &commit.tree()?, &file_path)
     } else {
         // For working directory changes, read from disk
-        let full_path = Path::new(&path).join(&file_path);
+        let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
         if full_path.exists() {
             std::fs::read(&full_path)
                 .ok()

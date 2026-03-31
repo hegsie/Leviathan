@@ -1335,6 +1335,8 @@ export class AppShell extends LitElement {
       } else {
         showToast(result.error?.message || 'Force delete failed', 'error');
       }
+    }).catch((e) => {
+      showToast(`Force delete failed: ${e instanceof Error ? e.message : 'Unknown error'}`, 'error');
     });
   };
 

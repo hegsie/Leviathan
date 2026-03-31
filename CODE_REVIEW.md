@@ -22,6 +22,7 @@ The findings below were manually verified against source code. Some original fin
 | — | N+1 IPC in GitHub dialog | `lv-github-dialog.ts` already batches with `Promise.all()` at lines 990, 1199, 1266. SAFETY comment added. |
 | — | Event listener leak in app-shell `disconnectedCallback` | All listeners registered in `connectedCallback` have matching `removeEventListener` calls in `disconnectedCallback` (lines 843-859). SAFETY comment added. |
 | 6.2 | OAuth client secrets in source code | Standard practice for desktop "public clients" per RFC 6749 §2.1. Cannot keep secrets in distributed binaries. Code already has thorough documentation with PKCE references. GitHub Desktop does the same. |
+| — | Filesystem scope `$HOME/**` too broad | Required for a Git client — repos can be located anywhere under the home directory, and the inline file editor needs direct fs access. Documented in capabilities/default.json. |
 
 ### ✅ Fixed in v0.3.1
 
@@ -32,6 +33,18 @@ The findings below were manually verified against source code. Some original fin
 | **HIGH** | Unhandled promise — `pollLoopbackCallback()` called without `.catch()` | Added `.catch()` handler with cleanup and error state notification. |
 | **HIGH** | Browser `confirm()` in `git.service.ts` for network permission | Replaced with async `showConfirm()` from dialog service (Tauri native dialog). Updated all 4 callers to `await`. |
 | **HIGH** | Missing upper bounds check in repository store setters | Added `isActiveIndexValid()` helper that checks both `< 0` and `>= length`. Applied to all 7 setter methods. |
+
+### ✅ Fixed in v0.3.1 (second review pass)
+
+| # | Finding | Fix |
+|---|---------|-----|
+| **CRITICAL** | Path traversal in `staging.rs`, `merge.rs`, `diff.rs` — 10 additional unvalidated `Path::join` sites | Extracted `validate_path_within_repo()` to shared `path_utils.rs` module. Applied to all path joins in `staging.rs` (4 sites), `merge.rs` (3 sites), `diff.rs` (3 sites). |
+| **HIGH** | Network permission bypass — `pushToMultipleRemotes()` and `fetchAllRemotes()` skip `checkNetworkPermission()` | Added `checkNetworkPermission()` calls to both functions, matching single-remote variants. |
+| **HIGH** | CSP disabled — `"csp": null` in `tauri.conf.json` | Added strict CSP: `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http://127.0.0.1; connect-src 'self' https: http://127.0.0.1; font-src 'self' data:` |
+| **MEDIUM** | Unhandled promise — `deleteBranch().then()` with no `.catch()` in `app-shell.ts` | Added `.catch()` handler with error toast. |
+| **MEDIUM** | CI workflow missing `permissions:` block | Added `permissions: contents: read` to `ci.yml`. |
+| **MEDIUM** | No security scanning in CI | Added `security-audit` job with `npm audit` and `cargo audit`. |
+| **MEDIUM** | Vulnerable `brace-expansion@5.0.3` | Updated via `npm audit fix` to patched version. |
 
 ---
 
