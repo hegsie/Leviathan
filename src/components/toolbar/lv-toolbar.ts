@@ -227,6 +227,7 @@ export class LvToolbar extends LitElement {
   @state() private canScrollRight = false;
 
   private unsubscribe?: () => void;
+  private _resizeObserver?: ResizeObserver;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -258,6 +259,7 @@ export class LvToolbar extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribe?.();
+    this._resizeObserver?.disconnect();
   }
 
   private async handleOpenRepo(): Promise<void> {
@@ -279,6 +281,8 @@ export class LvToolbar extends LitElement {
           // Build embedding index and check semantic availability
           embeddingIndexService.buildIndex(path).then(() => {
             this.checkSemanticAvailability(path);
+          }).catch((err) => {
+            console.error('Failed to build embedding index:', err);
           });
         } else {
           store.setError(result.error?.message ?? 'Failed to open repository');
@@ -461,7 +465,8 @@ export class LvToolbar extends LitElement {
   protected firstUpdated(): void {
     this.updateScrollButtons();
     // Listen for resize to update scroll buttons
-    new ResizeObserver(() => this.updateScrollButtons()).observe(this);
+    this._resizeObserver = new ResizeObserver(() => this.updateScrollButtons());
+    this._resizeObserver.observe(this);
   }
 
   render() {

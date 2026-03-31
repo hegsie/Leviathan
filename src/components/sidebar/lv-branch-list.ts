@@ -1516,6 +1516,8 @@ export class LvBranchList extends LitElement {
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'MERGE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('merge-conflict', { bubbles: true, composed: true }));
+        } else {
+          showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
         }
       } else {
         // Rebase current branch onto source
@@ -1540,6 +1542,8 @@ export class LvBranchList extends LitElement {
             composed: true,
             detail: { operationType: 'rebase' },
           }));
+        } else {
+          showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
         }
       }
     } else {
@@ -1581,6 +1585,8 @@ export class LvBranchList extends LitElement {
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'MERGE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('merge-conflict', { bubbles: true, composed: true }));
+        } else {
+          showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
         }
       } else {
         const result = await gitService.rebase({
@@ -1597,6 +1603,8 @@ export class LvBranchList extends LitElement {
             composed: true,
             detail: { operationType: 'rebase' },
           }));
+        } else {
+          showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
         }
       }
     }

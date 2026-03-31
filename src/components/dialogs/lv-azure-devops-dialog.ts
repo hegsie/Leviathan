@@ -587,6 +587,7 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private selectedAccountId: string | null = null;
 
   private unsubscribeStore?: () => void;
+  private _pendingOAuthHandler?: EventListener;
   private loadGeneration = 0;
 
   // Create PR form
@@ -642,6 +643,11 @@ export class LvAzureDevOpsDialog extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribeStore?.();
+    // Clean up pending OAuth listener to prevent leak
+    if (this._pendingOAuthHandler) {
+      window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
+      this._pendingOAuthHandler = undefined;
+    }
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -932,6 +938,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         if (detail?.provider !== 'azure') return;
 
         window.removeEventListener('oauth-complete', handleComplete);
+        this._pendingOAuthHandler = undefined;
         this.oauthPending = false;
 
         if (detail.error) {
@@ -963,6 +970,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       };
 
       window.addEventListener('oauth-complete', handleComplete);
+      this._pendingOAuthHandler = handleComplete;
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'OAuth flow failed';
       showToast(this.error, 'error');

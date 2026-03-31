@@ -141,7 +141,8 @@ fn generate_patch_content(repo: &git2::Repository, commit: &git2::Commit) -> Res
     if let Some(datetime) = chrono::DateTime::from_timestamp(epoch, 0) {
         let offset_minutes = time.offset_minutes();
         let offset = chrono::FixedOffset::east_opt(offset_minutes * 60)
-            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
+            .or_else(|| chrono::FixedOffset::east_opt(0))
+            .expect("UTC offset (0) is always valid");
         let local_time = datetime.with_timezone(&offset);
         patch_content.push_str(&format!(
             "Date:   {}\n",

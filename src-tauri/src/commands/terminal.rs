@@ -6,6 +6,21 @@ use tauri::command;
 
 use crate::error::{LeviathanError, Result};
 
+/// Escape cmd.exe metacharacters to prevent command injection (Windows only).
+/// Characters like & | < > ^ ( ) % ! are prefixed with ^ to be treated literally.
+#[cfg(target_os = "windows")]
+fn escape_cmd_meta(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if "&|<>^()%!".contains(c) {
+                format!("^{}", c)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Open a terminal in the specified directory
 #[command]
 pub async fn open_terminal(path: String) -> Result<()> {
@@ -126,7 +141,7 @@ pub async fn open_in_editor(file_path: String) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")
-            .args(["/c", "start", "", &file_path])
+            .args(["/c", "start", "", &escape_cmd_meta(&file_path)])
             .spawn()
             .map_err(|e| {
                 LeviathanError::OperationFailed(format!("Failed to open editor: {}", e))

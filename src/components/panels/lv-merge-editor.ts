@@ -912,6 +912,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       }));
     } else {
       console.error('Failed to resolve conflict:', result.error);
+      showToast(`Failed to mark file as resolved: ${result.error?.message ?? 'Unknown error'}`, 'error');
     }
   }
 

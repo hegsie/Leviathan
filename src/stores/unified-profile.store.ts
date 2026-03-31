@@ -112,6 +112,10 @@ export const unifiedProfileStore = createStore<UnifiedProfileState>()((set) => (
 
   addProfile: (profile) =>
     set((state) => {
+      // Idempotent: skip if profile already exists (prevents TOCTOU duplicates)
+      if (state.profiles.some((p) => p.id === profile.id)) {
+        return { error: null };
+      }
       const profiles = [...state.profiles, profile];
       const config = state.config
         ? { ...state.config, profiles }
@@ -155,6 +159,11 @@ export const unifiedProfileStore = createStore<UnifiedProfileState>()((set) => (
 
   addAccount: (account) =>
     set((state) => {
+      // Idempotent: skip if account already exists (prevents TOCTOU duplicates)
+      if (state.accounts.some((a) => a.id === account.id)) {
+        return { error: null };
+      }
+
       let accounts = state.accounts;
 
       // If this account is default for its type, unset others

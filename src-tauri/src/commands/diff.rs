@@ -533,7 +533,9 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
                 total_lines: None,
             });
 
-            files.last_mut().unwrap()
+            files
+                .last_mut()
+                .expect("files vec must be non-empty after push")
         };
 
         // Handle hunk header

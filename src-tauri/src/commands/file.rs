@@ -8,6 +8,20 @@ use super::path_utils::validate_path_within_repo;
 use crate::error::{LeviathanError, Result};
 use crate::utils::create_command;
 
+/// Escape cmd.exe metacharacters to prevent command injection (Windows only).
+#[cfg(target_os = "windows")]
+fn escape_cmd_meta(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if "&|<>^()%!".contains(c) {
+                format!("^{}", c)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Result of an open/reveal operation
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -177,7 +191,7 @@ pub async fn open_in_default_app(path: String) -> Result<OpenResult> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")
-            .args(["/c", "start", "", &path])
+            .args(["/c", "start", "", &escape_cmd_meta(&path)])
             .spawn()
             .map_err(|e| LeviathanError::OperationFailed(format!("Failed to open file: {}", e)))?;
     }

@@ -141,24 +141,19 @@ impl ModelManager {
         entry: &ModelEntry,
         app_handle: AppHandle,
     ) -> Result<(), String> {
-        // Prevent concurrent downloads of the same model
+        // Prevent concurrent downloads — single write lock for check-and-insert (avoids TOCTOU)
+        let cancel_flag = Arc::new(AtomicBool::new(false));
         {
-            let downloading = self.downloading.read().await;
+            let mut downloading = self.downloading.write().await;
             if downloading.contains_key(&entry.id) {
                 return Err(format!("Model '{}' is already being downloaded", entry.id));
             }
+            downloading.insert(entry.id.clone(), cancel_flag.clone());
         }
 
         let model_dir = self.models_dir.join(&entry.id);
         std::fs::create_dir_all(&model_dir)
             .map_err(|e| format!("Failed to create model directory: {e}"))?;
-
-        // Set up cancellation
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        {
-            let mut downloading = self.downloading.write().await;
-            downloading.insert(entry.id.clone(), cancel_flag.clone());
-        }
 
         let result = self
             .do_download(entry, &model_dir, &app_handle, &cancel_flag)

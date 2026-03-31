@@ -1249,6 +1249,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         composed: true,
         detail: { path: this.file.path }
       }));
+    } else {
+      showToast(`Failed to save file: ${result.error?.message ?? 'Unknown error'}`, 'error');
     }
   }
 
@@ -1705,9 +1707,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         await this.loadWorkingDiff();
       } else {
         console.error('Failed to stage selected lines:', result.error);
+        showToast(`Failed to stage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to stage selected lines:', err);
+      showToast(`Failed to stage lines: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
   }
 
@@ -1731,9 +1735,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         await this.loadWorkingDiff();
       } else {
         console.error('Failed to unstage selected lines:', result.error);
+        showToast(`Failed to unstage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to unstage selected lines:', err);
+      showToast(`Failed to unstage lines: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
   }
 
@@ -1769,9 +1775,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         }
       } else {
         console.error('Failed to stage hunk:', result.error);
+        showToast(`Failed to stage hunk: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to stage hunk:', err);
+      showToast(`Failed to stage hunk: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
   }
 
@@ -1797,9 +1805,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         await this.loadWorkingDiff();
       } else {
         console.error('Failed to unstage hunk:', result.error);
+        showToast(`Failed to unstage hunk: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to unstage hunk:', err);
+      showToast(`Failed to unstage hunk: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
   }
 

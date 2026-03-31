@@ -162,7 +162,7 @@ fn get_changed_files(_repo: &git2::Repository, diff: &git2::Diff) -> Result<Vec<
     let mut files = Vec::new();
 
     for i in 0..diff.deltas().len() {
-        let delta = diff.get_delta(i).unwrap();
+        let delta = diff.get_delta(i).expect("delta index within bounds");
 
         let path = delta
             .new_file()

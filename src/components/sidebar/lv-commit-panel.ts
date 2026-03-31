@@ -982,6 +982,8 @@ export class LvCommitPanel extends LitElement {
     if (result.success) {
       await this.loadTemplates();
       this.selectedTemplateId = template.id;
+    } else {
+      showToast(`Failed to save template: ${result.error?.message ?? 'Unknown error'}`, 'error');
     }
   }
 

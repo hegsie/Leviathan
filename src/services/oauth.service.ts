@@ -368,8 +368,6 @@ export async function exchangeCode(
   }
 
   const result = cmdResult.data;
-  console.log('[OAuth] exchangeCode raw result:', result);
-  console.log('[OAuth] exchangeCode result type:', typeof result);
   console.log('[OAuth] exchangeCode result keys:', result ? Object.keys(result) : 'null');
 
   // Handle both camelCase and snake_case field names (Rust serde serialization edge case)
@@ -383,7 +381,8 @@ export async function exchangeCode(
     scope: rawResult.scope,
   };
 
-  console.log('[OAuth] exchangeCode normalized result:', normalizedResult);
+  console.log('[OAuth] exchangeCode normalized: has accessToken=%s, has refreshToken=%s',
+    !!normalizedResult.accessToken, !!normalizedResult.refreshToken);
 
   return normalizedResult;
 }

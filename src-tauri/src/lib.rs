@@ -200,7 +200,11 @@ pub fn run() {
                 .build()?;
 
             let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().cloned().unwrap())
+                .icon(
+                    app.default_window_icon()
+                        .cloned()
+                        .expect("default window icon must be set in tauri.conf.json"),
+                )
                 .menu(&menu)
                 .tooltip("Leviathan")
                 .on_menu_event(
@@ -379,6 +383,7 @@ pub fn run() {
             commands::rewrite::drop_commit,
             commands::rewrite::reorder_commits,
             commands::rewrite::cherry_pick_from_branch,
+            commands::rewrite::cherry_pick_range,
             commands::squash::squash_commits,
             commands::squash::fixup_commit,
             commands::reflog::get_reflog,
