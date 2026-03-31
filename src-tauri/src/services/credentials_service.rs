@@ -452,6 +452,10 @@ fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a>
 mod tests {
     use super::*;
 
+    // Serialize tests that use the shared CREDENTIAL_CACHE to prevent flaky
+    // failures from parallel test execution interleaving clear/write/read.
+    static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Clear the global credential cache between tests to avoid cross-contamination.
     fn clear_cache() {
         if let Ok(mut cache) = CREDENTIAL_CACHE.lock() {
@@ -477,6 +481,7 @@ mod tests {
 
     #[test]
     fn test_cache_credentials_stores_and_retrieves() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         cache_credentials("example.com", "user", "pass");
         let creds = get_cached_credentials("example.com");
@@ -485,6 +490,7 @@ mod tests {
 
     #[test]
     fn test_cache_credentials_returns_none_for_missing_host() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         cache_credentials("a.com", "u", "p");
         assert!(get_cached_credentials("b.com").is_none());
@@ -528,6 +534,7 @@ mod tests {
 
     #[test]
     fn test_get_cached_credentials_skips_expired() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         // Manually insert an expired entry
         if let Ok(mut cache) = CREDENTIAL_CACHE.lock() {
@@ -579,6 +586,7 @@ mod tests {
 
     #[test]
     fn test_cache_overwrite_updates_credentials() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         cache_credentials("host.com", "old_user", "old_pass");
         cache_credentials("host.com", "new_user", "new_pass");
@@ -592,6 +600,7 @@ mod tests {
 
     #[test]
     fn test_cache_multiple_hosts() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         cache_credentials("github.com", "gh_user", "gh_pass");
         cache_credentials("gitlab.com", "gl_user", "gl_pass");
@@ -662,6 +671,7 @@ mod tests {
 
     #[test]
     fn test_delete_credentials_removes_from_cache() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         cache_credentials("delete-test.com", "user", "pass");
         assert!(get_cached_credentials("delete-test.com").is_some());
@@ -672,6 +682,7 @@ mod tests {
 
     #[test]
     fn test_store_credentials_populates_cache() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         let _ = store_credentials("https://store-test.com/repo.git", "myuser", "mypass");
 
@@ -730,6 +741,7 @@ mod tests {
 
     #[test]
     fn test_get_cached_credentials_returns_none_when_cache_uninitialized() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         // After clear, cache is None — get should return None without panic
         assert!(get_cached_credentials("any.host.com").is_none());
