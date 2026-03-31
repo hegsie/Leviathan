@@ -8,6 +8,7 @@ import {
   injectCommandError,
   injectCommandMock,
   waitForRepositoryChanged,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 test.describe('Stash List Context Menu', () => {
@@ -278,6 +279,9 @@ test.describe('Stash Context Menu - Error Handling', () => {
 
   test('should show error toast when pop_stash fails', async ({ page }) => {
     await injectCommandError(page, 'pop_stash', 'Pop failed: working directory not clean');
+
+    // Mock the Tauri confirm dialog used by showConfirm() in handlePopStash
+    await autoConfirmDialogs(page);
 
     await leftPanel.expandStashes();
     const stash = leftPanel.getStash(0);

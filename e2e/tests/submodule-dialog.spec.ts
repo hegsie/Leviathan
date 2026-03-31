@@ -416,10 +416,8 @@ test.describe('Submodule Error Scenarios', () => {
 
     await openSubmoduleDialog(page);
 
-    // Auto-accept the native confirm() dialog via Playwright's dialog handler
-    page.on('dialog', async (dialog) => {
-      await dialog.accept();
-    });
+    // Mock the Tauri confirm dialog used by showConfirm() in handleRemove
+    await autoConfirmDialogs(page);
 
     const dialog = page.locator('lv-submodule-dialog .dialog');
 

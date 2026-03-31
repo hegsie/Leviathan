@@ -240,8 +240,8 @@ export class RightPanelPage {
     this.unstagedFiles = page.locator('lv-file-status').getByRole('listitem');
 
     // Stage/unstage buttons - use accessible roles with exact match to avoid ambiguity
-    this.stageAllButton = page.getByRole('button', { name: 'Stage all', exact: true });
-    this.unstageAllButton = page.getByRole('button', { name: 'Unstage all', exact: true });
+    this.stageAllButton = page.getByRole('button', { name: 'Stage all files', exact: true });
+    this.unstageAllButton = page.getByRole('button', { name: 'Unstage all files', exact: true });
 
     // Commit panel - use getByRole for accessible elements
     this.commitPanel = page.locator('lv-commit-panel');

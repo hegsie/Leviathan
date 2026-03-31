@@ -245,8 +245,8 @@ test.describe('Config Dialog - Aliases Tab', () => {
   });
 
   test('clicking delete button on alias should call delete_alias', async ({ page }) => {
-    // Mock native confirm() since the component uses it directly
-    await page.evaluate(() => { window.confirm = () => true; });
+    // Mock the Tauri confirm dialog used by showConfirm()
+    await autoConfirmDialogs(page);
 
     // Verify initial alias count before deletion
     await expect(page.locator('lv-config-dialog .alias-item')).toHaveCount(2);

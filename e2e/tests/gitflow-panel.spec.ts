@@ -534,14 +534,17 @@ test.describe('GitFlow Panel - Operations', () => {
   test('clicking Start on Feature section should call gitflow_start_feature', async ({
     page,
   }) => {
-    // Listen for the prompt dialog and provide a feature name
-    page.on('dialog', async (dialog) => {
-      expect(dialog.type()).toBe('prompt');
-      await dialog.accept('new-feature');
-    });
-
     // Click the Start button in the Feature section (first section-actions .action-btn)
     await page.locator('lv-gitflow-panel .section-actions .action-btn').first().click();
+
+    // The component uses showPrompt() which renders lv-prompt-dialog with lv-modal
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible({ timeout: 3000 });
+    await promptInput.fill('new-feature');
+
+    // Click the OK/confirm button in the prompt dialog
+    const confirmBtn = page.locator('lv-prompt-dialog .btn-primary');
+    await confirmBtn.click();
 
     // Verify gitflow_start_feature was called
     await expect

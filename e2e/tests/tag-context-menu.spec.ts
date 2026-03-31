@@ -418,7 +418,7 @@ test.describe('Tag Context Menu - Error Handling', () => {
     // Listen for tag-pushed event (the component dispatches this, not repository-changed)
     const eventPromise = page.evaluate(() => {
       return new Promise<boolean>((resolve) => {
-        document.addEventListener('tag-pushed', () => resolve(true), { once: true });
+        document.addEventListener('tags-changed', () => resolve(true), { once: true });
         setTimeout(() => resolve(false), 3000);
       });
     });

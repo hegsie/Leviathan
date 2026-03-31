@@ -7,6 +7,7 @@ import {
   waitForRepositoryChanged,
   injectCommandError,
   injectCommandMock,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 /**
@@ -452,6 +453,9 @@ test.describe('Context Menus - Error Scenarios', () => {
     // Inject revert error before performing the action
     await injectCommandError(page, 'revert', 'Revert failed: working tree has modifications');
 
+    // Mock the Tauri confirm dialog used by showConfirm() in handleRevertCommit
+    await autoConfirmDialogs(page);
+
     // Right-click to open context menu and click Revert
     await rightClickOnCommitRow(page, 0);
     const contextMenu = page.locator('.context-menu');
@@ -552,6 +556,9 @@ test.describe('Context Menus - Error Scenarios', () => {
   test('revert failure error toast should contain informative message', async ({ page }) => {
     // Inject revert error with a specific message
     await injectCommandError(page, 'revert', 'Revert failed: working tree has modifications');
+
+    // Mock the Tauri confirm dialog used by showConfirm() in handleRevertCommit
+    await autoConfirmDialogs(page);
 
     await rightClickOnCommitRow(page, 0);
     const contextMenu = page.locator('.context-menu');

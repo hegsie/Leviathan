@@ -19,6 +19,7 @@ import {
   startCommandCaptureWithMocks,
   injectCommandError,
   injectCommandMock,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 // ============================================================================
@@ -837,8 +838,8 @@ test.describe('Profile CRUD Operations', () => {
       delete_unified_profile: null,
     });
 
-    // Auto-accept native window.confirm() dialog used by handleDelete
-    page.on('dialog', (dialog) => dialog.accept());
+    // Mock the Tauri confirm dialog used by showConfirm() in handleDelete
+    await autoConfirmDialogs(page);
 
     // Click the delete button on the Personal profile (second profile card)
     const deleteButton = page.getByRole('button', { name: 'Delete profile' }).last();
@@ -1107,8 +1108,8 @@ test.describe('Profiles - UI Outcome Verification', () => {
       delete_unified_profile: null,
     });
 
-    // Auto-accept native window.confirm() dialog used by handleDelete
-    page.on('dialog', (dialog) => dialog.accept());
+    // Mock the Tauri confirm dialog used by showConfirm() in handleDelete
+    await autoConfirmDialogs(page);
 
     // Click the delete button on the Personal profile (second profile card)
     const deleteButton = page.getByRole('button', { name: 'Delete profile' }).last();
