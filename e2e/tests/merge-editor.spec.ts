@@ -516,14 +516,16 @@ test.describe('Merge Editor - UI Outcome Verification', () => {
     await expect(resolveBtn).toBeVisible();
     await resolveBtn.click();
 
-    // The dialog should open but show an error state:
-    // either an error toast, an error message in the dialog, or the dialog stays open without file items
-    const errorToast = page.locator('lv-toast-container .toast.error, .error-message, .error-banner');
+    // The dialog should open
     const dialog = page.locator('lv-conflict-resolution-dialog');
+    await expect(dialog).toBeVisible({ timeout: 5000 });
+
+    // Error feedback should be shown: either a toast or an error indicator inside the dialog
+    const errorToast = page.locator('lv-toast-container .toast.error, .error-banner');
     const errorMsg = dialog.locator('.error-message, .error, .loading-error');
 
-    // Wait for either the toast or an error indicator in the dialog
-    await expect(errorToast.or(errorMsg).or(dialog)).toBeVisible({ timeout: 5000 });
+    // Use .first() to handle the case where both a toast and an in-dialog error are visible
+    await expect(errorToast.or(errorMsg).first()).toBeVisible({ timeout: 5000 });
 
     // The file list should not have loaded successfully (no file items or an error shown)
     const fileItems = dialog.locator('.file-item');
