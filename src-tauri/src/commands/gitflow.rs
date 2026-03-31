@@ -165,7 +165,9 @@ pub async fn gitflow_start_feature(path: String, name: String) -> Result<Branch>
     // Checkout the new branch
     let obj = reference.peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&obj, None)?;
-    repo.set_head(reference.name().unwrap())?;
+    repo.set_head(reference.name().ok_or_else(|| {
+        LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
+    })?)?;
 
     Ok(Branch {
         name: branch_name.clone(),
@@ -212,7 +214,9 @@ pub async fn gitflow_finish_feature(
         .map_err(|_| LeviathanError::BranchNotFound(develop.clone()))?;
     let develop_obj = develop_branch.get().peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&develop_obj, None)?;
-    repo.set_head(develop_branch.get().name().unwrap())?;
+    repo.set_head(develop_branch.get().name().ok_or_else(|| {
+        LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
+    })?)?;
 
     // Merge feature into develop
     let annotated_commit = repo.find_annotated_commit(feature_commit.id())?;
@@ -277,7 +281,9 @@ pub async fn gitflow_start_release(path: String, version: String) -> Result<Bran
 
     let obj = reference.peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&obj, None)?;
-    repo.set_head(reference.name().unwrap())?;
+    repo.set_head(reference.name().ok_or_else(|| {
+        LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
+    })?)?;
 
     Ok(Branch {
         name: branch_name.clone(),
@@ -330,7 +336,9 @@ pub async fn gitflow_finish_release(
         .map_err(|_| LeviathanError::BranchNotFound(master.clone()))?;
     let master_obj = master_branch.get().peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&master_obj, None)?;
-    repo.set_head(master_branch.get().name().unwrap())?;
+    repo.set_head(master_branch.get().name().ok_or_else(|| {
+        LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
+    })?)?;
 
     let annotated = repo.find_annotated_commit(release_commit.id())?;
     repo.merge(&[&annotated], None, None)?;
@@ -358,7 +366,9 @@ pub async fn gitflow_finish_release(
         .map_err(|_| LeviathanError::BranchNotFound(develop.clone()))?;
     let develop_obj = develop_branch.get().peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&develop_obj, None)?;
-    repo.set_head(develop_branch.get().name().unwrap())?;
+    repo.set_head(develop_branch.get().name().ok_or_else(|| {
+        LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
+    })?)?;
 
     // Re-read release commit from the new HEAD context
     let release_branch2 = repo
@@ -416,7 +426,9 @@ pub async fn gitflow_start_hotfix(path: String, version: String) -> Result<Branc
 
     let obj = reference.peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&obj, None)?;
-    repo.set_head(reference.name().unwrap())?;
+    repo.set_head(reference.name().ok_or_else(|| {
+        LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
+    })?)?;
 
     Ok(Branch {
         name: branch_name.clone(),

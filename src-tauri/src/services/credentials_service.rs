@@ -44,7 +44,13 @@ fn cleanup_expired_credentials(map: &mut HashMap<String, CachedCredential>) {
 /// Get credentials from the in-memory cache.
 /// Performs lazy cleanup of expired entries before lookup.
 fn get_cached_credentials(host: &str) -> Option<(String, String)> {
-    let mut cache = CREDENTIAL_CACHE.lock().ok()?;
+    let mut cache = match CREDENTIAL_CACHE.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: credential cache lock poisoned: {}", e);
+            return None;
+        }
+    };
     let map = cache.as_mut()?;
     cleanup_expired_credentials(map);
     map.get(host)

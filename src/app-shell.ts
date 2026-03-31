@@ -783,7 +783,7 @@ export class AppShell extends LitElement {
           if (result.success && result.data) {
             this.remoteStatus = { ahead: result.data.ahead, behind: result.data.behind };
           }
-        });
+        }).catch(() => { /* background status check — silent fail is acceptable */ });
       }
     };
     window.addEventListener('focus', this.focusHandler);
@@ -2322,7 +2322,11 @@ export class AppShell extends LitElement {
 
   private async handleOpenFileFromPalette(e: CustomEvent<{ path: string }>): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.openInConfiguredEditor(this.activeRepository.repository.path, e.detail.path);
+    try {
+      await gitService.openInConfiguredEditor(this.activeRepository.repository.path, e.detail.path);
+    } catch {
+      showToast('Failed to open file in editor', 'error');
+    }
   }
 
   private async handleWorkspaceOpenRepoFile(e: CustomEvent<{ repoPath: string; filePath: string; lineNumber: number }>): Promise<void> {

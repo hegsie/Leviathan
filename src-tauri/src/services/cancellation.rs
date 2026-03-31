@@ -49,26 +49,28 @@ impl CancellationRegistry {
     /// Register a new operation and return its cancellation token
     pub fn register(&self, operation_id: String) -> CancellationToken {
         let token = CancellationToken::new();
-        let mut tokens = self.tokens.lock().unwrap();
-        tokens.insert(operation_id, token.clone());
+        if let Ok(mut tokens) = self.tokens.lock() {
+            tokens.insert(operation_id, token.clone());
+        }
         token
     }
 
     /// Cancel an operation by ID
     pub fn cancel(&self, operation_id: &str) -> bool {
-        let tokens = self.tokens.lock().unwrap();
-        if let Some(token) = tokens.get(operation_id) {
-            token.cancel();
-            true
-        } else {
-            false
+        if let Ok(tokens) = self.tokens.lock() {
+            if let Some(token) = tokens.get(operation_id) {
+                token.cancel();
+                return true;
+            }
         }
+        false
     }
 
     /// Remove an operation from the registry
     pub fn remove(&self, operation_id: &str) {
-        let mut tokens = self.tokens.lock().unwrap();
-        tokens.remove(operation_id);
+        if let Ok(mut tokens) = self.tokens.lock() {
+            tokens.remove(operation_id);
+        }
     }
 }
 

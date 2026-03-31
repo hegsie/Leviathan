@@ -381,9 +381,11 @@ export class LvConflictResolutionDialog extends LitElement {
         this.conflicts = result.data;
       } else {
         console.error('Failed to load conflicts:', result.error);
+        showToast('Failed to load conflicts', 'error');
       }
     } catch (err) {
       console.error('Failed to load conflicts:', err);
+      showToast('Failed to load conflicts', 'error');
     } finally {
       this.loading = false;
     }

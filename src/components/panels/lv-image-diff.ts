@@ -477,6 +477,9 @@ export class LvImageDiff extends LitElement {
       clearTimeout(this.thresholdDebounceTimeout);
       this.thresholdDebounceTimeout = null;
     }
+    // Clean up drag event listeners if component disconnects mid-drag
+    document.removeEventListener('mousemove', this.handleSwipeMove);
+    document.removeEventListener('mouseup', this.handleSwipeEnd);
   }
 
   async updated(changedProperties: Map<string, unknown>) {

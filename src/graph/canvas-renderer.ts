@@ -287,6 +287,7 @@ export class CanvasRenderer {
   private static readonly MAX_AVATAR_CACHE_SIZE = 500;
   private avatarCache: Map<string, HTMLImageElement | null> = new Map();
   private avatarLoadingSet: Set<string> = new Set();
+  private pendingAvatarImages: Set<HTMLImageElement> = new Set();
 
   // Commit stats for size scaling and display (oid -> {additions, deletions, filesChanged})
   private commitStats: Map<string, { additions: number; deletions: number; filesChanged: number }> = new Map();
@@ -438,8 +439,10 @@ export class CanvasRenderer {
     this.avatarLoadingSet.add(email);
     const img = new Image();
     img.crossOrigin = 'anonymous';
+    this.pendingAvatarImages.add(img);
 
     img.onload = () => {
+      this.pendingAvatarImages.delete(img);
       this.avatarCache.set(email, img);
       this.avatarLoadingSet.delete(email);
       // Evict oldest entries when cache exceeds limit
@@ -451,6 +454,7 @@ export class CanvasRenderer {
     };
 
     img.onerror = () => {
+      this.pendingAvatarImages.delete(img);
       this.avatarCache.set(email, null);
       this.avatarLoadingSet.delete(email);
       // Evict oldest entries when cache exceeds limit
@@ -1863,6 +1867,13 @@ export class CanvasRenderer {
    */
   destroy(): void {
     this.cancelRender();
+    // Abort pending avatar loads to release closure references
+    for (const img of this.pendingAvatarImages) {
+      img.onload = null;
+      img.onerror = null;
+      img.src = '';
+    }
+    this.pendingAvatarImages.clear();
     this.avatarCache.clear();
     this.avatarLoadingSet.clear();
     this.commitStats.clear();

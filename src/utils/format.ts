@@ -6,6 +6,7 @@
  * Format a date relative to now
  */
 export function formatRelativeTime(timestamp: number): string {
+  if (typeof timestamp !== 'number' || !isFinite(timestamp)) return 'unknown';
   const now = Date.now();
   const diff = now - timestamp * 1000;
   const seconds = Math.floor(diff / 1000);

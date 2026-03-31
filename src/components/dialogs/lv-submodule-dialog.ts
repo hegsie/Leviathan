@@ -367,6 +367,9 @@ export class LvSubmoduleDialog extends LitElement {
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
       this.mode = 'list';
+      this.addUrl = '';
+      this.addPath = '';
+      this.addBranch = '';
       await this.loadSubmodules();
     }
   }
@@ -427,9 +430,12 @@ export class LvSubmoduleDialog extends LitElement {
 
     if (result.success) {
       // Also update after init
-      await gitService.updateSubmodules(this.repositoryPath, {
+      const updateResult = await gitService.updateSubmodules(this.repositoryPath, {
         submodulePaths: [submodule.path],
       });
+      if (!updateResult.success) {
+        showToast('Initialized but update failed: ' + (updateResult.error?.message || 'Unknown error'), 'warning');
+      }
       await this.loadSubmodules();
       this.dispatchEvent(new CustomEvent('submodules-changed'));
     } else {

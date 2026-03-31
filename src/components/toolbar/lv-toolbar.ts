@@ -238,7 +238,7 @@ export class LvToolbar extends LitElement {
       this.isLoading = state.isLoading;
 
       // Check semantic availability when active repo changes
-      if (state.activeIndex !== prevIndex && state.activeIndex >= 0) {
+      if (state.activeIndex !== prevIndex && state.activeIndex >= 0 && state.activeIndex < state.openRepositories.length) {
         const activeRepo = state.openRepositories[state.activeIndex];
         if (activeRepo) {
           this.checkSemanticAvailability(activeRepo.repository.path);

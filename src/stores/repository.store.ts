@@ -319,6 +319,13 @@ export const repositoryStore = createStore<RepositoryState>()(
         persistedOpenRepos: state.persistedOpenRepos,
         activeIndex: state.activeIndex,
       }),
+      onRehydrateStorage: () => (state) => {
+        // Clamp activeIndex to valid range — openRepositories starts empty
+        // and is rebuilt async by restorePersistedRepositories()
+        if (state && state.activeIndex >= state.openRepositories.length) {
+          state.activeIndex = state.openRepositories.length > 0 ? 0 : -1;
+        }
+      },
     }
   )
 );

@@ -4,6 +4,7 @@
 use std::path::Path;
 use tauri::command;
 
+use super::path_utils::validate_path_within_repo;
 use crate::error::{LeviathanError, Result};
 use crate::utils::create_command;
 
@@ -214,7 +215,9 @@ pub async fn open_in_configured_editor(
     let target_file = if Path::new(&filePath).is_absolute() {
         filePath.clone()
     } else {
-        repo_path.join(&filePath).to_string_lossy().to_string()
+        validate_path_within_repo(repo_path, &filePath)?
+            .to_string_lossy()
+            .to_string()
     };
 
     let target = Path::new(&target_file);

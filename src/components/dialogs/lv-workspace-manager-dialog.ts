@@ -767,6 +767,8 @@ export class LvWorkspaceManagerDialog extends LitElement {
     if (result.success && result.data) {
       workspaceStore.getState().addOrUpdateWorkspace(result.data);
       await this.loadWorkspaces();
+    } else {
+      showToast(result.error?.message || 'Failed to save workspace', 'error');
     }
   }
 
@@ -779,6 +781,8 @@ export class LvWorkspaceManagerDialog extends LitElement {
       workspaceStore.getState().removeWorkspace(ws.id);
       this.selectedWorkspaceId = null;
       await this.loadWorkspaces();
+    } else {
+      showToast(result.error?.message || 'Failed to delete workspace', 'error');
     }
   }
 
@@ -793,7 +797,9 @@ export class LvWorkspaceManagerDialog extends LitElement {
     const result = await workspaceService.addRepositoryToWorkspace(ws.id, path, name);
     if (result.success) {
       await this.loadWorkspaces();
-      this.refreshStatus();
+      await this.refreshStatus();
+    } else {
+      showToast(result.error?.message || 'Failed to add repository', 'error');
     }
   }
 
@@ -807,6 +813,8 @@ export class LvWorkspaceManagerDialog extends LitElement {
       newStatuses.delete(path);
       this.repoStatuses = newStatuses;
       await this.loadWorkspaces();
+    } else {
+      showToast(result.error?.message || 'Failed to remove repository', 'error');
     }
   }
 

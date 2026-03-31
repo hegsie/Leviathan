@@ -58,6 +58,18 @@ export function computeInlineWhitespaceDiff(
     if (nonWs) {
       segments.push({ text: nonWs, type: 'unchanged' });
     }
+
+    // Safety: if neither pointer advanced, collect remaining chars and break
+    // to prevent infinite loop when strings have mismatched non-whitespace
+    if (oi === oldWsStart && ni === newWsStart) {
+      if (oi < oldStr.length) {
+        segments.push({ text: oldStr.slice(oi), type: 'removed' });
+      }
+      if (ni < newStr.length) {
+        segments.push({ text: newStr.slice(ni), type: 'added' });
+      }
+      break;
+    }
   }
 
   return segments;
