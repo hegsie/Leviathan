@@ -5,7 +5,33 @@ Comprehensive code review covering broken/incomplete features, UX issues, event 
 **Static Analysis Baseline:**
 - ESLint: ✅ Clean (0 errors, 0 warnings)
 - TypeScript: ✅ Clean (0 errors)
-- Unit Tests: ✅ 2,635 tests passing
+- Unit Tests: ✅ 3,011 tests passing
+
+---
+
+## Verification Status (v0.3.1)
+
+The findings below were manually verified against source code. Some original findings were **false positives** — these are documented here for transparency.
+
+### ❌ Confirmed False Positives
+
+| # | Original Finding | Why It's Wrong |
+|---|------------------|----------------|
+| 0.1 | XSS in command palette `highlightMatch()` | `highlightMatch()` calls `escapeHtml()` on ALL text segments before inserting `<mark>` tags. See `src/utils/fuzzy-search.ts:67-96`. SAFETY comment added. |
+| 0.2 | Memory leak — graph canvas event listeners never removed | `cleanup()` (called from `disconnectedCallback`) removes ALL 7 canvas listeners at lines 626-631 plus observers at 645-646. SAFETY comment added. |
+| — | N+1 IPC in GitHub dialog | `lv-github-dialog.ts` already batches with `Promise.all()` at lines 990, 1199, 1266. SAFETY comment added. |
+| — | Event listener leak in app-shell `disconnectedCallback` | All listeners registered in `connectedCallback` have matching `removeEventListener` calls in `disconnectedCallback` (lines 843-859). SAFETY comment added. |
+| 6.2 | OAuth client secrets in source code | Standard practice for desktop "public clients" per RFC 6749 §2.1. Cannot keep secrets in distributed binaries. Code already has thorough documentation with PKCE references. GitHub Desktop does the same. |
+
+### ✅ Fixed in v0.3.1
+
+| # | Finding | Fix |
+|---|---------|-----|
+| **CRITICAL** | Path traversal in `checkout_file.rs` — user-provided `filePath` joined to repo path without validation | Added `validate_path_within_repo()` with canonicalize+starts_with. Applied to both `checkout_file_from_commit()` and `checkout_file_from_branch()`. |
+| **HIGH** | OAuth race condition — single `pendingAuth` variable overwritten by concurrent flows | Replaced with `pendingAuthByProvider` Map keyed by provider. Each flow has independent state. |
+| **HIGH** | Unhandled promise — `pollLoopbackCallback()` called without `.catch()` | Added `.catch()` handler with cleanup and error state notification. |
+| **HIGH** | Browser `confirm()` in `git.service.ts` for network permission | Replaced with async `showConfirm()` from dialog service (Tauri native dialog). Updated all 4 callers to `await`. |
+| **HIGH** | Missing upper bounds check in repository store setters | Added `isActiveIndexValid()` helper that checks both `< 0` and `>= length`. Applied to all 7 setter methods. |
 
 ---
 

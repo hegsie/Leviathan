@@ -6,6 +6,7 @@
 import { invokeCommand, listenToEvent } from "./tauri-api.ts";
 import { showToast } from "./notification.service.ts";
 import { showErrorWithSuggestion } from "./error-suggestion.service.ts";
+import { showConfirm } from "./dialog.service.ts";
 import { commitStatsCache, commitSignatureCache, createCacheKey } from "./cache.service.ts";
 import { settingsStore } from "../stores/settings.store.ts";
 
@@ -13,7 +14,7 @@ import { settingsStore } from "../stores/settings.store.ts";
  * Check if a network operation is allowed based on security settings.
  * Returns false if the operation should be blocked.
  */
-function checkNetworkPermission(operation: string, remote?: string): boolean {
+async function checkNetworkPermission(operation: string, remote?: string): Promise<boolean> {
   const settings = settingsStore.getState();
 
   if (settings.offlineMode) {
@@ -32,7 +33,7 @@ function checkNetworkPermission(operation: string, remote?: string): boolean {
   }
 
   if (settings.confirmNetworkOps) {
-    return confirm(`Allow ${operation}${remote ? ` to ${remote}` : ''}?`);
+    return showConfirm('Network Operation', `Allow ${operation}${remote ? ` to ${remote}` : ''}?`);
   }
 
   return true;
@@ -158,7 +159,7 @@ export async function openRepository(
 export async function cloneRepository(
   args: CloneRepositoryCommand,
 ): Promise<CommandResult<Repository>> {
-  if (!checkNetworkPermission('clone', args.url)) {
+  if (!await checkNetworkPermission('clone', args.url)) {
     return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
   }
 
@@ -698,7 +699,7 @@ export async function setRemoteUrl(
 export async function fetch(
   args?: FetchCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
-  if (!checkNetworkPermission('fetch', args?.remote)) {
+  if (!await checkNetworkPermission('fetch', args?.remote)) {
     return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
   }
 
@@ -733,7 +734,7 @@ export async function fetch(
 export async function pull(
   args?: PullCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
-  if (!checkNetworkPermission('pull', args?.remote)) {
+  if (!await checkNetworkPermission('pull', args?.remote)) {
     return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
   }
 
@@ -768,7 +769,7 @@ export async function pull(
 export async function push(
   args?: PushCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
-  if (!checkNetworkPermission('push', args?.remote)) {
+  if (!await checkNetworkPermission('push', args?.remote)) {
     return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
   }
 

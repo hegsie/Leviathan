@@ -92,6 +92,11 @@ const createEmptyRepoData = (repo: Repository): OpenRepository => ({
   unstagedFiles: [],
 });
 
+/** Checks if activeIndex is valid for the openRepositories array */
+function isActiveIndexValid(state: Pick<RepositoryState, 'activeIndex' | 'openRepositories'>): boolean {
+  return state.activeIndex >= 0 && state.activeIndex < state.openRepositories.length;
+}
+
 export const repositoryStore = createStore<RepositoryState>()(
   persist(
     (set, get) => ({
@@ -183,7 +188,7 @@ export const repositoryStore = createStore<RepositoryState>()(
       // Update active repo data
       setBranches: (branches) => {
         set((state) => {
-          if (state.activeIndex < 0) return state;
+          if (!isActiveIndexValid(state)) return state;
           const newRepos = [...state.openRepositories];
           newRepos[state.activeIndex] = {
             ...newRepos[state.activeIndex],
@@ -195,7 +200,7 @@ export const repositoryStore = createStore<RepositoryState>()(
 
       setCurrentBranch: (currentBranch) => {
         set((state) => {
-          if (state.activeIndex < 0) return state;
+          if (!isActiveIndexValid(state)) return state;
           const newRepos = [...state.openRepositories];
           newRepos[state.activeIndex] = {
             ...newRepos[state.activeIndex],
@@ -207,7 +212,7 @@ export const repositoryStore = createStore<RepositoryState>()(
 
       setRemotes: (remotes) => {
         set((state) => {
-          if (state.activeIndex < 0) return state;
+          if (!isActiveIndexValid(state)) return state;
           const newRepos = [...state.openRepositories];
           newRepos[state.activeIndex] = {
             ...newRepos[state.activeIndex],
@@ -219,7 +224,7 @@ export const repositoryStore = createStore<RepositoryState>()(
 
       setTags: (tags) => {
         set((state) => {
-          if (state.activeIndex < 0) return state;
+          if (!isActiveIndexValid(state)) return state;
           const newRepos = [...state.openRepositories];
           newRepos[state.activeIndex] = {
             ...newRepos[state.activeIndex],
@@ -231,7 +236,7 @@ export const repositoryStore = createStore<RepositoryState>()(
 
       setStashes: (stashes) => {
         set((state) => {
-          if (state.activeIndex < 0) return state;
+          if (!isActiveIndexValid(state)) return state;
           const newRepos = [...state.openRepositories];
           newRepos[state.activeIndex] = {
             ...newRepos[state.activeIndex],
@@ -243,7 +248,7 @@ export const repositoryStore = createStore<RepositoryState>()(
 
       setStatus: (status) => {
         set((state) => {
-          if (state.activeIndex < 0) return state;
+          if (!isActiveIndexValid(state)) return state;
           const newRepos = [...state.openRepositories];
           newRepos[state.activeIndex] = {
             ...newRepos[state.activeIndex],
@@ -257,7 +262,7 @@ export const repositoryStore = createStore<RepositoryState>()(
 
       updateActiveRepository: (repo) => {
         set((state) => {
-          if (state.activeIndex < 0) return state;
+          if (!isActiveIndexValid(state)) return state;
           const newRepos = [...state.openRepositories];
           newRepos[state.activeIndex] = {
             ...newRepos[state.activeIndex],

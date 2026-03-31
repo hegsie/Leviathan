@@ -985,7 +985,7 @@ export class LvGitHubDialog extends LitElement {
     const result = await gitService.detectGitHubRepo(this.repositoryPath);
     if (result.success && result.data) {
       this.detectedRepo = result.data;
-      // Auto-load data if connected
+      // SAFETY: IPC calls are batched with Promise.all to avoid N+1 sequential calls.
       if (this.connectionStatus?.connected) {
         await Promise.all([
           this.loadPullRequests(),

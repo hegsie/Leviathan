@@ -526,6 +526,8 @@ export class LvCommandPalette extends LitElement {
       for (const cmd of commands) {
         const index = globalIndex++;
         const highlighted = highlightMatch(cmd.label, this.searchQuery);
+        // SAFETY: innerHTML is safe here — highlightMatch() calls escapeHtml() on all text
+        // segments before wrapping matched characters in <mark> tags. See fuzzy-search.ts.
 
         sections.push(html`
           <div

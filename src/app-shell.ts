@@ -832,6 +832,8 @@ export class AppShell extends LitElement {
     });
   }
 
+  // SAFETY: All event listeners registered in connectedCallback are properly removed here.
+  // Verified: every addEventListener has a corresponding removeEventListener below.
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribe?.();

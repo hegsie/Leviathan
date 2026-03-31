@@ -621,6 +621,8 @@ export class LvGraphCanvas extends LitElement {
     this.canvasEl.addEventListener('keydown', this.handleKeyDown);
   }
 
+  // SAFETY: All observers (ResizeObserver, MutationObserver) and event listeners are
+  // properly disconnected/removed in cleanup(), which is called from disconnectedCallback().
   private cleanup(): void {
     // Remove canvas event listeners
     this.canvasEl?.removeEventListener('wheel', this.handleWheel);

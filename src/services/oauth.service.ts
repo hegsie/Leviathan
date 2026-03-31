@@ -55,8 +55,8 @@ const OAUTH_CLIENT_SECRETS: Partial<Record<OAuthProvider, string>> = {
   bitbucket: 'HAqqaX24y8QSexmnvfbQkEPShUjskmUm',
 };
 
-/** Currently pending OAuth authentication */
-let pendingAuth: PendingOAuth | null = null;
+/** Currently pending OAuth authentications, keyed by provider to prevent race conditions */
+const pendingAuthByProvider = new Map<OAuthProvider, PendingOAuth>();
 
 /** Listeners for OAuth state changes */
 const stateListeners = new Set<(state: OAuthFlowState) => void>();
@@ -123,8 +123,12 @@ async function handleDeepLink(url: string): Promise<void> {
     return;
   }
 
-  if (!pendingAuth) {
-    console.warn('Received OAuth callback but no pending auth');
+  // Extract provider from URL path: leviathan://oauth/{provider}/callback?...
+  const providerSegment = url.slice('leviathan://oauth/'.length).split('/')[0] as OAuthProvider;
+  const pending = pendingAuthByProvider.get(providerSegment);
+
+  if (!pending) {
+    console.warn('Received OAuth callback but no pending auth for provider:', providerSegment);
     return;
   }
 
@@ -140,9 +144,9 @@ async function handleDeepLink(url: string): Promise<void> {
       notifyStateChange({
         status: 'error',
         error: errorDescription || error,
-        provider: pendingAuth.provider,
+        provider: pending.provider,
       });
-      pendingAuth = null;
+      pendingAuthByProvider.delete(pending.provider);
       return;
     }
 
@@ -150,63 +154,63 @@ async function handleDeepLink(url: string): Promise<void> {
       notifyStateChange({
         status: 'error',
         error: 'No authorization code received',
-        provider: pendingAuth.provider,
+        provider: pending.provider,
       });
-      pendingAuth = null;
+      pendingAuthByProvider.delete(pending.provider);
       return;
     }
 
     // Verify state matches
-    if (state !== pendingAuth.state) {
+    if (state !== pending.state) {
       notifyStateChange({
         status: 'error',
         error: 'State mismatch - possible CSRF attack',
-        provider: pendingAuth.provider,
+        provider: pending.provider,
       });
-      pendingAuth = null;
+      pendingAuthByProvider.delete(pending.provider);
       return;
     }
 
     // Exchange code for tokens
     notifyStateChange({
       status: 'exchanging',
-      provider: pendingAuth.provider,
+      provider: pending.provider,
     });
 
-    const redirectUri = `leviathan://oauth/${pendingAuth.provider}/callback`;
+    const redirectUri = `leviathan://oauth/${pending.provider}/callback`;
     const tokens = await exchangeCode(
-      pendingAuth.provider,
+      pending.provider,
       code,
-      pendingAuth.verifier,
+      pending.verifier,
       redirectUri,
-      pendingAuth.instanceUrl
+      pending.instanceUrl
     );
 
     notifyStateChange({
       status: 'success',
-      provider: pendingAuth.provider,
+      provider: pending.provider,
     });
 
     // Dispatch event for the dialog to handle
     window.dispatchEvent(
       new CustomEvent('oauth-complete', {
         detail: {
-          provider: pendingAuth.provider,
+          provider: pending.provider,
           tokens,
-          instanceUrl: pendingAuth.instanceUrl,
+          instanceUrl: pending.instanceUrl,
         },
       })
     );
 
-    pendingAuth = null;
+    pendingAuthByProvider.delete(pending.provider);
   } catch (e) {
     console.error('OAuth callback error:', e);
     notifyStateChange({
       status: 'error',
       error: e instanceof Error ? e.message : 'Unknown error',
-      provider: pendingAuth?.provider,
+      provider: pending.provider,
     });
-    pendingAuth = null;
+    pendingAuthByProvider.delete(pending.provider);
   }
 }
 
@@ -231,21 +235,29 @@ export async function startOAuth(
     }
     const response = cmdResult.data;
 
-    pendingAuth = {
+    pendingAuthByProvider.set(provider, {
       verifier: response.verifier,
       provider,
       state: response.state,
       instanceUrl,
       loopbackPort: response.loopbackPort,
       startedAt: Date.now(),
-    };
+    });
 
     // Open the authorization URL in the browser
     await open(response.authorizeUrl);
 
     // For providers using loopback server, poll for the callback
     if (response.loopbackPort) {
-      pollLoopbackCallback(provider, response.loopbackPort);
+      pollLoopbackCallback(provider, response.loopbackPort).catch((e) => {
+        console.error(`OAuth polling error for ${provider}:`, e);
+        pendingAuthByProvider.delete(provider);
+        notifyStateChange({
+          status: 'error',
+          error: e instanceof Error ? e.message : 'OAuth polling failed',
+          provider,
+        });
+      });
     }
   } catch (e) {
     console.error('Failed to start OAuth:', e);
@@ -261,7 +273,8 @@ export async function startOAuth(
  * Poll for loopback callback (works for GitHub, GitLab, and any provider using loopback server)
  */
 async function pollLoopbackCallback(provider: OAuthProvider, port: number): Promise<void> {
-  if (!pendingAuth || pendingAuth.provider !== provider) {
+  const pending = pendingAuthByProvider.get(provider);
+  if (!pending) {
     return;
   }
 
@@ -277,7 +290,9 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
 
     console.log(`[OAuth ${provider}] Received callback code:`, code?.substring(0, 10) + '...');
 
-    if (!pendingAuth) {
+    // Re-check in case user cancelled while waiting for callback
+    const current = pendingAuthByProvider.get(provider);
+    if (!current) {
       return; // User cancelled or timeout
     }
 
@@ -288,7 +303,7 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
 
     const redirectUri = `http://127.0.0.1:${port}/callback`;
     console.log(`[OAuth ${provider}] Exchanging code for tokens...`);
-    const tokens = await exchangeCode(provider, code, pendingAuth.verifier, redirectUri, pendingAuth.instanceUrl);
+    const tokens = await exchangeCode(provider, code, current.verifier, redirectUri, current.instanceUrl);
     console.log(`[OAuth ${provider}] Token exchange result:`, {
       hasAccessToken: !!tokens?.accessToken,
       accessTokenLength: tokens?.accessToken?.length,
@@ -306,12 +321,12 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
         detail: {
           provider,
           tokens,
-          instanceUrl: pendingAuth.instanceUrl,
+          instanceUrl: current.instanceUrl,
         },
       })
     );
 
-    pendingAuth = null;
+    pendingAuthByProvider.delete(provider);
   } catch (e) {
     console.error(`${provider} OAuth error:`, e);
     notifyStateChange({
@@ -319,7 +334,7 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
       error: e instanceof Error ? e.message : `${provider} OAuth failed`,
       provider,
     });
-    pendingAuth = null;
+    pendingAuthByProvider.delete(provider);
   }
 }
 
@@ -398,13 +413,18 @@ export async function refreshToken(
 /**
  * Cancel pending OAuth flow
  */
-export function cancelOAuth(): void {
-  if (pendingAuth) {
-    notifyStateChange({
-      status: 'idle',
-      provider: pendingAuth.provider,
-    });
-    pendingAuth = null;
+export function cancelOAuth(provider?: OAuthProvider): void {
+  if (provider) {
+    const pending = pendingAuthByProvider.get(provider);
+    if (pending) {
+      notifyStateChange({ status: 'idle', provider });
+      pendingAuthByProvider.delete(provider);
+    }
+  } else {
+    for (const [p] of pendingAuthByProvider) {
+      notifyStateChange({ status: 'idle', provider: p });
+    }
+    pendingAuthByProvider.clear();
   }
 }
 
@@ -412,14 +432,15 @@ export function cancelOAuth(): void {
  * Check if an OAuth flow is pending
  */
 export function isPendingOAuth(): boolean {
-  return pendingAuth !== null;
+  return pendingAuthByProvider.size > 0;
 }
 
 /**
  * Get the pending OAuth provider
  */
 export function getPendingProvider(): OAuthProvider | null {
-  return pendingAuth?.provider || null;
+  const first = pendingAuthByProvider.keys().next();
+  return first.done ? null : first.value;
 }
 
 /**
