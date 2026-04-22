@@ -18,10 +18,16 @@ pub async fn get_status(path: String) -> Result<Vec<StatusEntry>> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let mut opts = git2::StatusOptions::new();
+    // update_index(true): refresh racy-git entries so files whose content
+    // matches the index drop out of status. Without it, a rewrite with
+    // identical content (common after checkout/rebase) shows as "M" in the
+    // UI but produces an empty content-diff — the user then hits
+    // "File not found in diff" when they click it.
     opts.include_untracked(true)
         .recurse_untracked_dirs(true)
         .include_ignored(false)
-        .include_unmodified(false);
+        .include_unmodified(false)
+        .update_index(true);
 
     let statuses = repo.statuses(Some(&mut opts))?;
     let mut entries = Vec::new();
@@ -1154,6 +1160,71 @@ mod tests {
         assert!(modified.is_some());
         assert_eq!(modified.unwrap().status, FileStatus::Modified);
         assert!(!modified.unwrap().is_staged);
+    }
+
+    // Regression test for "File 'X' not found in diff" error.
+    //
+    // Sequence: a file is rewritten with identical content (common after
+    // checkout/rebase/merge or build steps that touch files). libgit2's
+    // status then flags it "racy-modified" on stat alone. Previously
+    // get_status returned the entry, the UI rendered it as "M", and
+    // clicking it triggered get_file_diff — which found nothing in the
+    // content-diff and errored out.
+    //
+    // With update_index(true) on StatusOptions, libgit2 refreshes the
+    // stat info and the entry drops out of status. The UI never sees it.
+    #[tokio::test]
+    async fn test_get_status_drops_stat_stale_entries() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Rewrite README.md with the exact content committed by
+        // with_initial_commit(). This bumps mtime without changing content.
+        repo.create_file("README.md", "# Test Repo");
+
+        let entries = get_status(repo.path_str()).await.unwrap();
+        let entry = entries.iter().find(|e| e.path == "README.md");
+
+        assert!(
+            entry.is_none(),
+            "Stat-stale entry should not appear in status (content matches index); got {:?}",
+            entry
+        );
+    }
+
+    // Companion test: if the status layer misbehaves and a stat-stale
+    // entry ever leaks through, get_file_diff must not panic. It may
+    // return an "not found in diff" error (the frontend handles that
+    // explicitly for the "fully-staged hunk" case), but it must not
+    // surface as an unhandled exception.
+    #[tokio::test]
+    async fn test_get_file_diff_stat_stale_is_handled() {
+        use crate::commands::diff::get_file_diff;
+
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file("README.md", "# Test Repo");
+
+        let result = get_file_diff(
+            repo.path_str(),
+            "README.md".to_string(),
+            Some(false),
+            None,
+        )
+        .await;
+
+        // Either Ok (file has no real changes, returned as empty diff via
+        // fallback) or Err (the explicit "not found in diff" path). Must
+        // not panic or produce a non-Leviathan error.
+        match result {
+            Ok(_) => {}
+            Err(crate::error::LeviathanError::OperationFailed(msg)) => {
+                assert!(
+                    msg.contains("not found in diff"),
+                    "Unexpected error message: {}",
+                    msg
+                );
+            }
+            Err(e) => panic!("Unexpected error variant: {:?}", e),
+        }
     }
 
     #[tokio::test]
