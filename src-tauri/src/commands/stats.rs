@@ -262,7 +262,7 @@ pub async fn get_repo_stats(path: String, max_commits: Option<usize>) -> Result<
 
     // Sort contributors by commit count
     let mut contributors: Vec<ContributorStats> = contributors_map.into_values().collect();
-    contributors.sort_by(|a, b| b.commit_count.cmp(&a.commit_count));
+    contributors.sort_by_key(|b| std::cmp::Reverse(b.commit_count));
 
     // Sort month activity
     let mut activity_by_month: Vec<MonthActivity> = month_activity
@@ -394,7 +394,7 @@ pub async fn get_contributor_stats(
     }
 
     let mut contributors: Vec<ContributorStats> = contributors_map.into_values().collect();
-    contributors.sort_by(|a, b| b.commit_count.cmp(&a.commit_count));
+    contributors.sort_by_key(|b| std::cmp::Reverse(b.commit_count));
 
     Ok(contributors)
 }
@@ -771,7 +771,7 @@ pub async fn get_repo_statistics(
     let top_contributors = if include_contributors {
         let mut contributors: Vec<EnhancedContributorStats> =
             contributors_map.into_values().collect();
-        contributors.sort_by(|a, b| b.commits.cmp(&a.commits));
+        contributors.sort_by_key(|b| std::cmp::Reverse(b.commits));
         Some(contributors)
     } else {
         None
@@ -787,7 +787,7 @@ pub async fn get_repo_statistics(
                 total_lines: lines,
             })
             .collect();
-        types.sort_by(|a, b| b.file_count.cmp(&a.file_count));
+        types.sort_by_key(|b| std::cmp::Reverse(b.file_count));
         Some(types)
     } else {
         None

@@ -167,7 +167,7 @@ pub async fn build_embedding_index(
 
         let items: Vec<(String, String, Vec<f32>)> = chunk
             .iter()
-            .zip(embeddings.into_iter())
+            .zip(embeddings)
             .map(|(c, emb)| (c.0.clone(), c.2.clone(), emb))
             .collect();
 

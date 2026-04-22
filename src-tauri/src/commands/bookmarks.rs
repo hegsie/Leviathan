@@ -134,7 +134,7 @@ pub async fn update_bookmark(bookmark: RepoBookmark) -> Result<Vec<RepoBookmark>
 #[command]
 pub async fn get_recent_repos() -> Result<Vec<RepoBookmark>> {
     let mut bookmarks = load_bookmarks()?;
-    bookmarks.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+    bookmarks.sort_by_key(|b| std::cmp::Reverse(b.last_opened));
     Ok(bookmarks)
 }
 
@@ -164,7 +164,7 @@ pub async fn record_repo_opened(path: String, name: String) -> Result<()> {
             bookmarks.into_iter().partition(|b| b.pinned);
 
         // Sort unpinned by last_opened descending and truncate
-        unpinned.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+        unpinned.sort_by_key(|b| std::cmp::Reverse(b.last_opened));
         let keep_count = MAX_RECENT_REPOS.saturating_sub(pinned.len());
         unpinned.truncate(keep_count);
 

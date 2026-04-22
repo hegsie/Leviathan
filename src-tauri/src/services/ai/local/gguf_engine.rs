@@ -142,6 +142,7 @@ fn generate_tokens(
     let mut n_cur = prompt_tokens.len() as i32;
     let mut decoder = encoding_rs::UTF_8.new_decoder();
 
+    #[allow(clippy::explicit_counter_loop)]
     for _ in 0..max_tokens {
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
 

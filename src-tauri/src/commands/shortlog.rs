@@ -174,10 +174,10 @@ pub async fn shortlog(
     // Sort entries
     if use_numbered {
         // Sort by commit count (descending)
-        entries.sort_by(|a, b| b.count.cmp(&a.count));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.count));
     } else {
         // Sort alphabetically by name
-        entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        entries.sort_by_key(|a| a.name.to_lowercase());
     }
 
     let total_contributors = entries.len() as u32;

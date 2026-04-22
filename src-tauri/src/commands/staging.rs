@@ -167,8 +167,7 @@ pub async fn get_sorted_file_status(
         }
         _ => {
             // Default: sort by name ascending
-            sorted_entries
-                .sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+            sorted_entries.sort_by_key(|a| a.filename.to_lowercase());
         }
     }
 
@@ -912,17 +911,15 @@ pub async fn stage_lines(
                     old_count += 1;
                     new_count += 1;
                 }
-                "addition" => {
-                    if is_selected {
-                        let mut content = line.content.clone();
-                        if !content.ends_with('\n') {
-                            content.push('\n');
-                        }
-                        new_lines.push(format!("+{}", content));
-                        new_count += 1;
+                "addition" if is_selected => {
+                    let mut content = line.content.clone();
+                    if !content.ends_with('\n') {
+                        content.push('\n');
                     }
-                    // Not selected additions are simply omitted
+                    new_lines.push(format!("+{}", content));
+                    new_count += 1;
                 }
+                // Not-selected additions fall through to _ => {} (omitted)
                 "deletion" => {
                     if is_selected {
                         let mut content = line.content.clone();
