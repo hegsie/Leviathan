@@ -1088,7 +1088,10 @@ export class CanvasRenderer {
       ctx.fillText(displayMessage, messageColumnX, y);
 
       // Render refs in refs column - show as many as fit
-      const allRefs = [...refs, ...prs.map(pr => ({ ...pr, isPR: true }))];
+      // Sort refs so the most important ones render first when space is limited:
+      // HEAD > local branches > remote-only branches > remote duplicates > tags
+      const sortedRefs = this.sortRefsForDisplay(refs);
+      const allRefs = [...sortedRefs, ...prs.map(pr => ({ ...pr, isPR: true }))];
       const smallLabelHeight = 16;
       const smallLabelPadding = 6;
       const smallIconSize = 10;
@@ -1328,6 +1331,10 @@ export class CanvasRenderer {
       ctx.fillText(relativeTime, timeColumnX + timeColumnWidth, y);
       ctx.globalAlpha = 1.0;
     }
+  }
+
+  private sortRefsForDisplay(refs: RefInfo[]): RefInfo[] {
+    return sortRefsForDisplay(refs);
   }
 
   /**
@@ -1881,4 +1888,48 @@ export class CanvasRenderer {
     this.ciStatuses.clear();
     this.highlightedOids.clear();
   }
+}
+
+/**
+ * Sort refs so the most important ones display first when space is limited.
+ * Priority: HEAD > local branches > remote-only branches > remote duplicates > tags
+ *
+ * A "remote-only" branch is one like origin/new-nonprod-cert-dv3 where there's
+ * no corresponding local branch. A "remote duplicate" is like origin/feature/foo
+ * when local feature/foo already exists on the same commit.
+ */
+export function sortRefsForDisplay(refs: RefInfo[]): RefInfo[] {
+  if (refs.length <= 1) return refs;
+
+  // Build a set of local branch shorthands for duplicate detection
+  const localBranchNames = new Set<string>();
+  for (const ref of refs) {
+    if (ref.refType === 'localBranch') {
+      localBranchNames.add(ref.shorthand);
+    }
+  }
+
+  return [...refs].sort((a, b) => {
+    const aPriority = getRefSortPriority(a, localBranchNames);
+    const bPriority = getRefSortPriority(b, localBranchNames);
+    if (aPriority !== bPriority) return aPriority - bPriority;
+    // Within the same priority, shorter names first (more likely to fit)
+    return a.shorthand.length - b.shorthand.length;
+  });
+}
+
+/**
+ * Get sort priority for a ref (lower = higher priority).
+ */
+function getRefSortPriority(ref: RefInfo, localBranchNames: Set<string>): number {
+  if (ref.isHead) return 0;
+  if (ref.refType === 'localBranch') return 1;
+  if (ref.refType === 'remoteBranch') {
+    // Check if this remote branch has a local counterpart
+    // Remote shorthand is like "origin/feature/foo", strip remote prefix
+    const slashIndex = ref.shorthand.indexOf('/');
+    const branchName = slashIndex >= 0 ? ref.shorthand.substring(slashIndex + 1) : ref.shorthand;
+    return localBranchNames.has(branchName) ? 3 : 2;
+  }
+  return 4; // tags
 }
