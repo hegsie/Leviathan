@@ -194,6 +194,27 @@ export class LvBranchList extends LitElement {
         white-space: nowrap;
       }
 
+      .branch-info {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .branch-info .branch-name {
+        display: block;
+        flex: initial;
+      }
+
+      .branch-upstream {
+        display: block;
+        font-size: 10px;
+        line-height: 1.3;
+        color: var(--color-text-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .ahead-behind {
         display: flex;
         gap: 4px;
@@ -1418,7 +1439,12 @@ export class LvBranchList extends LitElement {
         title="${branch.name}"
       >
         ${this.renderBranchIcon(branch.isHead)}
-        <span class="branch-name">${displayName}</span>
+        ${!branch.isRemote && branch.upstream ? html`
+          <div class="branch-info">
+            <span class="branch-name">${displayName}</span>
+            <span class="branch-upstream" title="Tracking ${branch.upstream}">→ ${branch.upstream}</span>
+          </div>
+        ` : html`<span class="branch-name">${displayName}</span>`}
         ${this.renderAheadBehind(branch)}
         ${this.renderStaleIndicator(branch)}
         ${isDropTarget ? html`

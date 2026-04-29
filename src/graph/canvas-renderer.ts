@@ -33,7 +33,7 @@ export interface RenderConfig {
   showAvatars: boolean;
   /** Show icons in ref labels */
   showRefIcons: boolean;
-  /** Width of the refs column in pixels (default 130) */
+  /** Width of the refs column in pixels (default 200) */
   refsColumnWidth: number;
   /** Width of the stats column in pixels (default 80) */
   statsColumnWidth: number;
@@ -93,7 +93,7 @@ const DEFAULT_CONFIG: RenderConfig = {
   showFps: false,
   showAvatars: false,
   showRefIcons: true,
-  refsColumnWidth: 130,
+  refsColumnWidth: 200,
   statsColumnWidth: 80,
 };
 
@@ -1120,17 +1120,16 @@ export class CanvasRenderer {
             labelText = (item as RefInfo).shorthand;
           }
 
-          const textWidth = ctx.measureText(labelText).width;
-          const pillWidth = textWidth + smallLabelPadding * 2 + iconWidth;
 
-          // Check if we have room for this label plus potential "+N" badge
+          // Check if we have room for at least a truncated label plus "+N" badge
           const remainingRefs = allRefs.length - i - 1;
           const needsBadge = remainingRefs > 0;
           const badgeSpace = needsBadge ? 30 : 0;
-          const spaceNeeded = pillWidth + (i > 0 ? labelGapSize : 0) + badgeSpace;
+          const minTruncatedLabelWidth = 50;
+          const minSpaceNeeded = minTruncatedLabelWidth + (i > 0 ? labelGapSize : 0) + badgeSpace;
 
-          if (currentX + spaceNeeded > refsColumnX + refsColumnWidth && i > 0) {
-            // No room for this label, stop here
+          if (currentX + minSpaceNeeded > refsColumnX + refsColumnWidth && i > 0) {
+            // No room for even a truncated label, stop here
             break;
           }
 
@@ -1139,9 +1138,12 @@ export class CanvasRenderer {
             currentX += labelGapSize;
           }
 
-          // Calculate max width available for this label
-          const remainingWidth = refsColumnX + refsColumnWidth - currentX - badgeSpace;
-          const maxPillWidth = Math.max(40, remainingWidth); // Minimum 40px for any label
+          // Proportionally allocate column space among remaining labels
+          const totalRemainingLabels = allRefs.length - i;
+          const futureGaps = Math.max(0, totalRemainingLabels - 1) * labelGapSize;
+          const remainingSpace = refsColumnX + refsColumnWidth - currentX - badgeSpace - futureGaps;
+          const proportionalWidth = Math.floor(remainingSpace / totalRemainingLabels);
+          const maxPillWidth = Math.max(50, proportionalWidth);
 
           if (isPR) {
             // Render PR badge

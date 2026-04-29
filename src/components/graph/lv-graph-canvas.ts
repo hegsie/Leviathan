@@ -454,7 +454,7 @@ export class LvGraphCanvas extends LitElement {
   private totalLoadedCommits = 0;
 
   // Column resize state
-  @state() private refsColumnWidth = 130;
+  @state() private refsColumnWidth = 200;
   @state() private statsColumnWidth = 80;
   @state() private resizing: 'refs' | 'stats' | null = null;
   private resizeStartX = 0;
@@ -1877,7 +1877,7 @@ export class LvGraphCanvas extends LitElement {
       const saved = localStorage.getItem(this.COLUMN_STORAGE_KEY);
       if (saved) {
         const { refs, stats } = JSON.parse(saved);
-        this.refsColumnWidth = refs ?? 130;
+        this.refsColumnWidth = refs ?? 200;
         this.statsColumnWidth = stats ?? 80;
       }
     } catch {
@@ -2206,7 +2206,7 @@ export class LvGraphCanvas extends LitElement {
 
     if (this.resizing === 'refs') {
       // Refs column: wider when dragging right
-      this.refsColumnWidth = Math.max(80, Math.min(250, this.resizeStartWidth + delta));
+      this.refsColumnWidth = Math.max(80, Math.min(400, this.resizeStartWidth + delta));
     } else {
       // Stats column: wider when dragging left (inverted)
       this.statsColumnWidth = Math.max(50, Math.min(150, this.resizeStartWidth - delta));
