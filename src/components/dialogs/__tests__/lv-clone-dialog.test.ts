@@ -28,6 +28,7 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 import { expect, fixture, html } from '@open-wc/testing';
 import '../lv-clone-dialog.ts';
 import type { LvCloneDialog } from '../lv-clone-dialog.ts';
+import { settingsStore } from '../../../stores/settings.store.ts';
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-clone-dialog', () => {
@@ -35,6 +36,7 @@ describe('lv-clone-dialog', () => {
 
   beforeEach(async () => {
     mockInvoke = () => Promise.resolve(null);
+    settingsStore.getState().setDefaultClonePath('');
 
     el = await fixture<LvCloneDialog>(html`
       <lv-clone-dialog></lv-clone-dialog>
@@ -390,6 +392,47 @@ describe('lv-clone-dialog', () => {
       expect(formatBytes(1536)).to.equal('1.5 KB');
       expect(formatBytes(1048576)).to.equal('1.0 MB');
       expect(formatBytes(2621440)).to.equal('2.5 MB');
+    });
+  });
+
+  // ── Default clone path from settings ───────────────────────────────────
+  describe('default clone path', () => {
+    it('prefills destination from settings on open()', async () => {
+      settingsStore.getState().setDefaultClonePath('/home/user/projects');
+
+      el.open();
+      await el.updateComplete;
+
+      const internal = el as unknown as { destination: string };
+      expect(internal.destination).to.equal('/home/user/projects');
+
+      const destInput = el.shadowRoot!.querySelector('#destination') as HTMLInputElement;
+      expect(destInput.value).to.equal('/home/user/projects');
+    });
+
+    it('leaves destination empty when no default is set', async () => {
+      settingsStore.getState().setDefaultClonePath('');
+
+      el.open();
+      await el.updateComplete;
+
+      const internal = el as unknown as { destination: string };
+      expect(internal.destination).to.equal('');
+    });
+
+    it('reapplies the default each time open() is called', async () => {
+      settingsStore.getState().setDefaultClonePath('/home/a');
+      el.open();
+      await el.updateComplete;
+
+      const internal = el as unknown as { destination: string };
+      internal.destination = '/something/else';
+
+      settingsStore.getState().setDefaultClonePath('/home/b');
+      el.open();
+      await el.updateComplete;
+
+      expect(internal.destination).to.equal('/home/b');
     });
   });
 

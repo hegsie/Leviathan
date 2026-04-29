@@ -3,6 +3,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { settingsStore, getGraphColorSchemes, type Theme, type FontSize, type Density, type GraphColorScheme } from '../../stores/settings.store.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
+import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import * as localAiService from '../../services/local-ai.service.ts';
 import * as mcpService from '../../services/mcp.service.ts';
@@ -293,6 +294,22 @@ export class LvSettingsDialog extends LitElement {
         justify-content: space-between;
         width: 100%;
       }
+
+      .path-input-group {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+
+      .path-input-group input[type="text"] {
+        min-width: 220px;
+      }
+
+      .browse-button {
+        padding: 6px 10px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
     `,
   ];
 
@@ -304,6 +321,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private density: Density = 'comfortable';
   @state() private graphColorScheme: GraphColorScheme = 'default';
   @state() private defaultBranchName = 'main';
+  @state() private defaultClonePath = '';
   @state() private showAvatars = true;
   @state() private showCommitSize = true;
   @state() private wordWrap = true;
@@ -469,6 +487,7 @@ export class LvSettingsDialog extends LitElement {
     this.density = settings.density;
     this.graphColorScheme = settings.graphColorScheme;
     this.defaultBranchName = settings.defaultBranchName;
+    this.defaultClonePath = settings.defaultClonePath;
     this.showAvatars = settings.showAvatars;
     this.showCommitSize = settings.showCommitSize;
     this.wordWrap = settings.wordWrap;
@@ -515,6 +534,22 @@ export class LvSettingsDialog extends LitElement {
     this.defaultBranchName = input.value;
     settingsStore.getState().setDefaultBranchName(this.defaultBranchName);
     window.dispatchEvent(new CustomEvent('settings-changed'));
+  }
+
+  private handleDefaultClonePathChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    this.defaultClonePath = input.value;
+    settingsStore.getState().setDefaultClonePath(this.defaultClonePath);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
+  }
+
+  private async handleBrowseDefaultClonePath(): Promise<void> {
+    const path = await openCloneDestinationDialog(this.defaultClonePath || undefined);
+    if (path) {
+      this.defaultClonePath = path;
+      settingsStore.getState().setDefaultClonePath(path);
+      window.dispatchEvent(new CustomEvent('settings-changed'));
+    }
   }
 
   private async loadExternalToolsConfig(): Promise<void> {
@@ -971,6 +1006,27 @@ export class LvSettingsDialog extends LitElement {
               .value=${this.defaultBranchName}
               @change=${this.handleBranchNameChange}
             />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Default Clone Folder</span>
+              <span class="setting-description">Prefilled as the destination when cloning a repository</span>
+            </div>
+            <div class="path-input-group">
+              <input
+                type="text"
+                placeholder="No default set"
+                .value=${this.defaultClonePath}
+                @change=${this.handleDefaultClonePathChange}
+              />
+              <button
+                class="browse-button"
+                @click=${this.handleBrowseDefaultClonePath}
+              >
+                Browse...
+              </button>
+            </div>
           </div>
         </div>
 

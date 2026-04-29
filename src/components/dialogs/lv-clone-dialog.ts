@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { cloneRepository } from '../../services/git.service.ts';
 import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
+import { settingsStore } from '../../stores/settings.store.ts';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
@@ -193,6 +194,7 @@ export class LvCloneDialog extends LitElement {
 
   public open(): void {
     this.reset();
+    this.destination = settingsStore.getState().defaultClonePath;
     this.modal.open = true;
   }
 

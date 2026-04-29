@@ -27,6 +27,10 @@ describe('settings.store', () => {
       expect(settingsStore.getState().defaultRemoteName).to.equal('origin');
     });
 
+    it('should have empty default clone path by default', () => {
+      expect(settingsStore.getState().defaultClonePath).to.equal('');
+    });
+
     it('should show avatars by default', () => {
       expect(settingsStore.getState().showAvatars).to.be.true;
     });
@@ -160,6 +164,11 @@ describe('settings.store', () => {
       expect(settingsStore.getState().defaultRemoteName).to.equal('upstream');
     });
 
+    it('should set default clone path', () => {
+      settingsStore.getState().setDefaultClonePath('/home/user/projects');
+      expect(settingsStore.getState().defaultClonePath).to.equal('/home/user/projects');
+    });
+
     it('should set show avatars', () => {
       settingsStore.getState().setShowAvatars(false);
       expect(settingsStore.getState().showAvatars).to.be.false;
@@ -265,6 +274,12 @@ describe('settings.store', () => {
       settingsStore.getState().setGraphColorScheme('vibrant');
       settingsStore.getState().resetToDefaults();
       expect(settingsStore.getState().graphColorScheme).to.equal('default');
+    });
+
+    it('should reset default clone path', () => {
+      settingsStore.getState().setDefaultClonePath('/some/path');
+      settingsStore.getState().resetToDefaults();
+      expect(settingsStore.getState().defaultClonePath).to.equal('');
     });
 
     it('should reset security settings', () => {

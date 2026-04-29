@@ -115,6 +115,16 @@ describe('lv-settings-dialog settings-changed events', () => {
     expect(eventFired).to.be.true;
   });
 
+  it('dispatches settings-changed on handleDefaultClonePathChange', () => {
+    let eventFired = false;
+    window.addEventListener('settings-changed', () => { eventFired = true; }, { once: true });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).handleDefaultClonePathChange(makeChangeEvent('/home/user/projects'));
+
+    expect(eventFired).to.be.true;
+  });
+
   it('dispatches settings-changed on handleStaleBranchDaysChange', () => {
     let eventFired = false;
     window.addEventListener('settings-changed', () => { eventFired = true; }, { once: true });

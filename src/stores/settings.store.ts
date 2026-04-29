@@ -21,6 +21,7 @@ export interface SettingsState {
   // Git defaults
   defaultBranchName: string;
   defaultRemoteName: string;
+  defaultClonePath: string;
 
   // Graph settings
   showAvatars: boolean;
@@ -63,6 +64,7 @@ export interface SettingsState {
   setGraphColorScheme: (scheme: GraphColorScheme) => void;
   setDefaultBranchName: (name: string) => void;
   setDefaultRemoteName: (name: string) => void;
+  setDefaultClonePath: (path: string) => void;
   setShowAvatars: (show: boolean) => void;
   setShowCommitSize: (show: boolean) => void;
   setGraphRowHeight: (height: number) => void;
@@ -91,6 +93,7 @@ const defaultSettings = {
   density: 'comfortable' as Density,
   defaultBranchName: 'main',
   defaultRemoteName: 'origin',
+  defaultClonePath: '',
   showAvatars: true,
   showCommitSize: true,
   graphRowHeight: 40,
@@ -142,6 +145,8 @@ export const settingsStore = createStore<SettingsState>()(
       setDefaultBranchName: (defaultBranchName) => set({ defaultBranchName }),
 
       setDefaultRemoteName: (defaultRemoteName) => set({ defaultRemoteName }),
+
+      setDefaultClonePath: (defaultClonePath) => set({ defaultClonePath }),
 
       setShowAvatars: (showAvatars) => set({ showAvatars }),
 
