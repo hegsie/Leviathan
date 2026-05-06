@@ -640,11 +640,20 @@ export class LvRemoteDialog extends LitElement {
       if (result.success) {
         await this.loadRemotes();
         this.dispatchEvent(new CustomEvent('remotes-changed', { bubbles: true, composed: true }));
+        showToast(`Removed remote ${remote.name}`, 'success');
       } else {
-        this.error = result.error?.message ?? 'Failed to remove remote';
+        // Match the toast pattern used by sibling list-row actions
+        // (handleFetchRemote, handlePruneRemote).
+        showToast(
+          `Failed to remove remote: ${result.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
       }
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Unknown error';
+      showToast(
+        `Failed to remove remote: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error',
+      );
     }
   }
 

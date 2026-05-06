@@ -632,9 +632,15 @@ export class AppShell extends LitElement {
     e.preventDefault();
   };
 
-  // Handle repository-refresh events from window (e.g., after commit)
+  // Handle repository-refresh events from window (e.g., after commit).
+  // External callers expect a full refresh (store + graph + indexes), not just
+  // the graph. The internalRefreshActive guard prevents re-entry: handleRefresh
+  // itself dispatches `repository-refresh` to notify other components, and
+  // without the guard that would loop back here forever.
+  private internalRefreshActive = false;
   private handleWindowRefresh = (): void => {
-    this.graphCanvas?.refresh?.();
+    if (this.internalRefreshActive) return;
+    this.handleRefresh();
   };
 
   // Handle refs-changed from file watcher (debounced)
@@ -1680,24 +1686,30 @@ export class AppShell extends LitElement {
   }
 
   private async handleRefresh(): Promise<void> {
-    // Refresh the repository state (e.g., after cherry-pick, merge, rebase)
-    if (this.activeRepository) {
-      const result = await gitService.openRepository({ path: this.activeRepository.repository.path });
-      if (result.success && result.data) {
-        repositoryStore.getState().updateActiveRepository(result.data);
-      } else if (!result.success) {
-        showToast(result.error?.message ?? 'Failed to refresh repository', 'error');
+    // Re-entrancy guard: the dispatch below also wakes handleWindowRefresh.
+    this.internalRefreshActive = true;
+    try {
+      // Refresh the repository state (e.g., after cherry-pick, merge, rebase)
+      if (this.activeRepository) {
+        const result = await gitService.openRepository({ path: this.activeRepository.repository.path });
+        if (result.success && result.data) {
+          repositoryStore.getState().updateActiveRepository(result.data);
+        } else if (!result.success) {
+          showToast(result.error?.message ?? 'Failed to refresh repository', 'error');
+        }
       }
+      // Trigger refresh of the graph
+      this.graphCanvas?.refresh?.();
+      // Refresh search indexes incrementally
+      if (this.activeRepository) {
+        searchIndexService.refresh(this.activeRepository.repository.path);
+        embeddingIndexService.refreshIndex(this.activeRepository.repository.path);
+      }
+      // Dispatch event for other components (like context dashboard) to update
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+    } finally {
+      this.internalRefreshActive = false;
     }
-    // Trigger refresh of the graph
-    this.graphCanvas?.refresh?.();
-    // Refresh search indexes incrementally
-    if (this.activeRepository) {
-      searchIndexService.refresh(this.activeRepository.repository.path);
-      embeddingIndexService.refreshIndex(this.activeRepository.repository.path);
-    }
-    // Dispatch event for other components (like context dashboard) to update
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private async handleRefreshAccount(e: CustomEvent<{ accountId: string }>): Promise<void> {
@@ -2516,6 +2528,7 @@ export class AppShell extends LitElement {
                             .commitFile=${this.diffCommitFile}
                             .hasPartialStaging=${this.diffFilePartiallyStaged}
                             @file-edited=${() => this.handleRefresh()}
+                            @status-changed=${() => this.handleRefresh()}
                           ></lv-diff-view>
                         </div>
                       </div>

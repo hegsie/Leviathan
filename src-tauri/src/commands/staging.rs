@@ -463,41 +463,46 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// Apply a patch to the index. Internal helper shared by stage_hunk /
+/// unstage_hunk; uses a unique temp file per call so concurrent invocations
+/// don't clobber each other's patch on disk.
+fn apply_patch_to_index(repo_path: &str, patch: &str, reverse: bool) -> Result<()> {
+    // NamedTempFile produces a unique name (random suffix) and removes
+    // the file on drop, so concurrent calls cannot collide.
+    let mut tmp = tempfile::Builder::new()
+        .prefix("leviathan_hunk_")
+        .suffix(".patch")
+        .tempfile()?;
+    tmp.write_all(patch.as_bytes())?;
+    tmp.flush()?;
+
+    let mut cmd = create_command("git");
+    if reverse {
+        cmd.args(["apply", "--cached", "--reverse", "--unidiff-zero"]);
+    } else {
+        cmd.args(["apply", "--cached", "--unidiff-zero"]);
+    }
+    let output = cmd.arg(tmp.path()).current_dir(repo_path).output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let label = if reverse { "unstage" } else { "stage" };
+        return Err(crate::error::LeviathanError::OperationFailed(format!(
+            "Failed to {} hunk: {}",
+            label, stderr
+        )));
+    }
+
+    Ok(())
+}
+
 /// Stage a specific hunk from a diff
 ///
 /// Takes a patch string containing just the hunk to stage (with proper headers)
 /// and applies it to the index using git apply --cached
 #[command]
 pub async fn stage_hunk(repo_path: String, patch: String) -> Result<()> {
-    // Create a temporary file for the patch
-    let temp_dir = std::env::temp_dir();
-    let patch_file = temp_dir.join(format!("leviathan_hunk_{}.patch", std::process::id()));
-
-    // Write patch to temp file
-    let mut file = std::fs::File::create(&patch_file)?;
-    file.write_all(patch.as_bytes())?;
-    file.flush()?;
-    drop(file);
-
-    // Apply the patch to the index
-    let output = create_command("git")
-        .args(["apply", "--cached", "--unidiff-zero"])
-        .arg(&patch_file)
-        .current_dir(&repo_path)
-        .output()?;
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&patch_file);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(crate::error::LeviathanError::OperationFailed(format!(
-            "Failed to stage hunk: {}",
-            stderr
-        )));
-    }
-
-    Ok(())
+    apply_patch_to_index(&repo_path, &patch, false)
 }
 
 /// Unstage a specific hunk from the index
@@ -505,35 +510,7 @@ pub async fn stage_hunk(repo_path: String, patch: String) -> Result<()> {
 /// Takes a patch string and applies it in reverse to unstage
 #[command]
 pub async fn unstage_hunk(repo_path: String, patch: String) -> Result<()> {
-    // Create a temporary file for the patch
-    let temp_dir = std::env::temp_dir();
-    let patch_file = temp_dir.join(format!("leviathan_hunk_{}.patch", std::process::id()));
-
-    // Write patch to temp file
-    let mut file = std::fs::File::create(&patch_file)?;
-    file.write_all(patch.as_bytes())?;
-    file.flush()?;
-    drop(file);
-
-    // Apply the patch in reverse to unstage
-    let output = create_command("git")
-        .args(["apply", "--cached", "--reverse", "--unidiff-zero"])
-        .arg(&patch_file)
-        .current_dir(&repo_path)
-        .output()?;
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&patch_file);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(crate::error::LeviathanError::OperationFailed(format!(
-            "Failed to unstage hunk: {}",
-            stderr
-        )));
-    }
-
-    Ok(())
+    apply_patch_to_index(&repo_path, &patch, true)
 }
 
 /// Write content to a file and optionally stage it

@@ -148,36 +148,44 @@ pub async fn fetch(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
-    let do_fetch = async {
-        let repo = git2::Repository::open(Path::new(&path))?;
+    let do_fetch = async move {
+        let path_clone = path.clone();
+        let prune_val = prune.unwrap_or(false);
+        let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
+        let remote_name_for_event = remote_name_owned.clone();
 
-        let remote_name = remote.as_deref().unwrap_or("origin");
-        let mut git_remote = repo
-            .find_remote(remote_name)
-            .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
+        // git2 fetch is blocking network I/O; offload to a blocking thread so
+        // it doesn't starve the Tokio runtime.
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let repo = git2::Repository::open(Path::new(&path_clone))?;
+            let mut git_remote = repo
+                .find_remote(&remote_name_owned)
+                .map_err(|_| LeviathanError::RemoteNotFound(remote_name_owned.clone()))?;
 
-        let mut fetch_opts = credentials_service::get_fetch_options(token);
+            let mut fetch_opts = credentials_service::get_fetch_options(token);
+            if prune_val {
+                fetch_opts.prune(git2::FetchPrune::On);
+            }
 
-        if prune.unwrap_or(false) {
-            fetch_opts.prune(git2::FetchPrune::On);
-        }
+            let refspecs: Vec<String> = git_remote
+                .fetch_refspecs()?
+                .iter()
+                .filter_map(|s| s.map(|s| s.to_string()))
+                .collect();
+            let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
 
-        let refspecs: Vec<String> = git_remote
-            .fetch_refspecs()?
-            .iter()
-            .filter_map(|s| s.map(|s| s.to_string()))
-            .collect();
-
-        let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
-
-        git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
+            git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| LeviathanError::Custom(format!("Fetch task failed: {}", e)))??;
 
         // Emit success event
         let _ = app_handle.emit(
             "remote-operation-completed",
             RemoteOperationResult {
                 operation: "fetch".to_string(),
-                remote: remote_name.to_string(),
+                remote: remote_name_for_event,
                 success: true,
                 message: "Fetch completed successfully".to_string(),
             },
@@ -215,95 +223,116 @@ pub async fn pull(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
-    let do_pull = async {
-        let repo = git2::Repository::open(Path::new(&path))?;
+    let do_pull = async move {
+        let path_for_task = path.clone();
+        let remote_owned = remote.unwrap_or_else(|| "origin".to_string());
+        let remote_for_task = remote_owned.clone();
+        let branch_for_task = branch.clone();
+        let rebase_val = rebase.unwrap_or(false);
 
-        let remote_name = remote.as_deref().unwrap_or("origin");
+        // Whole pull is git2 / blocking network I/O. Run it on a blocking
+        // thread so the Tokio runtime stays responsive.
+        let (remote_name_returned, message) =
+            tokio::task::spawn_blocking(move || -> Result<(String, String)> {
+                // First fetch (network I/O)
+                fetch_internal(&path_for_task, &remote_for_task, false, token)?;
 
-        // First fetch (without emitting separate event)
-        fetch_internal(&path, remote_name, false, token)?;
+                let repo = git2::Repository::open(Path::new(&path_for_task))?;
 
-        // Get the branch to merge
-        let branch_name = if let Some(ref b) = branch {
-            b.clone()
-        } else {
-            let head = repo.head()?;
-            head.shorthand().unwrap_or("main").to_string()
-        };
+                let branch_name = if let Some(ref b) = branch_for_task {
+                    b.clone()
+                } else {
+                    let head = repo.head()?;
+                    head.shorthand().unwrap_or("main").to_string()
+                };
 
-        let remote_ref = format!("{}/{}", remote_name, branch_name);
-        let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
-        let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
+                let remote_ref = format!("{}/{}", remote_for_task, branch_name);
+                let fetch_head =
+                    repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
+                let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
 
-        let message: String;
+                let message: String;
 
-        if rebase.unwrap_or(false) {
-            // Rebase onto remote
-            let head = repo.head()?;
-            let head_commit = repo.reference_to_annotated_commit(&head)?;
+                if rebase_val {
+                    let head = repo.head()?;
+                    let head_commit = repo.reference_to_annotated_commit(&head)?;
 
-            let mut rebase_obj =
-                repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
+                    let mut rebase_obj =
+                        repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
 
-            let mut commit_count = 0;
-            while let Some(op) = rebase_obj.next() {
-                let _op = op?;
-                let signature = repo.signature()?;
-                rebase_obj.commit(None, &signature, None)?;
-                commit_count += 1;
-            }
+                    let mut commit_count = 0;
+                    while let Some(op) = rebase_obj.next() {
+                        let _op = op?;
+                        let signature = repo.signature()?;
+                        rebase_obj.commit(None, &signature, None)?;
+                        commit_count += 1;
+                    }
 
-            rebase_obj.finish(Some(&repo.signature()?))?;
-            message = format!("Rebased {} commit(s)", commit_count);
-        } else {
-            // Merge
-            let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
+                    rebase_obj.finish(Some(&repo.signature()?))?;
+                    message = format!("Rebased {} commit(s)", commit_count);
+                } else {
+                    let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
 
-            if analysis.is_up_to_date() {
-                message = "Already up to date".to_string();
-            } else if analysis.is_fast_forward() {
-                // Fast-forward
-                let refname = format!("refs/heads/{}", branch_name);
-                let mut reference = repo.find_reference(&refname)?;
-                reference.set_target(fetch_commit.id(), "Fast-forward")?;
-                repo.set_head(&refname)?;
-                repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-                message = "Fast-forward merge completed".to_string();
-            } else {
-                // Normal merge
-                repo.merge(&[&fetch_commit], None, None)?;
+                    if analysis.is_up_to_date() {
+                        message = "Already up to date".to_string();
+                    } else if analysis.is_fast_forward() {
+                        let refname = format!("refs/heads/{}", branch_name);
+                        let mut reference = repo.find_reference(&refname)?;
+                        reference.set_target(fetch_commit.id(), "Fast-forward")?;
+                        repo.set_head(&refname)?;
+                        repo.checkout_head(Some(
+                            git2::build::CheckoutBuilder::default().force(),
+                        ))?;
+                        message = "Fast-forward merge completed".to_string();
+                    } else {
+                        // Normal merge. Anything that fails AFTER repo.merge()
+                        // succeeds must reset state, otherwise the working
+                        // copy is permanently stuck in MERGING.
+                        repo.merge(&[&fetch_commit], None, None)?;
 
-                if repo.index()?.has_conflicts() {
-                    return Err(LeviathanError::MergeConflict);
+                        let merge_commit_result = (|| -> Result<()> {
+                            if repo.index()?.has_conflicts() {
+                                return Err(LeviathanError::MergeConflict);
+                            }
+                            let signature = repo.signature()?;
+                            let head = repo.head()?.peel_to_commit()?;
+                            let remote_commit = repo.find_commit(fetch_commit.id())?;
+                            let tree_oid = repo.index()?.write_tree()?;
+                            let tree = repo.find_tree(tree_oid)?;
+                            repo.commit(
+                                Some("HEAD"),
+                                &signature,
+                                &signature,
+                                &format!("Merge {} into {}", remote_ref, branch_name),
+                                &tree,
+                                &[&head, &remote_commit],
+                            )?;
+                            Ok(())
+                        })();
+
+                        if let Err(e) = merge_commit_result {
+                            // Best-effort cleanup; ignore secondary errors so
+                            // the original cause is what surfaces.
+                            let _ = repo.cleanup_state();
+                            return Err(e);
+                        }
+
+                        repo.cleanup_state()?;
+                        message = "Merge completed".to_string();
+                    }
                 }
 
-                // Create merge commit
-                let signature = repo.signature()?;
-                let head = repo.head()?.peel_to_commit()?;
-                let remote_commit = repo.find_commit(fetch_commit.id())?;
-                let tree_oid = repo.index()?.write_tree()?;
-                let tree = repo.find_tree(tree_oid)?;
-
-                repo.commit(
-                    Some("HEAD"),
-                    &signature,
-                    &signature,
-                    &format!("Merge {} into {}", remote_ref, branch_name),
-                    &tree,
-                    &[&head, &remote_commit],
-                )?;
-
-                repo.cleanup_state()?;
-                message = "Merge completed".to_string();
-            }
-        }
+                Ok((remote_for_task, message))
+            })
+            .await
+            .map_err(|e| LeviathanError::Custom(format!("Pull task failed: {}", e)))??;
 
         // Emit success event
         let _ = app_handle.emit(
             "remote-operation-completed",
             RemoteOperationResult {
                 operation: "pull".to_string(),
-                remote: remote_name.to_string(),
+                remote: remote_name_returned,
                 success: true,
                 message,
             },

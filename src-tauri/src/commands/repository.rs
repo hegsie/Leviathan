@@ -71,6 +71,44 @@ pub async fn open_repository(path: String) -> Result<Repository> {
     })
 }
 
+/// Validate a clone URL: reject values that could be parsed as a CLI flag, and
+/// require a recognizable scheme. This is critical defense against
+/// `--upload-pack=`/`--config=` style argument injection when the URL is
+/// passed to `git clone`.
+fn validate_clone_url(url: &str) -> Result<()> {
+    if url.is_empty() {
+        return Err(LeviathanError::Custom("Clone URL is empty".into()));
+    }
+    if url.starts_with('-') {
+        return Err(LeviathanError::Custom(
+            "Clone URL must not start with '-'".into(),
+        ));
+    }
+    let lower = url.to_ascii_lowercase();
+    let has_scheme = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("ssh://")
+        || lower.starts_with("git://")
+        || lower.starts_with("file://")
+        || lower.starts_with("git@");
+    // Allow user@host:path SCP-style syntax (must contain ':' before any '/')
+    let scp_style = !has_scheme
+        && url.contains('@')
+        && url.contains(':')
+        && url
+            .find(':')
+            .zip(url.find('/'))
+            .map(|(c, s)| c < s)
+            .unwrap_or(true);
+    if !has_scheme && !scp_style {
+        return Err(LeviathanError::Custom(format!(
+            "Unsupported clone URL scheme: {}",
+            url
+        )));
+    }
+    Ok(())
+}
+
 /// Detect if a repository is a partial clone and extract the filter
 fn detect_partial_clone_status(repo: &git2::Repository) -> (bool, Option<String>) {
     let config = match repo.config() {
@@ -107,6 +145,7 @@ pub async fn clone_repository(
     single_branch: Option<bool>,
     timeout_secs: Option<u64>,
 ) -> Result<Repository> {
+    validate_clone_url(&url)?;
     let do_clone = async {
         let dest_path = std::path::PathBuf::from(&path);
         let url_clone = url.clone();
@@ -159,6 +198,9 @@ pub async fn clone_repository(
                     url_clone.clone()
                 };
 
+                // `--` prevents URL/path from being parsed as a flag
+                // (defense against `--upload-pack=` style injection).
+                cmd.arg("--");
                 cmd.arg(&effective_url);
                 cmd.arg(&dest_path);
 

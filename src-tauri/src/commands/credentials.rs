@@ -530,19 +530,33 @@ pub async fn store_keyring_token(key: String, value: String) -> Result<()> {
             ])
             .output();
 
-        let output = std::process::Command::new("security")
+        // `-w` last with no value => password read from stdin. This avoids
+        // exposing the token via argv (`ps -E` is readable by any process
+        // running under the same user).
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("security")
             .args([
                 "add-generic-password",
                 "-s",
                 INTEGRATION_SERVICE,
                 "-a",
                 &key,
-                "-w",
-                &value,
                 "-A", // Allow any application to access without prompt
                 "-U", // Update if exists
+                "-w",
             ])
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run security: {e}")))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(value.as_bytes()).map_err(|e| {
+                LeviathanError::OperationFailed(format!("Failed to write token: {e}"))
+            })?;
+        }
+        let output = child
+            .wait_with_output()
             .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run security: {e}")))?;
 
         if !output.status.success() {

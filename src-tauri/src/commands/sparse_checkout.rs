@@ -111,7 +111,7 @@ pub async fn set_sparse_checkout_patterns(
         ));
     }
 
-    let mut args: Vec<&str> = vec!["sparse-checkout", "set"];
+    let mut args: Vec<&str> = vec!["sparse-checkout", "set", "--"];
     for p in &patterns {
         args.push(p.as_str());
     }
@@ -131,7 +131,7 @@ pub async fn add_sparse_checkout_patterns(
         ));
     }
 
-    let mut args: Vec<&str> = vec!["sparse-checkout", "add"];
+    let mut args: Vec<&str> = vec!["sparse-checkout", "add", "--"];
     for p in &patterns {
         args.push(p.as_str());
     }

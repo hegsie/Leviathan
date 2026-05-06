@@ -8,6 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
 
 interface ReflogContextMenuState {
@@ -345,9 +346,15 @@ export class LvReflogDialog extends LitElement {
       const result = await gitService.getReflog(this.repositoryPath, 50);
       if (result.success && result.data) {
         this.entries = result.data;
+      } else if (!result.success) {
+        showToast(`Failed to load reflog: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to load reflog:', err);
+      showToast(
+        `Failed to load reflog: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error',
+      );
     } finally {
       this.loading = false;
     }
@@ -408,10 +415,14 @@ export class LvReflogDialog extends LitElement {
         }));
         this.close();
       } else {
-        console.error('Reset failed:', result.error);
+        showToast(`Reset failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Reset failed:', err);
+      showToast(
+        `Reset failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error',
+      );
     } finally {
       this.resetting = false;
     }
