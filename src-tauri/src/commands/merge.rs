@@ -136,20 +136,35 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
 
     let signature = repo.signature()?;
 
-    while let Some(op) = rebase.next() {
-        let _op = op?;
+    // git2::Rebase does NOT call abort() on Drop. Without an explicit abort,
+    // failures other than the expected RebaseConflict (e.g. missing
+    // user.name signature, mid-loop git2 errors) leave the working tree
+    // permanently stuck in REBASE state. We do NOT abort on RebaseConflict
+    // because the UI surfaces a "resolve conflicts" flow that needs the
+    // rebase state intact; the user can call abort_rebase explicitly.
+    let result = (|| -> Result<()> {
+        while let Some(op) = rebase.next() {
+            let _op = op?;
 
-        // Check for conflicts
-        if repo.index()?.has_conflicts() {
-            return Err(LeviathanError::RebaseConflict);
+            if repo.index()?.has_conflicts() {
+                return Err(LeviathanError::RebaseConflict);
+            }
+
+            rebase.commit(None, &signature, None)?;
         }
 
-        rebase.commit(None, &signature, None)?;
+        rebase.finish(Some(&signature))?;
+        Ok(())
+    })();
+
+    match result {
+        Err(LeviathanError::RebaseConflict) => Err(LeviathanError::RebaseConflict),
+        Err(e) => {
+            let _ = rebase.abort();
+            Err(e)
+        }
+        Ok(()) => Ok(()),
     }
-
-    rebase.finish(Some(&signature))?;
-
-    Ok(())
 }
 
 /// Preview a rebase by running it in a temporary worktree (ghost rebase)

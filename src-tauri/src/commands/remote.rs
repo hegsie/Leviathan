@@ -10,7 +10,7 @@ use crate::models::{
 };
 use crate::services::cancellation::CancellationRegistry;
 use crate::services::credentials_service;
-use crate::utils::create_command;
+use crate::utils::{create_command, reject_flag_like};
 
 /// Add a new remote
 #[command]
@@ -259,15 +259,37 @@ pub async fn pull(
                     let mut rebase_obj =
                         repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
 
+                    // `git2::Rebase` does NOT call abort() on Drop. Without
+                    // an explicit abort, errors other than the expected
+                    // RebaseConflict (e.g. missing user.name signature,
+                    // mid-loop git2 errors) would leave the working tree
+                    // permanently stuck in REBASE state. We do NOT abort on
+                    // RebaseConflict because the UI surfaces a "resolve
+                    // conflicts" flow that needs the rebase state intact.
                     let mut commit_count = 0;
-                    while let Some(op) = rebase_obj.next() {
-                        let _op = op?;
-                        let signature = repo.signature()?;
-                        rebase_obj.commit(None, &signature, None)?;
-                        commit_count += 1;
+                    let rebase_result = (|| -> Result<()> {
+                        while let Some(op) = rebase_obj.next() {
+                            let _op = op?;
+                            if repo.index()?.has_conflicts() {
+                                return Err(LeviathanError::RebaseConflict);
+                            }
+                            let signature = repo.signature()?;
+                            rebase_obj.commit(None, &signature, None)?;
+                            commit_count += 1;
+                        }
+                        rebase_obj.finish(Some(&repo.signature()?))?;
+                        Ok(())
+                    })();
+                    match rebase_result {
+                        Err(LeviathanError::RebaseConflict) => {
+                            return Err(LeviathanError::RebaseConflict);
+                        }
+                        Err(e) => {
+                            let _ = rebase_obj.abort();
+                            return Err(e);
+                        }
+                        Ok(()) => {}
                     }
-
-                    rebase_obj.finish(Some(&repo.signature()?))?;
                     message = format!("Rebased {} commit(s)", commit_count);
                 } else {
                     let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
@@ -397,6 +419,16 @@ pub async fn push(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
+    // Reject branch values that could be parsed as a flag by `git push`
+    // (e.g. `--receive-pack=/tmp/evil`). The remote name is safer because
+    // it must already exist in the repo config.
+    if let Some(ref b) = branch {
+        reject_flag_like(b, "Branch name")?;
+    }
+    if let Some(ref r) = remote {
+        reject_flag_like(r, "Remote name")?;
+    }
+
     let do_push = async move {
         let path_for_task = path.clone();
         let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
@@ -541,6 +573,9 @@ fn push_via_cli(
         cmd.arg("--set-upstream");
     }
 
+    // `--` keeps remote_name / branch_name from being parsed as flags by git
+    // even though callers also validate them with reject_flag_like.
+    cmd.arg("--");
     cmd.arg(remote_name);
     cmd.arg(branch_name);
 
@@ -628,6 +663,14 @@ pub async fn push_to_multiple_remotes(
     push_tags: bool,
     token: Option<String>,
 ) -> Result<MultiPushResult> {
+    // Reject branch and remote names that could be parsed as flags.
+    if let Some(ref b) = branch {
+        reject_flag_like(b, "Branch name")?;
+    }
+    for r in &remotes {
+        reject_flag_like(r, "Remote name")?;
+    }
+
     // Each push is blocking network I/O for potentially seconds; running them
     // sequentially on the async executor blocks a Tokio worker for the full
     // duration of all pushes combined. Offload to a blocking thread.

@@ -308,9 +308,17 @@ pub async fn oauth_exchange_code(
     let text = response.text().await.unwrap_or_default();
 
     if !status.is_success() {
+        // Some IdPs echo the submitted `code` / `code_verifier` (PKCE secret)
+        // back in 4xx response bodies. Discard the body before surfacing the
+        // error so it doesn't reach toasts or logs.
+        tracing::debug!(
+            "OAuth exchange failed with status {} ({} body bytes discarded)",
+            status,
+            text.len()
+        );
         return Err(LeviathanError::OAuth(format!(
-            "Token request failed with status {}: {}",
-            status, text
+            "Token request failed with status {}",
+            status
         )));
     }
 

@@ -353,6 +353,12 @@ fn get_commits_between_refs(
     compare_ref: &str,
     max_commits: u32,
 ) -> Result<String> {
+    // Reject refs that could be parsed as flags (e.g., `--output=/tmp/x`).
+    // We do NOT add a `--` separator because in `git log` `--` denotes
+    // "remaining args are pathspecs", which would then make git treat the
+    // rev range as a path. The leading-`-` rejection is the right defense.
+    crate::utils::reject_flag_like(base_ref, "Base ref")?;
+    crate::utils::reject_flag_like(compare_ref, "Compare ref")?;
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -518,6 +524,8 @@ pub async fn suggest_commit_splits(
 
 /// Get diff stats between two refs
 fn get_diff_stats(repo_path: &str, base_ref: &str, compare_ref: &str) -> Result<String> {
+    crate::utils::reject_flag_like(base_ref, "Base ref")?;
+    crate::utils::reject_flag_like(compare_ref, "Compare ref")?;
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)

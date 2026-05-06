@@ -6,19 +6,7 @@ use std::process::{Command, Stdio};
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-
-/// Reject paths that could be parsed as a CLI flag (starting with `-`).
-/// Without this, `git fetch --upload-pack=evil` style injection is possible
-/// when bundle_path or refspec is user-controlled.
-fn reject_flag_like(value: &str, label: &str) -> Result<()> {
-    if value.starts_with('-') {
-        return Err(LeviathanError::OperationFailed(format!(
-            "{} must not start with '-'",
-            label
-        )));
-    }
-    Ok(())
-}
+use crate::utils::reject_flag_like;
 
 /// Reference in a bundle
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
