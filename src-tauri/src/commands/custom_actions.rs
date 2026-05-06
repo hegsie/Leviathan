@@ -97,13 +97,24 @@ fn shell_quote_posix(value: &str) -> String {
 /// double-quotes, `%VAR%` is expanded and `^`/`&`/`|`/`<`/`>`/`(`/`)`/`!`/`"`
 /// retain meta-character roles in various parsing paths. Rather than try to
 /// quote our way out, we reject any value containing one of these characters.
-/// The caller's `Result` propagation surfaces the rejection as an error.
+/// We also reject ASCII control characters (CR/LF/NUL etc.) since CRLF can
+/// terminate cmd's command-line parser and let bytes after the newline be
+/// interpreted as a new command. The caller's `Result` propagation surfaces
+/// the rejection as an error.
 fn shell_quote_windows(value: &str) -> Result<String> {
     const FORBIDDEN: &[char] = &['%', '^', '&', '<', '>', '|', '(', ')', '!', '"'];
-    if let Some(c) = value.chars().find(|c| FORBIDDEN.contains(c)) {
+    if let Some(c) = value
+        .chars()
+        .find(|c| FORBIDDEN.contains(c) || c.is_ascii_control())
+    {
+        let label = if c.is_ascii_control() {
+            format!("control character (0x{:02X})", c as u32)
+        } else {
+            format!("metacharacter '{}'", c)
+        };
         return Err(LeviathanError::OperationFailed(format!(
-            "Refusing to substitute value containing shell metacharacter '{}' on Windows",
-            c
+            "Refusing to substitute value containing shell {} on Windows",
+            label
         )));
     }
     Ok(format!("\"{}\"", value))

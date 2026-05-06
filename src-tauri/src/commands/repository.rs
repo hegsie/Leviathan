@@ -146,6 +146,24 @@ pub async fn clone_repository(
     timeout_secs: Option<u64>,
 ) -> Result<Repository> {
     validate_clone_url(&url)?;
+    // `--branch` and `--filter` consume the next argv as their value, so a
+    // value starting with `-` is not a flag injection today. We reject them
+    // anyway as defense in depth: a future refactor toward
+    // `--branch=<value>` style would otherwise re-introduce flag injection.
+    if let Some(ref b) = branch {
+        if b.starts_with('-') || b.contains('\n') || b.contains('\r') {
+            return Err(LeviathanError::Custom(
+                "Branch name must not start with '-' or contain newlines".into(),
+            ));
+        }
+    }
+    if let Some(ref f) = filter {
+        if f.starts_with('-') || f.contains('\n') || f.contains('\r') {
+            return Err(LeviathanError::Custom(
+                "Filter spec must not start with '-' or contain newlines".into(),
+            ));
+        }
+    }
     let do_clone = async {
         let dest_path = std::path::PathBuf::from(&path);
         let url_clone = url.clone();

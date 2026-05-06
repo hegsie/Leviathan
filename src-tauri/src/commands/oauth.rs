@@ -395,10 +395,18 @@ pub async fn oauth_refresh_token(
 
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        // Some IdPs echo the submitted refresh_token back inside 4xx error
+        // bodies. Discard the body so it doesn't propagate to user-visible
+        // error toasts or logs.
+        let body_len = response.text().await.unwrap_or_default().len();
+        tracing::debug!(
+            "OAuth refresh failed with status {} ({} body bytes discarded)",
+            status,
+            body_len
+        );
         return Err(LeviathanError::OAuth(format!(
-            "Refresh request failed with status {}: {}",
-            status, text
+            "Refresh request failed with status {}",
+            status
         )));
     }
 

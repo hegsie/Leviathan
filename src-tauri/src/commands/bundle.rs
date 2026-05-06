@@ -156,6 +156,7 @@ pub async fn bundle_verify(path: String, bundle_path: String) -> Result<BundleVe
         return Err(LeviathanError::RepositoryNotFound(path));
     }
 
+    reject_flag_like(&bundle_path, "Bundle path")?;
     let bundle_file = Path::new(&bundle_path);
     if !bundle_file.exists() {
         return Err(LeviathanError::OperationFailed(format!(
@@ -164,11 +165,13 @@ pub async fn bundle_verify(path: String, bundle_path: String) -> Result<BundleVe
         )));
     }
 
-    // Run git bundle verify
+    // Run git bundle verify. `--` keeps a malicious bundle_path from being
+    // parsed as a flag, mirroring bundle_list_heads / bundle_unbundle.
     let output = Command::new("git")
         .current_dir(repo_path)
         .arg("bundle")
         .arg("verify")
+        .arg("--")
         .arg(&bundle_path)
         .output()
         .map_err(|e| {
