@@ -93,27 +93,47 @@ fn shell_quote_posix(value: &str) -> String {
 }
 
 /// Quote a value for safe interpolation into a Windows `cmd /C` command line.
-/// `cmd.exe` quoting is notoriously messy; we wrap in double-quotes, double any
-/// embedded double-quotes, and reject any caret/percent/ampersand metacharacter
-/// that would still be expanded inside double-quotes by `cmd.exe`.
-fn shell_quote_windows(value: &str) -> String {
-    let escaped: String = value.replace('"', "\"\"");
-    format!("\"{}\"", escaped)
+/// `cmd.exe` quoting is fundamentally unsound for hostile input: even inside
+/// double-quotes, `%VAR%` is expanded and `^`/`&`/`|`/`<`/`>`/`(`/`)`/`!`/`"`
+/// retain meta-character roles in various parsing paths. Rather than try to
+/// quote our way out, we reject any value containing one of these characters.
+/// The caller's `Result` propagation surfaces the rejection as an error.
+fn shell_quote_windows(value: &str) -> Result<String> {
+    const FORBIDDEN: &[char] = &['%', '^', '&', '<', '>', '|', '(', ')', '!', '"'];
+    if let Some(c) = value.chars().find(|c| FORBIDDEN.contains(c)) {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Refusing to substitute value containing shell metacharacter '{}' on Windows",
+            c
+        )));
+    }
+    Ok(format!("\"{}\"", value))
 }
 
 /// Replace template variables in a string. Substituted values are shell-quoted
 /// for the target shell so that branch names containing metacharacters
 /// (e.g. `` `;rm -rf ~;# ``) cannot break out of the surrounding command.
-fn substitute_variables(input: &str, repo_path: &str, branch: &str, for_shell: bool) -> String {
+/// Returns Err on Windows if a substituted value contains a metacharacter
+/// that cmd.exe quoting cannot safely handle.
+fn substitute_variables(
+    input: &str,
+    repo_path: &str,
+    branch: &str,
+    for_shell: bool,
+) -> Result<String> {
     if for_shell {
         let (repo_q, branch_q) = if cfg!(target_os = "windows") {
-            (shell_quote_windows(repo_path), shell_quote_windows(branch))
+            (
+                shell_quote_windows(repo_path)?,
+                shell_quote_windows(branch)?,
+            )
         } else {
             (shell_quote_posix(repo_path), shell_quote_posix(branch))
         };
-        input.replace("$REPO", &repo_q).replace("$BRANCH", &branch_q)
+        Ok(input
+            .replace("$REPO", &repo_q)
+            .replace("$BRANCH", &branch_q))
     } else {
-        input.replace("$REPO", repo_path).replace("$BRANCH", branch)
+        Ok(input.replace("$REPO", repo_path).replace("$BRANCH", branch))
     }
 }
 
@@ -197,19 +217,19 @@ pub async fn run_custom_action(path: String, action_id: String) -> Result<Action
     let branch = get_current_branch(repo_path);
     // Command and arguments are passed to `sh -c` / `cmd /C`, so substituted
     // values must be shell-quoted to prevent injection via branch names like
-    // `` `;rm -rf ~;# ``.
-    let command_str = substitute_variables(&action.command, &path, &branch, true);
-    let arguments_str = action
-        .arguments
-        .as_deref()
-        .map(|args| substitute_variables(args, &path, &branch, true))
-        .unwrap_or_default();
+    // `` `;rm -rf ~;# ``. On Windows, values with `cmd.exe` metacharacters
+    // are rejected outright (see shell_quote_windows).
+    let command_str = substitute_variables(&action.command, &path, &branch, true)?;
+    let arguments_str = match action.arguments.as_deref() {
+        Some(args) => substitute_variables(args, &path, &branch, true)?,
+        None => String::new(),
+    };
 
     // Working directory is passed via `current_dir`, not interpolated into a
     // shell command, so plain substitution is correct here.
     let working_dir = match action.working_directory.as_deref() {
         Some("repo_root") | None => path.clone(),
-        Some(custom_path) => substitute_variables(custom_path, &path, &branch, false),
+        Some(custom_path) => substitute_variables(custom_path, &path, &branch, false)?,
     };
 
     // Log the command being executed for auditability
@@ -427,31 +447,35 @@ mod tests {
 
     #[test]
     fn test_substitute_variables() {
-        let result = substitute_variables("echo $REPO on $BRANCH", "/my/repo", "main", false);
+        let result = substitute_variables("echo $REPO on $BRANCH", "/my/repo", "main", false)
+            .expect("substitution should succeed");
         assert_eq!(result, "echo /my/repo on main");
     }
 
     #[test]
     fn test_substitute_variables_no_placeholders() {
-        let result = substitute_variables("echo hello", "/my/repo", "main", false);
+        let result = substitute_variables("echo hello", "/my/repo", "main", false)
+            .expect("substitution should succeed");
         assert_eq!(result, "echo hello");
     }
 
     #[test]
     fn test_substitute_variables_shell_quotes_metacharacters() {
-        // Must defeat shell injection via branch name
-        let result = substitute_variables(
-            "git log $BRANCH",
-            "/repo",
-            "`;rm -rf ~;#",
-            true,
-        );
-        if cfg!(target_os = "windows") {
-            // Windows uses double-quoting; just ensure it's wrapped
-            assert!(result.contains("\"`;rm -rf ~;#\""));
-        } else {
-            // POSIX single-quoted: backticks/semis become inert
+        // Must defeat shell injection via branch name (POSIX path).
+        if !cfg!(target_os = "windows") {
+            let result = substitute_variables("git log $BRANCH", "/repo", "`;rm -rf ~;#", true)
+                .expect("POSIX quoting should succeed");
             assert_eq!(result, "git log '`;rm -rf ~;#'");
+        }
+    }
+
+    #[test]
+    fn test_substitute_variables_rejects_windows_metachars() {
+        // Windows path: substitution must be rejected when value contains
+        // characters cmd.exe quoting cannot handle.
+        if cfg!(target_os = "windows") {
+            let err = substitute_variables("git log $BRANCH", "/repo", "%USERPROFILE%", true);
+            assert!(err.is_err(), "expected rejection of % in branch name");
         }
     }
 
@@ -459,7 +483,8 @@ mod tests {
     fn test_substitute_variables_quotes_apostrophe_branch() {
         // POSIX-only check; ensures embedded single quote is escaped properly
         if !cfg!(target_os = "windows") {
-            let result = substitute_variables("echo $BRANCH", "/repo", "it's", true);
+            let result = substitute_variables("echo $BRANCH", "/repo", "it's", true)
+                .expect("POSIX quoting should succeed");
             assert_eq!(result, "echo 'it'\\''s'");
         }
     }
@@ -504,19 +529,22 @@ mod tests {
             "/my/repo",
             "develop",
             false,
-        );
+        )
+        .expect("substitution should succeed");
         assert_eq!(result, "/my/repo is on develop and /my/repo again");
     }
 
     #[test]
     fn test_substitute_variables_empty_input() {
-        let result = substitute_variables("", "/repo", "main", false);
+        let result =
+            substitute_variables("", "/repo", "main", false).expect("substitution should succeed");
         assert_eq!(result, "");
     }
 
     #[test]
     fn test_substitute_variables_empty_branch() {
-        let result = substitute_variables("branch is $BRANCH", "/repo", "", false);
+        let result = substitute_variables("branch is $BRANCH", "/repo", "", false)
+            .expect("substitution should succeed");
         assert_eq!(result, "branch is ");
     }
 

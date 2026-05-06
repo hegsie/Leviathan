@@ -634,12 +634,18 @@ export class AppShell extends LitElement {
 
   // Handle repository-refresh events from window (e.g., after commit).
   // External callers expect a full refresh (store + graph + indexes), not just
-  // the graph. The internalRefreshActive guard prevents re-entry: handleRefresh
-  // itself dispatches `repository-refresh` to notify other components, and
-  // without the guard that would loop back here forever.
+  // the graph. handleRefresh itself dispatches `repository-refresh` to notify
+  // other components, so we must not loop back into a fresh refresh while one
+  // is in flight. But we also can't simply drop external requests that arrive
+  // mid-refresh (the user-visible state would lag a commit behind), so we
+  // remember the pending request and re-run after the current refresh ends.
   private internalRefreshActive = false;
+  private pendingExternalRefresh = false;
   private handleWindowRefresh = (): void => {
-    if (this.internalRefreshActive) return;
+    if (this.internalRefreshActive) {
+      this.pendingExternalRefresh = true;
+      return;
+    }
     this.handleRefresh();
   };
 
@@ -1709,6 +1715,12 @@ export class AppShell extends LitElement {
       window.dispatchEvent(new CustomEvent('repository-refresh'));
     } finally {
       this.internalRefreshActive = false;
+    }
+    // If an external refresh request landed while we were awaiting above,
+    // honour it now so the UI doesn't lag behind the latest state change.
+    if (this.pendingExternalRefresh) {
+      this.pendingExternalRefresh = false;
+      this.handleRefresh();
     }
   }
 

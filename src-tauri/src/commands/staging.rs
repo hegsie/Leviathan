@@ -743,33 +743,7 @@ pub async fn stage_hunk_by_index(path: String, file_path: String, hunk_index: u3
         })?;
 
     let patch = build_hunk_patch(&file_path, hunk);
-
-    // Write patch to temp file and apply
-    let temp_dir = std::env::temp_dir();
-    let patch_file = temp_dir.join(format!("leviathan_stage_hunk_{}.patch", std::process::id()));
-
-    let mut file = std::fs::File::create(&patch_file)?;
-    file.write_all(patch.as_bytes())?;
-    file.flush()?;
-    drop(file);
-
-    let output = create_command("git")
-        .args(["apply", "--cached", "--unidiff-zero"])
-        .arg(&patch_file)
-        .current_dir(&path)
-        .output()?;
-
-    let _ = std::fs::remove_file(&patch_file);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(crate::error::LeviathanError::OperationFailed(format!(
-            "Failed to stage hunk: {}",
-            stderr
-        )));
-    }
-
-    Ok(())
+    apply_patch_to_index(&path, &patch, false)
 }
 
 /// Unstage a specific hunk by index
@@ -793,36 +767,7 @@ pub async fn unstage_hunk_by_index(path: String, file_path: String, hunk_index: 
         })?;
 
     let patch = build_hunk_patch(&file_path, hunk);
-
-    // Write patch to temp file and apply in reverse
-    let temp_dir = std::env::temp_dir();
-    let patch_file = temp_dir.join(format!(
-        "leviathan_unstage_hunk_{}.patch",
-        std::process::id()
-    ));
-
-    let mut file = std::fs::File::create(&patch_file)?;
-    file.write_all(patch.as_bytes())?;
-    file.flush()?;
-    drop(file);
-
-    let output = create_command("git")
-        .args(["apply", "--cached", "--reverse", "--unidiff-zero"])
-        .arg(&patch_file)
-        .current_dir(&path)
-        .output()?;
-
-    let _ = std::fs::remove_file(&patch_file);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(crate::error::LeviathanError::OperationFailed(format!(
-            "Failed to unstage hunk: {}",
-            stderr
-        )));
-    }
-
-    Ok(())
+    apply_patch_to_index(&path, &patch, true)
 }
 
 /// Stage specific lines from a diff

@@ -140,10 +140,7 @@ fn keyring_set(service: &str, account: &str, password: &str) -> bool {
                 return false;
             }
         }
-        child
-            .wait()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        child.wait().map(|s| s.success()).unwrap_or(false)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -418,7 +415,7 @@ pub fn get_push_options<'a>(token: Option<String>) -> git2::PushOptions<'a> {
 }
 
 /// Get remote callbacks with both credential and progress support
-fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a> {
+pub fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a> {
     let mut callbacks = CredentialsHelper::new_with_token(token).get_callbacks();
 
     // Add transfer progress callback

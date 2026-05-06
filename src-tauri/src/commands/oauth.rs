@@ -328,9 +328,8 @@ pub async fn oauth_exchange_code(
     // Try to parse as token response. Do NOT log the raw response — it contains
     // access_token / refresh_token / id_token in plaintext.
     tracing::debug!("Token exchange response received ({} bytes)", text.len());
-    let tokens: OAuthTokenResponse = serde_json::from_str(&text).map_err(|e| {
-        LeviathanError::OAuth(format!("Failed to parse token response: {}", e))
-    })?;
+    let tokens: OAuthTokenResponse = serde_json::from_str(&text)
+        .map_err(|e| LeviathanError::OAuth(format!("Failed to parse token response: {}", e)))?;
 
     tracing::info!(
         "Parsed token - has access_token: {}",
