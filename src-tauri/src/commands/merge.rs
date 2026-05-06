@@ -97,9 +97,19 @@ pub async fn merge(
             Ok(())
         })();
 
-        if let Err(e) = result {
-            let _ = repo.cleanup_state();
-            return Err(e);
+        // MergeConflict is the expected "user must resolve" path; the UI
+        // drives a conflict-resolution flow that needs MERGE_HEAD intact
+        // (and `abort_merge` to undo). Only call cleanup_state for
+        // non-conflict errors (disk-full, signature missing, etc.).
+        match result {
+            Err(LeviathanError::MergeConflict) => {
+                return Err(LeviathanError::MergeConflict);
+            }
+            Err(e) => {
+                let _ = repo.cleanup_state();
+                return Err(e);
+            }
+            Ok(()) => {}
         }
 
         repo.cleanup_state()?;

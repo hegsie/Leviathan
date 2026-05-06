@@ -329,11 +329,19 @@ pub async fn pull(
                             Ok(())
                         })();
 
-                        if let Err(e) = merge_commit_result {
-                            // Best-effort cleanup; ignore secondary errors so
-                            // the original cause is what surfaces.
-                            let _ = repo.cleanup_state();
-                            return Err(e);
+                        // MergeConflict is the expected "user must resolve"
+                        // path; the UI drives a conflict-resolution flow
+                        // that needs MERGE_HEAD intact. Only cleanup_state
+                        // for non-conflict errors.
+                        match merge_commit_result {
+                            Err(LeviathanError::MergeConflict) => {
+                                return Err(LeviathanError::MergeConflict);
+                            }
+                            Err(e) => {
+                                let _ = repo.cleanup_state();
+                                return Err(e);
+                            }
+                            Ok(()) => {}
                         }
 
                         repo.cleanup_state()?;
