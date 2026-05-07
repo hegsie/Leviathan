@@ -177,13 +177,14 @@ fn detect_encoding_heuristic(data: &[u8]) -> (String, f64) {
     }
 
     // Not valid UTF-8, try to detect other encodings
-    // Use chardetng for encoding detection
-    let mut detector = chardetng::EncodingDetector::new();
+    // Use chardetng for encoding detection. chardetng 1.0 dropped the
+    // reliability signal that `guess_assess` used to return, so we report a
+    // single mid-confidence value.
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(content_to_check, true);
-    let (encoding, is_reliable) = detector.guess_assess(None, true);
+    let encoding = detector.guess(None, chardetng::Utf8Detection::Allow);
 
-    let confidence = if is_reliable { 0.9 } else { 0.5 };
-    (encoding.name().to_string().to_uppercase(), confidence)
+    (encoding.name().to_string().to_uppercase(), 0.7)
 }
 
 /// Detect the encoding of a file
