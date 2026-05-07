@@ -634,6 +634,11 @@ export class LvRemoteDialog extends LitElement {
 
     if (!confirmed) return;
 
+    // Clear any inline error left over from a previous form action (add /
+    // edit / rename) — the template still renders this.error and a stale
+    // banner would persist across the toast-based remove flow otherwise.
+    this.error = null;
+
     try {
       const result = await gitService.removeRemote(this.repositoryPath, remote.name);
 
