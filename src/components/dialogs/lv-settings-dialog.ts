@@ -9,6 +9,7 @@ import * as localAiService from '../../services/local-ai.service.ts';
 import * as mcpService from '../../services/mcp.service.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { MergeToolInfo, AvailableDiffTool } from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
 import type { AiProviderInfo, AiProviderType } from '../../services/ai.service.ts';
 import type { SystemCapabilities, ModelEntry, DownloadedModel, DownloadProgress, LocalModelStatus } from '../../services/local-ai.service.ts';
@@ -582,6 +583,10 @@ export class LvSettingsDialog extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load external tools config:', err);
+      showToast(
+        `Failed to load external tools config: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error',
+      );
     } finally {
       this.loadingTools = false;
     }

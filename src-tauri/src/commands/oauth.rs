@@ -308,9 +308,17 @@ pub async fn oauth_exchange_code(
     let text = response.text().await.unwrap_or_default();
 
     if !status.is_success() {
+        // Some IdPs echo the submitted `code` / `code_verifier` (PKCE secret)
+        // back in 4xx response bodies. Discard the body before surfacing the
+        // error so it doesn't reach toasts or logs.
+        tracing::debug!(
+            "OAuth exchange failed with status {} ({} body bytes discarded)",
+            status,
+            text.len()
+        );
         return Err(LeviathanError::OAuth(format!(
-            "Token request failed with status {}: {}",
-            status, text
+            "Token request failed with status {}",
+            status
         )));
     }
 
@@ -325,14 +333,11 @@ pub async fn oauth_exchange_code(
         }
     }
 
-    // Try to parse as token response
-    tracing::info!("Token exchange raw response: {}", text);
-    let tokens: OAuthTokenResponse = serde_json::from_str(&text).map_err(|e| {
-        LeviathanError::OAuth(format!(
-            "Failed to parse token response: {}. Raw response: {}",
-            e, text
-        ))
-    })?;
+    // Try to parse as token response. Do NOT log the raw response — it contains
+    // access_token / refresh_token / id_token in plaintext.
+    tracing::debug!("Token exchange response received ({} bytes)", text.len());
+    let tokens: OAuthTokenResponse = serde_json::from_str(&text)
+        .map_err(|e| LeviathanError::OAuth(format!("Failed to parse token response: {}", e)))?;
 
     tracing::info!(
         "Parsed token - has access_token: {}",
@@ -398,10 +403,18 @@ pub async fn oauth_refresh_token(
 
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        // Some IdPs echo the submitted refresh_token back inside 4xx error
+        // bodies. Discard the body so it doesn't propagate to user-visible
+        // error toasts or logs.
+        let body_len = response.text().await.unwrap_or_default().len();
+        tracing::debug!(
+            "OAuth refresh failed with status {} ({} body bytes discarded)",
+            status,
+            body_len
+        );
         return Err(LeviathanError::OAuth(format!(
-            "Refresh request failed with status {}: {}",
-            status, text
+            "Refresh request failed with status {}",
+            status
         )));
     }
 

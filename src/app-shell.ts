@@ -632,9 +632,17 @@ export class AppShell extends LitElement {
     e.preventDefault();
   };
 
-  // Handle repository-refresh events from window (e.g., after commit)
-  private handleWindowRefresh = (): void => {
-    this.graphCanvas?.refresh?.();
+  // Handle repository-refresh events from window (e.g., after commit).
+  // External callers expect a full refresh (store + graph + indexes), not just
+  // the graph. handleRefresh itself dispatches a `repository-refresh` window
+  // event tagged with `detail.source = 'app-shell'` to notify external
+  // listeners (context dashboard, etc.); we MUST ignore those tagged events
+  // here, otherwise dispatching it from inside handleRefresh would re-trigger
+  // handleWindowRefresh in an unbounded loop.
+  private handleWindowRefresh = (e: Event): void => {
+    const detail = (e as CustomEvent).detail as { source?: string } | undefined;
+    if (detail?.source === 'app-shell') return;
+    this.handleRefresh();
   };
 
   // Handle refs-changed from file watcher (debounced)
@@ -1679,25 +1687,51 @@ export class AppShell extends LitElement {
     window.dispatchEvent(new CustomEvent('unstage-all'));
   }
 
+  // Re-entrancy state for handleRefresh. Multiple callers (file-watcher,
+  // @file-edited, @status-changed, child @repository-refresh) can call
+  // handleRefresh concurrently; coalesce them into one follow-up pass so the
+  // final state always reflects the most recent request.
+  private refreshInFlight = false;
+  private refreshQueued = false;
+
   private async handleRefresh(): Promise<void> {
-    // Refresh the repository state (e.g., after cherry-pick, merge, rebase)
-    if (this.activeRepository) {
-      const result = await gitService.openRepository({ path: this.activeRepository.repository.path });
-      if (result.success && result.data) {
-        repositoryStore.getState().updateActiveRepository(result.data);
-      } else if (!result.success) {
-        showToast(result.error?.message ?? 'Failed to refresh repository', 'error');
+    if (this.refreshInFlight) {
+      this.refreshQueued = true;
+      return;
+    }
+    this.refreshInFlight = true;
+    try {
+      // Refresh the repository state (e.g., after cherry-pick, merge, rebase)
+      if (this.activeRepository) {
+        const result = await gitService.openRepository({ path: this.activeRepository.repository.path });
+        if (result.success && result.data) {
+          repositoryStore.getState().updateActiveRepository(result.data);
+        } else if (!result.success) {
+          showToast(result.error?.message ?? 'Failed to refresh repository', 'error');
+        }
       }
+      // Trigger refresh of the graph
+      this.graphCanvas?.refresh?.();
+      // Refresh search indexes incrementally
+      if (this.activeRepository) {
+        searchIndexService.refresh(this.activeRepository.repository.path);
+        embeddingIndexService.refreshIndex(this.activeRepository.repository.path);
+      }
+      // Dispatch event for OTHER listeners (context dashboard, etc.). The
+      // `source: 'app-shell'` tag lets handleWindowRefresh ignore our own
+      // emission so we don't loop back into a fresh handleRefresh.
+      window.dispatchEvent(
+        new CustomEvent('repository-refresh', { detail: { source: 'app-shell' } }),
+      );
+    } finally {
+      this.refreshInFlight = false;
     }
-    // Trigger refresh of the graph
-    this.graphCanvas?.refresh?.();
-    // Refresh search indexes incrementally
-    if (this.activeRepository) {
-      searchIndexService.refresh(this.activeRepository.repository.path);
-      embeddingIndexService.refreshIndex(this.activeRepository.repository.path);
+    // If a refresh request landed while we were awaiting above, run one more
+    // pass and AWAIT it so callers awaiting handleRefresh see the final state.
+    if (this.refreshQueued) {
+      this.refreshQueued = false;
+      await this.handleRefresh();
     }
-    // Dispatch event for other components (like context dashboard) to update
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
   private async handleRefreshAccount(e: CustomEvent<{ accountId: string }>): Promise<void> {
@@ -2516,6 +2550,7 @@ export class AppShell extends LitElement {
                             .commitFile=${this.diffCommitFile}
                             .hasPartialStaging=${this.diffFilePartiallyStaged}
                             @file-edited=${() => this.handleRefresh()}
+                            @status-changed=${() => this.handleRefresh()}
                           ></lv-diff-view>
                         </div>
                       </div>

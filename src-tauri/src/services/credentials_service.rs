@@ -100,29 +100,47 @@ fn keyring_get(service: &str, account: &str) -> Option<String> {
 
 /// Store a password in the keyring.
 /// On macOS uses the `security` CLI with `-A` to allow any application to access
-/// the item without triggering authorization prompts.
+/// the item without triggering authorization prompts. The password is sent on
+/// stdin (via `-w` with no value) so it does NOT appear in the process argv,
+/// where any other process under the same user could read it via `ps`.
 fn keyring_set(service: &str, account: &str, password: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
         // Delete existing entry first
         let _ = std::process::Command::new("security")
             .args(["delete-generic-password", "-s", service, "-a", account])
             .output();
-        std::process::Command::new("security")
+
+        // `-w` last with no argument => read password from stdin.
+        let mut child = match std::process::Command::new("security")
             .args([
                 "add-generic-password",
                 "-s",
                 service,
                 "-a",
                 account,
-                "-w",
-                password,
                 "-A", // Allow any application to access without prompt
                 "-U",
+                "-w",
             ])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if stdin.write_all(password.as_bytes()).is_err() {
+                let _ = child.kill();
+                return false;
+            }
+        }
+        child.wait().map(|s| s.success()).unwrap_or(false)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -397,7 +415,7 @@ pub fn get_push_options<'a>(token: Option<String>) -> git2::PushOptions<'a> {
 }
 
 /// Get remote callbacks with both credential and progress support
-fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a> {
+pub fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a> {
     let mut callbacks = CredentialsHelper::new_with_token(token).get_callbacks();
 
     // Add transfer progress callback

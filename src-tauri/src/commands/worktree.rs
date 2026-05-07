@@ -134,6 +134,17 @@ pub async fn add_worktree(
 ) -> Result<Worktree> {
     let repo_path = Path::new(&path);
 
+    crate::utils::reject_flag_like(&worktree_path, "Worktree path")?;
+    if let Some(ref nb) = new_branch {
+        crate::utils::reject_flag_like(nb, "New branch")?;
+    }
+    if let Some(ref b) = branch {
+        crate::utils::reject_flag_like(b, "Branch")?;
+    }
+    if let Some(ref c) = commit {
+        crate::utils::reject_flag_like(c, "Commit")?;
+    }
+
     let mut args = vec!["worktree", "add"];
 
     if force.unwrap_or(false) {
@@ -190,6 +201,8 @@ pub async fn remove_worktree(
 ) -> Result<()> {
     let repo_path = Path::new(&path);
 
+    crate::utils::reject_flag_like(&worktree_path, "Worktree path")?;
+
     let mut args = vec!["worktree", "remove"];
 
     if force.unwrap_or(false) {
@@ -227,6 +240,8 @@ pub async fn lock_worktree(
 ) -> Result<()> {
     let repo_path = Path::new(&path);
 
+    crate::utils::reject_flag_like(&worktree_path, "Worktree path")?;
+
     let mut args = vec!["worktree", "lock"];
 
     let reason_owned: String;
@@ -247,6 +262,8 @@ pub async fn lock_worktree(
 pub async fn unlock_worktree(path: String, worktree_path: String) -> Result<()> {
     let repo_path = Path::new(&path);
 
+    crate::utils::reject_flag_like(&worktree_path, "Worktree path")?;
+
     run_git_command(repo_path, &["worktree", "unlock", &worktree_path])?;
     Ok(())
 }
@@ -260,6 +277,9 @@ pub async fn move_worktree(
     force: Option<bool>,
 ) -> Result<()> {
     let repo_path = Path::new(&path);
+
+    crate::utils::reject_flag_like(&worktree_path, "Worktree path")?;
+    crate::utils::reject_flag_like(&new_path, "New path")?;
 
     let mut args = vec!["worktree", "move"];
 

@@ -10,7 +10,7 @@ use crate::models::{
 };
 use crate::services::cancellation::CancellationRegistry;
 use crate::services::credentials_service;
-use crate::utils::create_command;
+use crate::utils::{create_command, reject_flag_like};
 
 /// Add a new remote
 #[command]
@@ -148,36 +148,44 @@ pub async fn fetch(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
-    let do_fetch = async {
-        let repo = git2::Repository::open(Path::new(&path))?;
+    let do_fetch = async move {
+        let path_clone = path.clone();
+        let prune_val = prune.unwrap_or(false);
+        let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
+        let remote_name_for_event = remote_name_owned.clone();
 
-        let remote_name = remote.as_deref().unwrap_or("origin");
-        let mut git_remote = repo
-            .find_remote(remote_name)
-            .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
+        // git2 fetch is blocking network I/O; offload to a blocking thread so
+        // it doesn't starve the Tokio runtime.
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let repo = git2::Repository::open(Path::new(&path_clone))?;
+            let mut git_remote = repo
+                .find_remote(&remote_name_owned)
+                .map_err(|_| LeviathanError::RemoteNotFound(remote_name_owned.clone()))?;
 
-        let mut fetch_opts = credentials_service::get_fetch_options(token);
+            let mut fetch_opts = credentials_service::get_fetch_options(token);
+            if prune_val {
+                fetch_opts.prune(git2::FetchPrune::On);
+            }
 
-        if prune.unwrap_or(false) {
-            fetch_opts.prune(git2::FetchPrune::On);
-        }
+            let refspecs: Vec<String> = git_remote
+                .fetch_refspecs()?
+                .iter()
+                .filter_map(|s| s.map(|s| s.to_string()))
+                .collect();
+            let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
 
-        let refspecs: Vec<String> = git_remote
-            .fetch_refspecs()?
-            .iter()
-            .filter_map(|s| s.map(|s| s.to_string()))
-            .collect();
-
-        let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
-
-        git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
+            git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| LeviathanError::Custom(format!("Fetch task failed: {}", e)))??;
 
         // Emit success event
         let _ = app_handle.emit(
             "remote-operation-completed",
             RemoteOperationResult {
                 operation: "fetch".to_string(),
-                remote: remote_name.to_string(),
+                remote: remote_name_for_event,
                 success: true,
                 message: "Fetch completed successfully".to_string(),
             },
@@ -215,95 +223,143 @@ pub async fn pull(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
-    let do_pull = async {
-        let repo = git2::Repository::open(Path::new(&path))?;
+    let do_pull = async move {
+        let path_for_task = path.clone();
+        let remote_owned = remote.unwrap_or_else(|| "origin".to_string());
+        let remote_for_task = remote_owned.clone();
+        let branch_for_task = branch.clone();
+        let rebase_val = rebase.unwrap_or(false);
 
-        let remote_name = remote.as_deref().unwrap_or("origin");
+        // Whole pull is git2 / blocking network I/O. Run it on a blocking
+        // thread so the Tokio runtime stays responsive.
+        let (remote_name_returned, message) =
+            tokio::task::spawn_blocking(move || -> Result<(String, String)> {
+                // First fetch (network I/O)
+                fetch_internal(&path_for_task, &remote_for_task, false, token)?;
 
-        // First fetch (without emitting separate event)
-        fetch_internal(&path, remote_name, false, token)?;
+                let repo = git2::Repository::open(Path::new(&path_for_task))?;
 
-        // Get the branch to merge
-        let branch_name = if let Some(ref b) = branch {
-            b.clone()
-        } else {
-            let head = repo.head()?;
-            head.shorthand().unwrap_or("main").to_string()
-        };
+                let branch_name = if let Some(ref b) = branch_for_task {
+                    b.clone()
+                } else {
+                    let head = repo.head()?;
+                    head.shorthand().unwrap_or("main").to_string()
+                };
 
-        let remote_ref = format!("{}/{}", remote_name, branch_name);
-        let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
-        let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
+                let remote_ref = format!("{}/{}", remote_for_task, branch_name);
+                let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
+                let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
 
-        let message: String;
+                let message: String;
 
-        if rebase.unwrap_or(false) {
-            // Rebase onto remote
-            let head = repo.head()?;
-            let head_commit = repo.reference_to_annotated_commit(&head)?;
+                if rebase_val {
+                    let head = repo.head()?;
+                    let head_commit = repo.reference_to_annotated_commit(&head)?;
 
-            let mut rebase_obj =
-                repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
+                    let mut rebase_obj =
+                        repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
 
-            let mut commit_count = 0;
-            while let Some(op) = rebase_obj.next() {
-                let _op = op?;
-                let signature = repo.signature()?;
-                rebase_obj.commit(None, &signature, None)?;
-                commit_count += 1;
-            }
+                    // `git2::Rebase` does NOT call abort() on Drop. Without
+                    // an explicit abort, errors other than the expected
+                    // RebaseConflict (e.g. missing user.name signature,
+                    // mid-loop git2 errors) would leave the working tree
+                    // permanently stuck in REBASE state. We do NOT abort on
+                    // RebaseConflict because the UI surfaces a "resolve
+                    // conflicts" flow that needs the rebase state intact.
+                    let mut commit_count = 0;
+                    let rebase_result = (|| -> Result<()> {
+                        while let Some(op) = rebase_obj.next() {
+                            let _op = op?;
+                            if repo.index()?.has_conflicts() {
+                                return Err(LeviathanError::RebaseConflict);
+                            }
+                            let signature = repo.signature()?;
+                            rebase_obj.commit(None, &signature, None)?;
+                            commit_count += 1;
+                        }
+                        rebase_obj.finish(Some(&repo.signature()?))?;
+                        Ok(())
+                    })();
+                    match rebase_result {
+                        Err(LeviathanError::RebaseConflict) => {
+                            return Err(LeviathanError::RebaseConflict);
+                        }
+                        Err(e) => {
+                            let _ = rebase_obj.abort();
+                            return Err(e);
+                        }
+                        Ok(()) => {}
+                    }
+                    message = format!("Rebased {} commit(s)", commit_count);
+                } else {
+                    let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
 
-            rebase_obj.finish(Some(&repo.signature()?))?;
-            message = format!("Rebased {} commit(s)", commit_count);
-        } else {
-            // Merge
-            let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
+                    if analysis.is_up_to_date() {
+                        message = "Already up to date".to_string();
+                    } else if analysis.is_fast_forward() {
+                        let refname = format!("refs/heads/{}", branch_name);
+                        let mut reference = repo.find_reference(&refname)?;
+                        reference.set_target(fetch_commit.id(), "Fast-forward")?;
+                        repo.set_head(&refname)?;
+                        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+                        message = "Fast-forward merge completed".to_string();
+                    } else {
+                        // Normal merge. Anything that fails AFTER repo.merge()
+                        // succeeds must reset state, otherwise the working
+                        // copy is permanently stuck in MERGING.
+                        repo.merge(&[&fetch_commit], None, None)?;
 
-            if analysis.is_up_to_date() {
-                message = "Already up to date".to_string();
-            } else if analysis.is_fast_forward() {
-                // Fast-forward
-                let refname = format!("refs/heads/{}", branch_name);
-                let mut reference = repo.find_reference(&refname)?;
-                reference.set_target(fetch_commit.id(), "Fast-forward")?;
-                repo.set_head(&refname)?;
-                repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-                message = "Fast-forward merge completed".to_string();
-            } else {
-                // Normal merge
-                repo.merge(&[&fetch_commit], None, None)?;
+                        let merge_commit_result = (|| -> Result<()> {
+                            if repo.index()?.has_conflicts() {
+                                return Err(LeviathanError::MergeConflict);
+                            }
+                            let signature = repo.signature()?;
+                            let head = repo.head()?.peel_to_commit()?;
+                            let remote_commit = repo.find_commit(fetch_commit.id())?;
+                            let tree_oid = repo.index()?.write_tree()?;
+                            let tree = repo.find_tree(tree_oid)?;
+                            repo.commit(
+                                Some("HEAD"),
+                                &signature,
+                                &signature,
+                                &format!("Merge {} into {}", remote_ref, branch_name),
+                                &tree,
+                                &[&head, &remote_commit],
+                            )?;
+                            Ok(())
+                        })();
 
-                if repo.index()?.has_conflicts() {
-                    return Err(LeviathanError::MergeConflict);
+                        // MergeConflict is the expected "user must resolve"
+                        // path; the UI drives a conflict-resolution flow
+                        // that needs MERGE_HEAD intact. Only cleanup_state
+                        // for non-conflict errors.
+                        match merge_commit_result {
+                            Err(LeviathanError::MergeConflict) => {
+                                return Err(LeviathanError::MergeConflict);
+                            }
+                            Err(e) => {
+                                let _ = repo.cleanup_state();
+                                return Err(e);
+                            }
+                            Ok(()) => {}
+                        }
+
+                        repo.cleanup_state()?;
+                        message = "Merge completed".to_string();
+                    }
                 }
 
-                // Create merge commit
-                let signature = repo.signature()?;
-                let head = repo.head()?.peel_to_commit()?;
-                let remote_commit = repo.find_commit(fetch_commit.id())?;
-                let tree_oid = repo.index()?.write_tree()?;
-                let tree = repo.find_tree(tree_oid)?;
-
-                repo.commit(
-                    Some("HEAD"),
-                    &signature,
-                    &signature,
-                    &format!("Merge {} into {}", remote_ref, branch_name),
-                    &tree,
-                    &[&head, &remote_commit],
-                )?;
-
-                repo.cleanup_state()?;
-                message = "Merge completed".to_string();
-            }
-        }
+                Ok((remote_for_task, message))
+            })
+            .await
+            .map_err(|e| LeviathanError::Custom(format!("Pull task failed: {}", e)))??;
 
         // Emit success event
         let _ = app_handle.emit(
             "remote-operation-completed",
             RemoteOperationResult {
                 operation: "pull".to_string(),
-                remote: remote_name.to_string(),
+                remote: remote_name_returned,
                 success: true,
                 message,
             },
@@ -371,72 +427,96 @@ pub async fn push(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
-    let do_push = async {
-        let repo = git2::Repository::open(Path::new(&path))?;
+    // Reject branch values that could be parsed as a flag by `git push`
+    // (e.g. `--receive-pack=/tmp/evil`). The remote name is safer because
+    // it must already exist in the repo config.
+    if let Some(ref b) = branch {
+        reject_flag_like(b, "Branch name")?;
+    }
+    if let Some(ref r) = remote {
+        reject_flag_like(r, "Remote name")?;
+    }
 
-        let remote_name = remote.as_deref().unwrap_or("origin");
-
-        // Validate remote exists
-        repo.find_remote(remote_name)
-            .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
-
-        let branch_name = if let Some(ref b) = branch {
-            b.clone()
-        } else {
-            let head = repo.head()?;
-            head.shorthand().unwrap_or("main").to_string()
-        };
-
+    let do_push = async move {
+        let path_for_task = path.clone();
+        let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
+        let remote_for_task = remote_name_owned.clone();
+        let branch_for_task = branch.clone();
+        let force_val = force.unwrap_or(false);
         let use_force_with_lease = force_with_lease.unwrap_or(false);
         let use_push_tags = push_tags.unwrap_or(false);
+        let set_upstream_val = set_upstream.unwrap_or(false);
 
-        // force_with_lease requires git CLI since git2 doesn't support it natively.
-        // We also use git CLI when push_tags is requested, since git2 would require
-        // building separate refspecs for each tag.
-        if use_force_with_lease || use_push_tags {
-            push_via_cli(
-                &path,
-                remote_name,
-                &branch_name,
-                force.unwrap_or(false),
-                use_force_with_lease,
-                use_push_tags,
-                set_upstream.unwrap_or(false),
-                token,
-            )?;
-        } else {
-            // Use git2 for standard push (existing behavior)
-            let mut git_remote = repo
-                .find_remote(remote_name)
-                .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
+        // git2/git-CLI push is blocking network I/O; offload so the runtime
+        // stays responsive during slow remotes.
+        let (remote_name_returned, branch_name_returned) =
+            tokio::task::spawn_blocking(move || -> Result<(String, String)> {
+                let repo = git2::Repository::open(Path::new(&path_for_task))?;
 
-            let mut push_opts = credentials_service::get_push_options(token);
+                repo.find_remote(&remote_for_task)
+                    .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
 
-            let refspec = if force.unwrap_or(false) {
-                format!("+refs/heads/{}:refs/heads/{}", branch_name, branch_name)
-            } else {
-                format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name)
-            };
+                let branch_name = if let Some(ref b) = branch_for_task {
+                    b.clone()
+                } else {
+                    let head = repo.head()?;
+                    head.shorthand().unwrap_or("main").to_string()
+                };
 
-            git_remote.push(&[&refspec], Some(&mut push_opts))?;
+                if use_force_with_lease || use_push_tags {
+                    push_via_cli(
+                        &path_for_task,
+                        &remote_for_task,
+                        &branch_name,
+                        force_val,
+                        use_force_with_lease,
+                        use_push_tags,
+                        set_upstream_val,
+                        token,
+                    )?;
+                } else {
+                    let mut git_remote = repo
+                        .find_remote(&remote_for_task)
+                        .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
 
-            // Set upstream if requested
-            if set_upstream.unwrap_or(false) {
-                let mut local_branch = repo.find_branch(&branch_name, git2::BranchType::Local)?;
-                let upstream_name = format!("{}/{}", remote_name, branch_name);
-                local_branch.set_upstream(Some(&upstream_name))?;
-            }
-        }
+                    let mut push_opts = credentials_service::get_push_options(token);
+
+                    let refspec = if force_val {
+                        format!("+refs/heads/{}:refs/heads/{}", branch_name, branch_name)
+                    } else {
+                        format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name)
+                    };
+
+                    git_remote.push(&[&refspec], Some(&mut push_opts))?;
+
+                    if set_upstream_val {
+                        let mut local_branch =
+                            repo.find_branch(&branch_name, git2::BranchType::Local)?;
+                        let upstream_name = format!("{}/{}", remote_for_task, branch_name);
+                        local_branch.set_upstream(Some(&upstream_name))?;
+                    }
+                }
+
+                Ok((remote_for_task, branch_name))
+            })
+            .await
+            .map_err(|e| LeviathanError::Custom(format!("Push task failed: {}", e)))??;
 
         // Emit success event
-        let mut message = format!("Pushed to {}/{}", remote_name, branch_name);
+        let mut message = format!(
+            "Pushed to {}/{}",
+            remote_name_returned, branch_name_returned
+        );
         if use_force_with_lease {
             message = format!(
                 "Force-pushed (with lease) to {}/{}",
-                remote_name, branch_name
+                remote_name_returned, branch_name_returned
             );
-        } else if force.unwrap_or(false) {
-            message = format!("Force-pushed to {}/{}", remote_name, branch_name);
+        } else if force_val {
+            message = format!(
+                "Force-pushed to {}/{}",
+                remote_name_returned, branch_name_returned
+            );
         }
         if use_push_tags {
             message.push_str(" (including tags)");
@@ -446,7 +526,7 @@ pub async fn push(
             "remote-operation-completed",
             RemoteOperationResult {
                 operation: "push".to_string(),
-                remote: remote_name.to_string(),
+                remote: remote_name_returned,
                 success: true,
                 message,
             },
@@ -501,6 +581,9 @@ fn push_via_cli(
         cmd.arg("--set-upstream");
     }
 
+    // `--` keeps remote_name / branch_name from being parsed as flags by git
+    // even though callers also validate them with reject_flag_like.
+    cmd.arg("--");
     cmd.arg(remote_name);
     cmd.arg(branch_name);
 
@@ -588,66 +671,89 @@ pub async fn push_to_multiple_remotes(
     push_tags: bool,
     token: Option<String>,
 ) -> Result<MultiPushResult> {
-    let repo = git2::Repository::open(Path::new(&path))?;
-
-    let branch_name = if let Some(ref b) = branch {
-        b.clone()
-    } else {
-        let head = repo.head()?;
-        head.shorthand().unwrap_or("main").to_string()
-    };
-
-    // Validate that all remotes exist before starting
-    for remote_name in &remotes {
-        repo.find_remote(remote_name)
-            .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
+    // Reject branch and remote names that could be parsed as flags.
+    if let Some(ref b) = branch {
+        reject_flag_like(b, "Branch name")?;
+    }
+    for r in &remotes {
+        reject_flag_like(r, "Remote name")?;
     }
 
-    let mut results: Vec<RemotePushResult> = Vec::new();
-    let mut total_success: u32 = 0;
-    let mut total_failed: u32 = 0;
+    // Each push is blocking network I/O for potentially seconds; running them
+    // sequentially on the async executor blocks a Tokio worker for the full
+    // duration of all pushes combined. Offload to a blocking thread.
+    let path_for_task = path.clone();
+    let remotes_for_task = remotes.clone();
+    let branch_for_task = branch.clone();
+    let token_for_task = token.clone();
 
-    for remote_name in &remotes {
-        match push_single_remote(
-            &path,
-            remote_name,
-            &branch_name,
-            force,
-            force_with_lease,
-            push_tags,
-            token.clone(),
-        ) {
-            Ok(()) => {
-                let mut message = format!("Pushed to {}/{}", remote_name, branch_name);
-                if force_with_lease {
-                    message = format!(
-                        "Force-pushed (with lease) to {}/{}",
-                        remote_name, branch_name
-                    );
-                } else if force {
-                    message = format!("Force-pushed to {}/{}", remote_name, branch_name);
-                }
-                if push_tags {
-                    message.push_str(" (including tags)");
-                }
+    let (results, total_success, total_failed) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<RemotePushResult>, u32, u32)> {
+            let repo = git2::Repository::open(Path::new(&path_for_task))?;
 
-                results.push(RemotePushResult {
-                    remote: remote_name.clone(),
-                    success: true,
-                    message: Some(message),
-                });
-                total_success += 1;
+            let branch_name = if let Some(ref b) = branch_for_task {
+                b.clone()
+            } else {
+                let head = repo.head()?;
+                head.shorthand().unwrap_or("main").to_string()
+            };
+
+            // Validate that all remotes exist before starting
+            for remote_name in &remotes_for_task {
+                repo.find_remote(remote_name)
+                    .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
             }
-            Err(e) => {
-                results.push(RemotePushResult {
-                    remote: remote_name.clone(),
-                    success: false,
-                    message: Some(e),
-                });
-                total_failed += 1;
+
+            let mut results: Vec<RemotePushResult> = Vec::new();
+            let mut total_success: u32 = 0;
+            let mut total_failed: u32 = 0;
+
+            for remote_name in &remotes_for_task {
+                match push_single_remote(
+                    &path_for_task,
+                    remote_name,
+                    &branch_name,
+                    force,
+                    force_with_lease,
+                    push_tags,
+                    token_for_task.clone(),
+                ) {
+                    Ok(()) => {
+                        let mut message = format!("Pushed to {}/{}", remote_name, branch_name);
+                        if force_with_lease {
+                            message = format!(
+                                "Force-pushed (with lease) to {}/{}",
+                                remote_name, branch_name
+                            );
+                        } else if force {
+                            message = format!("Force-pushed to {}/{}", remote_name, branch_name);
+                        }
+                        if push_tags {
+                            message.push_str(" (including tags)");
+                        }
+
+                        results.push(RemotePushResult {
+                            remote: remote_name.clone(),
+                            success: true,
+                            message: Some(message),
+                        });
+                        total_success += 1;
+                    }
+                    Err(e) => {
+                        results.push(RemotePushResult {
+                            remote: remote_name.clone(),
+                            success: false,
+                            message: Some(e),
+                        });
+                        total_failed += 1;
+                    }
+                }
             }
-        }
-    }
+
+            Ok((results, total_success, total_failed))
+        })
+        .await
+        .map_err(|e| LeviathanError::Custom(format!("Push task failed: {}", e)))??;
 
     let overall_success = total_failed == 0;
 
@@ -681,37 +787,55 @@ pub async fn fetch_all_remotes(
     tags: bool,
     token: Option<String>,
 ) -> Result<FetchAllResult> {
-    let repo = git2::Repository::open(Path::new(&path))?;
-    let remote_names = repo.remotes()?;
+    // Multiple sequential blocking fetches; run on a blocking thread to keep
+    // the Tokio runtime responsive.
+    let path_for_task = path.clone();
+    let token_for_task = token.clone();
 
-    let mut results: Vec<RemoteFetchResult> = Vec::new();
-    let mut total_fetched: u32 = 0;
-    let mut total_failed: u32 = 0;
+    let (results, total_fetched, total_failed) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<RemoteFetchResult>, u32, u32)> {
+            let repo = git2::Repository::open(Path::new(&path_for_task))?;
+            let remote_names = repo.remotes()?;
 
-    for remote_name in remote_names.iter().flatten() {
-        let fetch_result = fetch_single_remote(&path, remote_name, prune, tags, token.clone());
+            let mut results: Vec<RemoteFetchResult> = Vec::new();
+            let mut total_fetched: u32 = 0;
+            let mut total_failed: u32 = 0;
 
-        match fetch_result {
-            Ok(refs_updated) => {
-                results.push(RemoteFetchResult {
-                    remote: remote_name.to_string(),
-                    success: true,
-                    message: Some(format!("Fetched {} refs", refs_updated)),
-                    refs_updated,
-                });
-                total_fetched += 1;
+            for remote_name in remote_names.iter().flatten() {
+                let fetch_result = fetch_single_remote(
+                    &path_for_task,
+                    remote_name,
+                    prune,
+                    tags,
+                    token_for_task.clone(),
+                );
+
+                match fetch_result {
+                    Ok(refs_updated) => {
+                        results.push(RemoteFetchResult {
+                            remote: remote_name.to_string(),
+                            success: true,
+                            message: Some(format!("Fetched {} refs", refs_updated)),
+                            refs_updated,
+                        });
+                        total_fetched += 1;
+                    }
+                    Err(e) => {
+                        results.push(RemoteFetchResult {
+                            remote: remote_name.to_string(),
+                            success: false,
+                            message: Some(e.to_string()),
+                            refs_updated: 0,
+                        });
+                        total_failed += 1;
+                    }
+                }
             }
-            Err(e) => {
-                results.push(RemoteFetchResult {
-                    remote: remote_name.to_string(),
-                    success: false,
-                    message: Some(e.to_string()),
-                    refs_updated: 0,
-                });
-                total_failed += 1;
-            }
-        }
-    }
+
+            Ok((results, total_fetched, total_failed))
+        })
+        .await
+        .map_err(|e| LeviathanError::Custom(format!("Fetch task failed: {}", e)))??;
 
     let overall_success = total_failed == 0;
 
@@ -751,12 +875,6 @@ fn fetch_single_remote(
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let mut fetch_opts = credentials_service::get_fetch_options(token);
-
-    if prune {
-        fetch_opts.prune(git2::FetchPrune::On);
-    }
-
     // Collect refspecs
     let mut refspecs: Vec<String> = git_remote
         .fetch_refspecs()?
@@ -775,21 +893,23 @@ fn fetch_single_remote(
     let refs_updated = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let refs_counter = refs_updated.clone();
 
-    let mut callbacks = git2::RemoteCallbacks::new();
+    // Build callbacks that carry BOTH the credentials (token) AND our
+    // update_tips counter. Previously this code rebuilt options with `None`
+    // for the token, silently dropping the caller's auth and breaking fetch
+    // on private remotes.
+    let mut callbacks = credentials_service::get_callbacks_with_progress(token);
     callbacks.update_tips(move |_refname, _old, _new| {
         refs_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         true
     });
 
-    // Transfer credentials callback from fetch_opts to our callbacks
-    // We need to rebuild fetch options with our callbacks
-    let mut fetch_opts_with_callbacks = credentials_service::get_fetch_options(None);
+    let mut fetch_opts = git2::FetchOptions::new();
     if prune {
-        fetch_opts_with_callbacks.prune(git2::FetchPrune::On);
+        fetch_opts.prune(git2::FetchPrune::On);
     }
-    fetch_opts_with_callbacks.remote_callbacks(callbacks);
+    fetch_opts.remote_callbacks(callbacks);
 
-    git_remote.fetch(&refspec_strs, Some(&mut fetch_opts_with_callbacks), None)?;
+    git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
 
     Ok(refs_updated.load(std::sync::atomic::Ordering::Relaxed))
 }

@@ -56,41 +56,60 @@ pub async fn merge(
         reference.set_target(target_oid, "Fast-forward merge")?;
         repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
     } else {
-        // Normal or squash merge
+        // Normal or squash merge. Once repo.merge() succeeds the index/working
+        // tree is in MERGING state; any subsequent failure must reset that
+        // state so the user isn't stuck with a half-merged repo.
         repo.merge(&[&annotated_commit], None, None)?;
 
-        if repo.index()?.has_conflicts() {
-            return Err(LeviathanError::MergeConflict);
-        }
+        let result = (|| -> Result<()> {
+            if repo.index()?.has_conflicts() {
+                return Err(LeviathanError::MergeConflict);
+            }
 
-        let signature = repo.signature()?;
-        let head = repo.head()?.peel_to_commit()?;
-        let tree_oid = repo.index()?.write_tree()?;
-        let tree = repo.find_tree(tree_oid)?;
+            let signature = repo.signature()?;
+            let head = repo.head()?.peel_to_commit()?;
+            let tree_oid = repo.index()?.write_tree()?;
+            let tree = repo.find_tree(tree_oid)?;
 
-        let commit_message = message.unwrap_or_else(|| format!("Merge '{}' into HEAD", source_ref));
+            let commit_message =
+                message.unwrap_or_else(|| format!("Merge '{}' into HEAD", source_ref));
 
-        if squash.unwrap_or(false) {
-            // Squash merge - single parent
-            repo.commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                &commit_message,
-                &tree,
-                &[&head],
-            )?;
-        } else {
-            // Regular merge - two parents
-            let source_commit = repo.find_commit(annotated_commit.id())?;
-            repo.commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                &commit_message,
-                &tree,
-                &[&head, &source_commit],
-            )?;
+            if squash.unwrap_or(false) {
+                repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    &commit_message,
+                    &tree,
+                    &[&head],
+                )?;
+            } else {
+                let source_commit = repo.find_commit(annotated_commit.id())?;
+                repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    &commit_message,
+                    &tree,
+                    &[&head, &source_commit],
+                )?;
+            }
+            Ok(())
+        })();
+
+        // MergeConflict is the expected "user must resolve" path; the UI
+        // drives a conflict-resolution flow that needs MERGE_HEAD intact
+        // (and `abort_merge` to undo). Only call cleanup_state for
+        // non-conflict errors (disk-full, signature missing, etc.).
+        match result {
+            Err(LeviathanError::MergeConflict) => {
+                return Err(LeviathanError::MergeConflict);
+            }
+            Err(e) => {
+                let _ = repo.cleanup_state();
+                return Err(e);
+            }
+            Ok(()) => {}
         }
 
         repo.cleanup_state()?;
@@ -127,20 +146,35 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
 
     let signature = repo.signature()?;
 
-    while let Some(op) = rebase.next() {
-        let _op = op?;
+    // git2::Rebase does NOT call abort() on Drop. Without an explicit abort,
+    // failures other than the expected RebaseConflict (e.g. missing
+    // user.name signature, mid-loop git2 errors) leave the working tree
+    // permanently stuck in REBASE state. We do NOT abort on RebaseConflict
+    // because the UI surfaces a "resolve conflicts" flow that needs the
+    // rebase state intact; the user can call abort_rebase explicitly.
+    let result = (|| -> Result<()> {
+        while let Some(op) = rebase.next() {
+            let _op = op?;
 
-        // Check for conflicts
-        if repo.index()?.has_conflicts() {
-            return Err(LeviathanError::RebaseConflict);
+            if repo.index()?.has_conflicts() {
+                return Err(LeviathanError::RebaseConflict);
+            }
+
+            rebase.commit(None, &signature, None)?;
         }
 
-        rebase.commit(None, &signature, None)?;
+        rebase.finish(Some(&signature))?;
+        Ok(())
+    })();
+
+    match result {
+        Err(LeviathanError::RebaseConflict) => Err(LeviathanError::RebaseConflict),
+        Err(e) => {
+            let _ = rebase.abort();
+            Err(e)
+        }
+        Ok(()) => Ok(()),
     }
-
-    rebase.finish(Some(&signature))?;
-
-    Ok(())
 }
 
 /// Preview a rebase by running it in a temporary worktree (ghost rebase)
@@ -150,6 +184,14 @@ pub async fn preview_rebase(
     onto: String,
 ) -> Result<crate::services::ai::RebasePreview> {
     use crate::services::ai::{PredictedConflict, RebasePreview};
+
+    // Reject ref values that could be parsed as a flag, e.g.
+    // `--exec=/tmp/payload` would run an arbitrary command via `git rebase`.
+    if onto.starts_with('-') {
+        return Err(LeviathanError::OperationFailed(
+            "Rebase target must not start with '-'".into(),
+        ));
+    }
 
     // Create a temp directory for the ghost worktree
     let temp_dir = tempfile::tempdir().map_err(|e| {
@@ -178,11 +220,13 @@ pub async fn preview_rebase(
         )));
     }
 
-    // Run rebase in the temp worktree
+    // Run rebase in the temp worktree. `--` prevents the user-supplied ref
+    // from being parsed as a flag.
     let rebase_output = std::process::Command::new("git")
         .arg("-C")
         .arg(&temp_path)
         .arg("rebase")
+        .arg("--")
         .arg(&onto)
         .output()
         .map_err(|e| {

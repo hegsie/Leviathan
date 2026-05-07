@@ -71,6 +71,68 @@ pub async fn open_repository(path: String) -> Result<Repository> {
     })
 }
 
+/// Validate a clone URL: reject values that could be parsed as a CLI flag, and
+/// require a recognizable scheme. This is critical defense against
+/// `--upload-pack=`/`--config=` style argument injection when the URL is
+/// passed to `git clone`.
+fn validate_clone_url(url: &str) -> Result<()> {
+    if url.is_empty() {
+        return Err(LeviathanError::Custom("Clone URL is empty".into()));
+    }
+    // Leading-`-` and CR/LF are the universal CLI-safety rejections. Reuse
+    // the shared helper so this stays consistent with every other git-CLI
+    // entrypoint in the codebase.
+    crate::utils::reject_flag_like(url, "Clone URL")?;
+    let lower = url.to_ascii_lowercase();
+    let has_scheme = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("ssh://")
+        || lower.starts_with("git://")
+        || lower.starts_with("file://");
+    // Accept SCP-style refs of the form `[user@]host:path`. The standard form
+    // is `user@host:path` but git also allows the `@` to be omitted
+    // (`host:path`). To stay unambiguous on Windows, we explicitly reject
+    // values that look like a drive-letter path (`C:/...`, `C:\...`).
+    let looks_like_scp = !has_scheme && {
+        let first_colon = url.find(':');
+        let first_slash = url.find('/');
+        match first_colon {
+            None => false,
+            Some(colon_idx) => {
+                // Reject Windows drive-letter paths: single ASCII letter then ':'
+                // optionally followed by '/' or '\\'. Treat as a local path,
+                // not an SCP URL.
+                let drive_letter = colon_idx == 1
+                    && url
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_alphabetic())
+                        .unwrap_or(false);
+                if drive_letter {
+                    false
+                } else {
+                    // host part (before ':') must be non-empty and not contain '/'
+                    let host = &url[..colon_idx];
+                    // Reject `scheme://` patterns where the char after ':' is
+                    // also '/' — that's a URI scheme, not SCP form.
+                    let after_colon = url.as_bytes().get(colon_idx + 1).copied();
+                    !host.is_empty()
+                        && !host.contains('/')
+                        && after_colon != Some(b'/')
+                        && first_slash.map(|s| s > colon_idx).unwrap_or(true)
+                }
+            }
+        }
+    };
+    if !has_scheme && !looks_like_scp {
+        return Err(LeviathanError::Custom(format!(
+            "Unsupported clone URL scheme: {}",
+            url
+        )));
+    }
+    Ok(())
+}
+
 /// Detect if a repository is a partial clone and extract the filter
 fn detect_partial_clone_status(repo: &git2::Repository) -> (bool, Option<String>) {
     let config = match repo.config() {
@@ -107,6 +169,25 @@ pub async fn clone_repository(
     single_branch: Option<bool>,
     timeout_secs: Option<u64>,
 ) -> Result<Repository> {
+    validate_clone_url(&url)?;
+    // `--branch` and `--filter` consume the next argv as their value, so a
+    // value starting with `-` is not a flag injection today. We reject them
+    // anyway as defense in depth: a future refactor toward
+    // `--branch=<value>` style would otherwise re-introduce flag injection.
+    if let Some(ref b) = branch {
+        if b.starts_with('-') || b.contains('\n') || b.contains('\r') {
+            return Err(LeviathanError::Custom(
+                "Branch name must not start with '-' or contain newlines".into(),
+            ));
+        }
+    }
+    if let Some(ref f) = filter {
+        if f.starts_with('-') || f.contains('\n') || f.contains('\r') {
+            return Err(LeviathanError::Custom(
+                "Filter spec must not start with '-' or contain newlines".into(),
+            ));
+        }
+    }
     let do_clone = async {
         let dest_path = std::path::PathBuf::from(&path);
         let url_clone = url.clone();
@@ -159,6 +240,9 @@ pub async fn clone_repository(
                     url_clone.clone()
                 };
 
+                // `--` prevents URL/path from being parsed as a flag
+                // (defense against `--upload-pack=` style injection).
+                cmd.arg("--");
                 cmd.arg(&effective_url);
                 cmd.arg(&dest_path);
 
@@ -477,6 +561,51 @@ mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_validate_clone_url_accepts_https_and_ssh_schemes() {
+        assert!(validate_clone_url("https://github.com/foo/bar.git").is_ok());
+        assert!(validate_clone_url("http://example.com/foo.git").is_ok());
+        assert!(validate_clone_url("ssh://git@host/foo.git").is_ok());
+        assert!(validate_clone_url("git://host/foo.git").is_ok());
+        assert!(validate_clone_url("file:///tmp/repo").is_ok());
+    }
+
+    #[test]
+    fn test_validate_clone_url_accepts_scp_style() {
+        // user@host:path is the canonical SCP form
+        assert!(validate_clone_url("git@github.com:foo/bar.git").is_ok());
+        // host:path (no user) is also valid git syntax
+        assert!(validate_clone_url("server.example.com:repo.git").is_ok());
+    }
+
+    #[test]
+    fn test_validate_clone_url_rejects_flag_like() {
+        assert!(validate_clone_url("--upload-pack=/tmp/evil").is_err());
+        assert!(validate_clone_url("-foo").is_err());
+    }
+
+    #[test]
+    fn test_validate_clone_url_rejects_crlf() {
+        assert!(validate_clone_url("https://example.com/\nfoo").is_err());
+        assert!(validate_clone_url("https://example.com/\rfoo").is_err());
+    }
+
+    #[test]
+    fn test_validate_clone_url_rejects_windows_drive_letter() {
+        // C:\path is a local Windows path, NOT an SCP URL — must be rejected
+        // so we don't accidentally pass it to git as `git clone host:path`.
+        assert!(validate_clone_url("C:/Users/me/repo").is_err());
+        assert!(validate_clone_url("D:\\repo").is_err());
+    }
+
+    #[test]
+    fn test_validate_clone_url_rejects_empty_and_unknown_scheme() {
+        assert!(validate_clone_url("").is_err());
+        assert!(validate_clone_url("ftp://host/foo").is_err());
+        // No colon at all → not a recognizable URL form
+        assert!(validate_clone_url("plainstring").is_err());
+    }
 
     #[tokio::test]
     async fn test_open_repository_valid() {

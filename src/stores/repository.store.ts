@@ -149,8 +149,14 @@ export const repositoryStore = createStore<RepositoryState>()(
 
           if (newRepos.length === 0) {
             newActiveIndex = -1;
-          } else if (state.activeIndex >= index) {
-            newActiveIndex = Math.max(0, state.activeIndex - 1);
+          } else if (state.activeIndex === index) {
+            // The active tab was closed. Prefer the tab that "shifted in" from
+            // the right (matches browser/VS Code behaviour); fall back to the
+            // tab on the left when the closed tab was the last one.
+            newActiveIndex = Math.min(state.activeIndex, newRepos.length - 1);
+          } else if (state.activeIndex > index) {
+            // A tab to the left of active was closed; everything shifts down.
+            newActiveIndex = state.activeIndex - 1;
           }
 
           return {

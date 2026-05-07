@@ -156,6 +156,9 @@ pub async fn filter_commits(
     }
 
     if let Some(ref branch) = filter.branch {
+        // Reject ref values that could be parsed as a `git log` flag like
+        // `--output=/tmp/x` (arbitrary file write).
+        crate::utils::reject_flag_like(branch, "Branch")?;
         cmd.arg(branch.as_str());
     }
 
@@ -177,6 +180,9 @@ pub async fn get_branch_diff_commits(
     max_results: Option<u32>,
 ) -> Result<Vec<FilteredCommit>> {
     let max_results = max_results.unwrap_or(500);
+
+    crate::utils::reject_flag_like(&base_branch, "Base branch")?;
+    crate::utils::reject_flag_like(&compare_branch, "Compare branch")?;
 
     let mut cmd = Command::new("git");
     cmd.arg("-C")

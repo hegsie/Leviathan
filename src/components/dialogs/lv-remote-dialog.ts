@@ -634,17 +634,31 @@ export class LvRemoteDialog extends LitElement {
 
     if (!confirmed) return;
 
+    // Clear any inline error left over from a previous form action (add /
+    // edit / rename) — the template still renders this.error and a stale
+    // banner would persist across the toast-based remove flow otherwise.
+    this.error = null;
+
     try {
       const result = await gitService.removeRemote(this.repositoryPath, remote.name);
 
       if (result.success) {
         await this.loadRemotes();
         this.dispatchEvent(new CustomEvent('remotes-changed', { bubbles: true, composed: true }));
+        showToast(`Removed remote ${remote.name}`, 'success');
       } else {
-        this.error = result.error?.message ?? 'Failed to remove remote';
+        // Match the toast pattern used by sibling list-row actions
+        // (handleFetchRemote, handlePruneRemote).
+        showToast(
+          `Failed to remove remote: ${result.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
       }
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Unknown error';
+      showToast(
+        `Failed to remove remote: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error',
+      );
     }
   }
 

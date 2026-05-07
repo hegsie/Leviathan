@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::reject_flag_like;
 
 /// Reference in a bundle
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -46,19 +47,28 @@ pub async fn bundle_create(
         return Err(LeviathanError::RepositoryNotFound(path));
     }
 
-    // Build the git bundle create command
-    let mut cmd = Command::new("git");
-    cmd.current_dir(repo_path)
-        .arg("bundle")
-        .arg("create")
-        .arg(&bundle_path);
+    reject_flag_like(&bundle_path, "Bundle path")?;
+    for ref_spec in &refs {
+        reject_flag_like(ref_spec, "Refspec")?;
+    }
 
-    if all {
-        cmd.arg("--all");
-    } else if refs.is_empty() {
+    // `git bundle create [<bundle-create options>] <file> <rev-list args>`.
+    // We place `--` directly before `<file>` to defend the file path from
+    // being parsed as a bundle-create option. `--all` and explicit refs are
+    // rev-list arguments and must come AFTER `<file>`.
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo_path).arg("bundle").arg("create");
+
+    if !all && refs.is_empty() {
         return Err(LeviathanError::OperationFailed(
             "Either refs must be provided or 'all' must be true".to_string(),
         ));
+    }
+
+    cmd.arg("--").arg(&bundle_path);
+
+    if all {
+        cmd.arg("--all");
     } else {
         for ref_spec in &refs {
             cmd.arg(ref_spec);
@@ -134,6 +144,7 @@ pub async fn bundle_verify(path: String, bundle_path: String) -> Result<BundleVe
         return Err(LeviathanError::RepositoryNotFound(path));
     }
 
+    reject_flag_like(&bundle_path, "Bundle path")?;
     let bundle_file = Path::new(&bundle_path);
     if !bundle_file.exists() {
         return Err(LeviathanError::OperationFailed(format!(
@@ -142,11 +153,13 @@ pub async fn bundle_verify(path: String, bundle_path: String) -> Result<BundleVe
         )));
     }
 
-    // Run git bundle verify
+    // Run git bundle verify. `--` keeps a malicious bundle_path from being
+    // parsed as a flag, mirroring bundle_list_heads / bundle_unbundle.
     let output = Command::new("git")
         .current_dir(repo_path)
         .arg("bundle")
         .arg("verify")
+        .arg("--")
         .arg(&bundle_path)
         .output()
         .map_err(|e| {
@@ -204,6 +217,7 @@ pub async fn bundle_verify(path: String, bundle_path: String) -> Result<BundleVe
 /// List the heads (refs) contained in a bundle file
 #[command]
 pub async fn bundle_list_heads(bundle_path: String) -> Result<Vec<BundleRef>> {
+    reject_flag_like(&bundle_path, "Bundle path")?;
     let bundle_file = Path::new(&bundle_path);
     if !bundle_file.exists() {
         return Err(LeviathanError::OperationFailed(format!(
@@ -216,6 +230,7 @@ pub async fn bundle_list_heads(bundle_path: String) -> Result<Vec<BundleRef>> {
     let output = Command::new("git")
         .arg("bundle")
         .arg("list-heads")
+        .arg("--")
         .arg(&bundle_path)
         .output()
         .map_err(|e| {
@@ -258,6 +273,7 @@ pub async fn bundle_unbundle(path: String, bundle_path: String) -> Result<Vec<Bu
         return Err(LeviathanError::RepositoryNotFound(path));
     }
 
+    reject_flag_like(&bundle_path, "Bundle path")?;
     let bundle_file = Path::new(&bundle_path);
     if !bundle_file.exists() {
         return Err(LeviathanError::OperationFailed(format!(
@@ -271,6 +287,7 @@ pub async fn bundle_unbundle(path: String, bundle_path: String) -> Result<Vec<Bu
         .current_dir(repo_path)
         .arg("bundle")
         .arg("verify")
+        .arg("--")
         .arg(&bundle_path)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to verify bundle: {}", e)))?;
@@ -283,10 +300,13 @@ pub async fn bundle_unbundle(path: String, bundle_path: String) -> Result<Vec<Bu
         )));
     }
 
-    // Use git fetch to unbundle - this fetches all refs from the bundle
+    // Use git fetch to unbundle - this fetches all refs from the bundle.
+    // `--` terminates options so a malicious bundle_path cannot be parsed
+    // as a flag like `--upload-pack=`.
     let output = Command::new("git")
         .current_dir(repo_path)
         .arg("fetch")
+        .arg("--")
         .arg(&bundle_path)
         .arg("*:*") // Fetch all refs
         .stderr(Stdio::piped())
@@ -300,6 +320,7 @@ pub async fn bundle_unbundle(path: String, bundle_path: String) -> Result<Vec<Bu
         let list_output = Command::new("git")
             .arg("bundle")
             .arg("list-heads")
+            .arg("--")
             .arg(&bundle_path)
             .output()
             .map_err(|e| {
@@ -324,10 +345,15 @@ pub async fn bundle_unbundle(path: String, bundle_path: String) -> Result<Vec<Bu
                 let oid = parts[0];
                 let refname = parts[1].trim();
 
-                // Fetch this specific ref
+                // Fetch this specific ref. Skip refs that look like flags;
+                // they originate from the bundle file and are not trusted.
+                if refname.starts_with('-') {
+                    continue;
+                }
                 let fetch_result = Command::new("git")
                     .current_dir(repo_path)
                     .arg("fetch")
+                    .arg("--")
                     .arg(&bundle_path)
                     .arg(format!("{}:{}", refname, refname))
                     .output();
