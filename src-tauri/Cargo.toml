@@ -59,7 +59,7 @@ llama-cpp-2 = { version = "0.1", default-features = false }
 sqlite-vec = "0.1.8-alpha.1"
 candle-core = "0.9"
 candle-nn = "0.9"
-candle-transformers = "0.9"
+candle-transformers = "0.10"
 hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 
