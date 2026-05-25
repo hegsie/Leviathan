@@ -1595,7 +1595,7 @@ export class LvBitbucketDialog extends LitElement {
       <lv-modal
         .open=${this.open}
         ?backButton=${this.backButton}
-        title="Bitbucket"
+        modalTitle="Bitbucket"
         @close=${this.handleClose}
       >
         <div class="content">

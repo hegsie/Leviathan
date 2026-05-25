@@ -1772,7 +1772,7 @@ export class LvGitLabDialog extends LitElement {
       <lv-modal
         .open=${this.open}
         ?backButton=${this.backButton}
-        title="GitLab"
+        modalTitle="GitLab"
         @close=${this.handleClose}
       >
         <div class="content">

@@ -1735,7 +1735,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       <lv-modal
         .open=${this.open}
         ?backButton=${this.backButton}
-        title="Azure DevOps"
+        modalTitle="Azure DevOps"
         @close=${this.handleClose}
       >
         <div class="content">

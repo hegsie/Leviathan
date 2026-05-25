@@ -1703,8 +1703,8 @@ export class LvProfileManagerDialog extends LitElement {
           ${accounts.length === 0
             ? html`
                 <div class="empty-accounts">
-                  No integration accounts yet. Connect one below, then reopen this profile to
-                  attach it.
+                  No integration accounts yet. Connect one below — once you return, it'll be
+                  attached to this profile automatically.
                 </div>
               `
             : html`

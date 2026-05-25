@@ -783,7 +783,7 @@ describe('lv-profile-manager-dialog', () => {
     it('lists only the accounts attached to the profile', async () => {
       const el = await renderDialog();
       const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
-      // Personal profile has defaultAccounts { github: 'account-2' } → one attached account
+      // Personal profile has defaultAccounts { gitlab: 'account-2' } → one attached account
       (profileItems[1] as HTMLElement).click();
       await el.updateComplete;
 
