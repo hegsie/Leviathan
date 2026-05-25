@@ -79,8 +79,10 @@ async function renderAndOpen(
         return { success: true, pruned: [], count: 0 };
       case 'plugin:notification|is_permission_granted':
         return false;
-      case 'plugin:dialog|confirm':
-        return true;
+      // plugin-dialog 2.7 routes confirm() through `message` and returns the
+      // clicked button label; 'Ok' means the user confirmed.
+      case 'plugin:dialog|message':
+        return 'Ok';
       default:
         return null;
     }

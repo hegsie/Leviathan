@@ -41,8 +41,10 @@ const mockInvoke: MockInvoke = async (command: string) => {
       return null;
     case 'remove_submodule':
       return null;
-    case 'plugin:dialog|confirm':
-      return true;
+    // plugin-dialog 2.7 routes confirm() through `message` and returns the
+    // clicked button label; 'Ok' means the user confirmed.
+    case 'plugin:dialog|message':
+      return 'Ok';
     default:
       return null;
   }

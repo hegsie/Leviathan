@@ -57,8 +57,10 @@ function setupDefaultMocks(tags = mockTags): void {
         return null;
       case 'checkout_with_autostash':
         return { success: true, stashed: false, stashApplied: false, stashConflict: false, message: 'ok' };
-      case 'plugin:dialog|confirm':
-        return true;
+      // plugin-dialog 2.7 routes confirm() through `message` and returns the
+      // clicked button label; 'Ok' means the user confirmed.
+      case 'plugin:dialog|message':
+        return 'Ok';
       default:
         return null;
     }

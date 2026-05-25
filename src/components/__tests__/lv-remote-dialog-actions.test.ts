@@ -64,8 +64,10 @@ function setupDefaultMocks(remotes = mockRemotes): void {
         return { name: 'origin', url: 'https://new-url.com/repo.git', pushUrl: null };
       case 'detect_github_repo':
         return null;
-      case 'plugin:dialog|confirm':
-        return true;
+      // plugin-dialog 2.7 routes confirm() through `message` and returns the
+      // clicked button label; 'Ok' means the user confirmed.
+      case 'plugin:dialog|message':
+        return 'Ok';
       default:
         return null;
     }
@@ -518,7 +520,7 @@ describe('lv-remote-dialog actions', () => {
       await el.updateComplete;
 
       // Confirm dialog should have been shown
-      const confirmCalls = findCommands('plugin:dialog|confirm');
+      const confirmCalls = findCommands('plugin:dialog|message');
       expect(confirmCalls.length).to.equal(1);
 
       // remove_remote should have been called
@@ -535,8 +537,8 @@ describe('lv-remote-dialog actions', () => {
         switch (command) {
           case 'get_remotes':
             return mockRemotes;
-          case 'plugin:dialog|confirm':
-            return false; // User declined
+          case 'plugin:dialog|message':
+            return 'Cancel'; // User declined (any non-'Ok' label)
           default:
             return null;
         }
