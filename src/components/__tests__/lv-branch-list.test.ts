@@ -826,9 +826,10 @@ describe('lv-branch-list', () => {
           case 'delete_branch':
             deleteCalled = true;
             return null;
-          // showConfirm uses Tauri dialog plugin
-          case 'plugin:dialog|confirm':
-            return true;
+          // showConfirm uses Tauri dialog plugin; plugin-dialog 2.7 routes it
+          // through `message` and returns the clicked button label ('Ok').
+          case 'plugin:dialog|message':
+            return 'Ok';
           default:
             return null;
         }

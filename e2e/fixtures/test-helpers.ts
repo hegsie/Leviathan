@@ -131,6 +131,23 @@ export async function injectCommandMock(
     (window as unknown as {
       __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
     }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
+      // plugin-dialog 2.7 implements confirm()/ask() by invoking the `message`
+      // command and comparing the resolved button label. Translate legacy
+      // boolean confirm/ask mocks to the matching label so specs keep working.
+      if (command === 'plugin:dialog|message' && !('plugin:dialog|message' in mocks)) {
+        const buttons = (args as { buttons?: unknown } | undefined)?.buttons;
+        const yesNo = buttons === 'YesNo';
+        const legacyKey = yesNo ? 'plugin:dialog|ask' : 'plugin:dialog|confirm';
+        if (legacyKey in mocks) {
+          const captured = (window as unknown as { __INVOKED_COMMANDS__?: { command: string; args: unknown }[] })
+            .__INVOKED_COMMANDS__;
+          if (captured) {
+            captured.push({ command, args });
+          }
+          const affirmative = mocks[legacyKey] !== false;
+          return yesNo ? (affirmative ? 'Yes' : 'No') : (affirmative ? 'Ok' : 'Cancel');
+        }
+      }
       if (command in mocks) {
         // Record the command for waitForCommand/findCommand if capture is active,
         // since we short-circuit and don't call originalInvoke which may have its own recording
@@ -215,6 +232,19 @@ export async function startCommandCaptureWithMocks(
     }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
       (window as unknown as { __INVOKED_COMMANDS__: { command: string; args: unknown }[] })
         .__INVOKED_COMMANDS__.push({ command, args });
+
+      // plugin-dialog 2.7 implements confirm()/ask() by invoking the `message`
+      // command and comparing the resolved button label. Translate legacy
+      // boolean confirm/ask mocks to the matching label so specs keep working.
+      if (command === 'plugin:dialog|message' && !('plugin:dialog|message' in mocks)) {
+        const buttons = (args as { buttons?: unknown } | undefined)?.buttons;
+        const yesNo = buttons === 'YesNo';
+        const legacyKey = yesNo ? 'plugin:dialog|ask' : 'plugin:dialog|confirm';
+        if (legacyKey in mocks) {
+          const affirmative = mocks[legacyKey] !== false;
+          return yesNo ? (affirmative ? 'Yes' : 'No') : (affirmative ? 'Ok' : 'Cancel');
+        }
+      }
 
       if (command in mocks) {
         const val = mocks[command];

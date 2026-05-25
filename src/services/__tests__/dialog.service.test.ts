@@ -149,19 +149,22 @@ describe('dialog.service', () => {
 
   describe('showConfirm', () => {
     it('should return true when confirmed', async () => {
-      invokeResult = true;
+      // plugin-dialog 2.7: confirm() resolves true only when the underlying
+      // `plugin:dialog|message` command returns the OK button label ('Ok'),
+      // no longer a boolean.
+      invokeResult = 'Ok';
       const result = await showConfirm('Confirm', 'Are you sure?');
       expect(result).to.be.true;
     });
 
     it('should return false when denied', async () => {
-      invokeResult = false;
+      invokeResult = 'Cancel';
       const result = await showConfirm('Confirm', 'Are you sure?');
       expect(result).to.be.false;
     });
 
     it('should accept kind parameter', async () => {
-      invokeResult = true;
+      invokeResult = 'Ok';
       const result = await showConfirm('Delete', 'Remove file?', 'warning');
       expect(result).to.be.true;
     });
@@ -169,19 +172,21 @@ describe('dialog.service', () => {
 
   describe('showAsk', () => {
     it('should return true when OK is pressed', async () => {
-      invokeResult = true;
+      // plugin-dialog 2.7: ask() resolves true only when the message command
+      // returns the affirmative button label ('Yes').
+      invokeResult = 'Yes';
       const result = await showAsk('Question', 'Proceed?');
       expect(result).to.be.true;
     });
 
     it('should return false when Cancel is pressed', async () => {
-      invokeResult = false;
+      invokeResult = 'No';
       const result = await showAsk('Question', 'Proceed?');
       expect(result).to.be.false;
     });
 
     it('should accept kind parameter', async () => {
-      invokeResult = false;
+      invokeResult = 'No';
       const result = await showAsk('Error', 'Retry?', 'error');
       expect(result).to.be.false;
     });

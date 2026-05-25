@@ -118,8 +118,10 @@ function setupDefaultMocks(): void {
         return null;
       case 'apply_unified_profile':
         return null;
-      case 'plugin:dialog|confirm':
-        return true;
+      // plugin-dialog 2.7 routes confirm() through `message` and returns the
+      // clicked button label; 'Ok' means the user confirmed.
+      case 'plugin:dialog|message':
+        return 'Ok';
       default:
         return null;
     }
@@ -499,7 +501,7 @@ describe('lv-profile-manager-dialog', () => {
       // Override mock to reject confirmation
       const defaultMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') return false;
+        if (command === 'plugin:dialog|message') return 'Cancel';
         return defaultMock(command, args);
       };
 
@@ -880,8 +882,8 @@ describe('lv-profile-manager-dialog', () => {
             return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
           case 'delete_unified_profile':
             throw new Error('Delete failed!');
-          case 'plugin:dialog|confirm':
-            return true;
+          case 'plugin:dialog|message':
+            return 'Ok';
           default:
             return null;
         }
@@ -907,8 +909,8 @@ describe('lv-profile-manager-dialog', () => {
             return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
           case 'delete_global_account':
             throw new Error('Account removal failed!');
-          case 'plugin:dialog|confirm':
-            return true;
+          case 'plugin:dialog|message':
+            return 'Ok';
           default:
             return null;
         }

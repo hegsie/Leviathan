@@ -56,8 +56,10 @@ function setupDefaultMocks(stashes = mockStashes): void {
         return null;
       case 'drop_stash':
         return null;
-      case 'plugin:dialog|confirm':
-        return true;
+      // plugin-dialog 2.7 routes confirm() through `message` and returns the
+      // clicked button label; 'Ok' means the user confirmed.
+      case 'plugin:dialog|message':
+        return 'Ok';
       default:
         return null;
     }
