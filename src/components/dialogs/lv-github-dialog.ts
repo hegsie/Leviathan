@@ -744,6 +744,8 @@ export class LvGitHubDialog extends LitElement {
 
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
+  /** Show a back arrow instead of a close ×, e.g. when opened from the profile manager. */
+  @property({ type: Boolean }) backButton = false;
 
   @state() private activeTab: TabType = 'connection';
   @state() private connectionStatus: GitHubConnectionStatus | null = null;
@@ -905,6 +907,19 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
+  /**
+   * Mirror a verified connection result into the shared unified-profile store so
+   * other views (e.g. the profile manager's status dots) reflect it immediately,
+   * rather than waiting for their own re-check.
+   */
+  private syncSharedConnectionStatus(connected: boolean): void {
+    if (this.selectedAccountId) {
+      unifiedProfileStore
+        .getState()
+        .setAccountConnectionStatus(this.selectedAccountId, connected ? 'connected' : 'disconnected');
+    }
+  }
+
   private async checkConnection(): Promise<void> {
     try {
       // Get token for selected account (or legacy token if no account)
@@ -912,6 +927,7 @@ export class LvGitHubDialog extends LitElement {
       const result = await gitService.checkGitHubConnectionWithToken(token);
       if (result.success && result.data) {
         this.connectionStatus = result.data;
+        this.syncSharedConnectionStatus(result.data.connected);
         // Update cached user in global account if connected
         if (this.selectedAccountId && result.data.connected && result.data.user) {
           await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
@@ -1192,6 +1208,7 @@ export class LvGitHubDialog extends LitElement {
       }
 
       this.connectionStatus = verifyResult.data;
+      this.syncSharedConnectionStatus(true);
       this.oauthState = { status: 'idle' };
 
       // Load data if connected and repo detected
@@ -1259,6 +1276,7 @@ export class LvGitHubDialog extends LitElement {
       // Token saved, update state
       this.tokenInput = '';
       this.connectionStatus = verifyResult.data;
+      this.syncSharedConnectionStatus(true);
 
       // Load data if connected and repo detected
       // Pass the token directly since storage might not be ready yet
@@ -1291,6 +1309,7 @@ export class LvGitHubDialog extends LitElement {
         await gitService.deleteGitHubToken();
       }
 
+      this.syncSharedConnectionStatus(false);
       this.connectionStatus = { connected: false, user: null, scopes: [] };
       this.pullRequests = [];
       this.workflowRuns = [];
@@ -1386,6 +1405,8 @@ export class LvGitHubDialog extends LitElement {
         user: null,
         scopes: ['app-installation'],
       };
+      this.selectedAccountId = accountId;
+      this.syncSharedConnectionStatus(true);
 
       showToast('Connected via GitHub App', 'success');
 
@@ -2340,6 +2361,7 @@ export class LvGitHubDialog extends LitElement {
     return html`
       <lv-modal
         ?open=${this.open}
+        ?backButton=${this.backButton}
         modalTitle="GitHub"
         @close=${this.handleClose}
       >

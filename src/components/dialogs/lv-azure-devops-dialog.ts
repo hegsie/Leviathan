@@ -564,6 +564,8 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   @property({ type: Boolean }) open = false;
   @property({ type: String }) repositoryPath = '';
+  /** Show a back arrow instead of a close ×, e.g. when opened from the profile manager. */
+  @property({ type: Boolean }) backButton = false;
 
   @state() private activeTab: TabType = 'connection';
   @state() private connectionStatus: AdoConnectionStatus | null = null;
@@ -730,6 +732,18 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
   }
 
+  /**
+   * Mirror a verified connection result into the shared unified-profile store so
+   * other views (e.g. the profile manager's status dots) reflect it immediately.
+   */
+  private syncSharedConnectionStatus(connected: boolean): void {
+    if (this.selectedAccountId) {
+      unifiedProfileStore
+        .getState()
+        .setAccountConnectionStatus(this.selectedAccountId, connected ? 'connected' : 'disconnected');
+    }
+  }
+
   private async checkConnection(): Promise<void> {
     const org = this.detectedRepo?.organization || this.organizationInput;
     if (!org) return;
@@ -739,6 +753,7 @@ export class LvAzureDevOpsDialog extends LitElement {
     const result = await gitService.checkAdoConnectionWithToken(org, token);
     if (result.success && result.data) {
       this.connectionStatus = result.data;
+      this.syncSharedConnectionStatus(result.data.connected);
       // Update cached user in global account if connected
       if (this.selectedAccountId && result.data.connected && result.data.user) {
         await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
@@ -961,6 +976,8 @@ export class LvAzureDevOpsDialog extends LitElement {
 
           if (result.success && result.data?.connected) {
             this.connectionStatus = result.data;
+            this.selectedAccountId = accountId;
+            this.syncSharedConnectionStatus(true);
             showToast('Connected to Azure DevOps via Microsoft Entra ID', 'success');
           } else {
             this.error = 'Connection verification failed';
@@ -1008,6 +1025,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
 
       this.connectionStatus = verifyResult.data;
+      this.syncSharedConnectionStatus(true);
 
       // Update cached user if we got user info
       if (this.selectedAccountId && verifyResult.data.user) {
@@ -1101,6 +1119,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       // Token saved, update state
       this.tokenInput = '';
       this.connectionStatus = verifyResult.data;
+      this.syncSharedConnectionStatus(true);
 
       // Store git credentials in keyring for push/pull operations
       // Username must be non-empty for macOS Keychain - use 'pat' as a placeholder
@@ -1140,6 +1159,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
       log.debug('Deleted git credentials from keyring');
 
+      this.syncSharedConnectionStatus(false);
       this.connectionStatus = null;
       this.pullRequests = [];
       this.workItems = [];
@@ -1714,6 +1734,7 @@ export class LvAzureDevOpsDialog extends LitElement {
     return html`
       <lv-modal
         .open=${this.open}
+        ?backButton=${this.backButton}
         title="Azure DevOps"
         @close=${this.handleClose}
       >

@@ -593,6 +593,8 @@ export class LvGitLabDialog extends LitElement {
 
   @property({ type: Boolean }) open = false;
   @property({ type: String }) repositoryPath = '';
+  /** Show a back arrow instead of a close ×, e.g. when opened from the profile manager. */
+  @property({ type: Boolean }) backButton = false;
 
   @state() private activeTab: TabType = 'connection';
   @state() private connectionStatus: GitLabConnectionStatus | null = null;
@@ -750,6 +752,18 @@ export class LvGitLabDialog extends LitElement {
     }
   }
 
+  /**
+   * Mirror a verified connection result into the shared unified-profile store so
+   * other views (e.g. the profile manager's status dots) reflect it immediately.
+   */
+  private syncSharedConnectionStatus(connected: boolean): void {
+    if (this.selectedAccountId) {
+      unifiedProfileStore
+        .getState()
+        .setAccountConnectionStatus(this.selectedAccountId, connected ? 'connected' : 'disconnected');
+    }
+  }
+
   private async checkConnection(): Promise<void> {
     const instanceUrl = this.detectedRepo?.instanceUrl || this.instanceUrlInput;
     if (!instanceUrl) return;
@@ -759,6 +773,7 @@ export class LvGitLabDialog extends LitElement {
     const result = await gitService.checkGitLabConnectionWithToken(instanceUrl, token);
     if (result.success && result.data) {
       this.connectionStatus = result.data;
+      this.syncSharedConnectionStatus(result.data.connected);
       // Update cached user in global account if connected
       if (this.selectedAccountId && result.data.connected && result.data.user) {
         await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
@@ -978,6 +993,7 @@ export class LvGitLabDialog extends LitElement {
       // Token saved, update state
       this.tokenInput = '';
       this.connectionStatus = verifyResult.data;
+      this.syncSharedConnectionStatus(true);
 
       // Load data if connected and repo detected
       if (this.connectionStatus?.connected && this.detectedRepo) {
@@ -1002,6 +1018,7 @@ export class LvGitLabDialog extends LitElement {
         await gitService.deleteGitLabToken();
       }
 
+      this.syncSharedConnectionStatus(false);
       this.connectionStatus = null;
       this.mergeRequests = [];
       this.issues = [];
@@ -1754,6 +1771,7 @@ export class LvGitLabDialog extends LitElement {
     return html`
       <lv-modal
         .open=${this.open}
+        ?backButton=${this.backButton}
         title="GitLab"
         @close=${this.handleClose}
       >

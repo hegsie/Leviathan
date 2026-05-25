@@ -1352,6 +1352,13 @@ export class AppShell extends LitElement {
     this.showSettings = true;
   };
 
+  // True while any integration dialog is open. Used to demote the profile manager
+  // behind it (it stays open underneath), so closing the integration dialog reveals
+  // the account picker again exactly where the user left off.
+  private get integrationDialogOpen(): boolean {
+    return this.showGitHub || this.showGitLab || this.showBitbucket || this.showAzureDevOps;
+  }
+
   private handleTriggerAbort = (): void => {
     this.handleAbortOperation();
   };
@@ -2977,6 +2984,7 @@ export class AppShell extends LitElement {
       ${this.activeRepository ? html`
         <lv-github-dialog
           ?open=${this.showGitHub}
+          ?backButton=${this.showProfileManager}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGitHub = false; }}
           @manage-accounts=${() => { this.showProfileManager = true; }}
@@ -2986,6 +2994,7 @@ export class AppShell extends LitElement {
       ${this.activeRepository ? html`
         <lv-gitlab-dialog
           ?open=${this.showGitLab}
+          ?backButton=${this.showProfileManager}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGitLab = false; }}
           @manage-accounts=${() => { this.showProfileManager = true; }}
@@ -2995,6 +3004,7 @@ export class AppShell extends LitElement {
       ${this.activeRepository ? html`
         <lv-bitbucket-dialog
           ?open=${this.showBitbucket}
+          ?backButton=${this.showProfileManager}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showBitbucket = false; }}
           @manage-accounts=${() => { this.showProfileManager = true; }}
@@ -3004,6 +3014,7 @@ export class AppShell extends LitElement {
       ${this.activeRepository ? html`
         <lv-azure-devops-dialog
           ?open=${this.showAzureDevOps}
+          ?backButton=${this.showProfileManager}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showAzureDevOps = false; }}
           @manage-accounts=${() => { this.showProfileManager = true; }}
@@ -3012,12 +3023,13 @@ export class AppShell extends LitElement {
 
       <lv-profile-manager-dialog
         ?open=${this.showProfileManager}
+        ?demoted=${this.integrationDialogOpen}
         .repoPath=${this.activeRepository?.repository.path ?? ''}
         @close=${() => { this.showProfileManager = false; }}
-        @open-github=${() => { this.showProfileManager = false; this.showGitHub = true; }}
-        @open-gitlab=${() => { this.showProfileManager = false; this.showGitLab = true; }}
-        @open-bitbucket=${() => { this.showProfileManager = false; this.showBitbucket = true; }}
-        @open-azure-devops=${() => { this.showProfileManager = false; this.showAzureDevOps = true; }}
+        @open-github=${() => { this.showGitHub = true; }}
+        @open-gitlab=${() => { this.showGitLab = true; }}
+        @open-bitbucket=${() => { this.showBitbucket = true; }}
+        @open-azure-devops=${() => { this.showAzureDevOps = true; }}
       ></lv-profile-manager-dialog>
 
       <lv-migration-dialog

@@ -572,6 +572,8 @@ export class LvBitbucketDialog extends LitElement {
 
   @property({ type: Boolean }) open = false;
   @property({ type: String }) repositoryPath = '';
+  /** Show a back arrow instead of a close ×, e.g. when opened from the profile manager. */
+  @property({ type: Boolean }) backButton = false;
 
   @state() private activeTab: TabType = 'connection';
   @state() private connectionStatus: BitbucketConnectionStatus | null = null;
@@ -723,6 +725,18 @@ export class LvBitbucketDialog extends LitElement {
     }
   }
 
+  /**
+   * Mirror a verified connection result into the shared unified-profile store so
+   * other views (e.g. the profile manager's status dots) reflect it immediately.
+   */
+  private syncSharedConnectionStatus(connected: boolean): void {
+    if (this.selectedAccountId) {
+      unifiedProfileStore
+        .getState()
+        .setAccountConnectionStatus(this.selectedAccountId, connected ? 'connected' : 'disconnected');
+    }
+  }
+
   private async checkConnection(): Promise<void> {
     // Get token for selected account (or use stored OAuth token)
     const token = this.oauthToken || await this.getSelectedAccountToken();
@@ -732,6 +746,7 @@ export class LvBitbucketDialog extends LitElement {
       const result = await gitService.checkBitbucketConnectionWithToken(token);
       if (result.success && result.data) {
         this.connectionStatus = result.data;
+        this.syncSharedConnectionStatus(result.data.connected);
         this.oauthToken = token;
 
         // Update cached user in global account if connected
@@ -930,6 +945,7 @@ export class LvBitbucketDialog extends LitElement {
           this.accounts = getAccountsByType('bitbucket');
         }
 
+        this.syncSharedConnectionStatus(true);
         this.usernameInput = '';
         this.appPasswordInput = '';
         if (this.detectedRepo) {
@@ -955,6 +971,7 @@ export class LvBitbucketDialog extends LitElement {
       }
       // Also delete legacy credentials
       await gitService.deleteBitbucketCredentials();
+      this.syncSharedConnectionStatus(false);
       this.connectionStatus = null;
       this.oauthToken = null;
       this.pullRequests = [];
@@ -1577,6 +1594,7 @@ export class LvBitbucketDialog extends LitElement {
     return html`
       <lv-modal
         .open=${this.open}
+        ?backButton=${this.backButton}
         title="Bitbucket"
         @close=${this.handleClose}
       >

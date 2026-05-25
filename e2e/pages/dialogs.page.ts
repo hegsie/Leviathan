@@ -199,6 +199,10 @@ export class ProfileManagerDialogPage extends BaseDialog {
   readonly setDefaultButton: Locator;
   readonly accountsSection: Locator;
   readonly addAccountButton: Locator;
+  readonly integrationAccountsSection: Locator;
+  readonly attachAccountButton: Locator;
+  readonly attachedAccountItems: Locator;
+  readonly pickerAccountRows: Locator;
 
   constructor(page: Page) {
     super(page, 'lv-profile-manager-dialog');
@@ -226,6 +230,18 @@ export class ProfileManagerDialogPage extends BaseDialog {
     this.setDefaultButton = page.getByRole('button', { name: /set as default|make default/i });
     this.accountsSection = page.locator('.accounts-section, [data-section="accounts"]');
     this.addAccountButton = page.getByRole('button', { name: /add account/i });
+    // The "Integration Accounts" section of the profile edit form (distinct from
+    // the "Assigned Repositories" section, which shares the .accounts-section class).
+    this.integrationAccountsSection = page
+      .locator('lv-profile-manager-dialog .accounts-section')
+      .filter({ hasText: 'Integration Accounts' });
+    this.attachAccountButton = this.integrationAccountsSection.getByRole('button', {
+      name: 'Add',
+      exact: true,
+    });
+    this.attachedAccountItems = this.integrationAccountsSection.locator('.account-item');
+    // Selectable rows shown in the account picker (select-account view).
+    this.pickerAccountRows = page.locator('lv-profile-manager-dialog .account-item.selectable');
   }
 
   async getProfileCount(): Promise<number> {
