@@ -61,6 +61,12 @@ export class LvModal extends LitElement {
         background: var(--color-bg-tertiary);
       }
 
+      .header-left {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+      }
+
       .title {
         font-size: var(--font-size-lg);
         font-weight: var(--font-weight-semibold);
@@ -113,6 +119,12 @@ export class LvModal extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) modalTitle = '';
   @property({ type: Boolean }) showClose = true;
+  /**
+   * When true, the header shows a back arrow (←) on the left instead of the close
+   * (×) on the right. Used when the dialog was opened from another screen (e.g. the
+   * profile manager) that it should return to. Still dispatches `close`.
+   */
+  @property({ type: Boolean }) backButton = false;
 
   private previouslyFocused: HTMLElement | null = null;
 
@@ -212,8 +224,19 @@ export class LvModal extends LitElement {
       <div class="overlay" @click=${this.handleOverlayClick}></div>
       <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
         <header class="header">
-          <h2 class="title" id="modal-title">${this.modalTitle}</h2>
-          ${this.showClose
+          <div class="header-left">
+            ${this.backButton
+              ? html`
+                  <button class="close-btn" @click=${this.close} aria-label="Back" title="Back">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="15 18 9 12 15 6"></polyline>
+                    </svg>
+                  </button>
+                `
+              : ''}
+            <h2 class="title" id="modal-title">${this.modalTitle}</h2>
+          </div>
+          ${this.showClose && !this.backButton
             ? html`
                 <button class="close-btn" @click=${this.close} aria-label="Close">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

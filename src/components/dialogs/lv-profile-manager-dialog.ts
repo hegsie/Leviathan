@@ -3,7 +3,7 @@
  * Full CRUD interface for managing unified profiles (git identity + integration accounts)
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatus } from '../../stores/unified-profile.store.ts';
@@ -14,7 +14,7 @@ import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../ty
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 
-type ViewMode = 'list' | 'edit' | 'create' | 'add-account' | 'edit-account' | 'assign-repos';
+type ViewMode = 'list' | 'edit' | 'create' | 'select-account' | 'edit-account' | 'assign-repos';
 
 @customElement('lv-profile-manager-dialog')
 export class LvProfileManagerDialog extends LitElement {
@@ -33,6 +33,13 @@ export class LvProfileManagerDialog extends LitElement {
         align-items: center;
         justify-content: center;
         z-index: var(--z-modal);
+      }
+
+      /* Sit behind a stacked dialog (e.g. an integration dialog opened from the
+         picker); the dialog on top provides the backdrop. */
+      :host([demoted]) .dialog-overlay {
+        z-index: calc(var(--z-modal) - 1);
+        background: transparent;
       }
 
       .dialog {
@@ -71,9 +78,19 @@ export class LvProfileManagerDialog extends LitElement {
       .dialog-footer {
         display: flex;
         justify-content: flex-end;
+        align-items: center;
         gap: var(--spacing-sm);
         padding: var(--spacing-md);
         border-top: 1px solid var(--color-border);
+      }
+
+      .btn-danger {
+        background: var(--color-error);
+        color: var(--color-text-inverse);
+      }
+
+      .btn-danger:hover:not(:disabled) {
+        filter: brightness(0.92);
       }
 
       .close-btn {
@@ -584,6 +601,13 @@ export class LvProfileManagerDialog extends LitElement {
 
   @property({ type: Boolean }) open = false;
   @property({ type: String }) repoPath = '';
+  /**
+   * When true, render behind another modal (e.g. an integration dialog opened
+   * from the account picker). The profile manager stays mounted and open so that
+   * closing the dialog stacked on top reveals it again, right where the user left
+   * off — no fragile "return" state to lose across an auth round trip.
+   */
+  @property({ type: Boolean, reflect: true }) demoted = false;
 
   @state() private viewMode: ViewMode = 'list';
   @state() private profiles: UnifiedProfile[] = [];
@@ -601,6 +625,12 @@ export class LvProfileManagerDialog extends LitElement {
 
   private unsubscribeStore?: () => void;
   private unsubscribeRepoStore?: () => void;
+
+  // When the user picks "Connect a new account" for a provider in the picker, we
+  // remember the provider and the account ids that existed beforehand, so that on
+  // return we can auto-attach the account they just connected to the profile.
+  private pendingConnectType: IntegrationType | null = null;
+  private accountIdsBeforeConnect: Set<string> = new Set();
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -636,7 +666,15 @@ export class LvProfileManagerDialog extends LitElement {
 
   updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('open') && this.open) {
-      this.loadProfiles();
+      // Fresh open: load data, then verify connection status for accurate dots.
+      void this.loadProfiles().then(() => this.refreshConnectionStatuses());
+    }
+    // When a dialog stacked on top of us closes (e.g. an integration dialog opened
+    // from the picker), refresh and auto-attach the account the user just connected.
+    // We do NOT re-check connection status here — the integration dialog already
+    // wrote it to the shared store, and re-checking would overwrite it.
+    if (changedProperties.has('demoted') && !this.demoted && this.open) {
+      void this.handleRevealAfterConnect();
     }
   }
 
@@ -644,6 +682,19 @@ export class LvProfileManagerDialog extends LitElement {
     await unifiedProfileService.loadUnifiedProfiles();
     // Also load backup info
     await this.loadBackupInfo();
+  }
+
+  /**
+   * Kick off a background connection check for every global account so the status
+   * indicator dots are accurate on a fresh open (e.g. after app restart the store
+   * status is 'unknown'). NOT called when revealing after connecting an account —
+   * the integration dialog already wrote the authoritative status, and re-checking
+   * here would clobber it.
+   */
+  private refreshConnectionStatuses(): void {
+    for (const account of this.getGlobalAccounts()) {
+      void unifiedProfileService.refreshAccountCachedUser(account);
+    }
   }
 
   private async loadBackupInfo(): Promise<void> {
@@ -752,7 +803,7 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private handleBack(): void {
-    if (this.viewMode === 'add-account' || this.viewMode === 'edit-account') {
+    if (this.viewMode === 'select-account' || this.viewMode === 'edit-account') {
       this.viewMode = this.editingProfile?.id ? 'edit' : 'create';
       this.editingAccount = null;
     } else if (this.viewMode === 'assign-repos') {
@@ -914,18 +965,61 @@ export class LvProfileManagerDialog extends LitElement {
     return unifiedProfileStore.getState().accounts;
   }
 
-  // Account management - now works with global accounts
-  private handleAddAccount(): void {
-    this.editingAccount = {
-      name: '',
-      integrationType: 'github',
-      config: { type: 'github' },
-      color: null,
-      cachedUser: null,
-      urlPatterns: [],
-      isDefault: false,
+  /**
+   * Accounts attached to the profile being edited, resolved from the profile's
+   * defaultAccounts map to concrete global account objects. Dangling ids (whose
+   * global account no longer exists) are filtered out defensively, since
+   * editingProfile is a local snapshot taken in handleEdit.
+   */
+  private getAttachedAccounts(): Array<{ type: IntegrationType; account: IntegrationAccount }> {
+    const map = this.editingProfile?.defaultAccounts ?? {};
+    const globals = this.getGlobalAccounts();
+    return Object.entries(map)
+      .map(([type, id]) => ({
+        type: type as IntegrationType,
+        account: globals.find((a) => a.id === id),
+      }))
+      .filter((entry): entry is { type: IntegrationType; account: IntegrationAccount } =>
+        Boolean(entry.account)
+      );
+  }
+
+  private setEditingProfileAccount(type: IntegrationType, accountId: string): void {
+    if (!this.editingProfile) return;
+    this.editingProfile = {
+      ...this.editingProfile,
+      defaultAccounts: { ...this.editingProfile.defaultAccounts, [type]: accountId },
     };
-    this.viewMode = 'add-account';
+  }
+
+  private removeEditingProfileAccount(type: IntegrationType): void {
+    if (!this.editingProfile) return;
+    const defaultAccounts = { ...this.editingProfile.defaultAccounts };
+    delete defaultAccounts[type];
+    this.editingProfile = { ...this.editingProfile, defaultAccounts };
+  }
+
+  // Account management - attaches existing global accounts to the profile
+  private handleOpenAccountPicker(): void {
+    this.viewMode = 'select-account';
+  }
+
+  /**
+   * Attach an existing global account to the profile being edited. Because a
+   * profile holds at most one account per provider type, this replaces any
+   * account already attached for the same type. Persisted on "Save Profile".
+   */
+  private handleAttachAccount(account: IntegrationAccount): void {
+    this.setEditingProfileAccount(account.integrationType, account.id);
+    this.viewMode = this.editingProfile?.id ? 'edit' : 'create';
+  }
+
+  /**
+   * Detach an account from the profile being edited (local only; the global
+   * account is kept). Persisted on "Save Profile".
+   */
+  private handleDetachAccount(type: IntegrationType): void {
+    this.removeEditingProfileAccount(type);
   }
 
   private handleEditAccount(account: IntegrationAccount): void {
@@ -933,19 +1027,31 @@ export class LvProfileManagerDialog extends LitElement {
     this.viewMode = 'edit-account';
   }
 
-  private async handleRemoveAccount(accountId: string): Promise<void> {
+  /**
+   * Delete a global account entirely (for all profiles). Reachable only from the
+   * account's Edit screen because it is destructive and irreversible.
+   */
+  private async handleDeleteGlobalAccount(accountId: string): Promise<void> {
     const confirmed = await showConfirm(
-      'Remove Account',
-      'Remove this account? This will delete the account for all profiles.',
+      'Delete Account',
+      'Delete this account? This will remove the account for all profiles.',
       'warning'
     );
     if (!confirmed) return;
 
     try {
       await unifiedProfileService.deleteGlobalAccount(accountId);
-      showToast('Account removed', 'success');
+      // The editing profile is a local snapshot - drop the deleted account from it too.
+      const attachedType = Object.entries(this.editingProfile?.defaultAccounts ?? {}).find(
+        ([, id]) => id === accountId
+      )?.[0] as IntegrationType | undefined;
+      if (attachedType) {
+        this.removeEditingProfileAccount(attachedType);
+      }
+      showToast('Account deleted', 'success');
+      this.handleBack();
     } catch (error) {
-      showToast(`Failed to remove account: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
+      showToast(`Failed to delete account: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     }
   }
 
@@ -1035,8 +1141,8 @@ export class LvProfileManagerDialog extends LitElement {
         return 'New Profile';
       case 'edit':
         return 'Edit Profile';
-      case 'add-account':
-        return 'Add Account';
+      case 'select-account':
+        return 'Attach Account';
       case 'edit-account':
         return 'Edit Account';
       case 'assign-repos':
@@ -1053,7 +1159,8 @@ export class LvProfileManagerDialog extends LitElement {
       case 'create':
       case 'edit':
         return this.renderProfileForm();
-      case 'add-account':
+      case 'select-account':
+        return this.renderAccountPicker();
       case 'edit-account':
         return this.renderAccountForm();
       case 'assign-repos':
@@ -1083,13 +1190,21 @@ export class LvProfileManagerDialog extends LitElement {
             ${this.isSaving ? 'Saving...' : 'Save Profile'}
           </button>
         `;
-      case 'add-account':
-        // Add account mode just shows instructions, only need back button
+      case 'select-account':
+        // Picker rows are click-to-attach, so only a back button is needed.
         return html`
           <button class="btn btn-secondary" @click=${this.handleBack}>Back</button>
         `;
       case 'edit-account':
         return html`
+          <button
+            class="btn btn-danger"
+            ?disabled=${!this.editingAccount?.id}
+            @click=${() => this.editingAccount?.id && this.handleDeleteGlobalAccount(this.editingAccount.id)}
+          >
+            Delete Account
+          </button>
+          <div style="flex: 1;"></div>
           <button class="btn btn-secondary" @click=${this.handleBack}>Cancel</button>
           <button class="btn btn-primary" @click=${this.handleSaveAccount}>Save Account</button>
         `;
@@ -1364,7 +1479,7 @@ export class LvProfileManagerDialog extends LitElement {
             </svg>
             Integration Accounts
           </div>
-          <button class="btn btn-sm" @click=${this.handleAddAccount}>
+          <button class="btn btn-sm" @click=${this.handleOpenAccountPicker}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19"></line>
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -1373,22 +1488,19 @@ export class LvProfileManagerDialog extends LitElement {
           </button>
         </div>
 
-        ${this.getGlobalAccounts().length === 0
+        ${this.getAttachedAccounts().length === 0
           ? html`
-              <div class="empty-accounts warning">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;">
-                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-                  <line x1="12" y1="9" x2="12" y2="13"></line>
-                  <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                </svg>
-                No integration accounts configured.
+              <div class="empty-accounts">
+                No accounts attached to this profile.
                 <br />
-                Connect accounts from the GitHub, GitLab, Azure DevOps, or Bitbucket dialogs.
+                Click "Add" to attach an integration account.
               </div>
             `
           : html`
               <div class="accounts-list">
-                ${this.getGlobalAccounts().map((account) => this.renderAccountItem(account))}
+                ${this.getAttachedAccounts().map(({ type, account }) =>
+                  this.renderAttachedAccountItem(type, account)
+                )}
               </div>
             `}
       </div>
@@ -1500,7 +1612,17 @@ export class LvProfileManagerDialog extends LitElement {
     `;
   }
 
-  private renderAccountItem(account: IntegrationAccount) {
+  /**
+   * Base renderer for an account row. `actions` is an optional template for the
+   * trailing action buttons (edit/detach); `onClick`, when provided, makes the
+   * whole row a click-to-select control (used by the account picker). The same
+   * markup is reused for attached accounts and picker rows.
+   */
+  private renderAccountItem(
+    account: IntegrationAccount,
+    actions: TemplateResult | typeof nothing = nothing,
+    onClick?: () => void
+  ) {
     const details = this.getAccountDetails(account);
     const connectionStatus = this.getAccountConnectionStatus(account.id);
     const statusTitle = {
@@ -1511,7 +1633,20 @@ export class LvProfileManagerDialog extends LitElement {
     }[connectionStatus];
 
     return html`
-      <div class="account-item">
+      <div
+        class="account-item ${onClick ? 'selectable' : ''}"
+        role=${onClick ? 'button' : nothing}
+        tabindex=${onClick ? '0' : nothing}
+        @click=${onClick ?? nothing}
+        @keydown=${onClick
+          ? (e: KeyboardEvent) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : nothing}
+      >
         ${this.renderAccountIcon(account.integrationType)}
         <div class="account-info">
           <div class="account-name">
@@ -1522,6 +1657,20 @@ export class LvProfileManagerDialog extends LitElement {
           ${details ? html`<div class="account-detail">${details}</div>` : nothing}
         </div>
         <span class="status-indicator ${connectionStatus}" title="${statusTitle}"></span>
+        ${actions}
+      </div>
+    `;
+  }
+
+  /**
+   * An account row in the profile's "Integration Accounts" list. The X button
+   * detaches the account from this profile only (it does not delete the global
+   * account); editing opens the account's Edit screen.
+   */
+  private renderAttachedAccountItem(type: IntegrationType, account: IntegrationAccount) {
+    return this.renderAccountItem(
+      account,
+      html`
         <div class="account-actions">
           <button class="action-btn" @click=${() => this.handleEditAccount(account)} title="Edit account">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1529,12 +1678,69 @@ export class LvProfileManagerDialog extends LitElement {
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
             </svg>
           </button>
-          <button class="action-btn delete" @click=${() => this.handleRemoveAccount(account.id)} title="Remove account">
+          <button class="action-btn delete" @click=${() => this.handleDetachAccount(type)} title="Detach from profile">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"></line>
               <line x1="6" y1="6" x2="18" y2="18"></line>
             </svg>
           </button>
+        </div>
+      `
+    );
+  }
+
+  /**
+   * Account picker shown when attaching an account to a profile. Lists existing
+   * global accounts as click-to-attach rows, and always offers a path to connect
+   * a brand-new account via the integration dialogs.
+   */
+  private renderAccountPicker() {
+    const accounts = this.getGlobalAccounts();
+
+    return html`
+      <div class="form-content">
+        <div class="form-section">
+          ${accounts.length === 0
+            ? html`
+                <div class="empty-accounts">
+                  No integration accounts yet. Connect one below — once you return, it'll be
+                  attached to this profile automatically.
+                </div>
+              `
+            : html`
+                <p style="color: var(--color-text-secondary); margin-bottom: var(--spacing-md);">
+                  Select an account to attach to <strong>${this.editingProfile?.name || 'this profile'}</strong>.
+                  A profile uses one account per provider, so choosing a provider you already have
+                  attached will replace it.
+                </p>
+                <div class="accounts-list">
+                  ${accounts.map((account) =>
+                    this.renderAccountItem(account, nothing, () => this.handleAttachAccount(account))
+                  )}
+                </div>
+              `}
+
+          <div class="form-section-title" style="margin-top: var(--spacing-lg);">
+            Connect a new account
+          </div>
+          <div style="display: flex; gap: var(--spacing-sm); flex-wrap: wrap; margin-top: var(--spacing-sm);">
+            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('github')}>
+              ${this.renderAccountIcon('github')}
+              GitHub
+            </button>
+            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('gitlab')}>
+              ${this.renderAccountIcon('gitlab')}
+              GitLab
+            </button>
+            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('bitbucket')}>
+              ${this.renderAccountIcon('bitbucket')}
+              Bitbucket
+            </button>
+            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('azure-devops')}>
+              ${this.renderAccountIcon('azure-devops')}
+              Azure DevOps
+            </button>
+          </div>
         </div>
       </div>
     `;
@@ -1635,45 +1841,6 @@ export class LvProfileManagerDialog extends LitElement {
   private renderAccountForm() {
     if (!this.editingAccount) return nothing;
 
-    const isEditMode = this.viewMode === 'edit-account';
-
-    // In add mode, show message directing user to integration dialogs
-    if (!isEditMode) {
-      return html`
-        <div class="empty-state" style="padding: var(--spacing-lg);">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width: 48px; height: 48px; opacity: 0.5; margin-bottom: var(--spacing-md);">
-            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-          </svg>
-          <div style="font-weight: var(--font-weight-medium); margin-bottom: var(--spacing-sm);">
-            Add accounts via integration dialogs
-          </div>
-          <p style="font-size: var(--font-size-sm); color: var(--color-text-secondary); margin-bottom: var(--spacing-lg); max-width: 400px;">
-            To add a new account, use the GitHub, GitLab, Bitbucket, or Azure DevOps dialogs from the toolbar.
-            Accounts are automatically linked to your active profile when you authenticate.
-          </p>
-          <div style="display: flex; gap: var(--spacing-sm); flex-wrap: wrap; justify-content: center;">
-            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('github')}>
-              ${this.renderAccountIcon('github')}
-              GitHub
-            </button>
-            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('gitlab')}>
-              ${this.renderAccountIcon('gitlab')}
-              GitLab
-            </button>
-            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('bitbucket')}>
-              ${this.renderAccountIcon('bitbucket')}
-              Bitbucket
-            </button>
-            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('azure-devops')}>
-              ${this.renderAccountIcon('azure-devops')}
-              Azure DevOps
-            </button>
-          </div>
-        </div>
-      `;
-    }
-
     // Edit mode - show form for editing existing account metadata
     return html`
       <div class="form-group">
@@ -1735,13 +1902,45 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private dispatchIntegrationOpen(type: IntegrationType): void {
-    this.handleBack(); // Go back to edit view
+    // Remember which provider the user is connecting and the accounts that exist
+    // now, so that when the integration dialog closes we can auto-attach the
+    // account they just connected to the profile being edited.
+    this.pendingConnectType = type;
+    this.accountIdsBeforeConnect = new Set(this.getGlobalAccounts().map((a) => a.id));
+    // Stay on the picker view: the host stacks the integration dialog on top and
+    // reveals this one again on close.
     this.dispatchEvent(
-      new CustomEvent(`open-${type === 'azure-devops' ? 'azure-devops' : type}`, {
+      new CustomEvent(`open-${type}`, {
         bubbles: true,
         composed: true,
       })
     );
+  }
+
+  /**
+   * After an integration dialog opened from the picker closes, attach the account
+   * the user just connected to the profile being edited, then return to the form
+   * so it shows as attached (ready to Save). Matches the user's intent: clicking
+   * "Connect <provider>" while attaching to a profile means "use this account".
+   */
+  private async handleRevealAfterConnect(): Promise<void> {
+    await this.loadProfiles();
+    const type = this.pendingConnectType;
+    this.pendingConnectType = null;
+    if (!type || !this.editingProfile) return;
+    // Don't override an account already attached for this provider.
+    if (this.editingProfile.defaultAccounts?.[type]) return;
+
+    const accountsOfType = this.getGlobalAccounts().filter((a) => a.integrationType === type);
+    const toAttach =
+      accountsOfType.find((a) => !this.accountIdsBeforeConnect.has(a.id)) ?? // newly connected
+      accountsOfType.find((a) => a.isDefault) ?? // the default for this provider
+      (accountsOfType.length === 1 ? accountsOfType[0] : undefined); // the only one
+
+    if (toAttach) {
+      this.setEditingProfileAccount(type, toAttach.id);
+      this.viewMode = this.editingProfile.id ? 'edit' : 'create';
+    }
   }
 
   private renderAccountConfigFields() {

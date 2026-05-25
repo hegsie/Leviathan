@@ -327,6 +327,38 @@ describe('lv-github-dialog', () => {
       expect(tokenForm !== null || authToggle !== null || oauthSection !== null).to.be.true;
     });
 
+    // Cross-component contract: verifying a connection here must update the SHARED
+    // store status that other views (e.g. the profile manager dots) read.
+    it('writes verified connected status to the shared store', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(unifiedProfileStore.getState().accountConnectionStatus['gh-acc-1']?.status).to.equal(
+        'connected'
+      );
+    });
+
+    it('writes disconnected status to the shared store when verification fails', async () => {
+      connectionResponse = mockDisconnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(unifiedProfileStore.getState().accountConnectionStatus['gh-acc-1']?.status).to.equal(
+        'disconnected'
+      );
+    });
+
     it('shows user info when connected', async () => {
       connectionResponse = mockConnectedStatus;
 

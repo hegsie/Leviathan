@@ -71,7 +71,7 @@ const personalProfile = makeProfile({
   isDefault: true,
   color: PROFILE_COLORS[1],
   urlPatterns: ['github.com/personal/*'],
-  defaultAccounts: { github: 'account-2' },
+  defaultAccounts: { gitlab: 'account-2' },
 });
 
 const githubAccount = makeAccount();
@@ -142,6 +142,29 @@ function setupStoreState(): void {
   const repoStore = repositoryStore.getState();
   repoStore.addRecentRepository('/repo/work', 'work');
   repoStore.addRecentRepository('/repo/personal', 'personal');
+}
+
+// Override both the Tauri mock and the store so a custom config survives the
+// component's initial loadProfiles() call (which reloads via get_unified_profiles_config).
+function useConfig(profiles: UnifiedProfile[], accounts: IntegrationAccount[]): void {
+  mockInvoke = async (command: string, args?: unknown) => {
+    switch (command) {
+      case 'get_unified_profiles_config':
+        return { version: 3, profiles, accounts, repositoryAssignments: {} };
+      case 'get_migration_backup_info':
+        return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+      case 'save_unified_profile':
+        // Echo back the submitted profile so the store reflects what was saved.
+        return (args as { profile?: UnifiedProfile } | undefined)?.profile ?? profiles[0] ?? null;
+      case 'delete_global_account':
+        return null;
+      case 'plugin:dialog|message':
+        return 'Ok';
+      default:
+        return null;
+    }
+  };
+  unifiedProfileStore.getState().setConfig({ version: 3, profiles, accounts, repositoryAssignments: {} });
 }
 
 async function renderDialog(props: { open?: boolean; repoPath?: string } = {}): Promise<LvProfileManagerDialog> {
@@ -757,70 +780,563 @@ describe('lv-profile-manager-dialog', () => {
       expect(accountsTitle).to.not.be.undefined;
     });
 
-    it('lists global accounts in the accounts section', async () => {
+    it('lists only the accounts attached to the profile', async () => {
       const el = await renderDialog();
       const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
-      (profileItems[0] as HTMLElement).click();
+      // Personal profile has defaultAccounts { gitlab: 'account-2' } → one attached account
+      (profileItems[1] as HTMLElement).click();
       await el.updateComplete;
 
-      const accountItems = el.shadowRoot!.querySelectorAll('.account-item');
-      expect(accountItems.length).to.be.greaterThanOrEqual(2);
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      const accountItems = accountsSection!.querySelectorAll('.account-item');
+      expect(accountItems.length).to.equal(1);
+      expect(accountItems[0].textContent).to.include('Personal GitLab');
     });
 
-    it('shows account name and type badge for each account', async () => {
+    it('shows the attached account name and type badge', async () => {
       const el = await renderDialog();
       const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
-      (profileItems[0] as HTMLElement).click();
+      (profileItems[1] as HTMLElement).click();
       await el.updateComplete;
 
-      const accountNames = el.shadowRoot!.querySelectorAll('.account-name');
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      const accountNames = accountsSection!.querySelectorAll('.account-name');
       const nameTexts = Array.from(accountNames).map((n) => n.textContent?.trim());
-      expect(nameTexts.some((t) => t?.includes('Work GitHub'))).to.be.true;
       expect(nameTexts.some((t) => t?.includes('Personal GitLab'))).to.be.true;
+      // Work GitHub is NOT attached to the Personal profile
+      expect(nameTexts.some((t) => t?.includes('Work GitHub'))).to.be.false;
 
-      const typeBadges = el.shadowRoot!.querySelectorAll('.type-badge');
-      expect(typeBadges.length).to.be.greaterThanOrEqual(2);
+      const typeBadges = accountsSection!.querySelectorAll('.type-badge');
+      expect(typeBadges.length).to.equal(1);
     });
 
-    it('shows empty accounts warning when no accounts exist', async () => {
-      // Override mock to return config with no accounts
+    it('shows empty state when no accounts are attached to the profile', async () => {
+      const el = await renderDialog();
+      const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
+      // Work profile has empty defaultAccounts
+      (profileItems[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      const empty = accountsSection!.querySelector('.empty-accounts');
+      expect(empty).to.not.be.null;
+      expect(empty!.textContent).to.include('No accounts attached to this profile');
+      expect(accountsSection!.querySelectorAll('.account-item').length).to.equal(0);
+    });
+
+    it('ignores dangling account ids whose global account no longer exists', async () => {
+      const danglingProfile = makeProfile({
+        id: 'profile-dangling',
+        name: 'Dangling',
+        defaultAccounts: { github: 'does-not-exist' },
+      });
+      useConfig([danglingProfile], testAccounts);
+
+      const el = await renderDialog();
+      const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
+      (profileItems[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      expect(accountsSection!.querySelectorAll('.account-item').length).to.equal(0);
+      expect(accountsSection!.querySelector('.empty-accounts')).to.not.be.null;
+    });
+  });
+
+  // ── Attaching/detaching accounts ───────────────────────────────────────
+  describe('attaching and detaching accounts', () => {
+    function getAddButton(el: LvProfileManagerDialog): HTMLButtonElement {
+      const section = el.shadowRoot!.querySelector('.accounts-section')!;
+      return Array.from(section.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Add'
+      ) as HTMLButtonElement;
+    }
+
+    it('opens the account picker when Add is clicked', async () => {
+      const el = await renderDialog();
+      const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
+      (profileItems[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Attach Account');
+      // Picker lists the existing global accounts as selectable rows
+      const selectable = el.shadowRoot!.querySelectorAll('.account-item.selectable');
+      expect(selectable.length).to.equal(2);
+    });
+
+    it('attaches a selected account and returns to the form without a Tauri call', async () => {
+      const el = await renderDialog();
+      const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
+      (profileItems[0] as HTMLElement).click(); // Work profile, no attached accounts
+      await el.updateComplete;
+
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      clearHistory();
+      // Click the Work GitHub row
+      const rows = el.shadowRoot!.querySelectorAll('.account-item.selectable');
+      const githubRow = Array.from(rows).find((r) => r.textContent?.includes('Work GitHub'));
+      (githubRow as HTMLElement).click();
+      await el.updateComplete;
+
+      // Back on the edit form with the account now attached
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Edit Profile');
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      const accountItems = accountsSection!.querySelectorAll('.account-item');
+      expect(accountItems.length).to.equal(1);
+      expect(accountItems[0].textContent).to.include('Work GitHub');
+
+      // Attach is local-only until Save - no association command should fire
+      expect(findCommands('set_profile_default_account').length).to.equal(0);
+    });
+
+    it('replaces the existing account of the same provider when attaching another', async () => {
+      const ghA = makeAccount({ id: 'gh-a', name: 'GitHub A', integrationType: 'github' });
+      const ghB = makeAccount({ id: 'gh-b', name: 'GitHub B', integrationType: 'github' });
+      const profile = makeProfile({ id: 'p', name: 'P', defaultAccounts: { github: 'gh-a' } });
+      useConfig([profile], [ghA, ghB]);
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      const rows = el.shadowRoot!.querySelectorAll('.account-item.selectable');
+      const rowB = Array.from(rows).find((r) => r.textContent?.includes('GitHub B'));
+      (rowB as HTMLElement).click();
+      await el.updateComplete;
+
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      const accountItems = accountsSection!.querySelectorAll('.account-item');
+      // Still one github slot, now showing GitHub B
+      expect(accountItems.length).to.equal(1);
+      expect(accountItems[0].textContent).to.include('GitHub B');
+      expect(accountItems[0].textContent).to.not.include('GitHub A');
+    });
+
+    it('detaches an account without deleting it globally', async () => {
+      const el = await renderDialog();
+      const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
+      (profileItems[1] as HTMLElement).click(); // Personal, one attached account
+      await el.updateComplete;
+
+      clearHistory();
+      const detachBtn = el.shadowRoot!.querySelector(
+        '.accounts-section .account-actions .action-btn.delete'
+      ) as HTMLButtonElement;
+      detachBtn.click();
+      await el.updateComplete;
+
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      expect(accountsSection!.querySelectorAll('.account-item').length).to.equal(0);
+      expect(accountsSection!.querySelector('.empty-accounts')).to.not.be.null;
+
+      // Detach is local-only - no global delete and no association command
+      expect(findCommands('delete_global_account').length).to.equal(0);
+      expect(findCommands('remove_profile_default_account').length).to.equal(0);
+    });
+
+    it('persists an attached account on Save Profile', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click(); // Work
+      await el.updateComplete;
+
+      getAddButton(el).click();
+      await el.updateComplete;
+      const rows = el.shadowRoot!.querySelectorAll('.account-item.selectable');
+      const githubRow = Array.from(rows).find((r) => r.textContent?.includes('Work GitHub'));
+      (githubRow as HTMLElement).click();
+      await el.updateComplete;
+
+      clearHistory();
+      const saveBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.dialog-footer .btn-primary')
+      ).find((b) => b.textContent?.trim().includes('Save Profile')) as HTMLButtonElement;
+      saveBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const saveCalls = findCommands('save_unified_profile');
+      expect(saveCalls.length).to.equal(1);
+      const saved = (saveCalls[0].args as { profile: UnifiedProfile }).profile;
+      expect(saved.defaultAccounts.github).to.equal('account-1');
+    });
+
+    it('persists an attached account when creating a new profile', async () => {
+      const el = await renderDialog();
+      const newProfileBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.dialog-footer .btn-primary')
+      ).find((b) => b.textContent?.trim().includes('New Profile')) as HTMLButtonElement;
+      newProfileBtn.click();
+      await el.updateComplete;
+
+      const inputs = el.shadowRoot!.querySelectorAll(
+        '.form-group input'
+      ) as NodeListOf<HTMLInputElement>;
+      inputs[0].value = 'Created';
+      inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+      inputs[1].value = 'Created User';
+      inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+      inputs[2].value = 'created@test.com';
+      inputs[2].dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      getAddButton(el).click();
+      await el.updateComplete;
+      const rows = el.shadowRoot!.querySelectorAll('.account-item.selectable');
+      const githubRow = Array.from(rows).find((r) => r.textContent?.includes('Work GitHub'));
+      (githubRow as HTMLElement).click();
+      await el.updateComplete;
+
+      clearHistory();
+      const saveBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.dialog-footer .btn-primary')
+      ).find((b) => b.textContent?.trim().includes('Save Profile')) as HTMLButtonElement;
+      saveBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const saveCalls = findCommands('save_unified_profile');
+      expect(saveCalls.length).to.equal(1);
+      const saved = (saveCalls[0].args as { profile: UnifiedProfile }).profile;
+      expect(saved.id).to.be.a('string').and.not.be.empty;
+      expect(saved.defaultAccounts.github).to.equal('account-1');
+    });
+
+    it('shows connect-new buttons in the picker and dispatches open-github', async () => {
+      useConfig(testProfiles, []);
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      // No global accounts → no selectable rows, but connect-new buttons present
+      expect(el.shadowRoot!.querySelectorAll('.account-item.selectable').length).to.equal(0);
+      const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'GitHub'
+      ) as HTMLButtonElement;
+      expect(githubBtn).to.not.be.undefined;
+
+      let dispatched = false;
+      el.addEventListener('open-github', () => {
+        dispatched = true;
+      });
+      githubBtn.click();
+      await el.updateComplete;
+      expect(dispatched).to.be.true;
+
+      // The picker view is preserved (the host hides/reopens the dialog), so the
+      // user returns here to select the newly connected account.
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Attach Account');
+    });
+
+    it('preserves the picker and refreshes when demoted then revealed', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      // Demote behind a stacked dialog (e.g. an integration dialog)
+      el.demoted = true;
+      await el.updateComplete;
+      expect(el.hasAttribute('demoted')).to.be.true;
+      // Still mounted and on the picker (state preserved)
+      expect(el.shadowRoot!.querySelector('.dialog-overlay')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Attach Account');
+
+      // Revealing again refreshes the account list so a newly connected account shows
+      clearHistory();
+      el.demoted = false;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+      expect(el.hasAttribute('demoted')).to.be.false;
+      expect(findCommands('get_unified_profiles_config').length).to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Attach Account');
+    });
+
+    it('auto-attaches a newly connected account on return from the integration dialog', async () => {
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
+      useConfig([profile], []); // no global accounts yet
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      // Click the "Connect a new account → GitHub" button
+      const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'GitHub'
+      ) as HTMLButtonElement;
+      githubBtn.click();
+      await el.updateComplete;
+
+      // Integration dialog opens (demoted); user connects an account
+      el.demoted = true;
+      await el.updateComplete;
+      const newGh = makeAccount({ id: 'gh-new', name: 'New GH', integrationType: 'github' });
+      useConfig([profile], [newGh]);
+
+      // Closing the integration dialog reveals the picker and auto-attaches
+      el.demoted = false;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+
+      // Back on the edit form with the connected account attached
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Edit Profile');
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      expect(accountsSection!.querySelectorAll('.account-item').length).to.equal(1);
+      expect(accountsSection!.textContent).to.include('New GH');
+    });
+
+    it('auto-attaches the existing default account when re-connecting a provider', async () => {
+      const gh = makeAccount({
+        id: 'gh1',
+        name: 'Existing GH',
+        integrationType: 'github',
+        isDefault: true,
+      });
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
+      useConfig([profile], [gh]);
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      // Re-authenticate the existing (disconnected) account via the connect button
+      const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'GitHub'
+      ) as HTMLButtonElement;
+      githubBtn.click();
+      await el.updateComplete;
+
+      el.demoted = true;
+      await el.updateComplete;
+      // No new account (same id re-authed)
+      el.demoted = false;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+
+      // The existing default account is attached
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Edit Profile');
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      expect(accountsSection!.textContent).to.include('Existing GH');
+    });
+
+    it('deletes a global account from the account edit screen', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[1] as HTMLElement).click(); // Personal
+      await el.updateComplete;
+
+      // Open the attached account's edit screen
+      const editBtn = el.shadowRoot!.querySelector(
+        '.accounts-section .account-actions .action-btn:not(.delete)'
+      ) as HTMLButtonElement;
+      editBtn.click();
+      await el.updateComplete;
+
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Edit Account');
+
+      clearHistory();
+      const deleteBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.dialog-footer .btn-danger')
+      ).find((b) => b.textContent?.trim().includes('Delete Account')) as HTMLButtonElement;
+      expect(deleteBtn).to.not.be.undefined;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(findCommands('delete_global_account').length).to.equal(1);
+    });
+
+    it('discards an attach when the picker is dismissed with Back', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click(); // Work, no accounts
+      await el.updateComplete;
+
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      // Leave the picker without selecting anything
+      const backBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.dialog-footer .btn-secondary')
+      ).find((b) => b.textContent?.trim() === 'Back') as HTMLButtonElement;
+      backBtn.click();
+      await el.updateComplete;
+
+      const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
+      expect(accountsSection!.querySelectorAll('.account-item').length).to.equal(0);
+    });
+
+    it('discards a detach when the form is cancelled without saving', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[1] as HTMLElement).click(); // Personal
+      await el.updateComplete;
+
+      // Detach the attached account locally
+      (
+        el.shadowRoot!.querySelector(
+          '.accounts-section .account-actions .action-btn.delete'
+        ) as HTMLButtonElement
+      ).click();
+      await el.updateComplete;
+      expect(
+        el.shadowRoot!.querySelector('.accounts-section')!.querySelectorAll('.account-item').length
+      ).to.equal(0);
+
+      clearHistory();
+      // Cancel the form (returns to list) - nothing should persist
+      const cancelBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.dialog-footer .btn-secondary')
+      ).find((b) => b.textContent?.trim() === 'Cancel') as HTMLButtonElement;
+      cancelBtn.click();
+      await el.updateComplete;
+      expect(findCommands('save_unified_profile').length).to.equal(0);
+
+      // Re-open the profile - the account is still attached (the store was untouched)
+      (el.shadowRoot!.querySelectorAll('.profile-item')[1] as HTMLElement).click();
+      await el.updateComplete;
+      expect(
+        el.shadowRoot!.querySelector('.accounts-section')!.querySelectorAll('.account-item').length
+      ).to.equal(1);
+    });
+  });
+
+  // ── Connection status indicator ────────────────────────────────────────
+  describe('connection status', () => {
+    it('refreshes the status dot to connected when opened', async () => {
+      const gh = makeAccount({ id: 'gh1', name: 'GH', integrationType: 'github' });
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: { github: 'gh1' } });
+
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_unified_profiles_config':
-            return { version: 3, profiles: testProfiles, accounts: [], repositoryAssignments: {} };
+            return { version: 3, profiles: [profile], accounts: [gh], repositoryAssignments: {} };
           case 'get_migration_backup_info':
             return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'get_keyring_token':
+            return 'tok-123';
+          case 'check_github_connection':
+            return { connected: true, user: { login: 'me', name: 'Me', avatarUrl: null, email: null } };
+          case 'update_global_account_cached_user':
+            return null;
           default:
             return null;
         }
       };
       unifiedProfileStore.getState().setConfig({
         version: 3,
-        profiles: testProfiles,
-        accounts: [],
+        profiles: [profile],
+        accounts: [gh],
         repositoryAssignments: {},
       });
 
       const el = await renderDialog();
-      const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
-      (profileItems[0] as HTMLElement).click();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
       await el.updateComplete;
 
-      const warning = el.shadowRoot!.querySelector('.empty-accounts.warning');
-      expect(warning).to.not.be.null;
-      expect(warning!.textContent).to.include('No integration accounts configured');
+      // The status check runs in the background; wait for it to resolve
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      const indicator = el.shadowRoot!.querySelector('.accounts-section .status-indicator');
+      expect(indicator).to.not.be.null;
+      expect(indicator!.classList.contains('connected')).to.be.true;
+    });
+
+    it('marks the account disconnected when it has no token', async () => {
+      const gh = makeAccount({ id: 'gh1', name: 'GH', integrationType: 'github' });
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: { github: 'gh1' } });
+
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [profile], accounts: [gh], repositoryAssignments: {} };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'get_keyring_token':
+            return null; // no token → disconnected
+          default:
+            return null;
+        }
+      };
+      unifiedProfileStore.getState().setConfig({
+        version: 3,
+        profiles: [profile],
+        accounts: [gh],
+        repositoryAssignments: {},
+      });
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const indicator = el.shadowRoot!.querySelector('.accounts-section .status-indicator');
+      expect(indicator!.classList.contains('disconnected')).to.be.true;
+    });
+
+    it('does not override the status set by the integration dialog on reveal', async () => {
+      const gh = makeAccount({ id: 'gh1', name: 'GH', integrationType: 'github' });
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: { github: 'gh1' } });
+      useConfig([profile], [gh]); // no token in this mock → fresh-open check = disconnected
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      // Let the fresh-open status check settle (it resolves to disconnected here)
+      await new Promise((r) => setTimeout(r, 60));
+      await el.updateComplete;
+
+      // Simulate the integration dialog reporting a verified connection
+      unifiedProfileStore.getState().setAccountConnectionStatus('gh1', 'connected');
+      await el.updateComplete;
+
+      // Demote (integration dialog opens on top) then reveal (it closes)
+      el.demoted = true;
+      await el.updateComplete;
+      el.demoted = false;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 60));
+      await el.updateComplete;
+
+      // Reveal must NOT re-check and clobber the dialog's status
+      expect(unifiedProfileStore.getState().accountConnectionStatus['gh1']?.status).to.equal(
+        'connected'
+      );
+      const indicator = el.shadowRoot!.querySelector('.accounts-section .status-indicator');
+      expect(indicator!.classList.contains('connected')).to.be.true;
     });
   });
 
   // ── Default account per integration type ───────────────────────────────
   describe('default account per integration type', () => {
-    it('shows "Default" badge on the default account', async () => {
+    it('shows "Default" badge on the attached default account', async () => {
       const el = await renderDialog();
       const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
-      (profileItems[0] as HTMLElement).click();
+      // Personal profile has the gitlab account (isDefault: true) attached
+      (profileItems[1] as HTMLElement).click();
       await el.updateComplete;
 
-      // gitlabAccount has isDefault: true
       const defaultBadges = el.shadowRoot!.querySelectorAll('.account-item .default-badge');
       expect(defaultBadges.length).to.be.greaterThanOrEqual(1);
     });
@@ -900,7 +1416,7 @@ describe('lv-profile-manager-dialog', () => {
       expect(dialog).to.not.be.null;
     });
 
-    it('handles account removal failure gracefully', async () => {
+    it('handles global account delete failure gracefully', async () => {
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_unified_profiles_config':
@@ -917,20 +1433,26 @@ describe('lv-profile-manager-dialog', () => {
       };
 
       const el = await renderDialog();
-      // Go to edit view
+      // Edit the Personal profile (has an attached account) and open its edit screen
       const profileItems = el.shadowRoot!.querySelectorAll('.profile-item');
-      (profileItems[0] as HTMLElement).click();
+      (profileItems[1] as HTMLElement).click();
       await el.updateComplete;
 
-      // Click remove on the first account
-      const removeButtons = el.shadowRoot!.querySelectorAll('.account-actions .action-btn.delete');
-      if (removeButtons.length > 0) {
-        (removeButtons[0] as HTMLButtonElement).click();
-        await new Promise((r) => setTimeout(r, 100));
-        await el.updateComplete;
-      }
+      const editBtn = el.shadowRoot!.querySelector(
+        '.accounts-section .account-actions .action-btn:not(.delete)'
+      ) as HTMLButtonElement;
+      editBtn.click();
+      await el.updateComplete;
 
-      // Component should still be rendered
+      // Click the destructive global delete and confirm
+      const deleteBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.dialog-footer .btn-danger')
+      ).find((b) => b.textContent?.trim().includes('Delete Account')) as HTMLButtonElement;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      // Component should still be rendered despite the failure
       const dialog = el.shadowRoot!.querySelector('.dialog');
       expect(dialog).to.not.be.null;
     });

@@ -237,6 +237,300 @@ test.describe('Profile Manager Dialog - With Existing Profiles', () => {
 });
 
 // ============================================================================
+// Integration Accounts on Profiles (attach / detach)
+// ============================================================================
+
+test.describe('Profile Manager Dialog - Integration Accounts', () => {
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(page, {
+      profiles: [testProfiles.work, testProfiles.personal],
+      accounts: [testAccounts.githubWork, testAccounts.githubPersonal, testAccounts.gitlab],
+    });
+
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.work, testProfiles.personal],
+        accounts: [testAccounts.githubWork, testAccounts.githubPersonal, testAccounts.gitlab],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+  });
+
+  async function openProfileManager(page: Page): Promise<void> {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+    await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
+  }
+
+  test('edit profile lists only the accounts attached to it', async ({ page }) => {
+    await openProfileManager(page);
+
+    // Work profile has github: account-github-work attached
+    await page.locator('.profile-item').first().click();
+    await expect(page.getByRole('button', { name: 'Save Profile' })).toBeVisible();
+
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(1);
+    await expect(dialogs.profileManager.attachedAccountItems.first()).toContainText('Work GitHub');
+  });
+
+  test('attach an existing account to a profile and persist on save', async ({ page }) => {
+    await openProfileManager(page);
+
+    // Personal profile has no attached accounts
+    await page.locator('.profile-item').nth(1).click();
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(0);
+
+    await dialogs.profileManager.attachAccountButton.click();
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Attach Account'
+    );
+
+    // Pick the Personal GitHub account from the picker
+    await dialogs.profileManager.pickerAccountRows.filter({ hasText: 'Personal GitHub' }).click();
+
+    // Back on the edit form, the account is now attached
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(1);
+    await expect(dialogs.profileManager.attachedAccountItems.first()).toContainText(
+      'Personal GitHub'
+    );
+
+    await startCommandCaptureWithMocks(page, {
+      save_unified_profile: {
+        ...testProfiles.personal,
+        defaultAccounts: { github: 'account-github-personal' },
+      },
+    });
+
+    await page.getByRole('button', { name: 'Save Profile' }).click();
+    await waitForCommand(page, 'save_unified_profile');
+
+    const cmds = await findCommand(page, 'save_unified_profile');
+    const profile = (cmds[0].args as { profile: { defaultAccounts: Record<string, string> } })
+      .profile;
+    expect(profile.defaultAccounts.github).toBe('account-github-personal');
+  });
+
+  test('detach an account removes it from the profile without deleting it globally', async ({
+    page,
+  }) => {
+    await openProfileManager(page);
+
+    // Work profile has one attached account
+    await page.locator('.profile-item').first().click();
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(1);
+
+    await startCommandCaptureWithMocks(page, {
+      save_unified_profile: { ...testProfiles.work, defaultAccounts: {} },
+    });
+
+    // Click the detach (X) button on the attached account
+    await dialogs.profileManager.attachedAccountItems
+      .first()
+      .locator('.account-actions .action-btn.delete')
+      .click();
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Save Profile' }).click();
+    await waitForCommand(page, 'save_unified_profile');
+
+    const cmds = await findCommand(page, 'save_unified_profile');
+    const profile = (cmds[0].args as { profile: { defaultAccounts: Record<string, string> } })
+      .profile;
+    expect(profile.defaultAccounts.github).toBeUndefined();
+
+    // The key fix: detaching must NOT delete the global account
+    const deletes = await findCommand(page, 'delete_global_account');
+    expect(deletes.length).toBe(0);
+  });
+
+  test('attaching another account of the same provider replaces it', async ({ page }) => {
+    await openProfileManager(page);
+
+    // Work profile has github: account-github-work attached
+    await page.locator('.profile-item').first().click();
+    await expect(dialogs.profileManager.attachedAccountItems.first()).toContainText('Work GitHub');
+
+    await dialogs.profileManager.attachAccountButton.click();
+    await dialogs.profileManager.pickerAccountRows.filter({ hasText: 'Personal GitHub' }).click();
+
+    // Still one github slot, now showing Personal GitHub
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(1);
+    await expect(dialogs.profileManager.attachedAccountItems.first()).toContainText(
+      'Personal GitHub'
+    );
+  });
+
+  test('delete account globally from the account edit screen', async ({ page }) => {
+    await openProfileManager(page);
+
+    await page.locator('.profile-item').first().click();
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(1);
+
+    // Open the attached account's edit screen via the pencil (non-delete) button
+    await dialogs.profileManager.attachedAccountItems
+      .first()
+      .locator('.account-actions .action-btn:not(.delete)')
+      .click();
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Edit Account'
+    );
+
+    await startCommandCaptureWithMocks(page, {
+      delete_global_account: null,
+      'plugin:dialog|message': 'Ok',
+    });
+
+    await page.getByRole('button', { name: 'Delete Account' }).click();
+    await waitForCommand(page, 'delete_global_account');
+
+    const cmds = await findCommand(page, 'delete_global_account');
+    expect(cmds.length).toBeGreaterThan(0);
+
+    // After deletion the dialog returns to the profile editor and the now-deleted
+    // account no longer appears in the attached list.
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Edit Profile'
+    );
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(0);
+  });
+});
+
+test.describe('Profile Manager Dialog - Attach with no accounts', () => {
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(page, {
+      profiles: [testProfiles.personal],
+      accounts: [],
+    });
+
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.personal],
+        accounts: [],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+  });
+
+  test('picker offers connect-new buttons and opens the GitHub dialog', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+    await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
+
+    await page.locator('.profile-item').first().click();
+    await dialogs.profileManager.attachAccountButton.click();
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Attach Account'
+    );
+
+    // No existing accounts to pick, but connect-new buttons are present
+    await expect(dialogs.profileManager.pickerAccountRows).toHaveCount(0);
+    const githubBtn = page
+      .locator('lv-profile-manager-dialog')
+      .getByRole('button', { name: 'GitHub', exact: true });
+    await expect(githubBtn).toBeVisible();
+
+    await githubBtn.click();
+
+    // The GitHub dialog opens on top; the profile manager stays mounted underneath
+    // (demoted) so it can be revealed again when the GitHub dialog closes.
+    await expect(dialogs.github.dialog).toBeVisible();
+    await expect(page.locator('lv-profile-manager-dialog[open][demoted]')).toHaveCount(1);
+  });
+
+  test('connecting a new account auto-attaches it to the profile', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.executeFirst();
+    await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
+
+    await page.locator('.profile-item').first().click();
+    await dialogs.profileManager.attachAccountButton.click();
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Attach Account'
+    );
+
+    // Connect a new GitHub account → GitHub dialog opens on top, profile manager
+    // stays mounted underneath (demoted).
+    await page
+      .locator('lv-profile-manager-dialog')
+      .getByRole('button', { name: 'GitHub', exact: true })
+      .click();
+    await expect(dialogs.github.dialog).toBeVisible();
+    await expect(page.locator('lv-profile-manager-dialog[open][demoted]')).toHaveCount(1);
+
+    // Opened from the profile manager → the dialog shows a Back arrow, not a close ×
+    await expect(
+      page.locator('lv-github-dialog').getByRole('button', { name: 'Back' })
+    ).toBeVisible();
+    await expect(
+      page.locator('lv-github-dialog').getByRole('button', { name: 'Close' })
+    ).toHaveCount(0);
+
+    // Simulate the account being connected while in the GitHub dialog: the next
+    // profile reload (on reveal) will include it.
+    const newAccount = {
+      id: 'account-new-gh',
+      name: 'Freshly Connected GitHub',
+      integrationType: 'github' as const,
+      config: { type: 'github' },
+      color: null,
+      cachedUser: null,
+      urlPatterns: [],
+      isDefault: false,
+    };
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [testProfiles.personal],
+        accounts: [newAccount],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+
+    // Going back from the GitHub dialog reveals the profile manager and auto-attaches
+    // the account that was just connected — landing back on the edit form.
+    await page.locator('lv-github-dialog').getByRole('button', { name: 'Back' }).click();
+
+    await expect(page.locator('lv-profile-manager-dialog[open][demoted]')).toHaveCount(0);
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Edit Profile'
+    );
+    await expect(dialogs.profileManager.attachedAccountItems.first()).toContainText(
+      'Freshly Connected GitHub'
+    );
+
+    // And saving persists it to the profile
+    await startCommandCaptureWithMocks(page, {
+      save_unified_profile: {
+        ...testProfiles.personal,
+        defaultAccounts: { github: 'account-new-gh' },
+      },
+    });
+    await page.getByRole('button', { name: 'Save Profile' }).click();
+    await waitForCommand(page, 'save_unified_profile');
+    const cmds = await findCommand(page, 'save_unified_profile');
+    const profile = (cmds[0].args as { profile: { defaultAccounts: Record<string, string> } })
+      .profile;
+    expect(profile.defaultAccounts.github).toBe('account-new-gh');
+  });
+});
+
+// ============================================================================
 // Global Accounts Management Tests
 // ============================================================================
 
