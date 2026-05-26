@@ -2933,7 +2933,7 @@ dependencies = [
  "llama-cpp-2",
  "notify",
  "once_cell",
- "rand 0.8.6",
+ "rand 0.9.3",
  "regex",
  "reqwest 0.13.3",
  "rusqlite",
