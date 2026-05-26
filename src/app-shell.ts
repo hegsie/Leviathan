@@ -2987,7 +2987,13 @@ export class AppShell extends LitElement {
           ?backButton=${this.showProfileManager}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGitHub = false; }}
-          @manage-accounts=${() => { this.showProfileManager = true; }}
+          @manage-accounts=${() => {
+            this.showGitHub = false;
+            this.showGitLab = false;
+            this.showBitbucket = false;
+            this.showAzureDevOps = false;
+            this.showProfileManager = true;
+          }}
         ></lv-github-dialog>
       ` : ''}
 
@@ -2997,7 +3003,13 @@ export class AppShell extends LitElement {
           ?backButton=${this.showProfileManager}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGitLab = false; }}
-          @manage-accounts=${() => { this.showProfileManager = true; }}
+          @manage-accounts=${() => {
+            this.showGitHub = false;
+            this.showGitLab = false;
+            this.showBitbucket = false;
+            this.showAzureDevOps = false;
+            this.showProfileManager = true;
+          }}
         ></lv-gitlab-dialog>
       ` : ''}
 
@@ -3007,7 +3019,13 @@ export class AppShell extends LitElement {
           ?backButton=${this.showProfileManager}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showBitbucket = false; }}
-          @manage-accounts=${() => { this.showProfileManager = true; }}
+          @manage-accounts=${() => {
+            this.showGitHub = false;
+            this.showGitLab = false;
+            this.showBitbucket = false;
+            this.showAzureDevOps = false;
+            this.showProfileManager = true;
+          }}
         ></lv-bitbucket-dialog>
       ` : ''}
 
@@ -3017,7 +3035,13 @@ export class AppShell extends LitElement {
           ?backButton=${this.showProfileManager}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showAzureDevOps = false; }}
-          @manage-accounts=${() => { this.showProfileManager = true; }}
+          @manage-accounts=${() => {
+            this.showGitHub = false;
+            this.showGitLab = false;
+            this.showBitbucket = false;
+            this.showAzureDevOps = false;
+            this.showProfileManager = true;
+          }}
         ></lv-azure-devops-dialog>
       ` : ''}
 
@@ -3030,6 +3054,7 @@ export class AppShell extends LitElement {
         @open-gitlab=${() => { this.showGitLab = true; }}
         @open-bitbucket=${() => { this.showBitbucket = true; }}
         @open-azure-devops=${() => { this.showAzureDevOps = true; }}
+        @migration-needed=${() => { this.showMigrationDialog = true; }}
       ></lv-profile-manager-dialog>
 
       <lv-migration-dialog

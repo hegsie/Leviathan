@@ -85,7 +85,11 @@
       "Bash(gh pr merge:*)",
       "Bash(gh release:*)",
       "Bash(gh api:*)",
-      "Bash(gh issue list:*)"
+      "Bash(gh issue list:*)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(brew list *)",
+      "Bash(git ls-remote *)",
+      "Bash(echo \"---EXIT:$?---\")"
     ]
   }
 }

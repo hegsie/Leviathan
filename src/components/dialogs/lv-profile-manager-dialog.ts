@@ -656,13 +656,32 @@ export class LvProfileManagerDialog extends LitElement {
     this.unsubscribeRepoStore = repositoryStore.subscribe((state) => {
       this.recentRepositories = state.recentRepositories;
     });
+
+    // Escape closes the dialog (or backs out of a sub-view).
+    window.addEventListener('keydown', this.handleKeyDown, true);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribeStore?.();
     this.unsubscribeRepoStore?.();
+    window.removeEventListener('keydown', this.handleKeyDown, true);
   }
+
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape') return;
+    // Use the reflected attribute as the source of truth — the `open` property
+    // is set via `?open=${...}` from the parent and reliably reflects there.
+    const isOpen = this.hasAttribute('open');
+    if (!isOpen || this.demoted) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (this.viewMode === 'list') {
+      this.handleClose();
+    } else {
+      this.handleBack();
+    }
+  };
 
   updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('open') && this.open) {
@@ -939,8 +958,15 @@ export class LvProfileManagerDialog extends LitElement {
     };
 
     try {
+      const wasCreate = this.viewMode === 'create';
       await unifiedProfileService.saveUnifiedProfile(profile);
-      showToast(this.viewMode === 'create' ? 'Profile created' : 'Profile saved', 'success');
+      showToast(wasCreate ? 'Profile created' : 'Profile saved', 'success');
+      // After creating a new profile, re-evaluate which profile applies to the
+      // current repo. Without this, a freshly-created default profile sits in
+      // the list but never becomes active until the user manually applies it.
+      if (this.repoPath) {
+        await unifiedProfileService.loadUnifiedProfileForRepository(this.repoPath);
+      }
       this.handleBack();
     } catch (error) {
       showToast(`Failed to save profile: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
@@ -1393,6 +1419,7 @@ export class LvProfileManagerDialog extends LitElement {
           <input
             type="text"
             placeholder="e.g., Work, Personal, Open Source"
+            autofocus
             .value=${this.editingProfile.name ?? ''}
             @input=${(e: Event) => this.updateEditingProfile('name', (e.target as HTMLInputElement).value)}
           />

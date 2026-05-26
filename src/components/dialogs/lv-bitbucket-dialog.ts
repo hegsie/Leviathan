@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import { openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import type {
   BitbucketConnectionStatus,
@@ -23,7 +24,7 @@ import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts'
 import type { OAuthFlowState, OAuthTokenResponse } from '../../types/oauth.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
@@ -626,31 +627,34 @@ export class LvBitbucketDialog extends LitElement {
       }
     });
 
-    // Subscribe to unified profile store - get global accounts
-    this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
+    // Subscribe to unified profile store. When the active profile changes,
+    // re-derive the preferred account so a profile switch is reflected here.
+    let lastActiveProfileId = unifiedProfileStore.getState().activeProfile?.id ?? null;
+    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
       this.accounts = getAccountsByType('bitbucket');
-      // If selected account was deleted, reset to null
       if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
         this.selectedAccountId = null;
       }
-      // If no account selected, try to select the default one
-      if (!this.selectedAccountId && this.accounts.length > 0) {
-        const defaultAccount = getDefaultGlobalAccount('bitbucket');
-        const account = defaultAccount ?? this.accounts[0];
-        if (account) {
-          this.selectedAccountId = account.id;
-        }
+      const activeProfileId = state.activeProfile?.id ?? null;
+      if (activeProfileId !== lastActiveProfileId) {
+        const preferred = getActiveProfilePreferredAccount('bitbucket') ?? this.accounts[0];
+        this.selectedAccountId = preferred?.id ?? null;
+        lastActiveProfileId = activeProfileId;
+      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        const preferred = getActiveProfilePreferredAccount('bitbucket')
+          ?? getDefaultGlobalAccount('bitbucket')
+          ?? this.accounts[0];
+        this.selectedAccountId = preferred?.id ?? null;
       }
     });
 
     // Initialize from current state
     this.accounts = getAccountsByType('bitbucket');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
-      const defaultAccount = getDefaultGlobalAccount('bitbucket');
-      const account = defaultAccount ?? this.accounts[0];
-      if (account) {
-        this.selectedAccountId = account.id;
-      }
+      const preferred = getActiveProfilePreferredAccount('bitbucket')
+        ?? getDefaultGlobalAccount('bitbucket')
+        ?? this.accounts[0];
+      this.selectedAccountId = preferred?.id ?? null;
     }
 
     if (this.open) {
@@ -671,6 +675,9 @@ export class LvBitbucketDialog extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
+      // Fresh open: clear selectedAccountId so loadInitialData() re-derives
+      // it from the current active profile's preferred account.
+      this.selectedAccountId = null;
       await this.loadInitialData();
     }
     if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
@@ -694,11 +701,15 @@ export class LvBitbucketDialog extends LitElement {
         if (generation !== this.loadGeneration) return;
       }
 
-      // Re-sync local state with store after loading
+      // Re-sync local state with store after loading. Auto-derive only when
+      // nothing is selected (fresh open clears selectedAccountId in updated()).
+      // Manual switches set selectedAccountId before calling loadInitialData()
+      // and must not be overwritten.
       this.accounts = getAccountsByType('bitbucket');
       if (this.accounts.length > 0 && !this.selectedAccountId) {
-        const defaultAccount = getDefaultGlobalAccount('bitbucket');
-        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+        const preferred = getActiveProfilePreferredAccount('bitbucket')
+          ?? getDefaultGlobalAccount('bitbucket');
+        this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
       }
 
       // Load OAuth token for selected account
@@ -758,12 +769,20 @@ export class LvBitbucketDialog extends LitElement {
             avatarUrl: result.data.user.avatarUrl ?? null,
           });
         }
+      } else {
+        // Failed check must mark the account as disconnected so dependent UI
+        // surfaces (toolbar, selector dot) don't keep a stale connected state.
+        this.connectionStatus = { connected: false, user: null };
+        this.syncSharedConnectionStatus(false);
       }
     } else {
       // Fall back to legacy credential check
       const result = await gitService.checkBitbucketConnection();
       if (result.success && result.data) {
         this.connectionStatus = result.data;
+      } else {
+        this.connectionStatus = { connected: false, user: null };
+        this.syncSharedConnectionStatus(false);
       }
     }
   }
@@ -796,8 +815,12 @@ export class LvBitbucketDialog extends LitElement {
    * Handle add account request
    */
   private handleAddAccount(): void {
+    // Clear selection so the next save creates a new account instead of
+    // overwriting the previously-selected account's credentials.
     this.activeTab = 'connection';
     this.connectionStatus = null;
+    this.selectedAccountId = null;
+    this.appPasswordInput = '';
   }
 
   /**
@@ -984,6 +1007,15 @@ export class LvBitbucketDialog extends LitElement {
 
   private async handleDeleteIntegration(): Promise<void> {
     if (!this.selectedAccountId) return;
+
+    const selected = this.accounts.find((a) => a.id === this.selectedAccountId);
+    const accountName = selected?.name ?? 'this account';
+    const confirmed = await showConfirm(
+      'Delete Bitbucket Integration',
+      `Delete ${accountName}? The stored credentials will be removed and any profile that uses this account as its default will lose that reference.`,
+      'warning',
+    );
+    if (!confirmed) return;
 
     this.isLoading = true;
 

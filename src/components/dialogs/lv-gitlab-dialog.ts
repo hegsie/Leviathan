@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import { openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import type {
   GitLabConnectionStatus,
@@ -19,7 +20,7 @@ import type {
   CreateMergeRequestInput,
   CreateGitLabIssueInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
@@ -653,38 +654,38 @@ export class LvGitLabDialog extends LitElement {
       }
     });
 
-    // Subscribe to unified profile store - get global accounts
-    this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
+    // Subscribe to unified profile store. When the active profile changes,
+    // re-derive the preferred account so a profile switch is reflected here.
+    let lastActiveProfileId = unifiedProfileStore.getState().activeProfile?.id ?? null;
+    const applyAccount = (account: IntegrationAccount | undefined) => {
+      if (!account) return;
+      this.selectedAccountId = account.id;
+      if (account.config.type === 'gitlab' && account.config.instanceUrl) {
+        this.instanceUrlInput = account.config.instanceUrl;
+      }
+    };
+    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
       this.accounts = getAccountsByType('gitlab');
-      // If selected account was deleted, reset to null
       if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
         this.selectedAccountId = null;
       }
-      // If no account selected, try to select the default one
-      if (!this.selectedAccountId && this.accounts.length > 0) {
-        const defaultAccount = getDefaultGlobalAccount('gitlab');
-        const account = defaultAccount ?? this.accounts[0];
-        if (account) {
-          this.selectedAccountId = account.id;
-          // Update instance URL from account config
-          if (account.config.type === 'gitlab' && account.config.instanceUrl) {
-            this.instanceUrlInput = account.config.instanceUrl;
-          }
-        }
+      const activeProfileId = state.activeProfile?.id ?? null;
+      if (activeProfileId !== lastActiveProfileId) {
+        applyAccount(getActiveProfilePreferredAccount('gitlab') ?? this.accounts[0]);
+        lastActiveProfileId = activeProfileId;
+      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        applyAccount(
+          getActiveProfilePreferredAccount('gitlab') ?? getDefaultGlobalAccount('gitlab') ?? this.accounts[0],
+        );
       }
     });
 
     // Initialize from current state
     this.accounts = getAccountsByType('gitlab');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
-      const defaultAccount = getDefaultGlobalAccount('gitlab');
-      const account = defaultAccount ?? this.accounts[0];
-      if (account) {
-        this.selectedAccountId = account.id;
-        if (account.config.type === 'gitlab' && account.config.instanceUrl) {
-          this.instanceUrlInput = account.config.instanceUrl;
-        }
-      }
+      applyAccount(
+        getActiveProfilePreferredAccount('gitlab') ?? getDefaultGlobalAccount('gitlab') ?? this.accounts[0],
+      );
     }
 
     if (this.open) {
@@ -705,6 +706,9 @@ export class LvGitLabDialog extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
+      // Fresh open: clear selectedAccountId so loadInitialData() re-derives
+      // it from the current active profile's preferred account.
+      this.selectedAccountId = null;
       await this.loadInitialData();
     }
     if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
@@ -728,11 +732,18 @@ export class LvGitLabDialog extends LitElement {
         if (generation !== this.loadGeneration) return;
       }
 
-      // Re-sync local state with store after loading
+      // Re-sync local state with store after loading. Auto-derive only when
+      // nothing is selected (fresh open clears selectedAccountId in updated()).
+      // Manual switches set selectedAccountId before calling loadInitialData()
+      // and must not be overwritten.
       this.accounts = getAccountsByType('gitlab');
       if (this.accounts.length > 0 && !this.selectedAccountId) {
-        const defaultAccount = getDefaultGlobalAccount('gitlab');
-        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+        const preferred = getActiveProfilePreferredAccount('gitlab')
+          ?? getDefaultGlobalAccount('gitlab');
+        this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
+        if (preferred?.config.type === 'gitlab' && preferred.config.instanceUrl) {
+          this.instanceUrlInput = preferred.config.instanceUrl;
+        }
       }
 
       if (this.repositoryPath) {
@@ -783,6 +794,12 @@ export class LvGitLabDialog extends LitElement {
           avatarUrl: result.data.user.avatarUrl ?? null,
         });
       }
+    } else {
+      // Failed check must mark the account as disconnected so dependent UI
+      // surfaces (toolbar, account selector dot) don't keep showing a stale
+      // "connected" state for a now-invalid token.
+      this.connectionStatus = { connected: false, user: null, instanceUrl };
+      this.syncSharedConnectionStatus(false);
     }
   }
 
@@ -818,8 +835,12 @@ export class LvGitLabDialog extends LitElement {
    * Handle add account request
    */
   private handleAddAccount(): void {
+    // Clear selection so the next token save creates a new account instead of
+    // overwriting the previously-selected account's token.
     this.activeTab = 'connection';
     this.connectionStatus = null;
+    this.selectedAccountId = null;
+    this.tokenInput = '';
   }
 
   /**
@@ -1030,6 +1051,15 @@ export class LvGitLabDialog extends LitElement {
 
   private async handleDeleteIntegration(): Promise<void> {
     if (!this.selectedAccountId) return;
+
+    const selected = this.accounts.find((a) => a.id === this.selectedAccountId);
+    const accountName = selected?.name ?? 'this account';
+    const confirmed = await showConfirm(
+      'Delete GitLab Integration',
+      `Delete ${accountName}? The stored token will be removed and any profile that uses this account as its default will lose that reference.`,
+      'warning',
+    );
+    if (!confirmed) return;
 
     this.isLoading = true;
 

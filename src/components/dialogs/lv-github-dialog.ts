@@ -20,7 +20,7 @@ import type {
   ReleaseSummary,
   CreateReleaseInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
@@ -29,6 +29,7 @@ import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts'
 import type { OAuthFlowState, OAuthTokenResponse } from '../../types/oauth.types.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
@@ -815,25 +816,37 @@ export class LvGitHubDialog extends LitElement {
     // Listen for OAuth complete events
     window.addEventListener('oauth-complete', this.boundOAuthComplete as unknown as EventListener);
 
-    // Subscribe to unified profile store - get global accounts
-    this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
+    // Subscribe to unified profile store - get global accounts. Track the
+    // active profile so that switching profiles re-derives the preferred
+    // account instead of stickily keeping whatever the user manually selected
+    // under a previous profile.
+    let lastActiveProfileId = unifiedProfileStore.getState().activeProfile?.id ?? null;
+    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
       this.accounts = getAccountsByType('github');
       // If selected account was deleted, reset to null
       if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
         this.selectedAccountId = null;
       }
-      // If no account selected, try to select the default one
-      if (!this.selectedAccountId && this.accounts.length > 0) {
-        const defaultAccount = getDefaultGlobalAccount('github');
-        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+      const activeProfileId = state.activeProfile?.id ?? null;
+      if (activeProfileId !== lastActiveProfileId) {
+        // Active profile changed — re-derive the preferred account for the new
+        // profile, even if the user had a selection from the previous profile.
+        const preferred = getActiveProfilePreferredAccount('github');
+        this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
+        lastActiveProfileId = activeProfileId;
+      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        // First-time selection: prefer the active profile's default, falling
+        // back to the global default.
+        const preferred = getActiveProfilePreferredAccount('github') ?? getDefaultGlobalAccount('github');
+        this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
       }
     });
 
     // Initialize from current state
     this.accounts = getAccountsByType('github');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
-      const defaultAccount = getDefaultGlobalAccount('github');
-      this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+      const preferred = getActiveProfilePreferredAccount('github') ?? getDefaultGlobalAccount('github');
+      this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
     }
 
     if (this.open) {
@@ -850,6 +863,11 @@ export class LvGitHubDialog extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
+      // Fresh open: re-derive the preferred account so a profile switch since
+      // the last open is reflected. handleAccountChange() also calls
+      // loadInitialData(), and we must NOT re-derive in that path or a manual
+      // switch would immediately be overwritten.
+      this.selectedAccountId = null;
       await this.loadInitialData();
     }
     if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
@@ -886,9 +904,13 @@ export class LvGitHubDialog extends LitElement {
 
       this.accounts = getAccountsByType('github');
       console.log('[GitHub Dialog] Loaded accounts:', this.accounts.map(a => ({ id: a.id, name: a.name })));
+      // Only auto-derive if nothing is selected (fresh open clears it in
+      // `updated()`). Manual switches set selectedAccountId before calling
+      // loadInitialData(), and must not be overwritten.
       if (this.accounts.length > 0 && !this.selectedAccountId) {
-        const defaultAccount = getDefaultGlobalAccount('github');
-        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+        const preferred = getActiveProfilePreferredAccount('github')
+          ?? getDefaultGlobalAccount('github');
+        this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
         console.log('[GitHub Dialog] Selected account:', this.selectedAccountId);
       }
 
@@ -939,11 +961,17 @@ export class LvGitHubDialog extends LitElement {
         }
       } else if (!result.success) {
         this.error = result.error?.message ?? 'Failed to check connection';
+        this.connectionStatus = { connected: false, user: null, scopes: [] };
+        this.syncSharedConnectionStatus(false);
       } else {
         this.error = 'Failed to verify connection';
+        this.connectionStatus = { connected: false, user: null, scopes: [] };
+        this.syncSharedConnectionStatus(false);
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to check connection';
+      this.connectionStatus = { connected: false, user: null, scopes: [] };
+      this.syncSharedConnectionStatus(false);
     }
   }
 
@@ -974,11 +1002,14 @@ export class LvGitHubDialog extends LitElement {
    * Handle add account request
    */
   private handleAddAccount(): void {
-    // Switch to connection tab to add token for new account
+    // Switch to connection tab to add token for a NEW account. Clearing
+    // selectedAccountId is essential — without it handleSaveToken would write
+    // the new token onto the previously-selected account instead of creating
+    // a new one, leaving the user with no way to add additional accounts.
     this.activeTab = 'connection';
     this.connectionStatus = null;
-    // For now, we'll create a new account when saving a token
-    // In a more complete implementation, this would open an account creation dialog
+    this.selectedAccountId = null;
+    this.tokenInput = '';
   }
 
   /**
@@ -1325,6 +1356,15 @@ export class LvGitHubDialog extends LitElement {
 
   private async handleDeleteIntegration(): Promise<void> {
     if (!this.selectedAccountId) return;
+
+    const selected = this.accounts.find((a) => a.id === this.selectedAccountId);
+    const accountName = selected?.name ?? 'this account';
+    const confirmed = await showConfirm(
+      'Delete GitHub Integration',
+      `Delete ${accountName}? The stored token will be removed and any profile that uses this account as its default will lose that reference.`,
+      'warning',
+    );
+    if (!confirmed) return;
 
     this.isLoading = true;
     this.error = null;

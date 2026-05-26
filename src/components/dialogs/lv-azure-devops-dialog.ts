@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import { loggers, openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import * as oauthService from '../../services/oauth.service.ts';
 
@@ -21,7 +22,7 @@ import type {
   AdoPipelineRun,
   CreateAdoPullRequestInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
@@ -603,38 +604,42 @@ export class LvAzureDevOpsDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
 
-    // Subscribe to unified profile store - get global accounts
-    this.unsubscribeStore = unifiedProfileStore.subscribe(() => {
+    // Subscribe to unified profile store. When the active profile changes,
+    // re-derive the preferred account so a profile switch is reflected here.
+    let lastActiveProfileId = unifiedProfileStore.getState().activeProfile?.id ?? null;
+    const applyAccount = (account: IntegrationAccount | undefined) => {
+      if (!account) return;
+      this.selectedAccountId = account.id;
+      if (account.config.type === 'azure-devops' && account.config.organization) {
+        this.organizationInput = account.config.organization;
+      }
+    };
+    this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
       this.accounts = getAccountsByType('azure-devops');
-      // If selected account was deleted, reset to null
       if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
         this.selectedAccountId = null;
       }
-      // If no account selected, try to select the default one
-      if (!this.selectedAccountId && this.accounts.length > 0) {
-        const defaultAccount = getDefaultGlobalAccount('azure-devops');
-        const account = defaultAccount ?? this.accounts[0];
-        if (account) {
-          this.selectedAccountId = account.id;
-          // Update organization from account config
-          if (account.config.type === 'azure-devops' && account.config.organization) {
-            this.organizationInput = account.config.organization;
-          }
-        }
+      const activeProfileId = state.activeProfile?.id ?? null;
+      if (activeProfileId !== lastActiveProfileId) {
+        applyAccount(getActiveProfilePreferredAccount('azure-devops') ?? this.accounts[0]);
+        lastActiveProfileId = activeProfileId;
+      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        applyAccount(
+          getActiveProfilePreferredAccount('azure-devops')
+          ?? getDefaultGlobalAccount('azure-devops')
+          ?? this.accounts[0],
+        );
       }
     });
 
     // Initialize from current state
     this.accounts = getAccountsByType('azure-devops');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
-      const defaultAccount = getDefaultGlobalAccount('azure-devops');
-      const account = defaultAccount ?? this.accounts[0];
-      if (account) {
-        this.selectedAccountId = account.id;
-        if (account.config.type === 'azure-devops' && account.config.organization) {
-          this.organizationInput = account.config.organization;
-        }
-      }
+      applyAccount(
+        getActiveProfilePreferredAccount('azure-devops')
+        ?? getDefaultGlobalAccount('azure-devops')
+        ?? this.accounts[0],
+      );
     }
 
     if (this.open) {
@@ -654,6 +659,9 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
+      // Fresh open: clear selectedAccountId so loadInitialData() re-derives
+      // it from the current active profile's preferred account.
+      this.selectedAccountId = null;
       await this.loadInitialData();
     }
     if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
@@ -677,11 +685,18 @@ export class LvAzureDevOpsDialog extends LitElement {
         if (generation !== this.loadGeneration) return;
       }
 
-      // Re-sync local state with store after loading
+      // Re-sync local state with store after loading. Auto-derive only when
+      // nothing is selected (fresh open clears selectedAccountId in updated()).
+      // Manual switches set selectedAccountId before calling loadInitialData()
+      // and must not be overwritten.
       this.accounts = getAccountsByType('azure-devops');
       if (this.accounts.length > 0 && !this.selectedAccountId) {
-        const defaultAccount = getDefaultGlobalAccount('azure-devops');
-        this.selectedAccountId = defaultAccount?.id ?? this.accounts[0]?.id ?? null;
+        const preferred = getActiveProfilePreferredAccount('azure-devops')
+          ?? getDefaultGlobalAccount('azure-devops');
+        this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
+        if (preferred?.config.type === 'azure-devops' && preferred.config.organization) {
+          this.organizationInput = preferred.config.organization;
+        }
       }
 
       // Check if selected account has a stored token
@@ -778,6 +793,10 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
     } else if (!result.success) {
       log.error('checkConnection failed:', result.error?.message);
+      // Failed check must mark the account as disconnected so dependent UI
+      // surfaces (toolbar, selector dot) don't keep a stale connected state.
+      this.connectionStatus = { connected: false, user: null, organization: org };
+      this.syncSharedConnectionStatus(false);
     }
   }
 
@@ -830,8 +849,12 @@ export class LvAzureDevOpsDialog extends LitElement {
    * Handle add account request
    */
   private handleAddAccount(): void {
+    // Clear selection so the next token save creates a new account instead of
+    // overwriting the previously-selected account's token.
     this.activeTab = 'connection';
     this.connectionStatus = null;
+    this.selectedAccountId = null;
+    this.tokenInput = '';
   }
 
   /**
@@ -1171,6 +1194,15 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   private async handleDeleteIntegration(): Promise<void> {
     if (!this.selectedAccountId) return;
+
+    const selected = this.accounts.find((a) => a.id === this.selectedAccountId);
+    const accountName = selected?.name ?? 'this account';
+    const confirmed = await showConfirm(
+      'Delete Azure DevOps Integration',
+      `Delete ${accountName}? The stored token will be removed and any profile that uses this account as its default will lose that reference.`,
+      'warning',
+    );
+    if (!confirmed) return;
 
     this.isLoading = true;
 
