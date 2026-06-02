@@ -21,6 +21,7 @@ const keyringStore = new Map<string, string>();
 
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-gitlab-dialog.ts';
@@ -514,6 +515,56 @@ describe('lv-gitlab-dialog', () => {
       const errorMsg = el.shadowRoot!.querySelector('.error');
       expect(errorMsg).to.not.be.null;
       expect(errorMsg!.textContent).to.include('GitLab instance unreachable');
+    });
+
+    it('surfaces a backend error when repo detection fails (not silent)', async () => {
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'detect_gitlab_repo') throw new Error('gitlab detect boom');
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.include('gitlab detect boom');
+    });
+  });
+
+  describe('OAuth completes after dialog closed', () => {
+    it('persists the account and surfaces a toast instead of failing silently', async () => {
+      connectionResponse = mockConnectedStatus;
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${false}></lv-gitlab-dialog>
+      `);
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      invokeHistory.length = 0;
+
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: {
+            provider: 'gitlab',
+            tokens: { accessToken: 'glpat_oauth' },
+            instanceUrl: 'https://gitlab.com',
+          },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      const persisted = invokeHistory.filter(
+        (h) => h.command === 'save_global_account' || h.command === 'store_keyring_token'
+      );
+      expect(persisted.length).to.be.greaterThan(0);
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success' && /Connected GitLab/.test(t.message))).to.be.true;
     });
   });
 });

@@ -866,6 +866,10 @@ export class LvGitLabDialog extends LitElement {
       if (this.connectionStatus?.connected) {
         await this.loadAllData();
       }
+    } else if (!result.success) {
+      // A genuine backend failure (not merely "this isn't a GitLab repo", which
+      // surfaces as success with null data) must not fail silently.
+      this.error = result.error?.message ?? 'Failed to detect GitLab repository';
     }
   }
 
@@ -1114,6 +1118,10 @@ export class LvGitLabDialog extends LitElement {
       currentInstanceUrl: this.instanceUrlInput,
     });
 
+    // OAuth can complete after the dialog was closed; still persist the account
+    // but surface a toast instead of the (invisible) inline status.
+    const wasOpen = this.open;
+
     this.isLoading = true;
     this.error = null;
 
@@ -1221,8 +1229,17 @@ export class LvGitLabDialog extends LitElement {
       this.connectionStatus = verifyResult.data;
       this.oauthState = { status: 'idle' };
 
+      // If the dialog was closed before OAuth completed, surface a toast so the
+      // connection isn't a silent no-op.
+      if (!wasOpen) {
+        showToast(
+          user?.username ? `Connected GitLab account @${user.username}` : 'Connected GitLab account',
+          'success'
+        );
+      }
+
       // Load data if connected and repo detected
-      if (this.connectionStatus?.connected && this.detectedRepo) {
+      if (wasOpen && this.connectionStatus?.connected && this.detectedRepo) {
         await this.loadAllData();
       }
     } catch (err) {
