@@ -10,7 +10,7 @@
  */
 
 import { test, expect, Page } from '@playwright/test';
-import { setupOpenRepository, setupProfilesAndAccounts } from '../fixtures/tauri-mock';
+import { setupOpenRepository, setupProfilesAndAccounts, setupTauriMocks } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
 import {
@@ -2532,5 +2532,230 @@ test.describe('Parity - Azure DevOps dialog', () => {
     await page.locator('lv-azure-devops-dialog button:has-text("Disconnect")').first().click();
     await waitForCommand(page, 'delete_keyring_token');
     expect((await findCommand(page, 'delete_keyring_token')).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. No repository open — connecting accounts must still work (#211 / #1, #2)
+//
+// Previously the integration dialogs were only rendered when a repository was
+// open, but the Profile Manager (and its "Connect <provider>" buttons) are
+// reachable with no repo. Clicking Connect dead-ended and left the manager
+// demoted into a transparent, unusable state. These tests assert the connect
+// flow works without a repository.
+// ---------------------------------------------------------------------------
+
+test.describe('No repository open - connect flow', () => {
+  // Boot the app with mocks but WITHOUT opening a repository, so activeRepository
+  // stays null and the welcome screen is shown.
+  async function bootWithoutRepository(page: Page): Promise<void> {
+    await setupTauriMocks(page);
+    await page.goto('/');
+    await page.waitForLoadState('domcontentloaded');
+    await injectCommandMock(page, {
+      get_unified_profiles_config: { version: 3, profiles: [], accounts: [], repositoryAssignments: {} },
+      get_migration_backup_info: { hasBackup: false },
+    });
+    // No repo open → the welcome screen is visible (proves the precondition).
+    await expect(page.locator('lv-welcome')).toBeVisible({ timeout: 10000 });
+  }
+
+  test('Connect GitHub from the picker opens the integration dialog with no repo open', async ({ page }) => {
+    const dialogs = new DialogsPage(page);
+    await bootWithoutRepository(page);
+
+    await openProfileManager(page, dialogs);
+
+    // New profile → account picker → Connect GitHub
+    await dialogs.profileManager.addProfileButton.click();
+    await dialogs.profileManager.attachAccountButton.click();
+    await expect(
+      page.locator('lv-profile-manager-dialog .dialog-title'),
+    ).toContainText('Attach Account');
+
+    await page
+      .locator('lv-profile-manager-dialog')
+      .getByRole('button', { name: 'GitHub', exact: true })
+      .click();
+
+    // The GitHub dialog must actually open (previously it never mounted with no
+    // repo), and the Profile Manager must be demoted behind it — not left
+    // transparent with nothing on top.
+    await expect(dialogs.github.dialog).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('lv-profile-manager-dialog[open][demoted]')).toHaveCount(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. Standalone Accounts management view (#211 / #3, #4)
+//
+// Accounts are global, not owned by a profile. The Profile Manager now exposes
+// a dedicated "Manage Accounts" view so accounts can be edited/deleted without
+// first attaching them to a profile, and "Manage Accounts" from an integration
+// dialog routes there.
+// ---------------------------------------------------------------------------
+
+test.describe('Accounts management view', () => {
+  test('opens from the profile list "Accounts" button and lists all global accounts', async ({ page }) => {
+    const dialogs = new DialogsPage(page);
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile],
+      accounts: [githubWork, githubPersonal],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile],
+        accounts: [githubWork, githubPersonal],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+
+    await openProfileManager(page, dialogs);
+    await page
+      .locator('lv-profile-manager-dialog .dialog-footer')
+      .getByRole('button', { name: 'Accounts' })
+      .click();
+
+    await expect(
+      page.locator('lv-profile-manager-dialog .dialog-title'),
+    ).toContainText('Manage Accounts');
+    // Both global accounts are listed with edit + delete affordances.
+    await expect(
+      page.locator('lv-profile-manager-dialog .accounts-list .account-item'),
+    ).toHaveCount(2);
+    await expect(
+      page.locator('lv-profile-manager-dialog .account-actions .action-btn.delete'),
+    ).toHaveCount(2);
+  });
+
+  test('deleting a global account from the accounts view stays in the view and removes it', async ({ page }) => {
+    const dialogs = new DialogsPage(page);
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile],
+      accounts: [githubWork, githubPersonal],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile],
+        accounts: [githubWork, githubPersonal],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+      delete_global_account: null,
+    });
+    await autoConfirmDialogs(page);
+
+    await openProfileManager(page, dialogs);
+    await page
+      .locator('lv-profile-manager-dialog .dialog-footer')
+      .getByRole('button', { name: 'Accounts' })
+      .click();
+    await expect(
+      page.locator('lv-profile-manager-dialog .accounts-list .account-item'),
+    ).toHaveCount(2);
+
+    // Backend: after delete the config no longer contains the first account.
+    await startCommandCaptureWithMocks(page, {
+      delete_global_account: null,
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile],
+        accounts: [githubPersonal],
+        repositoryAssignments: {},
+      },
+    });
+
+    await page
+      .locator('lv-profile-manager-dialog .account-actions .action-btn.delete')
+      .first()
+      .click();
+    await waitForCommand(page, 'delete_global_account');
+
+    // Still on the accounts view, now showing only the remaining account.
+    await expect(
+      page.locator('lv-profile-manager-dialog .dialog-title'),
+    ).toContainText('Manage Accounts');
+    await expect(
+      page.locator('lv-profile-manager-dialog .accounts-list .account-item'),
+    ).toHaveCount(1);
+  });
+
+  test('"Manage Accounts" from an integration dialog lands on the accounts view', async ({ page }) => {
+    const dialogs = new DialogsPage(page);
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile],
+      accounts: [githubWork, githubPersonal],
+      connectedAccounts: ['account-github-work'],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile],
+        accounts: [githubWork, githubPersonal],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+      load_unified_profile_for_repository: workProfile,
+    });
+
+    const app = new AppPage(page);
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    await page.locator('lv-github-dialog lv-account-selector .selector-btn').click();
+    await page
+      .locator('lv-github-dialog lv-account-selector .dropdown-action', { hasText: 'Manage Accounts' })
+      .click();
+
+    // The Profile Manager opens directly on the account-management view (not the
+    // profile list) and is on top (not demoted behind the integration dialog).
+    await expect(page.locator('lv-profile-manager-dialog[open] .dialog-overlay')).toBeVisible();
+    await expect(page.locator('lv-profile-manager-dialog[open][demoted]')).toHaveCount(0);
+    await expect(
+      page.locator('lv-profile-manager-dialog .dialog-title'),
+    ).toContainText('Manage Accounts');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 14. Unsaved-changes guard on dialog dismissal (#211 / #6)
+// ---------------------------------------------------------------------------
+
+test.describe('Unsaved-changes guard', () => {
+  test('closing the dialog with unsaved profile edits prompts to confirm', async ({ page }) => {
+    const dialogs = new DialogsPage(page);
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile],
+      accounts: [],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile],
+        accounts: [],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+    });
+
+    await openProfileManager(page, dialogs);
+    await page.locator('.profile-item').first().click();
+
+    // Make the form dirty
+    await page.getByPlaceholder(/Work, Personal/i).fill('Dirty Name');
+
+    // Auto-confirm the discard prompt, then dismiss via the X button.
+    await autoConfirmDialogs(page);
+    await startCommandCapture(page);
+    await page.locator('lv-profile-manager-dialog .close-btn').click();
+
+    // A confirm dialog was shown (the guard fired) and the dialog then closed.
+    await waitForCommand(page, 'plugin:dialog|message');
+    const confirms = await findCommand(page, 'plugin:dialog|message');
+    expect(confirms.length).toBeGreaterThan(0);
+    await expect(page.locator('lv-profile-manager-dialog[open]')).toHaveCount(0, { timeout: 5000 });
   });
 });
