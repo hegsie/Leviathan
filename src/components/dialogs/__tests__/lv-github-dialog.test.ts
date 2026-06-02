@@ -21,6 +21,7 @@ const keyringStore = new Map<string, string>();
 
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-github-dialog.ts';
@@ -632,6 +633,56 @@ describe('lv-github-dialog', () => {
       const errorMsg = el.shadowRoot!.querySelector('.error-message');
       expect(errorMsg).to.not.be.null;
       expect(errorMsg!.textContent).to.include('Network timeout');
+    });
+
+    it('surfaces a backend error when repo detection fails (not silent)', async () => {
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'detect_github_repo') throw new Error('repo detect boom');
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      const errorMsg = el.shadowRoot!.querySelector('.error-message');
+      expect(errorMsg).to.not.be.null;
+      expect(errorMsg!.textContent).to.include('repo detect boom');
+    });
+  });
+
+  describe('OAuth completes after dialog closed', () => {
+    it('persists the account and surfaces a toast instead of failing silently', async () => {
+      connectionResponse = mockConnectedStatus;
+      // Dialog is mounted but closed — the window OAuth listener is still active.
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${false}></lv-github-dialog>
+      `);
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      invokeHistory.length = 0;
+
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: { provider: 'github', tokens: { accessToken: 'ghp_oauth_token' } },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      // The auth was still persisted (the user completed it — don't lose it),
+      // either by creating a new account or storing the token on an existing one.
+      const persisted = invokeHistory.filter(
+        (h) => h.command === 'save_global_account' || h.command === 'store_keyring_token'
+      );
+      expect(persisted.length).to.be.greaterThan(0);
+
+      // And a success toast was shown since the inline status is invisible when closed.
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success' && /Connected GitHub/.test(t.message))).to.be.true;
     });
   });
 });

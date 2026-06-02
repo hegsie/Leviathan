@@ -575,6 +575,9 @@ export class AppShell extends LitElement {
 
   // Profile Manager dialog
   @state() private showProfileManager = false;
+  // Which view the Profile Manager should open to. 'accounts' is set when the
+  // user picks "Manage Accounts" from an integration dialog; reset on close.
+  @state() private profileManagerView: '' | 'accounts' = '';
 
   // Migration dialog
   @state() private showMigrationDialog = false;
@@ -1739,6 +1742,17 @@ export class AppShell extends LitElement {
       this.refreshQueued = false;
       await this.handleRefresh();
     }
+  }
+
+  // "Manage Accounts" from an integration dialog: close the integration dialogs
+  // and open the Profile Manager directly on its account-management view.
+  private handleManageAccounts(): void {
+    this.showGitHub = false;
+    this.showGitLab = false;
+    this.showBitbucket = false;
+    this.showAzureDevOps = false;
+    this.profileManagerView = 'accounts';
+    this.showProfileManager = true;
   }
 
   private async handleRefreshAccount(e: CustomEvent<{ accountId: string }>): Promise<void> {
@@ -2981,75 +2995,44 @@ export class AppShell extends LitElement {
         ></lv-credentials-dialog>
       ` : ''}
 
-      ${this.activeRepository ? html`
-        <lv-github-dialog
-          ?open=${this.showGitHub}
-          ?backButton=${this.showProfileManager}
-          .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showGitHub = false; }}
-          @manage-accounts=${() => {
-            this.showGitHub = false;
-            this.showGitLab = false;
-            this.showBitbucket = false;
-            this.showAzureDevOps = false;
-            this.showProfileManager = true;
-          }}
-        ></lv-github-dialog>
-      ` : ''}
+      <lv-github-dialog
+        ?open=${this.showGitHub}
+        ?backButton=${this.showProfileManager}
+        .repositoryPath=${this.activeRepository?.repository.path ?? ''}
+        @close=${() => { this.showGitHub = false; }}
+        @manage-accounts=${this.handleManageAccounts}
+      ></lv-github-dialog>
 
-      ${this.activeRepository ? html`
-        <lv-gitlab-dialog
-          ?open=${this.showGitLab}
-          ?backButton=${this.showProfileManager}
-          .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showGitLab = false; }}
-          @manage-accounts=${() => {
-            this.showGitHub = false;
-            this.showGitLab = false;
-            this.showBitbucket = false;
-            this.showAzureDevOps = false;
-            this.showProfileManager = true;
-          }}
-        ></lv-gitlab-dialog>
-      ` : ''}
+      <lv-gitlab-dialog
+        ?open=${this.showGitLab}
+        ?backButton=${this.showProfileManager}
+        .repositoryPath=${this.activeRepository?.repository.path ?? ''}
+        @close=${() => { this.showGitLab = false; }}
+        @manage-accounts=${this.handleManageAccounts}
+      ></lv-gitlab-dialog>
 
-      ${this.activeRepository ? html`
-        <lv-bitbucket-dialog
-          ?open=${this.showBitbucket}
-          ?backButton=${this.showProfileManager}
-          .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showBitbucket = false; }}
-          @manage-accounts=${() => {
-            this.showGitHub = false;
-            this.showGitLab = false;
-            this.showBitbucket = false;
-            this.showAzureDevOps = false;
-            this.showProfileManager = true;
-          }}
-        ></lv-bitbucket-dialog>
-      ` : ''}
+      <lv-bitbucket-dialog
+        ?open=${this.showBitbucket}
+        ?backButton=${this.showProfileManager}
+        .repositoryPath=${this.activeRepository?.repository.path ?? ''}
+        @close=${() => { this.showBitbucket = false; }}
+        @manage-accounts=${this.handleManageAccounts}
+      ></lv-bitbucket-dialog>
 
-      ${this.activeRepository ? html`
-        <lv-azure-devops-dialog
-          ?open=${this.showAzureDevOps}
-          ?backButton=${this.showProfileManager}
-          .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showAzureDevOps = false; }}
-          @manage-accounts=${() => {
-            this.showGitHub = false;
-            this.showGitLab = false;
-            this.showBitbucket = false;
-            this.showAzureDevOps = false;
-            this.showProfileManager = true;
-          }}
-        ></lv-azure-devops-dialog>
-      ` : ''}
+      <lv-azure-devops-dialog
+        ?open=${this.showAzureDevOps}
+        ?backButton=${this.showProfileManager}
+        .repositoryPath=${this.activeRepository?.repository.path ?? ''}
+        @close=${() => { this.showAzureDevOps = false; }}
+        @manage-accounts=${this.handleManageAccounts}
+      ></lv-azure-devops-dialog>
 
       <lv-profile-manager-dialog
         ?open=${this.showProfileManager}
         ?demoted=${this.integrationDialogOpen}
         .repoPath=${this.activeRepository?.repository.path ?? ''}
-        @close=${() => { this.showProfileManager = false; }}
+        .initialView=${this.profileManagerView}
+        @close=${() => { this.showProfileManager = false; this.profileManagerView = ''; }}
         @open-github=${() => { this.showGitHub = true; }}
         @open-gitlab=${() => { this.showGitLab = true; }}
         @open-bitbucket=${() => { this.showBitbucket = true; }}

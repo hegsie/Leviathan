@@ -14,7 +14,7 @@ import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../ty
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 
-type ViewMode = 'list' | 'edit' | 'create' | 'select-account' | 'edit-account' | 'assign-repos';
+type ViewMode = 'list' | 'edit' | 'create' | 'select-account' | 'edit-account' | 'assign-repos' | 'accounts';
 
 @customElement('lv-profile-manager-dialog')
 export class LvProfileManagerDialog extends LitElement {
@@ -608,6 +608,13 @@ export class LvProfileManagerDialog extends LitElement {
    * off — no fragile "return" state to lose across an auth round trip.
    */
   @property({ type: Boolean, reflect: true }) demoted = false;
+  /**
+   * When the dialog is opened to manage integration accounts (e.g. via the
+   * "Manage Accounts" action in an integration dialog), the host sets this to
+   * 'accounts' so we land on the account-management view instead of the profile
+   * list. Cleared by the host on close.
+   */
+  @property({ type: String }) initialView: '' | 'accounts' = '';
 
   @state() private viewMode: ViewMode = 'list';
   @state() private profiles: UnifiedProfile[] = [];
@@ -622,6 +629,12 @@ export class LvProfileManagerDialog extends LitElement {
   @state() private backupInfo: MigrationBackupInfo | null = null;
   @state() private showBackupSection = false;
   @state() private isRestoringBackup = false;
+  // Tracks unsaved edits so we can warn before discarding them (back/close).
+  @state() private profileFormDirty = false;
+  @state() private accountFormDirty = false;
+  // Where the account edit form should return to (it can be reached from the
+  // profile form or from the standalone Accounts view).
+  private accountReturnView: ViewMode = 'edit';
 
   private unsubscribeStore?: () => void;
   private unsubscribeRepoStore?: () => void;
@@ -682,6 +695,14 @@ export class LvProfileManagerDialog extends LitElement {
       this.handleBack();
     }
   };
+
+  willUpdate(changedProperties: Map<string, unknown>): void {
+    // Land on the requested view before render so opening doesn't flash the
+    // list view first (and avoids a redundant update if set in updated()).
+    if (changedProperties.has('open') && this.open) {
+      this.viewMode = this.initialView === 'accounts' ? 'accounts' : 'list';
+    }
+  }
 
   updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('open') && this.open) {
@@ -781,11 +802,43 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
+  /**
+   * Whether there are unsaved edits to a profile or account form. Used to warn
+   * before the whole dialog is dismissed (X / overlay / Escape). The explicit
+   * Cancel/Back controls intentionally discard without prompting.
+   */
+  private isFormDirty(): boolean {
+    return (
+      (this.profileFormDirty && !!this.editingProfile) ||
+      (this.accountFormDirty && !!this.editingAccount)
+    );
+  }
+
   private handleClose(): void {
+    if (this.isFormDirty()) {
+      void showConfirm(
+        'Discard changes?',
+        'You have unsaved changes. Are you sure you want to discard them?',
+        'warning'
+      ).then((confirmed) => {
+        if (confirmed) this.performClose();
+      });
+      return;
+    }
+    this.performClose();
+  }
+
+  private performClose(): void {
     this.open = false;
     this.viewMode = 'list';
     this.editingProfile = null;
     this.editingAccount = null;
+    this.profileFormDirty = false;
+    this.accountFormDirty = false;
+    // Drop any in-flight "connect a new account" intent so it can't auto-attach
+    // to an unrelated profile the next time the dialog is revealed.
+    this.pendingConnectType = null;
+    this.accountIdsBeforeConnect = new Set();
     this.dispatchEvent(new CustomEvent('close'));
   }
 
@@ -800,11 +853,13 @@ export class LvProfileManagerDialog extends LitElement {
       color: PROFILE_COLORS[0],
       defaultAccounts: {},
     };
+    this.profileFormDirty = false;
     this.viewMode = 'create';
   }
 
   private handleEdit(profile: UnifiedProfile): void {
     this.editingProfile = { ...profile, defaultAccounts: { ...profile.defaultAccounts } };
+    this.profileFormDirty = false;
     this.viewMode = 'edit';
   }
 
@@ -818,19 +873,33 @@ export class LvProfileManagerDialog extends LitElement {
       isDefault: false, // Don't copy default status
       defaultAccounts: { ...profile.defaultAccounts }, // Copy default account preferences
     };
+    this.profileFormDirty = false;
     this.viewMode = 'create';
   }
 
   private handleBack(): void {
-    if (this.viewMode === 'select-account' || this.viewMode === 'edit-account') {
-      this.viewMode = this.editingProfile?.id ? 'edit' : 'create';
-      this.editingAccount = null;
-    } else if (this.viewMode === 'assign-repos') {
-      this.viewMode = 'edit';
-      this.selectedReposForAssignment = new Set();
-    } else {
-      this.viewMode = 'list';
-      this.editingProfile = null;
+    switch (this.viewMode) {
+      case 'select-account':
+        this.viewMode = this.editingProfile?.id ? 'edit' : 'create';
+        this.editingAccount = null;
+        break;
+      case 'edit-account':
+        this.viewMode = this.accountReturnView;
+        this.editingAccount = null;
+        this.accountFormDirty = false;
+        break;
+      case 'assign-repos':
+        this.viewMode = 'edit';
+        this.selectedReposForAssignment = new Set();
+        break;
+      case 'accounts':
+        this.viewMode = 'list';
+        break;
+      default:
+        // create / edit
+        this.viewMode = 'list';
+        this.editingProfile = null;
+        this.profileFormDirty = false;
     }
   }
 
@@ -923,6 +992,7 @@ export class LvProfileManagerDialog extends LitElement {
   private updateEditingProfile(field: keyof UnifiedProfile, value: unknown): void {
     if (this.editingProfile) {
       this.editingProfile = { ...this.editingProfile, [field]: value };
+      this.profileFormDirty = true;
     }
   }
 
@@ -967,6 +1037,9 @@ export class LvProfileManagerDialog extends LitElement {
       if (this.repoPath) {
         await unifiedProfileService.loadUnifiedProfileForRepository(this.repoPath);
       }
+      // Changes are persisted — clear the dirty flag so navigating back doesn't
+      // prompt to discard.
+      this.profileFormDirty = false;
       this.handleBack();
     } catch (error) {
       showToast(`Failed to save profile: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
@@ -1016,6 +1089,7 @@ export class LvProfileManagerDialog extends LitElement {
       ...this.editingProfile,
       defaultAccounts: { ...this.editingProfile.defaultAccounts, [type]: accountId },
     };
+    this.profileFormDirty = true;
   }
 
   private removeEditingProfileAccount(type: IntegrationType): void {
@@ -1023,11 +1097,18 @@ export class LvProfileManagerDialog extends LitElement {
     const defaultAccounts = { ...this.editingProfile.defaultAccounts };
     delete defaultAccounts[type];
     this.editingProfile = { ...this.editingProfile, defaultAccounts };
+    this.profileFormDirty = true;
   }
 
   // Account management - attaches existing global accounts to the profile
   private handleOpenAccountPicker(): void {
     this.viewMode = 'select-account';
+  }
+
+  // Opens the standalone account-management view (edit/delete/connect global
+  // accounts independent of any profile).
+  private handleOpenAccountsManager(): void {
+    this.viewMode = 'accounts';
   }
 
   /**
@@ -1036,7 +1117,14 @@ export class LvProfileManagerDialog extends LitElement {
    * account already attached for the same type. Persisted on "Save Profile".
    */
   private handleAttachAccount(account: IntegrationAccount): void {
+    const previous = this.editingProfile?.defaultAccounts?.[account.integrationType];
     this.setEditingProfileAccount(account.integrationType, account.id);
+    if (previous && previous !== account.id) {
+      showToast(
+        `Replaced the previously attached ${INTEGRATION_TYPE_NAMES[account.integrationType]} account`,
+        'info'
+      );
+    }
     this.viewMode = this.editingProfile?.id ? 'edit' : 'create';
   }
 
@@ -1050,6 +1138,10 @@ export class LvProfileManagerDialog extends LitElement {
 
   private handleEditAccount(account: IntegrationAccount): void {
     this.editingAccount = { ...account };
+    this.accountFormDirty = false;
+    // Remember where to return: the standalone Accounts view, or the profile form.
+    this.accountReturnView =
+      this.viewMode === 'accounts' ? 'accounts' : this.editingProfile?.id ? 'edit' : 'create';
     this.viewMode = 'edit-account';
   }
 
@@ -1075,7 +1167,14 @@ export class LvProfileManagerDialog extends LitElement {
         this.removeEditingProfileAccount(attachedType);
       }
       showToast('Account deleted', 'success');
-      this.handleBack();
+      // Deletion is intentional — skip the unsaved-changes guard and return to
+      // wherever the edit form was opened from. When deleting from the Accounts
+      // view, stay there; the store subscription re-renders the trimmed list.
+      this.editingAccount = null;
+      this.accountFormDirty = false;
+      if (this.viewMode === 'edit-account') {
+        this.viewMode = this.accountReturnView;
+      }
     } catch (error) {
       showToast(`Failed to delete account: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     }
@@ -1084,6 +1183,7 @@ export class LvProfileManagerDialog extends LitElement {
   private updateEditingAccount(field: keyof IntegrationAccount, value: unknown): void {
     if (this.editingAccount) {
       this.editingAccount = { ...this.editingAccount, [field]: value };
+      this.accountFormDirty = true;
     }
   }
 
@@ -1112,6 +1212,8 @@ export class LvProfileManagerDialog extends LitElement {
       // Save to global accounts
       await unifiedProfileService.saveGlobalAccount(account);
       showToast('Account saved', 'success');
+      // Persisted — clear the dirty flag so navigating back doesn't prompt.
+      this.accountFormDirty = false;
       this.handleBack();
     } catch (error) {
       showToast(`Failed to save account: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
@@ -1173,6 +1275,8 @@ export class LvProfileManagerDialog extends LitElement {
         return 'Edit Account';
       case 'assign-repos':
         return 'Assign Repositories';
+      case 'accounts':
+        return 'Manage Accounts';
       default:
         return 'Profiles';
     }
@@ -1191,6 +1295,8 @@ export class LvProfileManagerDialog extends LitElement {
         return this.renderAccountForm();
       case 'assign-repos':
         return this.renderRepoAssignment();
+      case 'accounts':
+        return this.renderAccountsManager();
       default:
         return nothing;
     }
@@ -1200,6 +1306,16 @@ export class LvProfileManagerDialog extends LitElement {
     switch (this.viewMode) {
       case 'list':
         return html`
+          <button class="btn btn-secondary" @click=${this.handleOpenAccountsManager}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+              <circle cx="9" cy="7" r="4"></circle>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+            </svg>
+            Accounts
+          </button>
+          <div style="flex: 1;"></div>
           <button class="btn btn-primary" @click=${this.handleCreateNew}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -1207,6 +1323,10 @@ export class LvProfileManagerDialog extends LitElement {
             </svg>
             New Profile
           </button>
+        `;
+      case 'accounts':
+        return html`
+          <button class="btn btn-secondary" @click=${this.handleBack}>Back</button>
         `;
       case 'create':
       case 'edit':
@@ -1226,6 +1346,7 @@ export class LvProfileManagerDialog extends LitElement {
           <button
             class="btn btn-danger"
             ?disabled=${!this.editingAccount?.id}
+            title="Permanently delete this account for all profiles"
             @click=${() => this.editingAccount?.id && this.handleDeleteGlobalAccount(this.editingAccount.id)}
           >
             Delete Account
@@ -1747,30 +1868,93 @@ export class LvProfileManagerDialog extends LitElement {
                 </div>
               `}
 
-          <div class="form-section-title" style="margin-top: var(--spacing-lg);">
-            Connect a new account
-          </div>
-          <div style="display: flex; gap: var(--spacing-sm); flex-wrap: wrap; margin-top: var(--spacing-sm);">
-            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('github')}>
-              ${this.renderAccountIcon('github')}
-              GitHub
-            </button>
-            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('gitlab')}>
-              ${this.renderAccountIcon('gitlab')}
-              GitLab
-            </button>
-            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('bitbucket')}>
-              ${this.renderAccountIcon('bitbucket')}
-              Bitbucket
-            </button>
-            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen('azure-devops')}>
-              ${this.renderAccountIcon('azure-devops')}
-              Azure DevOps
-            </button>
-          </div>
+          ${this.renderConnectButtons()}
         </div>
       </div>
     `;
+  }
+
+  /**
+   * "Connect a new account" provider buttons, shared by the attach picker and
+   * the standalone Accounts view. Each opens the matching integration dialog.
+   */
+  private renderConnectButtons() {
+    const providers: IntegrationType[] = ['github', 'gitlab', 'bitbucket', 'azure-devops'];
+    return html`
+      <div class="form-section-title" style="margin-top: var(--spacing-lg);">
+        Connect a new account
+      </div>
+      <div style="display: flex; gap: var(--spacing-sm); flex-wrap: wrap; margin-top: var(--spacing-sm);">
+        ${providers.map(
+          (type) => html`
+            <button class="btn btn-secondary btn-sm" @click=${() => this.dispatchIntegrationOpen(type)}>
+              ${this.renderAccountIcon(type)}
+              ${INTEGRATION_TYPE_NAMES[type]}
+            </button>
+          `
+        )}
+      </div>
+    `;
+  }
+
+  /**
+   * Standalone account-management view: lists every global account with edit /
+   * delete affordances and offers connect-new buttons. Reachable from the
+   * profile list ("Accounts") and from an integration dialog's "Manage
+   * Accounts" action — independent of editing any profile, so orphan accounts
+   * (attached to no profile) are manageable here.
+   */
+  private renderAccountsManager() {
+    const accounts = this.getGlobalAccounts();
+
+    return html`
+      <div class="form-content">
+        <div class="form-section">
+          ${accounts.length === 0
+            ? html`
+                <div class="empty-accounts">
+                  No integration accounts yet. Connect one below.
+                </div>
+              `
+            : html`
+                <div class="accounts-list">
+                  ${accounts.map((account) => this.renderManagedAccountItem(account))}
+                </div>
+              `}
+          ${this.renderConnectButtons()}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * An account row in the standalone Accounts view. Edit opens the account's
+   * Edit screen; Delete removes the global account for all profiles.
+   */
+  private renderManagedAccountItem(account: IntegrationAccount) {
+    return this.renderAccountItem(
+      account,
+      html`
+        <div class="account-actions">
+          <button class="action-btn" @click=${() => this.handleEditAccount(account)} title="Edit account">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+            </svg>
+          </button>
+          <button
+            class="action-btn delete"
+            @click=${() => this.handleDeleteGlobalAccount(account.id)}
+            title="Delete account (all profiles)"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </button>
+        </div>
+      `
+    );
   }
 
   private renderAccountIcon(type: IntegrationType) {
@@ -1955,12 +2139,27 @@ export class LvProfileManagerDialog extends LitElement {
     const type = this.pendingConnectType;
     this.pendingConnectType = null;
     if (!type || !this.editingProfile) return;
-    // Don't override an account already attached for this provider.
-    if (this.editingProfile.defaultAccounts?.[type]) return;
 
     const accountsOfType = this.getGlobalAccounts().filter((a) => a.integrationType === type);
+    const previous = this.editingProfile.defaultAccounts?.[type];
+    const newlyConnected = accountsOfType.find((a) => !this.accountIdsBeforeConnect.has(a.id));
+
+    if (newlyConnected) {
+      // The user explicitly connected this account while attaching to the
+      // profile — honor that intent even if another account was already
+      // attached for this provider (a profile holds one account per provider).
+      if (previous && previous !== newlyConnected.id) {
+        showToast(`Replaced the previously attached ${INTEGRATION_TYPE_NAMES[type]} account`, 'info');
+      }
+      this.setEditingProfileAccount(type, newlyConnected.id);
+      this.viewMode = this.editingProfile.id ? 'edit' : 'create';
+      return;
+    }
+
+    // No new account was connected (e.g. the user backed out). Only auto-fill
+    // when nothing is attached yet — never override an existing choice.
+    if (previous) return;
     const toAttach =
-      accountsOfType.find((a) => !this.accountIdsBeforeConnect.has(a.id)) ?? // newly connected
       accountsOfType.find((a) => a.isDefault) ?? // the default for this provider
       (accountsOfType.length === 1 ? accountsOfType[0] : undefined); // the only one
 

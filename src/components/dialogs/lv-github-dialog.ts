@@ -1042,6 +1042,10 @@ export class LvGitHubDialog extends LitElement {
           this.loadReleases(),
         ]);
       }
+    } else if (!result.success) {
+      // A genuine backend failure (not merely "this isn't a GitHub repo", which
+      // surfaces as success with null data) must not fail silently.
+      this.error = result.error?.message ?? 'Failed to detect GitHub repository';
     }
   }
 
@@ -1178,6 +1182,12 @@ export class LvGitHubDialog extends LitElement {
     });
     if (provider !== 'github') return;
 
+    // The OAuth callback arrives via a window event and can fire after the user
+    // has closed the dialog. We still persist the account (the user completed
+    // auth — don't throw it away), but the dialog's inline status is invisible
+    // when closed, so remember this to surface a toast instead.
+    const wasOpen = this.open;
+
     this.isLoading = true;
     this.error = null;
 
@@ -1185,7 +1195,7 @@ export class LvGitHubDialog extends LitElement {
       // IMPORTANT: Ensure profiles are loaded before trying to save the account
       // The OAuth callback fires via window event and may complete before loadInitialData
       await unifiedProfileService.loadUnifiedProfiles();
-      if (this.repositoryPath) {
+      if (wasOpen && this.repositoryPath) {
         await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
       }
 
@@ -1242,8 +1252,17 @@ export class LvGitHubDialog extends LitElement {
       this.syncSharedConnectionStatus(true);
       this.oauthState = { status: 'idle' };
 
+      // If the dialog was closed before OAuth completed, its inline status is
+      // not visible — surface a toast so the connection isn't a silent no-op.
+      if (!wasOpen) {
+        showToast(
+          user?.login ? `Connected GitHub account @${user.login}` : 'Connected GitHub account',
+          'success'
+        );
+      }
+
       // Load data if connected and repo detected
-      if (this.connectionStatus?.connected && this.detectedRepo) {
+      if (wasOpen && this.connectionStatus?.connected && this.detectedRepo) {
         await Promise.all([
           this.loadPullRequests(tokens.accessToken),
           this.loadWorkflowRuns(tokens.accessToken),

@@ -881,6 +881,10 @@ export class LvAzureDevOpsDialog extends LitElement {
       if (this.connectionStatus?.connected) {
         await this.loadAllData();
       }
+    } else if (!result.success) {
+      // A genuine backend failure (not merely "this isn't an Azure DevOps repo",
+      // which surfaces as success with null data) must not fail silently.
+      this.error = result.error?.message ?? 'Failed to detect Azure DevOps repository';
     }
   }
 

@@ -514,5 +514,22 @@ describe('lv-azure-devops-dialog', () => {
       expect(errorMsg).to.not.be.null;
       expect(errorMsg!.textContent).to.include('Organization not found');
     });
+
+    it('surfaces a backend error when repo detection fails (not silent)', async () => {
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'detect_ado_repo') throw new Error('ado detect boom');
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.include('ado detect boom');
+    });
   });
 });

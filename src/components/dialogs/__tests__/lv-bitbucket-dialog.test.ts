@@ -21,6 +21,7 @@ const keyringStore = new Map<string, string>();
 
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-bitbucket-dialog.ts';
@@ -505,6 +506,52 @@ describe('lv-bitbucket-dialog', () => {
       const errorMsg = el.shadowRoot!.querySelector('.error');
       expect(errorMsg).to.not.be.null;
       expect(errorMsg!.textContent).to.include('Bitbucket API rate limited');
+    });
+
+    it('surfaces a backend error when repo detection fails (not silent)', async () => {
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'detect_bitbucket_repo') throw new Error('bitbucket detect boom');
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.include('bitbucket detect boom');
+    });
+  });
+
+  describe('OAuth completes after dialog closed', () => {
+    it('persists the account and surfaces a toast instead of failing silently', async () => {
+      connectionResponse = mockConnectedStatus;
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${false}></lv-bitbucket-dialog>
+      `);
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      invokeHistory.length = 0;
+
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: { provider: 'bitbucket', tokens: { accessToken: 'bbp_oauth' } },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      const persisted = invokeHistory.filter(
+        (h) => h.command === 'save_global_account' || h.command === 'store_keyring_token'
+      );
+      expect(persisted.length).to.be.greaterThan(0);
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success' && /Connected Bitbucket/.test(t.message))).to.be.true;
     });
   });
 });

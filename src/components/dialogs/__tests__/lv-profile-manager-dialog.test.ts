@@ -25,6 +25,7 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { repositoryStore } from '../../../stores/repository.store.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 import type { UnifiedProfile, IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import { PROFILE_COLORS } from '../../../types/unified-profile.types.ts';
 
@@ -1596,6 +1597,225 @@ describe('lv-profile-manager-dialog', () => {
 
       const checkbox = el.shadowRoot!.querySelector('.checkbox-row input[type="checkbox"]') as HTMLInputElement;
       expect(checkbox.checked).to.be.true;
+    });
+  });
+
+  // ── Standalone Accounts view (Manage Accounts) ─────────────────────────────
+  describe('accounts manager view', () => {
+    function getAccountsButton(el: LvProfileManagerDialog): HTMLButtonElement {
+      return Array.from(
+        el.shadowRoot!.querySelectorAll('.dialog-footer .btn-secondary')
+      ).find((b) => b.textContent?.trim() === 'Accounts') as HTMLButtonElement;
+    }
+
+    it('opens the accounts view from the list footer "Accounts" button', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Manage Accounts');
+      // Lists every global account (both test accounts) with edit/delete actions
+      const rows = el.shadowRoot!.querySelectorAll('.accounts-list .account-item');
+      expect(rows.length).to.equal(2);
+      const editBtns = el.shadowRoot!.querySelectorAll('.account-actions .action-btn:not(.delete)');
+      const deleteBtns = el.shadowRoot!.querySelectorAll('.account-actions .action-btn.delete');
+      expect(editBtns.length).to.equal(2);
+      expect(deleteBtns.length).to.equal(2);
+    });
+
+    it('lands on the accounts view when opened with initialView="accounts"', async () => {
+      const el = await fixture<LvProfileManagerDialog>(
+        html`<lv-profile-manager-dialog
+          .open=${true}
+          .repoPath=${'/test/repo'}
+          .initialView=${'accounts'}
+        ></lv-profile-manager-dialog>`
+      );
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent).to.include('Manage Accounts');
+    });
+
+    it('offers connect-new buttons for every provider in the accounts view', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      const labels = Array.from(
+        el.shadowRoot!.querySelectorAll('.form-section .btn.btn-sm')
+      ).map((b) => b.textContent?.trim());
+      expect(labels).to.include('GitHub');
+      expect(labels).to.include('GitLab');
+      expect(labels).to.include('Bitbucket');
+      expect(labels).to.include('Azure DevOps');
+    });
+
+    it('dispatches open-<provider> when a connect button is clicked from the accounts view', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      let opened = false;
+      el.addEventListener('open-github', () => { opened = true; });
+      const githubBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.form-section .btn.btn-sm')
+      ).find((b) => b.textContent?.trim() === 'GitHub') as HTMLButtonElement;
+      githubBtn.click();
+      await el.updateComplete;
+
+      expect(opened).to.be.true;
+    });
+
+    it('edits an account from the accounts view and returns to it on Back', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      const editBtn = el.shadowRoot!.querySelector(
+        '.account-actions .action-btn:not(.delete)'
+      ) as HTMLButtonElement;
+      editBtn.click();
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Edit Account');
+
+      const backBtn = el.shadowRoot!.querySelector('.back-btn') as HTMLButtonElement;
+      backBtn.click();
+      await el.updateComplete;
+      // Returns to the accounts view, not the profile list
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Manage Accounts');
+    });
+
+    it('deletes a global account from the accounts view and stays in the view', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      clearHistory();
+      const deleteBtn = el.shadowRoot!.querySelector(
+        '.account-actions .action-btn.delete'
+      ) as HTMLButtonElement;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(findCommands('delete_global_account').length).to.equal(1);
+      // Still on the accounts view after deleting
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Manage Accounts');
+    });
+  });
+
+  // ── Replacing a same-provider account (#5) ─────────────────────────────────
+  describe('same-provider account replacement', () => {
+    it('shows an info toast and replaces when attaching a second account of the same provider', async () => {
+      const gh1 = makeAccount({ id: 'gh1', name: 'GH One', integrationType: 'github' });
+      const gh2 = makeAccount({ id: 'gh2', name: 'GH Two', integrationType: 'github' });
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: { github: 'gh1' } });
+      useConfig([profile], [gh1, gh2]);
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      // Open the picker and choose the OTHER github account
+      const addBtn = Array.from(
+        el.shadowRoot!.querySelector('.accounts-section')!.querySelectorAll('button')
+      ).find((b) => b.textContent?.trim() === 'Add') as HTMLButtonElement;
+      addBtn.click();
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      const rows = el.shadowRoot!.querySelectorAll('.account-item.selectable');
+      const gh2Row = Array.from(rows).find((r) => r.textContent?.includes('GH Two'));
+      (gh2Row as HTMLElement).click();
+      await el.updateComplete;
+
+      // Toast surfaced about the replacement
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.message.includes('Replaced'))).to.be.true;
+
+      // The profile form now shows the replacement account, not the original
+      const attached = el.shadowRoot!.querySelector('.accounts-section .accounts-list .account-name');
+      expect(attached!.textContent).to.include('GH Two');
+    });
+  });
+
+  // ── Unsaved-changes guard on dismissal (#6) ────────────────────────────────
+  describe('unsaved-changes guard', () => {
+    it('prompts to confirm when closing the dialog with unsaved profile edits', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      // Make the form dirty
+      const nameInput = el.shadowRoot!.querySelector('input[type="text"]') as HTMLInputElement;
+      nameInput.value = 'Changed';
+      nameInput.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      clearHistory();
+      let closeFired = false;
+      el.addEventListener('close', () => { closeFired = true; });
+
+      const closeBtn = el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement;
+      closeBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      // A confirm dialog was shown, and (mock answers 'Ok') the dialog closed
+      expect(findCommands('plugin:dialog|message').length).to.equal(1);
+      expect(closeFired).to.be.true;
+    });
+
+    it('does not prompt when closing without unsaved edits', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      clearHistory();
+      let closeFired = false;
+      el.addEventListener('close', () => { closeFired = true; });
+
+      const closeBtn = el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement;
+      closeBtn.click();
+      await el.updateComplete;
+
+      expect(findCommands('plugin:dialog|message').length).to.equal(0);
+      expect(closeFired).to.be.true;
+    });
+  });
+
+  // ── Pending connect intent cleanup ─────────────────────────────────────────
+  describe('connect intent cleanup', () => {
+    it('clears a pending connect intent when the dialog is closed', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      // Open the picker and click a "Connect a new account" provider button,
+      // which records a pending connect intent.
+      const addBtn = Array.from(
+        el.shadowRoot!.querySelector('.accounts-section')!.querySelectorAll('button')
+      ).find((b) => b.textContent?.trim() === 'Add') as HTMLButtonElement;
+      addBtn.click();
+      await el.updateComplete;
+
+      const githubConnect = Array.from(
+        el.shadowRoot!.querySelectorAll('.form-section .btn.btn-sm')
+      ).find((b) => b.textContent?.trim() === 'GitHub') as HTMLButtonElement;
+      githubConnect.click();
+      await el.updateComplete;
+
+      const withPrivate = el as unknown as { pendingConnectType: string | null };
+      expect(withPrivate.pendingConnectType).to.equal('github');
+
+      // Closing the dialog must drop the pending intent so it can't auto-attach later.
+      (el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement).click();
+      await el.updateComplete;
+      expect(withPrivate.pendingConnectType).to.equal(null);
     });
   });
 });
