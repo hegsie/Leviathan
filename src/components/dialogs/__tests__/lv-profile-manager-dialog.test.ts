@@ -1787,4 +1787,35 @@ describe('lv-profile-manager-dialog', () => {
       expect(closeFired).to.be.true;
     });
   });
+
+  // ── Pending connect intent cleanup ─────────────────────────────────────────
+  describe('connect intent cleanup', () => {
+    it('clears a pending connect intent when the dialog is closed', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      // Open the picker and click a "Connect a new account" provider button,
+      // which records a pending connect intent.
+      const addBtn = Array.from(
+        el.shadowRoot!.querySelector('.accounts-section')!.querySelectorAll('button')
+      ).find((b) => b.textContent?.trim() === 'Add') as HTMLButtonElement;
+      addBtn.click();
+      await el.updateComplete;
+
+      const githubConnect = Array.from(
+        el.shadowRoot!.querySelectorAll('.form-section .btn.btn-sm')
+      ).find((b) => b.textContent?.trim() === 'GitHub') as HTMLButtonElement;
+      githubConnect.click();
+      await el.updateComplete;
+
+      const withPrivate = el as unknown as { pendingConnectType: string | null };
+      expect(withPrivate.pendingConnectType).to.equal('github');
+
+      // Closing the dialog must drop the pending intent so it can't auto-attach later.
+      (el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement).click();
+      await el.updateComplete;
+      expect(withPrivate.pendingConnectType).to.equal(null);
+    });
+  });
 });

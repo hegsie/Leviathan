@@ -835,6 +835,10 @@ export class LvProfileManagerDialog extends LitElement {
     this.editingAccount = null;
     this.profileFormDirty = false;
     this.accountFormDirty = false;
+    // Drop any in-flight "connect a new account" intent so it can't auto-attach
+    // to an unrelated profile the next time the dialog is revealed.
+    this.pendingConnectType = null;
+    this.accountIdsBeforeConnect = new Set();
     this.dispatchEvent(new CustomEvent('close'));
   }
 
