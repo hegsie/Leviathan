@@ -1174,11 +1174,10 @@ export class LvGitHubDialog extends LitElement {
 
   private async handleOAuthComplete(event: CustomEvent<{ provider: string; tokens: OAuthTokenResponse }>): Promise<void> {
     const { provider, tokens } = event.detail;
+    // Do not log token material (M5) — only presence, never any prefix/value.
     console.log('[GitHub Dialog] OAuth complete event received:', {
       provider,
       hasTokens: !!tokens,
-      accessToken: tokens?.accessToken?.substring(0, 10) + '...',
-      tokenKeys: tokens ? Object.keys(tokens) : [],
     });
     if (provider !== 'github') return;
 
