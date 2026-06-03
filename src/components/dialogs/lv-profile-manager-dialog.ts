@@ -762,14 +762,16 @@ export class LvProfileManagerDialog extends LitElement {
         `Restored ${result.profilesCount ?? 0} profiles and ${result.accountsCount ?? 0} accounts from backup`,
         'success'
       );
-      this.handleClose();
-      // Dispatch event to trigger migration dialog
+      // D4: Dispatch `migration-needed` BEFORE closing so the parent can open
+      // the migration dialog as this one closes, avoiding a close-then-reopen
+      // flicker in the transition.
       this.dispatchEvent(
         new CustomEvent('migration-needed', {
           bubbles: true,
           composed: true,
         })
       );
+      this.handleClose();
     } catch (error) {
       showToast(
         `Failed to restore backup: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -924,7 +926,7 @@ export class LvProfileManagerDialog extends LitElement {
     this.isSaving = true;
     const profileId = this.editingProfile.id;
     let successCount = 0;
-    let errorCount = 0;
+    const failedRepos: string[] = [];
 
     try {
       for (const repoPath of this.selectedReposForAssignment) {
@@ -932,22 +934,30 @@ export class LvProfileManagerDialog extends LitElement {
           await unifiedProfileService.assignUnifiedProfileToRepository(repoPath, profileId);
           successCount++;
         } catch {
-          errorCount++;
+          failedRepos.push(repoPath);
         }
-      }
-
-      if (errorCount === 0) {
-        showToast(`Assigned ${successCount} repository${successCount !== 1 ? 'ies' : ''}`, 'success');
-      } else {
-        showToast(`Assigned ${successCount}, failed ${errorCount}`, 'warning');
       }
 
       // Reload profiles to update repositoryAssignments in the store
       await unifiedProfileService.loadUnifiedProfiles();
 
-      // Go back to edit view
-      this.selectedReposForAssignment = new Set();
-      this.viewMode = 'edit';
+      if (failedRepos.length === 0) {
+        showToast(`Assigned ${successCount} repository${successCount !== 1 ? 'ies' : ''}`, 'success');
+        // Only clear selection and leave the view on full success.
+        this.selectedReposForAssignment = new Set();
+        this.viewMode = 'edit';
+      } else {
+        // D11: On partial failure, keep the FAILED repos selected so the user can
+        // retry, and name them in the feedback instead of showing only a count.
+        const names = failedRepos
+          .map((p) => p.split(/[\\/]/).filter(Boolean).pop() ?? p)
+          .join(', ');
+        showToast(
+          `Assigned ${successCount}, failed ${failedRepos.length}: ${names}`,
+          'warning'
+        );
+        this.selectedReposForAssignment = new Set(failedRepos);
+      }
     } catch (error) {
       showToast(`Failed to assign repositories: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     } finally {
@@ -955,6 +965,8 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
+  // D5: No change event dispatched here by design — see handleSave. The store
+  // subscription is the single source of truth for UI sync.
   private async handleDelete(profile: UnifiedProfile, e: Event): Promise<void> {
     e.stopPropagation();
     const confirmed = await showConfirm(
@@ -996,6 +1008,13 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
+  // D5: This and its sibling mutators (handleSaveAccount, handleDelete,
+  // handleDeleteGlobalAccount) intentionally dispatch NO change event. The
+  // Zustand unified-profile store subscription is the single source of truth for
+  // UI sync — these handlers call unifiedProfileService.* which updates the store,
+  // and subscribed components re-render. Do NOT add a CustomEvent here: there is
+  // no parent listener for it, so it would be an orphan event (CLAUDE.md
+  // "Event Dispatch Consistency").
   private async handleSave(): Promise<void> {
     if (!this.editingProfile) return;
 
@@ -1148,6 +1167,9 @@ export class LvProfileManagerDialog extends LitElement {
   /**
    * Delete a global account entirely (for all profiles). Reachable only from the
    * account's Edit screen because it is destructive and irreversible.
+   *
+   * D5: No change event dispatched here by design — see handleSave. The store
+   * subscription is the single source of truth for UI sync.
    */
   private async handleDeleteGlobalAccount(accountId: string): Promise<void> {
     const confirmed = await showConfirm(
@@ -1187,6 +1209,9 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
+  // D5: No change event dispatched here by design — see handleSave. The store
+  // subscription is the single source of truth for UI sync; adding a parent-less
+  // CustomEvent would be an orphan event.
   private async handleSaveAccount(): Promise<void> {
     if (!this.editingAccount) return;
 

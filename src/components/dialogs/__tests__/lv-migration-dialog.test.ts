@@ -862,4 +862,24 @@ describe('lv-migration-dialog', () => {
       }
     });
   });
+
+  // D6: opening the profile manager from the migration dialog must also close
+  // the migration dialog so it isn't left stacked behind.
+  describe('Open Profile Manager (D6)', () => {
+    it('dispatches open-profile-manager and then closes the migration dialog', async () => {
+      const el = await renderDialog(true);
+      await waitForUpdate(el);
+
+      const order: string[] = [];
+      el.addEventListener('open-profile-manager', () => order.push('open-profile-manager'));
+      el.addEventListener('close', () => order.push('close'));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleOpenProfileManager();
+      await el.updateComplete;
+
+      expect(order).to.deep.equal(['open-profile-manager', 'close']);
+      expect((el as unknown as { open: boolean }).open).to.be.false;
+    });
+  });
 });

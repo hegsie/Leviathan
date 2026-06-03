@@ -519,4 +519,80 @@ describe('lv-context-dashboard', () => {
       expect(collapseBtn.getAttribute('aria-expanded')).to.equal('true');
     });
   });
+
+  // D10: the dashboard acts as an event bus — child-card events bubble in and are
+  // re-dispatched upward (to app-shell) by the dashboard.
+  describe('event bus relay (D10)', () => {
+    async function renderExpandedWithIntegrationCard(): Promise<LvContextDashboard> {
+      setupStores({
+        accounts: [defaultAccount],
+        profile: makeProfile({ defaultAccounts: { github: 'account-1' } }),
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+      return el;
+    }
+
+    it('re-dispatches integration-card refresh-account upward', async () => {
+      const el = await renderExpandedWithIntegrationCard();
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+
+      let relayed: CustomEvent | null = null;
+      el.addEventListener('refresh-account', ((e: CustomEvent) => {
+        relayed = e;
+      }) as EventListener);
+
+      card!.dispatchEvent(
+        new CustomEvent('refresh-account', {
+          detail: { accountId: 'account-1' },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      await el.updateComplete;
+
+      expect(relayed, 'refresh-account relayed').to.not.be.null;
+      expect((relayed! as CustomEvent).detail).to.deep.equal({ accountId: 'account-1' });
+    });
+
+    it('re-dispatches integration-card open-dialog as open-<provider> upward', async () => {
+      const el = await renderExpandedWithIntegrationCard();
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card).to.not.be.null;
+
+      let openGithub = false;
+      el.addEventListener('open-github', () => {
+        openGithub = true;
+      });
+
+      card!.dispatchEvent(new CustomEvent('open-dialog', { bubbles: true, composed: true }));
+      await el.updateComplete;
+
+      expect(openGithub, 'open-github relayed for a github account').to.be.true;
+    });
+
+    it('re-dispatches profile-card edit-profile as open-profile-manager upward', async () => {
+      setupStores();
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const profileCard = el.shadowRoot!.querySelector('lv-profile-card');
+      expect(profileCard).to.not.be.null;
+
+      let openProfileManager = false;
+      el.addEventListener('open-profile-manager', () => {
+        openProfileManager = true;
+      });
+
+      profileCard!.dispatchEvent(new CustomEvent('edit-profile', { bubbles: true, composed: true }));
+      await el.updateComplete;
+
+      expect(openProfileManager, 'edit-profile -> open-profile-manager').to.be.true;
+    });
+  });
 });

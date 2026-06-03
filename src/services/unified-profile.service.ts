@@ -279,14 +279,24 @@ export async function updateGlobalAccountCachedUser(
     throw new Error(result.error?.message || 'Failed to update cached user');
   }
 
-  // Refresh accounts in store
-  await loadUnifiedProfiles();
+  // V7: Update only the single account in the store instead of reloading the
+  // entire config. Callers like refreshAllAccountsCachedUser/validateAllAccountTokens
+  // loop over every account, so a full reload here was O(N) full config reloads.
+  const { accounts, updateAccount } = unifiedProfileStore.getState();
+  const existing = accounts.find((a) => a.id === accountId);
+  if (existing) {
+    updateAccount({ ...existing, cachedUser: user });
+  }
 }
 
 /**
- * Get the profile's preferred account for an integration type
+ * V5: Tauri wrapper (scope: "fetch" — round-trips to the backend).
+ * Get the profile's preferred account for an integration type.
+ * Renamed from getProfilePreferredAccount to disambiguate from the store
+ * selector (selectProfilePreferredAccount) and pure helper
+ * (resolveProfilePreferredAccount).
  */
-export async function getProfilePreferredAccount(
+export async function fetchProfilePreferredAccount(
   profileId: string,
   integrationType: IntegrationType
 ): Promise<IntegrationAccount | null> {
@@ -504,12 +514,16 @@ export async function loadUnifiedProfiles(): Promise<void> {
   const store = unifiedProfileStore.getState();
   store.setLoading(true);
 
+  // V6: Always clear loading via finally so a rejected getUnifiedProfilesConfig()
+  // can never leave the store stuck in the loading state. On error we still set
+  // the error message (consistent with sibling loaders).
   try {
     const config = await getUnifiedProfilesConfig();
     store.setConfig(config);
-    store.setLoading(false);
   } catch (error) {
     store.setError(error instanceof Error ? error.message : 'Failed to load profiles');
+  } finally {
+    store.setLoading(false);
   }
 }
 

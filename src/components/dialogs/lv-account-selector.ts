@@ -255,6 +255,10 @@ export class LvAccountSelector extends LitElement {
 
   @state() private accounts: IntegrationAccount[] = [];
   @state() private isOpen = false;
+  // D7: lightweight inline busy state so add/manage clicks aren't silent. We keep
+  // this on the sub-dialog itself (a brief "Opening..." label) rather than
+  // stacking a toast, since a parent dialog handles the actual navigation.
+  @state() private pendingAction: 'add' | 'manage' | null = null;
 
   private unsubscribe?: () => void;
 
@@ -302,7 +306,10 @@ export class LvAccountSelector extends LitElement {
   }
 
   private handleAddAccount(): void {
-    this.isOpen = false;
+    // D7: show a brief inline busy state before the parent opens the add flow.
+    // Keep the dropdown open so the "Opening…" label is actually visible; the
+    // parent dialog's navigation supersedes this selector shortly after.
+    this.pendingAction = 'add';
     this.dispatchEvent(
       new CustomEvent('add-account', {
         detail: { integrationType: this.integrationType },
@@ -313,7 +320,10 @@ export class LvAccountSelector extends LitElement {
   }
 
   private handleManageAccounts(): void {
-    this.isOpen = false;
+    // D7: show a brief inline busy state before the parent opens the manage flow.
+    // Keep the dropdown open so the "Opening…" label is visible; the parent
+    // dialog's navigation supersedes this selector shortly after.
+    this.pendingAction = 'manage';
     this.dispatchEvent(
       new CustomEvent('manage-accounts', {
         detail: { integrationType: this.integrationType },
@@ -401,7 +411,11 @@ export class LvAccountSelector extends LitElement {
           ? html`<div class="empty-state">No accounts configured</div>`
           : this.accounts.map((account) => this.renderAccountItem(account))}
         <div class="dropdown-divider"></div>
-        <button class="dropdown-action primary" @click=${this.handleAddAccount}>
+        <button
+          class="dropdown-action primary"
+          @click=${this.handleAddAccount}
+          ?disabled=${this.pendingAction !== null}
+        >
           <svg
             viewBox="0 0 24 24"
             fill="none"
@@ -411,13 +425,14 @@ export class LvAccountSelector extends LitElement {
             <line x1="12" y1="5" x2="12" y2="19"></line>
             <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
-          Add Account
+          ${this.pendingAction === 'add' ? 'Opening…' : 'Add Account'}
         </button>
         ${this.accounts.length > 0
           ? html`
               <button
                 class="dropdown-action"
                 @click=${this.handleManageAccounts}
+                ?disabled=${this.pendingAction !== null}
               >
                 <svg
                   viewBox="0 0 24 24"
@@ -430,7 +445,7 @@ export class LvAccountSelector extends LitElement {
                     d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
                   ></path>
                 </svg>
-                Manage Accounts...
+                ${this.pendingAction === 'manage' ? 'Opening…' : 'Manage Accounts...'}
               </button>
             `
           : nothing}

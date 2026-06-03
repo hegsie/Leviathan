@@ -1759,9 +1759,13 @@ export class AppShell extends LitElement {
     const { accountId } = e.detail;
     try {
       const account = await unifiedProfileService.getGlobalAccount(accountId);
-      if (account) {
-        await unifiedProfileService.refreshAccountCachedUser(account);
+      // D3: Surface feedback instead of silently returning when the account
+      // can't be found (e.g. it was deleted between dispatch and handling).
+      if (!account) {
+        showToast('Account not found', 'error');
+        return;
       }
+      await unifiedProfileService.refreshAccountCachedUser(account);
     } catch (error) {
       log.error('Failed to refresh account', error);
       showToast('Failed to refresh account connection', 'error');

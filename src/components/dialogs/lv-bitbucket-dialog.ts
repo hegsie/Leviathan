@@ -24,7 +24,7 @@ import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts'
 import type { OAuthFlowState, OAuthTokenResponse } from '../../types/oauth.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, selectDefaultGlobalAccount, getAccountById, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
@@ -642,7 +642,7 @@ export class LvBitbucketDialog extends LitElement {
         lastActiveProfileId = activeProfileId;
       } else if (!this.selectedAccountId && this.accounts.length > 0) {
         const preferred = getActiveProfilePreferredAccount('bitbucket')
-          ?? getDefaultGlobalAccount('bitbucket')
+          ?? selectDefaultGlobalAccount('bitbucket')
           ?? this.accounts[0];
         this.selectedAccountId = preferred?.id ?? null;
       }
@@ -652,7 +652,7 @@ export class LvBitbucketDialog extends LitElement {
     this.accounts = getAccountsByType('bitbucket');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
       const preferred = getActiveProfilePreferredAccount('bitbucket')
-        ?? getDefaultGlobalAccount('bitbucket')
+        ?? selectDefaultGlobalAccount('bitbucket')
         ?? this.accounts[0];
       this.selectedAccountId = preferred?.id ?? null;
     }
@@ -708,7 +708,7 @@ export class LvBitbucketDialog extends LitElement {
       this.accounts = getAccountsByType('bitbucket');
       if (this.accounts.length > 0 && !this.selectedAccountId) {
         const preferred = getActiveProfilePreferredAccount('bitbucket')
-          ?? getDefaultGlobalAccount('bitbucket');
+          ?? selectDefaultGlobalAccount('bitbucket');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
       }
 

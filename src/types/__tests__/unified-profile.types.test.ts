@@ -11,8 +11,8 @@ import {
   createEmptyIntegrationAccount,
   generateId,
   filterAccountsByType,
-  getDefaultGlobalAccount,
-  getProfilePreferredAccount,
+  resolveDefaultGlobalAccount,
+  resolveProfilePreferredAccount,
   getGlobalAccountCountByType,
   getAccountDisplayLabel,
   // Deprecated v2 functions (for migration)
@@ -369,13 +369,13 @@ describe('unified-profile.types', () => {
     });
   });
 
-  describe('getDefaultGlobalAccount (v3)', () => {
+  describe('resolveDefaultGlobalAccount (v3)', () => {
     it('returns default account for type', () => {
       const github1 = createMockAccount('g1', 'github', { isDefault: false });
       const github2 = createMockAccount('g2', 'github', { isDefault: true });
       const accounts = [github1, github2];
 
-      const defaultAccount = getDefaultGlobalAccount(accounts, 'github');
+      const defaultAccount = resolveDefaultGlobalAccount(accounts, 'github');
 
       expect(defaultAccount?.id).to.equal('g2');
     });
@@ -385,7 +385,7 @@ describe('unified-profile.types', () => {
       const github2 = createMockAccount('g2', 'github');
       const accounts = [github1, github2];
 
-      const defaultAccount = getDefaultGlobalAccount(accounts, 'github');
+      const defaultAccount = resolveDefaultGlobalAccount(accounts, 'github');
 
       expect(defaultAccount?.id).to.equal('g1');
     });
@@ -394,18 +394,18 @@ describe('unified-profile.types', () => {
       const gitlab = createMockAccount('gl1', 'gitlab');
       const accounts = [gitlab];
 
-      expect(getDefaultGlobalAccount(accounts, 'github')).to.be.undefined;
+      expect(resolveDefaultGlobalAccount(accounts, 'github')).to.be.undefined;
     });
   });
 
-  describe('getProfilePreferredAccount (v3)', () => {
+  describe('resolveProfilePreferredAccount (v3)', () => {
     it('returns profile preferred account', () => {
       const github1 = createMockAccount('g1', 'github', { isDefault: true });
       const github2 = createMockAccount('g2', 'github', { isDefault: false });
       const accounts = [github1, github2];
       const profile = createMockProfile({ github: 'g2' }); // Profile prefers g2
 
-      const preferred = getProfilePreferredAccount(profile, accounts, 'github');
+      const preferred = resolveProfilePreferredAccount(profile, accounts, 'github');
 
       expect(preferred?.id).to.equal('g2');
     });
@@ -415,7 +415,7 @@ describe('unified-profile.types', () => {
       const accounts = [github1];
       const profile = createMockProfile({}); // No preferences
 
-      const preferred = getProfilePreferredAccount(profile, accounts, 'github');
+      const preferred = resolveProfilePreferredAccount(profile, accounts, 'github');
 
       expect(preferred?.id).to.equal('g1');
     });
@@ -425,7 +425,7 @@ describe('unified-profile.types', () => {
       const accounts = [gitlab];
       const profile = createMockProfile({});
 
-      expect(getProfilePreferredAccount(profile, accounts, 'github')).to.be.undefined;
+      expect(resolveProfilePreferredAccount(profile, accounts, 'github')).to.be.undefined;
     });
 
     it('falls back to global default when preferred account not found', () => {
@@ -433,7 +433,7 @@ describe('unified-profile.types', () => {
       const accounts = [github1];
       const profile = createMockProfile({ github: 'non-existent' }); // Invalid preference
 
-      const preferred = getProfilePreferredAccount(profile, accounts, 'github');
+      const preferred = resolveProfilePreferredAccount(profile, accounts, 'github');
 
       expect(preferred?.id).to.equal('g1');
     });

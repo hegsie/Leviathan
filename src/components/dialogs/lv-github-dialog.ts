@@ -20,7 +20,7 @@ import type {
   ReleaseSummary,
   CreateReleaseInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, selectDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
@@ -837,7 +837,7 @@ export class LvGitHubDialog extends LitElement {
       } else if (!this.selectedAccountId && this.accounts.length > 0) {
         // First-time selection: prefer the active profile's default, falling
         // back to the global default.
-        const preferred = getActiveProfilePreferredAccount('github') ?? getDefaultGlobalAccount('github');
+        const preferred = getActiveProfilePreferredAccount('github') ?? selectDefaultGlobalAccount('github');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
       }
     });
@@ -845,7 +845,7 @@ export class LvGitHubDialog extends LitElement {
     // Initialize from current state
     this.accounts = getAccountsByType('github');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
-      const preferred = getActiveProfilePreferredAccount('github') ?? getDefaultGlobalAccount('github');
+      const preferred = getActiveProfilePreferredAccount('github') ?? selectDefaultGlobalAccount('github');
       this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
     }
 
@@ -909,7 +909,7 @@ export class LvGitHubDialog extends LitElement {
       // loadInitialData(), and must not be overwritten.
       if (this.accounts.length > 0 && !this.selectedAccountId) {
         const preferred = getActiveProfilePreferredAccount('github')
-          ?? getDefaultGlobalAccount('github');
+          ?? selectDefaultGlobalAccount('github');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
         console.log('[GitHub Dialog] Selected account:', this.selectedAccountId);
       }
@@ -1388,9 +1388,13 @@ export class LvGitHubDialog extends LitElement {
     this.isLoading = true;
     this.error = null;
 
+    // M10: Delete the config/account record (the source of truth) FIRST so a
+    // failure leaves the token intact but no zombie account. The keyring token
+    // deletion is best-effort last; if it fails we surface a warning rather than
+    // leaving a half-deleted state.
+    const accountId = this.selectedAccountId;
     try {
-      await credentialService.deleteAccountToken('github', this.selectedAccountId);
-      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+      await unifiedProfileService.deleteGlobalAccount(accountId);
 
       await unifiedProfileService.loadUnifiedProfiles();
       this.accounts = getAccountsByType('github');
@@ -1403,11 +1407,27 @@ export class LvGitHubDialog extends LitElement {
       this.releases = [];
       this.repoLabels = [];
 
+      // Best-effort token cleanup after the record is gone.
+      try {
+        await credentialService.deleteAccountToken('github', accountId);
+      } catch (tokenErr) {
+        // M10: surface partial failure instead of swallowing it.
+        const msg =
+          tokenErr instanceof Error
+            ? `Account deleted, but its stored token could not be removed: ${tokenErr.message}`
+            : 'Account deleted, but its stored token could not be removed.';
+        this.error = msg;
+        showToast(msg, 'error');
+      }
+
       if (this.accounts.length > 0) {
         await this.loadInitialData();
       }
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Failed to delete integration';
+      // M10: pair inline error with a toast for consistent feedback.
+      const msg = err instanceof Error ? err.message : 'Failed to delete integration';
+      this.error = msg;
+      showToast(msg, 'error');
     } finally {
       this.isLoading = false;
     }

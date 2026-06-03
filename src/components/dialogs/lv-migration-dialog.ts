@@ -501,6 +501,10 @@ export class LvMigrationDialog extends LitElement {
         composed: true,
       })
     );
+    // D6: Close this dialog so it isn't left stacked behind the profile manager.
+    // Dispatch first, then close, so the parent can open the manager as this one
+    // closes (avoiding a flicker), mirroring the restore-backup ordering (D4).
+    this.handleClose();
   }
 
   render() {

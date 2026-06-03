@@ -22,7 +22,7 @@ import type {
   AdoPipelineRun,
   CreateAdoPullRequestInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, selectDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
@@ -626,7 +626,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       } else if (!this.selectedAccountId && this.accounts.length > 0) {
         applyAccount(
           getActiveProfilePreferredAccount('azure-devops')
-          ?? getDefaultGlobalAccount('azure-devops')
+          ?? selectDefaultGlobalAccount('azure-devops')
           ?? this.accounts[0],
         );
       }
@@ -637,7 +637,7 @@ export class LvAzureDevOpsDialog extends LitElement {
     if (this.accounts.length > 0 && !this.selectedAccountId) {
       applyAccount(
         getActiveProfilePreferredAccount('azure-devops')
-        ?? getDefaultGlobalAccount('azure-devops')
+        ?? selectDefaultGlobalAccount('azure-devops')
         ?? this.accounts[0],
       );
     }
@@ -692,7 +692,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       this.accounts = getAccountsByType('azure-devops');
       if (this.accounts.length > 0 && !this.selectedAccountId) {
         const preferred = getActiveProfilePreferredAccount('azure-devops')
-          ?? getDefaultGlobalAccount('azure-devops');
+          ?? selectDefaultGlobalAccount('azure-devops');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
         if (preferred?.config.type === 'azure-devops' && preferred.config.organization) {
           this.organizationInput = preferred.config.organization;

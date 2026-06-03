@@ -653,6 +653,60 @@ describe('lv-github-dialog', () => {
     });
   });
 
+  describe('Delete Integration (M10)', () => {
+    async function openConnectedDialog(): Promise<LvGitHubDialog> {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gh-acc-1';
+      await el.updateComplete;
+      return el;
+    }
+
+    it('M10: deletes the account record BEFORE the keyring token (record is source of truth)', async () => {
+      const el = await openConnectedDialog();
+      invokeHistory.length = 0;
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      const deleteAccountIdx = invokeHistory.findIndex((h) => h.command === 'delete_global_account');
+      const deleteTokenIdx = invokeHistory.findIndex((h) => h.command === 'delete_keyring_token');
+      expect(deleteAccountIdx, 'account record deletion happened').to.be.greaterThan(-1);
+      expect(deleteTokenIdx, 'token deletion happened').to.be.greaterThan(-1);
+      expect(deleteAccountIdx).to.be.lessThan(deleteTokenIdx);
+    });
+
+    it('M10: surfaces an error (inline + toast) when account deletion fails', async () => {
+      const el = await openConnectedDialog();
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        if (command === 'delete_global_account') throw new Error('delete record boom');
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.include('delete record boom');
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /delete record boom/.test(t.message))).to.be.true;
+    });
+  });
+
   describe('OAuth completes after dialog closed', () => {
     it('persists the account and surfaces a toast instead of failing silently', async () => {
       connectionResponse = mockConnectedStatus;

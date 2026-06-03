@@ -1818,4 +1818,119 @@ describe('lv-profile-manager-dialog', () => {
       expect(withPrivate.pendingConnectType).to.equal(null);
     });
   });
+
+  // D4: restore-backup must dispatch `migration-needed` BEFORE closing so the
+  // parent can swap dialogs without a close-then-reopen flicker.
+  describe('restore backup ordering (D4)', () => {
+    it('dispatches migration-needed before the dialog closes', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: testProfiles, accounts: testAccounts, repositoryAssignments: {} };
+          case 'get_migration_backup_info':
+            return { hasBackup: true, backupDate: '2026-01-01', profilesCount: 2, accountsCount: 2 };
+          case 'restore_migration_backup':
+            return { hasBackup: true, backupDate: '2026-01-01', profilesCount: 2, accountsCount: 2 };
+          case 'needs_unified_profiles_migration':
+            return true;
+          case 'plugin:dialog|message':
+            return 'Ok';
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+
+      const order: string[] = [];
+      el.addEventListener('migration-needed', () => order.push('migration-needed'));
+      el.addEventListener('close', () => order.push('close'));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRestoreBackup();
+      await el.updateComplete;
+
+      expect(order).to.deep.equal(['migration-needed', 'close']);
+      // Dialog actually closed.
+      expect((el as unknown as { open: boolean }).open).to.be.false;
+    });
+  });
+
+  // D11: bulk-assign partial failure must keep the FAILED repos selected (so the
+  // user can retry) and name them in the feedback.
+  describe('bulk assign partial failure (D11)', () => {
+    it('keeps failed repos selected and names them in the toast', async () => {
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: testProfiles, accounts: testAccounts, repositoryAssignments: {} };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'assign_unified_profile_to_repository': {
+            const path = (args as { path?: string } | undefined)?.path;
+            // Fail only for the "personal" repo.
+            if (path === '/repo/personal') throw new Error('locked');
+            return null;
+          }
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      uiStore.getState().toasts.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingProfile = makeProfile({ id: 'profile-1' });
+      shell.selectedReposForAssignment = new Set(['/repo/work', '/repo/personal']);
+      shell.viewMode = 'assign-repos';
+
+      await shell.handleBulkAssign();
+      await el.updateComplete;
+
+      // Failed repo stays selected; succeeded repo is dropped.
+      const remaining = shell.selectedReposForAssignment as Set<string>;
+      expect(Array.from(remaining)).to.deep.equal(['/repo/personal']);
+
+      // Feedback names the failed repo, not just a count.
+      const toasts = uiStore.getState().toasts;
+      const warn = toasts.find((t) => t.type === 'warning');
+      expect(warn, 'a warning toast was shown').to.not.be.undefined;
+      expect(warn!.message).to.match(/failed 1/);
+      expect(warn!.message).to.match(/personal/);
+    });
+
+    it('clears the selection and leaves the view on full success', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: testProfiles, accounts: testAccounts, repositoryAssignments: {} };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'assign_unified_profile_to_repository':
+            return null;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      uiStore.getState().toasts.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingProfile = makeProfile({ id: 'profile-1' });
+      shell.selectedReposForAssignment = new Set(['/repo/work', '/repo/personal']);
+      shell.viewMode = 'assign-repos';
+
+      await shell.handleBulkAssign();
+      await el.updateComplete;
+
+      expect((shell.selectedReposForAssignment as Set<string>).size).to.equal(0);
+      expect(shell.viewMode).to.equal('edit');
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success')).to.be.true;
+    });
+  });
 });

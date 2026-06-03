@@ -20,7 +20,7 @@ import type {
   CreateMergeRequestInput,
   CreateGitLabIssueInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, selectDefaultGlobalAccount, getAccountById, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
@@ -675,7 +675,7 @@ export class LvGitLabDialog extends LitElement {
         lastActiveProfileId = activeProfileId;
       } else if (!this.selectedAccountId && this.accounts.length > 0) {
         applyAccount(
-          getActiveProfilePreferredAccount('gitlab') ?? getDefaultGlobalAccount('gitlab') ?? this.accounts[0],
+          getActiveProfilePreferredAccount('gitlab') ?? selectDefaultGlobalAccount('gitlab') ?? this.accounts[0],
         );
       }
     });
@@ -684,7 +684,7 @@ export class LvGitLabDialog extends LitElement {
     this.accounts = getAccountsByType('gitlab');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
       applyAccount(
-        getActiveProfilePreferredAccount('gitlab') ?? getDefaultGlobalAccount('gitlab') ?? this.accounts[0],
+        getActiveProfilePreferredAccount('gitlab') ?? selectDefaultGlobalAccount('gitlab') ?? this.accounts[0],
       );
     }
 
@@ -739,7 +739,7 @@ export class LvGitLabDialog extends LitElement {
       this.accounts = getAccountsByType('gitlab');
       if (this.accounts.length > 0 && !this.selectedAccountId) {
         const preferred = getActiveProfilePreferredAccount('gitlab')
-          ?? getDefaultGlobalAccount('gitlab');
+          ?? selectDefaultGlobalAccount('gitlab');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
         if (preferred?.config.type === 'gitlab' && preferred.config.instanceUrl) {
           this.instanceUrlInput = preferred.config.instanceUrl;
@@ -1066,10 +1066,15 @@ export class LvGitLabDialog extends LitElement {
     if (!confirmed) return;
 
     this.isLoading = true;
+    this.error = null;
 
+    // M10: Delete the config/account record (the source of truth) FIRST so a
+    // failure leaves the token intact but no zombie account. The keyring token
+    // deletion is best-effort last; if it fails we surface a warning rather than
+    // leaving a half-deleted state.
+    const accountId = this.selectedAccountId;
     try {
-      await credentialService.deleteAccountToken('gitlab', this.selectedAccountId);
-      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+      await unifiedProfileService.deleteGlobalAccount(accountId);
 
       await unifiedProfileService.loadUnifiedProfiles();
       this.accounts = getAccountsByType('gitlab');
@@ -1080,11 +1085,27 @@ export class LvGitLabDialog extends LitElement {
       this.issues = [];
       this.pipelines = [];
 
+      // Best-effort token cleanup after the record is gone.
+      try {
+        await credentialService.deleteAccountToken('gitlab', accountId);
+      } catch (tokenErr) {
+        // M7/M10: surface partial failure instead of swallowing it.
+        const msg =
+          tokenErr instanceof Error
+            ? `Account deleted, but its stored token could not be removed: ${tokenErr.message}`
+            : 'Account deleted, but its stored token could not be removed.';
+        this.error = msg;
+        showToast(msg, 'error');
+      }
+
       if (this.accounts.length > 0) {
         await this.loadInitialData();
       }
     } catch (err) {
-      console.error('Failed to delete GitLab integration:', err);
+      // M7: error path was previously console-only (silent). Surface to the user.
+      const msg = err instanceof Error ? err.message : 'Failed to delete GitLab integration';
+      this.error = msg;
+      showToast(msg, 'error');
     } finally {
       this.isLoading = false;
     }

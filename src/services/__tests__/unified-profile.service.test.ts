@@ -20,7 +20,11 @@ const invokeHistory: Array<{ command: string; args: unknown }> = [];
   },
 };
 
-import { saveGlobalAccount, loadUnifiedProfiles } from '../unified-profile.service.ts';
+import {
+  saveGlobalAccount,
+  loadUnifiedProfiles,
+  updateGlobalAccountCachedUser,
+} from '../unified-profile.service.ts';
 import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import { createEmptyIntegrationAccount, generateId } from '../../types/unified-profile.types.ts';
@@ -238,5 +242,79 @@ describe('unified-profile.service - loadUnifiedProfiles', () => {
     const state = unifiedProfileStore.getState();
     expect(state.error).to.not.be.null;
     expect(state.isLoading).to.be.false;
+  });
+});
+
+// V7: updateGlobalAccountCachedUser must update only the single account in the
+// store and must NOT trigger a full config reload (which would be O(N) when
+// looping over every account in refreshAll/validateAll).
+describe('unified-profile.service - updateGlobalAccountCachedUser (V7)', () => {
+  beforeEach(() => {
+    unifiedProfileStore.getState().reset();
+    invokeHistory.length = 0;
+
+    mockInvoke = async (command: string, args?: unknown) => {
+      const params = args as Record<string, unknown> | undefined;
+      if (command === 'update_global_account_cached_user') {
+        return null;
+      }
+      if (command === 'get_unified_profiles_config') {
+        return {
+          version: 3,
+          profiles: [],
+          accounts: unifiedProfileStore.getState().accounts,
+          repositoryAssignments: {},
+        };
+      }
+      void params;
+      return null;
+    };
+  });
+
+  it('updates only the single account in the store without a full config reload', async () => {
+    const account = makeTestAccount('acc-cached', { name: 'Cached Acc' });
+    unifiedProfileStore.getState().setAccounts([account]);
+
+    const cachedUser = {
+      username: 'octocat',
+      displayName: 'The Octocat',
+      avatarUrl: 'https://example.com/a.png',
+      email: 'octo@example.com',
+    };
+
+    await updateGlobalAccountCachedUser('acc-cached', cachedUser);
+
+    // The single account's cachedUser is updated in the store.
+    const stored = unifiedProfileStore.getState().accounts.find((a) => a.id === 'acc-cached');
+    expect(stored?.cachedUser?.username).to.equal('octocat');
+
+    // It must NOT have re-fetched the entire config.
+    const configReloads = invokeHistory.filter(
+      (h) => h.command === 'get_unified_profiles_config'
+    );
+    expect(configReloads).to.have.lengthOf(0);
+
+    // The backend cached-user command was invoked exactly once.
+    const updateCalls = invokeHistory.filter(
+      (h) => h.command === 'update_global_account_cached_user'
+    );
+    expect(updateCalls).to.have.lengthOf(1);
+  });
+
+  it('is a no-op on the store when the account is not present', async () => {
+    unifiedProfileStore.getState().setAccounts([]);
+
+    await updateGlobalAccountCachedUser('missing', {
+      username: 'x',
+      displayName: null,
+      avatarUrl: null,
+      email: null,
+    });
+
+    expect(unifiedProfileStore.getState().accounts).to.have.lengthOf(0);
+    const configReloads = invokeHistory.filter(
+      (h) => h.command === 'get_unified_profiles_config'
+    );
+    expect(configReloads).to.have.lengthOf(0);
   });
 });

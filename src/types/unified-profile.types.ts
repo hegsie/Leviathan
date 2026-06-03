@@ -304,9 +304,11 @@ export function filterAccountsByType(
 }
 
 /**
- * Get the default global account for a specific type
+ * V5: Pure helper (scope: "resolve" — operates on explicitly-passed accounts).
+ * Get the default global account for a specific type.
+ * Renamed from getDefaultGlobalAccount to disambiguate from the store selector.
  */
-export function getDefaultGlobalAccount(
+export function resolveDefaultGlobalAccount(
   accounts: IntegrationAccount[],
   integrationType: IntegrationType
 ): IntegrationAccount | undefined {
@@ -315,10 +317,13 @@ export function getDefaultGlobalAccount(
 }
 
 /**
- * Get the profile's preferred account for a specific type
- * Falls back to global default if profile has no preference
+ * V5: Pure helper (scope: "resolve" — operates on explicitly-passed accounts).
+ * Get the profile's preferred account for a specific type.
+ * Fallback semantics (must match store selector selectProfilePreferredAccount):
+ * profile defaultAccounts map first, then global default.
+ * Renamed from getProfilePreferredAccount to disambiguate from the store selector.
  */
-export function getProfilePreferredAccount(
+export function resolveProfilePreferredAccount(
   profile: UnifiedProfile,
   accounts: IntegrationAccount[],
   integrationType: IntegrationType
@@ -329,7 +334,7 @@ export function getProfilePreferredAccount(
     if (preferred) return preferred;
   }
   // Fall back to global default
-  return getDefaultGlobalAccount(accounts, integrationType);
+  return resolveDefaultGlobalAccount(accounts, integrationType);
 }
 
 /**
@@ -370,7 +375,7 @@ export function getAccountsByType(
 }
 
 /**
- * @deprecated Use getProfilePreferredAccount instead
+ * @deprecated Use resolveProfilePreferredAccount instead
  */
 export function getDefaultAccountForType(
   profile: UnifiedProfileV2,
