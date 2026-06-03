@@ -386,6 +386,25 @@ pub async fn get_profile_preferred_account(
         .cloned())
 }
 
+/// Resolve the preferred account for a repository, accounting for account-level
+/// URL patterns.
+///
+/// Precedence (most repo-specific first):
+/// 1. An account of `integration_type` whose `url_patterns` match `repo_url`.
+/// 2. The profile's explicit `default_accounts[integration_type]`.
+/// 3. The global default account for the type.
+#[command]
+pub async fn get_repository_preferred_account(
+    profile_id: String,
+    integration_type: IntegrationType,
+    repo_url: Option<String>,
+) -> Result<Option<IntegrationAccount>> {
+    let config = load_unified_profiles_config()?;
+    Ok(config
+        .get_repository_preferred_account(&profile_id, &integration_type, repo_url.as_deref())
+        .cloned())
+}
+
 // =============================================================================
 // Deprecated Profile-Scoped Account Commands (kept for backward compatibility)
 // =============================================================================

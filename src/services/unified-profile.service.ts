@@ -310,6 +310,35 @@ export async function fetchProfilePreferredAccount(
   return result.data!;
 }
 
+/**
+ * V5: Tauri wrapper (scope: "fetch" — round-trips to the backend).
+ * Resolve the preferred account for a repository, accounting for account-level
+ * URL patterns.
+ *
+ * Precedence (most repo-specific first):
+ * 1. An account of `integrationType` whose `urlPatterns` match `repoUrl`.
+ * 2. The profile's explicit default account for the type.
+ * 3. The global default account for the type.
+ */
+export async function fetchRepositoryPreferredAccount(
+  profileId: string,
+  integrationType: IntegrationType,
+  repoUrl: string | null
+): Promise<IntegrationAccount | null> {
+  const result = await invokeCommand<IntegrationAccount | null>(
+    'get_repository_preferred_account',
+    {
+      profileId,
+      integrationType,
+      repoUrl,
+    }
+  );
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to get repository preferred account');
+  }
+  return result.data!;
+}
+
 // =============================================================================
 // Profile Detection and Assignment
 // =============================================================================

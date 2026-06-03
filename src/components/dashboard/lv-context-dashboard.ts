@@ -879,20 +879,42 @@ export class LvContextDashboard extends LitElement {
 
   /**
    * Get the relevant integration account for the current repository.
-   * Returns the profile's default account for the detected provider, or null if not configured.
+   *
+   * Resolution precedence (mirrors the backend
+   * `get_repository_preferred_account`, most repo-specific first):
+   * 1. An account of the detected provider whose `urlPatterns` match one of the
+   *    repository's remote URLs (account-level auto-detection).
+   * 2. The active profile's explicit default account for the provider.
+   * 3. Any account of the provider type (global fallback).
+   *
+   * Returns null if no account is configured for the detected provider.
    */
   private getRelevantAccount(): IntegrationAccount | null {
     const provider = this.detectProvider();
     if (!provider) return null;
 
-    // Get the default account ID for this provider from the active profile
+    // 1. Account-level URL pattern match against the repo's remote URLs.
+    const remotes = this.activeRepository?.remotes ?? [];
+    if (remotes.length > 0) {
+      const patternMatch = this.accounts.find(
+        (a) =>
+          a.integrationType === provider &&
+          a.urlPatterns.length > 0 &&
+          remotes.some((remote) =>
+            a.urlPatterns.some((pattern) => this.matchUrlPattern(remote.url, pattern))
+          )
+      );
+      if (patternMatch) return patternMatch;
+    }
+
+    // 2. The active profile's explicit default account for this provider.
     const defaultAccountId = this.activeProfile?.defaultAccounts[provider];
     if (defaultAccountId) {
       const account = this.accounts.find((a) => a.id === defaultAccountId);
       if (account) return account;
     }
 
-    // Fall back to any account of this provider type
+    // 3. Fall back to any account of this provider type.
     return this.accounts.find((a) => a.integrationType === provider) ?? null;
   }
 

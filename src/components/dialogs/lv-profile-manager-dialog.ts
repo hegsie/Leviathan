@@ -1231,6 +1231,15 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
+  private handleAccountPatternsChange(e: Event): void {
+    const textarea = e.target as HTMLTextAreaElement;
+    const patterns = textarea.value
+      .split('\n')
+      .map((p) => p.trim())
+      .filter((p) => p);
+    this.updateEditingAccount('urlPatterns', patterns);
+  }
+
   // D5: No change event dispatched here by design — see handleSave. The store
   // subscription is the single source of truth for UI sync; adding a parent-less
   // CustomEvent would be an orphan event.
@@ -2138,6 +2147,20 @@ export class LvProfileManagerDialog extends LitElement {
       </div>
 
       ${this.renderAccountConfigFields()}
+
+      <div class="form-group">
+        <label>URL Patterns (one per line)</label>
+        <textarea
+          placeholder="github.com/mycompany/*&#10;github.com/another-org/*"
+          .value=${(this.editingAccount.urlPatterns ?? []).join('\n')}
+          @input=${this.handleAccountPatternsChange}
+        ></textarea>
+        <div class="form-hint">
+          Auto-select this account for repositories whose remote URL matches. Supports wildcards
+          (*). Account patterns take precedence over the profile's default account, so use them when
+          one repo needs a specific account of this type.
+        </div>
+      </div>
 
       <div class="form-group">
         <label>Color (optional)</label>

@@ -2005,6 +2005,68 @@ describe('lv-profile-manager-dialog', () => {
     });
   });
 
+  // ── Account URL patterns (Wave 3) ─────────────────────────────────────────
+  describe('account URL patterns (Wave 3)', () => {
+    it('renders a URL patterns textarea in the account edit form', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = { ...githubAccount };
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('.form-group label')).map((l) =>
+        l.textContent?.trim()
+      );
+      expect(labels.some((l) => l === 'URL Patterns (one per line)')).to.be.true;
+
+      // There should be a textarea in the account form.
+      const textarea = el.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+      expect(textarea).to.not.be.null;
+    });
+
+    it("round-trips an existing account's url patterns into the textarea", async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = makeAccount({
+        id: 'acc-patterns',
+        name: 'Work GitHub',
+        urlPatterns: ['github.com/work-org/*', 'github.com/another-org/*'],
+      });
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+      expect(textarea).to.not.be.null;
+      expect(textarea.value).to.equal('github.com/work-org/*\ngithub.com/another-org/*');
+    });
+
+    it('persists edited url patterns in save_global_account', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = { ...githubAccount, urlPatterns: [] };
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+      textarea.value = 'github.com/work-org/*\n  github.com/team/*  \n';
+      textarea.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      clearHistory();
+      await shell.handleSaveAccount();
+      await el.updateComplete;
+
+      const saves = findCommands('save_global_account');
+      expect(saves.length).to.equal(1);
+      const saved = (saves[0].args as { account?: IntegrationAccount }).account!;
+      // Trimmed and blank-filtered, one pattern per line.
+      expect(saved.urlPatterns).to.deep.equal(['github.com/work-org/*', 'github.com/team/*']);
+    });
+  });
+
   // ── Delete-confirm copy (Wave 1, item 3) ───────────────────────────────────
   describe('delete profile confirmation copy (Wave 1)', () => {
     it('explains accounts remain global and does NOT claim they are removed', async () => {

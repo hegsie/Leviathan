@@ -400,6 +400,47 @@ test.describe('Profile Manager Dialog - Integration Accounts', () => {
     );
     await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(0);
   });
+
+  test('edit account URL patterns and persist them in save_global_account (Wave 3)', async ({
+    page,
+  }) => {
+    await openProfileManager(page);
+
+    // Open the Work profile's attached GitHub account edit screen.
+    await page.locator('.profile-item').first().click();
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(1);
+    await dialogs.profileManager.attachedAccountItems
+      .first()
+      .locator('.account-actions .action-btn:not(.delete)')
+      .click();
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Edit Account'
+    );
+
+    // The account edit form exposes a URL patterns textarea pre-filled with the
+    // account's existing patterns (Work GitHub matches github.com/company/*).
+    const patternsTextarea = page.locator('lv-profile-manager-dialog textarea');
+    await expect(patternsTextarea).toBeVisible();
+    await expect(patternsTextarea).toHaveValue('github.com/company/*');
+
+    // Add a second pattern.
+    await patternsTextarea.fill('github.com/company/*\ngithub.com/company-labs/*');
+
+    await startCommandCaptureWithMocks(page, {
+      save_global_account: { ...testAccounts.githubWork },
+    });
+
+    await page.getByRole('button', { name: 'Save Account' }).click();
+    await waitForCommand(page, 'save_global_account');
+
+    const cmds = await findCommand(page, 'save_global_account');
+    expect(cmds.length).toBeGreaterThan(0);
+    const account = (cmds[0].args as { account: { urlPatterns: string[] } }).account;
+    expect(account.urlPatterns).toEqual([
+      'github.com/company/*',
+      'github.com/company-labs/*',
+    ]);
+  });
 });
 
 test.describe('Profile Manager Dialog - Attach with no accounts', () => {

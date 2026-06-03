@@ -633,6 +633,45 @@ impl UnifiedProfilesConfig {
         self.get_default_account(integration_type)
     }
 
+    /// Resolve the preferred account for a given repository.
+    ///
+    /// This extends [`get_profile_preferred_account`][Self::get_profile_preferred_account]
+    /// with repo-specific awareness via account-level `url_patterns`.
+    ///
+    /// Precedence (V3 — repo-aware, most-specific first):
+    /// 1. **Account URL-pattern match** — an account of the requested
+    ///    `integration_type` whose `url_patterns` MATCH `repo_url` (using
+    ///    [`url_matches_pattern`]). This is the most repo-specific signal and
+    ///    wins over everything else. When `repo_url` is `None` this tier is
+    ///    skipped.
+    /// 2. **Profile explicit default** — the account stored in
+    ///    `profile.default_accounts[integration_type]` (if it still exists).
+    /// 3. **Global default** — the global `is_default` account for the type
+    ///    (or the first account of that type as a final fallback).
+    ///
+    /// Returns `None` when there are no accounts of the requested type at all.
+    pub fn get_repository_preferred_account(
+        &self,
+        profile_id: &str,
+        integration_type: &IntegrationType,
+        repo_url: Option<&str>,
+    ) -> Option<&IntegrationAccount> {
+        // Tier 1: account whose url_patterns match the repo URL (most specific).
+        if let Some(url) = repo_url {
+            if let Some(account) = self.accounts.iter().find(|a| {
+                &a.integration_type == integration_type
+                    && a.url_patterns
+                        .iter()
+                        .any(|pattern| url_matches_pattern(url, pattern))
+            }) {
+                return Some(account);
+            }
+        }
+
+        // Tiers 2 & 3: profile explicit default, then global default.
+        self.get_profile_preferred_account(profile_id, integration_type)
+    }
+
     /// Clear the per-profile explicit default account for an integration type.
     ///
     /// After calling this the profile no longer has a local preference and
@@ -1374,6 +1413,136 @@ mod tests {
             global_id,
             "after clearing profile pref, global is_default must resolve"
         );
+    }
+
+    // =========================================================================
+    // V3 (Wave 3): repository-aware preferred-account resolution
+    // =========================================================================
+
+    /// Build a config with: a global-default GitHub account, a profile-default
+    /// GitHub account (set as the profile's preference), and a pattern-matching
+    /// GitHub account whose url_patterns target `github.com/work-org/*`.
+    /// Returns (config, profile_id, global_id, profile_default_id, pattern_id).
+    fn make_repo_pref_config() -> (UnifiedProfilesConfig, String, String, String, String) {
+        let mut config = UnifiedProfilesConfig::default();
+
+        let mut global_default = IntegrationAccount::new_github("Global Default".to_string());
+        global_default.is_default = true;
+        let global_id = global_default.id.clone();
+        config.save_account(global_default);
+
+        let profile_default = IntegrationAccount::new_github("Profile Default".to_string());
+        let profile_default_id = profile_default.id.clone();
+        config.save_account(profile_default);
+
+        let mut pattern_account = IntegrationAccount::new_github("Pattern Match".to_string());
+        pattern_account.url_patterns = vec!["github.com/work-org/*".to_string()];
+        let pattern_id = pattern_account.id.clone();
+        config.save_account(pattern_account);
+
+        let mut profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice".to_string(),
+            "alice@work.com".to_string(),
+        );
+        profile.set_default_account(IntegrationType::GitHub, profile_default_id.clone());
+        let profile_id = profile.id.clone();
+        config.save_profile(profile);
+
+        (
+            config,
+            profile_id,
+            global_id,
+            profile_default_id,
+            pattern_id,
+        )
+    }
+
+    #[test]
+    fn test_repo_preferred_account_pattern_match_wins() {
+        // Tier 1: an account whose url_patterns match the repo URL wins over the
+        // profile default and the global default.
+        let (config, profile_id, _global_id, _profile_default_id, pattern_id) =
+            make_repo_pref_config();
+
+        let preferred = config.get_repository_preferred_account(
+            &profile_id,
+            &IntegrationType::GitHub,
+            Some("https://github.com/work-org/some-repo"),
+        );
+        assert!(preferred.is_some());
+        assert_eq!(
+            preferred.unwrap().id,
+            pattern_id,
+            "account url_pattern match must win over profile/global defaults"
+        );
+    }
+
+    #[test]
+    fn test_repo_preferred_account_falls_back_to_profile_default() {
+        // Tier 2: when no account pattern matches, fall back to the profile's
+        // explicit default account.
+        let (config, profile_id, _global_id, profile_default_id, _pattern_id) =
+            make_repo_pref_config();
+
+        let preferred = config.get_repository_preferred_account(
+            &profile_id,
+            &IntegrationType::GitHub,
+            Some("https://github.com/personal/other-repo"),
+        );
+        assert!(preferred.is_some());
+        assert_eq!(
+            preferred.unwrap().id,
+            profile_default_id,
+            "no pattern match should fall back to the profile default"
+        );
+    }
+
+    #[test]
+    fn test_repo_preferred_account_falls_back_to_global_default() {
+        // Tier 3: when no pattern matches AND the profile has no preference,
+        // fall back to the global default account.
+        let (mut config, profile_id, global_id, _profile_default_id, _pattern_id) =
+            make_repo_pref_config();
+
+        // Remove the profile's explicit preference so tier 2 cannot apply.
+        config.clear_profile_default_account(&profile_id, &IntegrationType::GitHub);
+
+        let preferred = config.get_repository_preferred_account(
+            &profile_id,
+            &IntegrationType::GitHub,
+            Some("https://github.com/personal/other-repo"),
+        );
+        assert!(preferred.is_some());
+        assert_eq!(
+            preferred.unwrap().id,
+            global_id,
+            "no pattern + no profile pref should fall back to global default"
+        );
+    }
+
+    #[test]
+    fn test_repo_preferred_account_none_url_skips_pattern_tier() {
+        // When repo_url is None, tier 1 is skipped and we behave exactly like
+        // get_profile_preferred_account (profile default here).
+        let (config, profile_id, _global_id, profile_default_id, _pattern_id) =
+            make_repo_pref_config();
+
+        let preferred =
+            config.get_repository_preferred_account(&profile_id, &IntegrationType::GitHub, None);
+        assert!(preferred.is_some());
+        assert_eq!(preferred.unwrap().id, profile_default_id);
+    }
+
+    #[test]
+    fn test_repo_preferred_account_no_accounts_returns_none() {
+        let config = UnifiedProfilesConfig::default();
+        let preferred = config.get_repository_preferred_account(
+            "missing-profile",
+            &IntegrationType::GitHub,
+            Some("https://github.com/work-org/repo"),
+        );
+        assert!(preferred.is_none());
     }
 
     #[test]
