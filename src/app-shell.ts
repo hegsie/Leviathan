@@ -2068,28 +2068,29 @@ export class AppShell extends LitElement {
         label: 'GitHub Integration',
         category: 'action',
         icon: 'github',
-        action: this.requiresRepository(() => { this.showGitHub = true; }),
+        // Account connection is repo-independent; only PR/issue/pipeline tabs guard themselves.
+        action: () => { this.showGitHub = true; },
       },
       {
         id: 'gitlab',
         label: 'GitLab Integration',
         category: 'action',
         icon: 'gitlab',
-        action: this.requiresRepository(() => { this.showGitLab = true; }),
+        action: () => { this.showGitLab = true; },
       },
       {
         id: 'bitbucket',
         label: 'Bitbucket Integration',
         category: 'action',
         icon: 'bitbucket',
-        action: this.requiresRepository(() => { this.showBitbucket = true; }),
+        action: () => { this.showBitbucket = true; },
       },
       {
         id: 'azure-devops',
         label: 'Azure DevOps Integration',
         category: 'action',
         icon: 'azure',
-        action: this.requiresRepository(() => { this.showAzureDevOps = true; }),
+        action: () => { this.showAzureDevOps = true; },
       },
       {
         id: 'oidc',
@@ -2100,7 +2101,7 @@ export class AppShell extends LitElement {
       },
       {
         id: 'profiles',
-        label: 'Git Profiles',
+        label: 'Profiles & Accounts',
         category: 'action',
         icon: 'user',
         action: () => { this.showProfileManager = true; },
@@ -2661,6 +2662,7 @@ export class AppShell extends LitElement {
           `
         : html`<lv-welcome
             @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
+            @open-profile-manager=${() => { this.showProfileManager = true; }}
           ></lv-welcome>`}
 
       ${this.showSettings
@@ -2672,6 +2674,7 @@ export class AppShell extends LitElement {
             >
               <lv-settings-dialog
                 @close=${this.handleCloseSettings}
+                @open-profile-manager=${() => { this.showProfileManager = true; }}
               ></lv-settings-dialog>
             </lv-modal>
           `

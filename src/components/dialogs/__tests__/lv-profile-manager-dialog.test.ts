@@ -1614,7 +1614,7 @@ describe('lv-profile-manager-dialog', () => {
       await el.updateComplete;
 
       const title = el.shadowRoot!.querySelector('.dialog-title');
-      expect(title!.textContent).to.include('Manage Accounts');
+      expect(title!.textContent!.trim()).to.equal('Accounts');
       // Lists every global account (both test accounts) with edit/delete actions
       const rows = el.shadowRoot!.querySelectorAll('.accounts-list .account-item');
       expect(rows.length).to.equal(2);
@@ -1637,7 +1637,7 @@ describe('lv-profile-manager-dialog', () => {
       await el.updateComplete;
 
       const title = el.shadowRoot!.querySelector('.dialog-title');
-      expect(title!.textContent).to.include('Manage Accounts');
+      expect(title!.textContent!.trim()).to.equal('Accounts');
     });
 
     it('offers connect-new buttons for every provider in the accounts view', async () => {
@@ -1703,7 +1703,7 @@ describe('lv-profile-manager-dialog', () => {
       backBtn.click();
       await el.updateComplete;
       // Returns to the accounts view, not the profile list
-      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Manage Accounts');
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent!.trim()).to.equal('Accounts');
     });
 
     it('deletes a global account from the accounts view and stays in the view', async () => {
@@ -1721,7 +1721,7 @@ describe('lv-profile-manager-dialog', () => {
 
       expect(findCommands('delete_global_account').length).to.equal(1);
       // Still on the accounts view after deleting
-      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Manage Accounts');
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent!.trim()).to.equal('Accounts');
     });
   });
 

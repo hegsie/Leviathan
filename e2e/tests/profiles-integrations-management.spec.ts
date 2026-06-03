@@ -96,7 +96,7 @@ const githubAccount: MockIntegrationAccount = {
 
 async function openProfileManager(page: Page, dialogs: DialogsPage): Promise<void> {
   await dialogs.commandPalette.open();
-  await dialogs.commandPalette.search('Git Profiles');
+  await dialogs.commandPalette.search('Profiles & Accounts');
   await dialogs.commandPalette.executeFirst();
   await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
 }

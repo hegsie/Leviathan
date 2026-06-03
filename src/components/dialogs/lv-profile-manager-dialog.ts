@@ -75,6 +75,13 @@ export class LvProfileManagerDialog extends LitElement {
         padding: var(--spacing-md);
       }
 
+      .view-explainer {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        margin: 0 0 var(--spacing-md) 0;
+        line-height: 1.4;
+      }
+
       .dialog-footer {
         display: flex;
         justify-content: flex-end;
@@ -1320,7 +1327,7 @@ export class LvProfileManagerDialog extends LitElement {
   private getDialogTitle(): string {
     switch (this.viewMode) {
       case 'list':
-        return 'Profiles';
+        return 'Profiles & Accounts';
       case 'create':
         return 'New Profile';
       case 'edit':
@@ -1332,9 +1339,9 @@ export class LvProfileManagerDialog extends LitElement {
       case 'assign-repos':
         return 'Assign Repositories';
       case 'accounts':
-        return 'Manage Accounts';
+        return 'Accounts';
       default:
-        return 'Profiles';
+        return 'Profiles & Accounts';
     }
   }
 
@@ -1428,8 +1435,15 @@ export class LvProfileManagerDialog extends LitElement {
       return html`<div class="empty-state">Loading profiles...</div>`;
     }
 
+    const explainer = html`
+      <p class="view-explainer">
+        Profiles set your git identity per repository. Accounts are shared logins you assign to profiles.
+      </p>
+    `;
+
     if (this.profiles.length === 0) {
       return html`
+        ${explainer}
         <div class="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
@@ -1444,6 +1458,7 @@ export class LvProfileManagerDialog extends LitElement {
     }
 
     return html`
+      ${explainer}
       <div class="profile-list">
         ${this.profiles.map(
           (profile) => html`

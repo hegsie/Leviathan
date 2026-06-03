@@ -1,4 +1,4 @@
-import type { Page, Locator } from '@playwright/test';
+import { expect, type Page, type Locator } from '@playwright/test';
 
 /**
  * Base dialog helper class
@@ -627,12 +627,20 @@ export class BitbucketDialogPage extends BaseDialog {
 
   async selectOAuthMethod(): Promise<void> {
     if (await this.authMethodToggle.isVisible()) {
+      // Auto-retrying assertion lets the dialog's async open-load re-renders
+      // settle before we click, so the toggle button cannot detach mid-click
+      // (Lit "scheduled an update after an update completed" churn on open).
+      await expect(this.oauthButton).toBeVisible();
       await this.oauthButton.click();
     }
   }
 
   async selectAppPasswordMethod(): Promise<void> {
     if (await this.authMethodToggle.isVisible()) {
+      // Auto-retrying assertion lets the dialog's async open-load re-renders
+      // settle before we click, so the toggle button cannot detach mid-click
+      // (Lit "scheduled an update after an update completed" churn on open).
+      await expect(this.appPasswordButton).toBeVisible();
       await this.appPasswordButton.click();
     }
   }
