@@ -167,6 +167,7 @@ export const AzureDevOpsCredentials = {
 // =============================================================================
 
 import type { IntegrationType } from '../types/integration-accounts.types.ts';
+import type { GitHubConnectionStatus } from './git.service.ts';
 
 /**
  * Generate a namespaced credential key for an account
@@ -409,9 +410,13 @@ export async function configureGitHubApp(
   appId: number,
   privateKeyPem: string,
   installationId: number,
-): Promise<unknown> {
-  const result = await invokeCommand<unknown>('configure_github_app', { appId, privateKeyPem, installationId });
-  if (!result.success) {
+): Promise<GitHubConnectionStatus> {
+  const result = await invokeCommand<GitHubConnectionStatus>('configure_github_app', {
+    appId,
+    privateKeyPem,
+    installationId,
+  });
+  if (!result.success || !result.data) {
     throw new Error(result.error?.message ?? 'Failed to configure GitHub App');
   }
   return result.data;

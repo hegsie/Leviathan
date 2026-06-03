@@ -1454,13 +1454,20 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
-      const result = await import('../../services/credential.service.ts').then(m =>
+      // The backend now validates the key, mints a JWT, and persists the app
+      // config to the keyring (M1). Honor the status it returns instead of
+      // assuming success — a non-connected result must not persist a fake account.
+      const status = await import('../../services/credential.service.ts').then(m =>
         m.configureGitHubApp(
           parseInt(this.appId, 10),
           this.appPrivateKey,
           parseInt(this.appInstallationId, 10),
         )
       );
+
+      if (!status.connected) {
+        throw new Error('GitHub App configuration was not accepted by the server');
+      }
 
       // Store the app config as the account token
       const accountId = this.selectedAccountId || `github-app-${this.appId}`;
@@ -1478,10 +1485,11 @@ export class LvGitHubDialog extends LitElement {
         isDefault: !this.selectedAccountId,
       } as import('../../types/unified-profile.types.ts').IntegrationAccount);
 
+      // Reflect the backend-reported status rather than a hardcoded value (M1).
       this.connectionStatus = {
-        connected: true,
-        user: null,
-        scopes: ['app-installation'],
+        connected: status.connected,
+        user: status.user ?? null,
+        scopes: status.scopes?.length ? status.scopes : ['app-installation'],
       };
       this.selectedAccountId = accountId;
       this.syncSharedConnectionStatus(true);

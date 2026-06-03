@@ -189,6 +189,7 @@ const mockAccount = createTestAccount({
 
 let connectionResponse: unknown = mockDisconnectedStatus;
 let detectedRepoResponse: unknown = mockDetectedRepo;
+let appConfigResponse: unknown = { connected: true, user: null, scopes: ['app-installation'] };
 
 function setupMockInvoke(): void {
   keyringStore.clear();
@@ -226,6 +227,11 @@ function setupMockInvoke(): void {
     if (command === 'save_global_account') return params;
     if (command === 'update_global_account_cached_user') return null;
 
+    // GitHub App (M1)
+    if (command === 'configure_github_app') return appConfigResponse;
+    if (command === 'get_github_app_config') return null;
+    if (command === 'remove_github_app_config') return null;
+
     // GitHub-specific commands
     if (command === 'check_github_connection') return connectionResponse;
     if (command === 'check_github_connection_with_token') return connectionResponse;
@@ -251,8 +257,53 @@ describe('lv-github-dialog', () => {
     invokeHistory.length = 0;
     connectionResponse = mockDisconnectedStatus;
     detectedRepoResponse = mockDetectedRepo;
+    appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
     unifiedProfileStore.getState().reset();
     setupMockInvoke();
+  });
+
+  describe('GitHub App connection (M1)', () => {
+    it('reflects the backend-reported status and persists the account when connected', async () => {
+      appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      dialog.appId = '12345';
+      dialog.appPrivateKey = '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----';
+      dialog.appInstallationId = '67890';
+
+      await dialog.handleConnectGitHubApp();
+
+      expect(dialog.connectionStatus?.connected).to.be.true;
+      // The account was persisted (real connection, not a hardcoded UI flag).
+      expect(invokeHistory.some((c) => c.command === 'configure_github_app')).to.be.true;
+      expect(invokeHistory.some((c) => c.command === 'save_global_account')).to.be.true;
+    });
+
+    it('does NOT persist a fake account when the backend reports not connected', async () => {
+      appConfigResponse = { connected: false, user: null, scopes: [] };
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      dialog.appId = '12345';
+      dialog.appPrivateKey = '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----';
+      dialog.appInstallationId = '67890';
+
+      await dialog.handleConnectGitHubApp();
+
+      // Must surface an error and NOT flip the UI to connected or save an account.
+      expect(dialog.error).to.be.a('string').and.not.empty;
+      expect(dialog.connectionStatus?.connected ?? false).to.be.false;
+      expect(invokeHistory.some((c) => c.command === 'save_global_account')).to.be.false;
+    });
   });
 
   describe('Rendering & Modal', () => {
