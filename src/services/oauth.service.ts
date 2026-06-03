@@ -375,6 +375,9 @@ export async function exchangeCode(
     expiresIn: rawResult.expiresIn || rawResult.expires_in,
     tokenType: rawResult.tokenType || rawResult.token_type,
     scope: rawResult.scope,
+    // Preserve the OIDC ID token — it's the only source of user identity for
+    // Enterprise SSO accounts (decoded in the OIDC dialog for the cached user).
+    idToken: rawResult.idToken || rawResult.id_token,
   };
 
   return normalizedResult;

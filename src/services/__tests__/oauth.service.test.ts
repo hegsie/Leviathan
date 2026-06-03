@@ -188,6 +188,27 @@ describe('oauth.service - exchangeCode server-side PKCE contract (M5/M11)', () =
     }
     expect(threw).to.be.true;
   });
+
+  it('preserves the OIDC id token in the normalized result (camelCase and snake_case)', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_exchange_code') {
+        return Promise.resolve({ accessToken: 'a', idToken: 'h.p.s', tokenType: 'bearer' });
+      }
+      return Promise.resolve(null);
+    };
+    const camel = await exchangeCode('oidc', 'state', 'code');
+    expect(camel.idToken, 'idToken preserved (OIDC identity source)').to.equal('h.p.s');
+
+    mockInvoke = (command) => {
+      if (command === 'oauth_exchange_code') {
+        // eslint-disable-next-line camelcase
+        return Promise.resolve({ access_token: 'a', id_token: 'h2.p2.s2' });
+      }
+      return Promise.resolve(null);
+    };
+    const snake = await exchangeCode('oidc', 'state', 'code');
+    expect(snake.idToken).to.equal('h2.p2.s2');
+  });
 });
 
 describe('oauth.service - Provider Types', () => {

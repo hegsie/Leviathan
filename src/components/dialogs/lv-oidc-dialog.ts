@@ -483,6 +483,19 @@ export class LvOidcDialog extends LitElement {
           );
 
       if (existingAccount) {
+        // If the user edited the Issuer URL / Client ID before re-signing in,
+        // persist the new config so the stored account matches the issuer the
+        // token was actually minted against (otherwise the next open restores
+        // the stale issuer while holding a token for a different one).
+        const cfg = existingAccount.config;
+        const configChanged =
+          cfg.type !== 'oidc' || cfg.issuerUrl !== issuerUrl || cfg.clientId !== clientId;
+        if (configChanged) {
+          await unifiedProfileService.saveGlobalAccount({
+            ...existingAccount,
+            config: { type: 'oidc', issuerUrl, clientId },
+          });
+        }
         await credentialService.storeAccountOAuthToken(
           'oidc',
           existingAccount.id,

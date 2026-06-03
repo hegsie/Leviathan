@@ -310,6 +310,10 @@ export class LvIntegrationCard extends LitElement {
         return html`<svg viewBox="0 0 16 16" fill="currentColor"><path d="M15 3.622v8.512L11.5 15l-5.425-1.975v1.958L3.004 10.97l8.951.7V4.005L15 3.622zm-2.984.428L6.994 1v2.001L2.383 4.356l-.383 8.087 1.575 1.557V6.563z"/></svg>`;
       case 'bitbucket':
         return html`<svg viewBox="0 0 16 16" fill="currentColor"><path d="M.778 1.211a.768.768 0 0 0-.768.892l2.06 12.484a1.044 1.044 0 0 0 1.02.88h9.947c.396 0 .736-.282.803-.68l2.06-12.684a.768.768 0 0 0-.768-.892H.778zM9.69 10.6H6.344l-.9-4.801h5.15l-.904 4.8z"/></svg>`;
+      case 'oidc':
+      default:
+        // Enterprise SSO (OIDC) and any future provider: a generic key glyph.
+        return html`<svg viewBox="0 0 16 16" fill="currentColor"><path d="M10 1a4 4 0 0 0-3.9 4.9L1 11v3a1 1 0 0 0 1 1h3v-2h2v-2h2l1.1-1.1A4 4 0 1 0 10 1zm1.5 3.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/></svg>`;
     }
   }
 
@@ -345,6 +349,15 @@ export class LvIntegrationCard extends LitElement {
         return null;
       case 'bitbucket':
         return config.workspace ? `workspace: ${config.workspace}` : null;
+      case 'oidc':
+        if (config.issuerUrl) {
+          try {
+            return new URL(config.issuerUrl).hostname;
+          } catch {
+            return config.issuerUrl;
+          }
+        }
+        return null;
       default:
         return null;
     }
