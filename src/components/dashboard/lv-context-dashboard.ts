@@ -683,7 +683,8 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitFetch({ path: this.activeRepository.repository.path });
       if (!result.success) {
-        showToast(result.error?.message ?? 'Fetch failed', 'error');
+        // git.service already shows a failure toast; just record store state.
+        repositoryStore.getState().setError(result.error?.message ?? 'Fetch failed');
       } else {
         // Refresh repository data after fetch
         this.dispatchEvent(new CustomEvent('repository-refresh', {
@@ -693,7 +694,7 @@ export class LvContextDashboard extends LitElement {
         await this.loadRemoteStatus();
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Fetch failed', 'error');
+      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Fetch failed');
     } finally {
       this.isFetching = false;
     }
@@ -706,7 +707,8 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitPull({ path: this.activeRepository.repository.path });
       if (!result.success) {
-        showToast(result.error?.message ?? 'Pull failed', 'error');
+        // git.service already shows a failure toast; just record store state.
+        repositoryStore.getState().setError(result.error?.message ?? 'Pull failed');
       } else {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
@@ -715,7 +717,7 @@ export class LvContextDashboard extends LitElement {
         await this.loadRemoteStatus();
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Pull failed', 'error');
+      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Pull failed');
     } finally {
       this.isPulling = false;
     }
@@ -728,7 +730,8 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitPush({ path: this.activeRepository.repository.path });
       if (!result.success) {
-        showToast(result.error?.message ?? 'Push failed', 'error');
+        // git.service already shows a failure toast; just record store state.
+        repositoryStore.getState().setError(result.error?.message ?? 'Push failed');
       } else {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
@@ -737,7 +740,7 @@ export class LvContextDashboard extends LitElement {
         await this.loadRemoteStatus();
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Push failed', 'error');
+      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Push failed');
     } finally {
       this.isPushing = false;
     }
