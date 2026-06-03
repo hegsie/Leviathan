@@ -236,12 +236,16 @@ pub struct OidcUserInfo {
 }
 
 /// Validate a user-supplied issuer / instance URL before issuing a network
-/// request against it. Prevents SSRF by requiring `https` and rejecting hosts
-/// that point at the loopback interface, link-local addresses, or RFC-1918
-/// private ranges (which could let an attacker reach internal services or
-/// cloud metadata endpoints such as 169.254.169.254).
+/// request against it. Prevents SSRF by requiring `https`, rejecting IP
+/// literals in the loopback / link-local / RFC-1918 ranges, AND resolving
+/// hostnames so that an internal DNS name pointing at a private address is
+/// rejected too (e.g. cloud metadata endpoints such as 169.254.169.254).
+///
+/// Note: DNS rebinding (a host that resolves to a public IP here but a private
+/// one at connection time) remains a theoretical residual; fully closing it
+/// would require pinning the connection to the validated address.
 pub fn validate_issuer_url(issuer_url: &str) -> Result<(), String> {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 
     let parsed = url::Url::parse(issuer_url).map_err(|e| format!("Invalid issuer URL: {}", e))?;
 
@@ -264,6 +268,9 @@ pub fn validate_issuer_url(issuer_url: &str) -> Result<(), String> {
     }
 
     // If the host is an IP literal, reject private / loopback / link-local ranges.
+    // Otherwise resolve the hostname and reject if ANY resolved address is
+    // blocked — this closes the gap where an internal DNS name points at a
+    // private IP.
     let ip_literal = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = ip_literal.parse::<IpAddr>() {
         if is_blocked_ip(&ip) {
@@ -271,6 +278,20 @@ pub fn validate_issuer_url(issuer_url: &str) -> Result<(), String> {
                 "Issuer URL host is not allowed (private, loopback, or link-local address)"
                     .to_string(),
             );
+        }
+    } else {
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        // Resolution failure is left to surface naturally when the request runs;
+        // we only act on addresses we can actually resolve here.
+        if let Ok(addrs) = (host, port).to_socket_addrs() {
+            for addr in addrs {
+                if is_blocked_ip(&addr.ip()) {
+                    return Err(
+                        "Issuer URL host resolves to a blocked (private, loopback, or link-local) address"
+                            .to_string(),
+                    );
+                }
+            }
         }
     }
 

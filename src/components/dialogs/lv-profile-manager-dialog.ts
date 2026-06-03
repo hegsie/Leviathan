@@ -942,7 +942,7 @@ export class LvProfileManagerDialog extends LitElement {
       await unifiedProfileService.loadUnifiedProfiles();
 
       if (failedRepos.length === 0) {
-        showToast(`Assigned ${successCount} repository${successCount !== 1 ? 'ies' : ''}`, 'success');
+        showToast(`Assigned ${successCount} ${successCount === 1 ? 'repository' : 'repositories'}`, 'success');
         // Only clear selection and leave the view on full success.
         this.selectedReposForAssignment = new Set();
         this.viewMode = 'edit';

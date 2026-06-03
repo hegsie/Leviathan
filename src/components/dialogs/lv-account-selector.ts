@@ -259,6 +259,7 @@ export class LvAccountSelector extends LitElement {
   // this on the sub-dialog itself (a brief "Opening..." label) rather than
   // stacking a toast, since a parent dialog handles the actual navigation.
   @state() private pendingAction: 'add' | 'manage' | null = null;
+  private pendingActionResetTimer: number | null = null;
 
   private unsubscribe?: () => void;
 
@@ -280,6 +281,10 @@ export class LvAccountSelector extends LitElement {
     super.disconnectedCallback();
     this.unsubscribe?.();
     document.removeEventListener('click', this.handleDocumentClick);
+    if (this.pendingActionResetTimer !== null) {
+      clearTimeout(this.pendingActionResetTimer);
+      this.pendingActionResetTimer = null;
+    }
   }
 
   private handleDocumentClick = (e: MouseEvent): void => {
@@ -291,6 +296,33 @@ export class LvAccountSelector extends LitElement {
   private toggleDropdown(e: Event): void {
     e.stopPropagation();
     this.isOpen = !this.isOpen;
+    // Reopening the selector clears any stale "Opening…" busy state.
+    if (this.isOpen) this.clearPendingAction();
+  }
+
+  /**
+   * Show a brief inline busy state for an action that hands off to the parent
+   * dialog. The parent's navigation normally supersedes this selector — but if
+   * navigation is cancelled or fails, a safety timer clears the state so the
+   * actions don't stay permanently disabled.
+   */
+  private flagPendingAction(action: 'add' | 'manage'): void {
+    this.pendingAction = action;
+    if (this.pendingActionResetTimer !== null) {
+      clearTimeout(this.pendingActionResetTimer);
+    }
+    this.pendingActionResetTimer = window.setTimeout(() => {
+      this.pendingAction = null;
+      this.pendingActionResetTimer = null;
+    }, 4000);
+  }
+
+  private clearPendingAction(): void {
+    this.pendingAction = null;
+    if (this.pendingActionResetTimer !== null) {
+      clearTimeout(this.pendingActionResetTimer);
+      this.pendingActionResetTimer = null;
+    }
   }
 
   private handleSelectAccount(account: IntegrationAccount): void {
@@ -309,7 +341,7 @@ export class LvAccountSelector extends LitElement {
     // D7: show a brief inline busy state before the parent opens the add flow.
     // Keep the dropdown open so the "Opening…" label is actually visible; the
     // parent dialog's navigation supersedes this selector shortly after.
-    this.pendingAction = 'add';
+    this.flagPendingAction('add');
     this.dispatchEvent(
       new CustomEvent('add-account', {
         detail: { integrationType: this.integrationType },
@@ -323,7 +355,7 @@ export class LvAccountSelector extends LitElement {
     // D7: show a brief inline busy state before the parent opens the manage flow.
     // Keep the dropdown open so the "Opening…" label is visible; the parent
     // dialog's navigation supersedes this selector shortly after.
-    this.pendingAction = 'manage';
+    this.flagPendingAction('manage');
     this.dispatchEvent(
       new CustomEvent('manage-accounts', {
         detail: { integrationType: this.integrationType },

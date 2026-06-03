@@ -388,6 +388,39 @@ describe('lv-account-selector', () => {
     expect((el as unknown as { pendingAction: string | null }).pendingAction).to.equal('manage');
   });
 
+  // Review fix: the busy state must not get stuck if the parent never navigates.
+  it('clears the pending busy state when the dropdown is reopened', async () => {
+    const el = await fixture<LvAccountSelector>(html`
+      <lv-account-selector
+        integrationType="github"
+        .selectedAccountId=${'acc-1'}
+      ></lv-account-selector>
+    `);
+    await el.updateComplete;
+
+    const selectorBtn = el.shadowRoot!.querySelector('.selector-btn') as HTMLButtonElement;
+    selectorBtn.click();
+    await el.updateComplete;
+
+    const addButton = Array.from(el.shadowRoot!.querySelectorAll('.dropdown-action')).find((btn) =>
+      btn.textContent?.includes('Add Account')
+    ) as HTMLButtonElement;
+    addButton.click();
+    await el.updateComplete;
+    expect((el as unknown as { pendingAction: string | null }).pendingAction).to.equal('add');
+
+    // Parent didn't navigate; user closes and reopens the selector.
+    selectorBtn.click(); // close
+    await el.updateComplete;
+    selectorBtn.click(); // reopen
+    await el.updateComplete;
+
+    expect((el as unknown as { pendingAction: string | null }).pendingAction).to.be.null;
+    el.shadowRoot!.querySelectorAll('.dropdown-action').forEach((b) => {
+      expect((b as HTMLButtonElement).disabled).to.be.false;
+    });
+  });
+
   it('dropdown closes after selecting an account', async () => {
     const el = await fixture<LvAccountSelector>(html`
       <lv-account-selector

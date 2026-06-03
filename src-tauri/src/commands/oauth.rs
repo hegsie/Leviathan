@@ -557,10 +557,14 @@ pub async fn oauth_wait_for_callback(port: u16) -> Result<CallbackResponse> {
 /// Confirm that the given `state` matches an in-flight OAuth flow without
 /// consuming it. Returns an error if no matching flow exists.
 fn validate_callback_state(state: &str) -> Result<()> {
-    let pending = OAUTH_FLOWS
+    let mut pending = OAUTH_FLOWS
         .pending
         .lock()
         .map_err(|e| LeviathanError::OAuth(format!("Failed to access OAuth flow: {}", e)))?;
+    // Evict expired flows first so this peek stays consistent with the later
+    // consume in `oauth_exchange_code` (which also cleans up). Otherwise an
+    // expired state could validate here only to fail at exchange time.
+    cleanup_expired_flows(&mut pending);
     if pending.contains_key(state) {
         Ok(())
     } else {

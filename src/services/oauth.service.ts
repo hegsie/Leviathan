@@ -289,6 +289,19 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
       return; // User cancelled or timeout
     }
 
+    // Guard against stale/overlapping flows: the callback's state must match the
+    // flow we started for this provider. The backend validates state too, but
+    // checking here avoids exchanging the wrong flow when callbacks interleave.
+    if (state !== current.state) {
+      pendingAuthByProvider.delete(provider);
+      notifyStateChange({
+        status: 'error',
+        error: 'OAuth state mismatch — ignoring a stale or unexpected callback',
+        provider,
+      });
+      return;
+    }
+
     notifyStateChange({
       status: 'exchanging',
       provider,

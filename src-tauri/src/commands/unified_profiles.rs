@@ -746,10 +746,11 @@ pub struct MigrationPreviewAccount {
 
 /// Pure migration logic — separated from I/O so it can be unit-tested.
 ///
-/// Returns the `UnifiedMigrationResult` (with V2-correct `success`/`errors`)
-/// and the `UnifiedProfilesConfig` ready to be saved.  Hard I/O / parse
-/// failures continue to propagate as early `?` returns from the command layer
-/// above.
+/// Returns a tuple of the `UnifiedMigrationResult` (with V2-correct
+/// `success`/`errors`), the migrated `Vec<UnifiedProfile>`, and the migrated
+/// `Vec<IntegrationAccount>`; the caller assembles these into a
+/// `UnifiedProfilesConfig` and persists it. Hard I/O / parse failures continue
+/// to propagate as early `?` returns from the command layer above.
 fn run_migration_logic(
     legacy_profiles: &ProfilesConfig,
     legacy_accounts: &IntegrationAccountsConfig,
