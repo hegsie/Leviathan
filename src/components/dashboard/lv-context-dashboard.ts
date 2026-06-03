@@ -13,6 +13,7 @@ import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatu
 import { repositoryStore, type OpenRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus } from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import type { UnifiedProfile, IntegrationAccount, IntegrationType, ProfileAssignmentSource } from '../../types/unified-profile.types.ts';
 import './lv-profile-card.ts';
@@ -682,7 +683,7 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitFetch({ path: this.activeRepository.repository.path });
       if (!result.success) {
-        repositoryStore.getState().setError(result.error?.message ?? 'Fetch failed');
+        showToast(result.error?.message ?? 'Fetch failed', 'error');
       } else {
         // Refresh repository data after fetch
         this.dispatchEvent(new CustomEvent('repository-refresh', {
@@ -692,7 +693,7 @@ export class LvContextDashboard extends LitElement {
         await this.loadRemoteStatus();
       }
     } catch (err) {
-      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Fetch failed');
+      showToast(err instanceof Error ? err.message : 'Fetch failed', 'error');
     } finally {
       this.isFetching = false;
     }
@@ -705,7 +706,7 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitPull({ path: this.activeRepository.repository.path });
       if (!result.success) {
-        repositoryStore.getState().setError(result.error?.message ?? 'Pull failed');
+        showToast(result.error?.message ?? 'Pull failed', 'error');
       } else {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
@@ -714,7 +715,7 @@ export class LvContextDashboard extends LitElement {
         await this.loadRemoteStatus();
       }
     } catch (err) {
-      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Pull failed');
+      showToast(err instanceof Error ? err.message : 'Pull failed', 'error');
     } finally {
       this.isPulling = false;
     }
@@ -727,7 +728,7 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitPush({ path: this.activeRepository.repository.path });
       if (!result.success) {
-        repositoryStore.getState().setError(result.error?.message ?? 'Push failed');
+        showToast(result.error?.message ?? 'Push failed', 'error');
       } else {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
@@ -736,7 +737,7 @@ export class LvContextDashboard extends LitElement {
         await this.loadRemoteStatus();
       }
     } catch (err) {
-      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Push failed');
+      showToast(err instanceof Error ? err.message : 'Push failed', 'error');
     } finally {
       this.isPushing = false;
     }
@@ -768,10 +769,12 @@ export class LvContextDashboard extends LitElement {
         profile.id
       );
     } catch (err) {
-      // Surface the failure — a silent catch would leave the user staring at
-      // an unchanged profile with no explanation (CLAUDE.md error-feedback rule).
-      repositoryStore.getState().setError(
-        `Failed to switch profile: ${err instanceof Error ? err.message : 'Unknown error'}`
+      // Surface the failure via a visible toast — the repository store's error
+      // field has no render sink, so setError alone would be silent (CLAUDE.md
+      // error-feedback rule).
+      showToast(
+        `Failed to switch profile: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error'
       );
     } finally {
       this.isApplyingProfile = false;

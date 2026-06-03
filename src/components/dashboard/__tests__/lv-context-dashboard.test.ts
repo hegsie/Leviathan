@@ -24,6 +24,7 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { repositoryStore } from '../../../stores/repository.store.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 import type { UnifiedProfile, IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { Repository, Branch, Remote } from '../../../types/git.types.ts';
 import type { LvContextDashboard } from '../lv-context-dashboard.ts';
@@ -598,7 +599,7 @@ describe('lv-context-dashboard', () => {
 
   // ── Profile-switch error feedback (Wave 1, item 5) ─────────────────────────
   describe('profile switch error feedback (Wave 1)', () => {
-    it('surfaces an error when applying a profile fails (no silent catch)', async () => {
+    it('surfaces an error toast when applying a profile fails (no silent catch)', async () => {
       setupStores({
         profiles: [defaultProfile, makeProfile({ id: 'profile-2', name: 'Personal' })],
       });
@@ -610,34 +611,36 @@ describe('lv-context-dashboard', () => {
       };
 
       const el = await renderDashboard();
-      repositoryStore.getState().setError(null);
+      uiStore.setState({ toasts: [] });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const dash = el as any;
       await dash.handleSelectProfile(makeProfile({ id: 'profile-2', name: 'Personal' }));
       await el.updateComplete;
 
-      const error = repositoryStore.getState().error;
-      expect(error, 'an error message is surfaced').to.be.a('string');
-      expect(error).to.include('Failed to switch profile');
-      expect(error).to.include('git config is locked');
+      // The repository store error field has no render sink, so the failure must
+      // be surfaced via a visible error toast.
+      const errorToasts = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errorToasts.length, 'an error toast is shown').to.be.greaterThan(0);
+      expect(errorToasts[0].message).to.include('Failed to switch profile');
+      expect(errorToasts[0].message).to.include('git config is locked');
     });
 
-    it('does not set an error on a successful profile switch', async () => {
+    it('does not show an error toast on a successful profile switch', async () => {
       setupStores({
         profiles: [defaultProfile, makeProfile({ id: 'profile-2', name: 'Personal' })],
       });
       mockInvoke = async () => null;
 
       const el = await renderDashboard();
-      repositoryStore.getState().setError(null);
+      uiStore.setState({ toasts: [] });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const dash = el as any;
       await dash.handleSelectProfile(makeProfile({ id: 'profile-2', name: 'Personal' }));
       await el.updateComplete;
 
-      expect(repositoryStore.getState().error).to.be.null;
+      expect(uiStore.getState().toasts.filter((t) => t.type === 'error')).to.have.lengthOf(0);
     });
   });
 

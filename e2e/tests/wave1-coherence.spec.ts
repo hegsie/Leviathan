@@ -500,10 +500,9 @@ test.describe('Wave 1 #5 — profile switch error is surfaced', () => {
     color: '#10b981',
   };
 
-  // The reliably user-visible apply path is the Profile Manager's per-profile
-  // "Apply to current repository" button: it shows a toast on failure. (The
-  // dashboard dropdown path records the failure on repositoryStore.error, which
-  // currently has no visible render sink — covered separately below.)
+  // Both apply paths must surface failures via a visible error toast: the
+  // Profile Manager's "Apply to current repository" button and the dashboard
+  // profile dropdown.
   test('a failed apply from the profile manager surfaces an error toast', async ({ page }) => {
     const dialogs = new DialogsPage(page);
     await setupProfilesAndAccounts(page, {
@@ -532,7 +531,7 @@ test.describe('Wave 1 #5 — profile switch error is surfaced', () => {
     await expect(errorToast).toContainText(backendMessage);
   });
 
-  test('a failed apply from the dashboard dropdown is recorded (not silently swallowed)', async ({
+  test('a failed apply from the dashboard dropdown surfaces an error toast', async ({
     page,
   }) => {
     await setupProfilesAndAccounts(page, {
@@ -552,7 +551,8 @@ test.describe('Wave 1 #5 — profile switch error is surfaced', () => {
     // Toolbar starts on the default (Work) profile.
     await expect(page.locator('lv-context-dashboard .profile-name').first()).toHaveText('Work');
 
-    await injectCommandError(page, 'apply_unified_profile', 'Profile apply failed: git config is locked');
+    const backendMessage = 'Profile apply failed: git config is locked';
+    await injectCommandError(page, 'apply_unified_profile', backendMessage);
 
     // Switch profile via the dashboard dropdown.
     await page.locator('lv-context-dashboard .profile-selector-btn').click();
@@ -560,18 +560,11 @@ test.describe('Wave 1 #5 — profile switch error is surfaced', () => {
       .locator('lv-context-dashboard .profile-dropdown .dropdown-item', { hasText: 'Personal' })
       .click();
 
-    // The handler must record the failure on repositoryStore.error rather than
-    // swallowing it silently — proving the error path runs.
-    await expect
-      .poll(async () =>
-        page.evaluate(() => {
-          const stores = (window as unknown as { __LEVIATHAN_STORES__: {
-            repositoryStore: { getState: () => { error: string | null } };
-          } }).__LEVIATHAN_STORES__;
-          return stores.repositoryStore.getState().error;
-        }),
-      { timeout: 5000 })
-      .toContain('Failed to switch profile');
+    // The failure must be surfaced as a visible error toast (the repository
+    // store error field has no render sink).
+    const errorToast = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(errorToast).toBeVisible({ timeout: 5000 });
+    await expect(errorToast).toContainText('Failed to switch profile');
   });
 });
 
