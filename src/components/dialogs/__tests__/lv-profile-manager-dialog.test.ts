@@ -1760,6 +1760,30 @@ describe('lv-profile-manager-dialog', () => {
       expect(title!.textContent!.trim()).to.equal('Accounts');
     });
 
+    it('showAccountsView() lands an already-open (demoted) manager on the accounts view', async () => {
+      // Reproduces "Manage Accounts" clicked from a provider dialog that was
+      // itself launched FROM the manager: the manager is already open & demoted,
+      // so `open` never transitions false->true and willUpdate's view logic
+      // doesn't run. The host drives the accounts view explicitly instead.
+      const el = await renderDialog();
+      // Manager is sitting on a non-list sub-view (e.g. it was on select-account
+      // / edit when the provider dialog was launched on top of it).
+      const elState = el as unknown as { viewMode: string; demoted: boolean };
+      elState.viewMode = 'edit-account';
+      elState.demoted = true;
+      await el.updateComplete;
+
+      // Host calls the public method (what app-shell.handleManageAccounts does).
+      (el as unknown as { showAccountsView: () => void }).showAccountsView();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(elState.viewMode).to.equal('accounts');
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent!.trim()).to.equal('Accounts');
+    });
+
     it('offers connect-new buttons for every provider in the accounts view', async () => {
       const el = await renderDialog();
       getAccountsButton(el).click();

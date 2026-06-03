@@ -7,7 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { openExternalUrl, handleExternalLink } from '../../utils/index.ts';
+import { loggers, openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import type {
   GitHubConnectionStatus,
   DetectedGitHubRepo,
@@ -32,6 +32,8 @@ import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
+
+const log = loggers.github;
 
 type TabType = 'connection' | 'pull-requests' | 'issues' | 'releases' | 'actions' | 'create-pr' | 'create-issue' | 'create-release';
 
@@ -892,7 +894,7 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
-      console.log('[GitHub Dialog] loadInitialData starting...');
+      log.debug('loadInitialData starting');
 
       // Ensure unified profiles are loaded
       await unifiedProfileService.loadUnifiedProfiles();
@@ -906,7 +908,7 @@ export class LvGitHubDialog extends LitElement {
 
       // Re-sync local state with store after loading
       const state = unifiedProfileStore.getState();
-      console.log('[GitHub Dialog] Store state:', {
+      log.debug('Store state', {
         hasActiveProfile: !!state.activeProfile,
         activeProfileId: state.activeProfile?.id,
         globalAccountsCount: state.accounts?.length ?? 0,
@@ -914,7 +916,7 @@ export class LvGitHubDialog extends LitElement {
       });
 
       this.accounts = getAccountsByType('github');
-      console.log('[GitHub Dialog] Loaded accounts:', this.accounts.map(a => ({ id: a.id, name: a.name })));
+      log.debug('Loaded accounts', this.accounts.map(a => ({ id: a.id, name: a.name })));
       // Only auto-derive if nothing is selected (fresh open clears it in
       // `updated()`). Manual switches set selectedAccountId before calling
       // loadInitialData(), and must not be overwritten.
@@ -922,7 +924,7 @@ export class LvGitHubDialog extends LitElement {
         const preferred = getActiveProfilePreferredAccount('github')
           ?? selectDefaultGlobalAccount('github');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
-        console.log('[GitHub Dialog] Selected account:', this.selectedAccountId);
+        log.debug('Selected account', { accountId: this.selectedAccountId });
       }
 
       await this.checkConnection();
@@ -1186,7 +1188,7 @@ export class LvGitHubDialog extends LitElement {
   private async handleOAuthComplete(event: CustomEvent<{ provider: string; tokens: OAuthTokenResponse }>): Promise<void> {
     const { provider, tokens } = event.detail;
     // Do not log token material (M5) — only presence, never any prefix/value.
-    console.log('[GitHub Dialog] OAuth complete event received:', {
+    log.debug('OAuth complete event received', {
       provider,
       hasTokens: !!tokens,
     });
@@ -1210,9 +1212,9 @@ export class LvGitHubDialog extends LitElement {
       }
 
       // Verify the token works
-      console.log('[GitHub Dialog] Verifying token...');
+      log.debug('Verifying token');
       const verifyResult = await gitService.checkGitHubConnectionWithToken(tokens.accessToken);
-      console.log('[GitHub Dialog] Verify result:', verifyResult);
+      log.debug('Verify result', { success: verifyResult.success, connected: verifyResult.data?.connected });
       if (!verifyResult.success || !verifyResult.data?.connected) {
         this.error = verifyResult.error?.message ?? 'OAuth token verification failed';
         return;
@@ -1221,17 +1223,28 @@ export class LvGitHubDialog extends LitElement {
       const user = verifyResult.data.user;
 
       // Create or update global account with OAuth token
-      console.log('[GitHub Dialog] Creating/updating account:', {
+      log.debug('Creating/updating account', {
         hasSelectedAccountId: !!this.selectedAccountId,
         existingAccountsCount: this.accounts.length,
       });
 
       if (this.selectedAccountId) {
-        console.log('[GitHub Dialog] Storing token for existing account:', this.selectedAccountId);
+        log.debug('Storing token for existing account', { accountId: this.selectedAccountId });
         await credentialService.storeAccountToken('github', this.selectedAccountId, tokens.accessToken);
+        // Refresh cachedUser so the profile card shows the current avatar/username
+        // immediately rather than a stale one until the 5-min validation. Mirrors
+        // the PAT path's mapping; every other provider/path already does this.
+        if (user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+            username: user.login,
+            displayName: user.name ?? null,
+            email: user.email ?? null,
+            avatarUrl: user.avatarUrl ?? null,
+          });
+        }
       } else {
         // Create a new global account
-        console.log('[GitHub Dialog] Creating new global account');
+        log.debug('Creating new global account');
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
         const newAccount: IntegrationAccount = {
           ...createEmptyIntegrationAccount('github'),
@@ -1246,16 +1259,16 @@ export class LvGitHubDialog extends LitElement {
           } : null,
         };
 
-        console.log('[GitHub Dialog] New account:', newAccount);
+        log.debug('New account', { id: newAccount.id, name: newAccount.name });
         const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
-        console.log('[GitHub Dialog] Saved account:', savedAccount);
+        log.debug('Saved account', { id: savedAccount.id });
         await credentialService.storeAccountToken('github', savedAccount.id, tokens.accessToken);
         this.selectedAccountId = savedAccount.id;
 
         // Refresh accounts list from store after adding new account
         await unifiedProfileService.loadUnifiedProfiles();
         this.accounts = getAccountsByType('github');
-        console.log('[GitHub Dialog] Refreshed accounts list:', this.accounts.length, 'accounts');
+        log.debug('Refreshed accounts list', { count: this.accounts.length });
       }
 
       this.connectionStatus = verifyResult.data;

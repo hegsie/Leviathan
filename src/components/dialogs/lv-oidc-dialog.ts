@@ -297,9 +297,14 @@ export class LvOidcDialog extends LitElement {
       }
       const activeProfileId = state.activeProfile?.id ?? null;
       if (activeProfileId !== lastActiveProfileId) {
-        const preferred = getActiveProfilePreferredAccount('oidc') ?? this.accounts[0];
-        this.applyAccount(preferred);
+        // Track the new profile id either way so this branch doesn't keep
+        // re-firing, but DON'T clobber a half-typed "Add account" form — same
+        // guard the sibling branch already uses.
         lastActiveProfileId = activeProfileId;
+        if (!this.isAddingAccount) {
+          const preferred = getActiveProfilePreferredAccount('oidc') ?? this.accounts[0];
+          this.applyAccount(preferred);
+        }
       } else if (!this.isAddingAccount && !this.selectedAccountId && this.accounts.length > 0) {
         this.applyAccount(
           getActiveProfilePreferredAccount('oidc') ??

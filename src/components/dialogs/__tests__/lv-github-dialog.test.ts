@@ -863,4 +863,40 @@ describe('lv-github-dialog', () => {
       expect(args.user).to.not.be.null;
     });
   });
+
+  describe('OAuth re-auth refreshes cachedUser', () => {
+    it('calls update_global_account_cached_user when OAuth completes for an existing account', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Existing account is selected — OAuth re-auth must refresh its avatar/
+      // username immediately (the GitHub OAuth path used to skip this).
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gh-acc-1';
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: { provider: 'github', tokens: { accessToken: 'ghp_oauth_reauth' } },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      const storeIdx = invokeHistory.findIndex((h) => h.command === 'store_keyring_token');
+      const cachedUserIdx = invokeHistory.findIndex(
+        (h) => h.command === 'update_global_account_cached_user'
+      );
+      expect(storeIdx, 'token stored').to.be.greaterThan(-1);
+      expect(cachedUserIdx, 'cachedUser refreshed on OAuth re-auth').to.be.greaterThan(-1);
+      const args = invokeHistory[cachedUserIdx].args as Record<string, unknown>;
+      expect(args.accountId).to.equal('gh-acc-1');
+      expect(args.user).to.not.be.null;
+    });
+  });
 });

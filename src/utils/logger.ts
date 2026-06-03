@@ -69,5 +69,7 @@ export const loggers = {
   dialog: createLogger('Dialog'),
   app: createLogger('App'),
   azureDevOps: createLogger('AzureDevOps'),
+  github: createLogger('GitHub'),
+  gitlab: createLogger('GitLab'),
   graph: createLogger('Graph'),
 };

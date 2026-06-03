@@ -10,7 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
-import { openExternalUrl, handleExternalLink } from '../../utils/index.ts';
+import { loggers, openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import type {
   GitLabConnectionStatus,
   DetectedGitLabRepo,
@@ -29,6 +29,8 @@ import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts'
 import type { OAuthFlowState, OAuthTokenResponse } from '../../types/oauth.types.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
+
+const log = loggers.gitlab;
 
 type TabType = 'connection' | 'merge-requests' | 'issues' | 'pipelines' | 'create-mr' | 'create-issue';
 
@@ -1150,9 +1152,8 @@ export class LvGitLabDialog extends LitElement {
    * Handle OAuth completion
    */
   private async handleOAuthComplete(tokens: OAuthTokenResponse, instanceUrl?: string): Promise<void> {
-    console.log('[GitLab Dialog] handleOAuthComplete called', {
+    log.debug('handleOAuthComplete called', {
       hasAccessToken: !!tokens?.accessToken,
-      accessTokenLength: tokens?.accessToken?.length,
       instanceUrl,
       currentInstanceUrl: this.instanceUrlInput,
     });
@@ -1170,7 +1171,7 @@ export class LvGitLabDialog extends LitElement {
         this.instanceUrlInput = instanceUrl;
       }
 
-      console.log('[GitLab Dialog] Verifying token with instanceUrl:', this.instanceUrlInput);
+      log.debug('Verifying token', { instanceUrl: this.instanceUrlInput });
 
       // Verify the token works
       const verifyResult = await gitService.checkGitLabConnectionWithToken(
@@ -1178,10 +1179,9 @@ export class LvGitLabDialog extends LitElement {
         tokens.accessToken
       );
 
-      console.log('[GitLab Dialog] Token verification result:', {
+      log.debug('Token verification result', {
         success: verifyResult.success,
         connected: verifyResult.data?.connected,
-        error: verifyResult.error,
         user: verifyResult.data?.user?.username,
       });
 
@@ -1192,7 +1192,7 @@ export class LvGitLabDialog extends LitElement {
 
       const user = verifyResult.data.user;
 
-      console.log('[GitLab Dialog] Account state:', {
+      log.debug('Account state', {
         selectedAccountId: this.selectedAccountId,
         accountsCount: this.accounts.length,
       });
@@ -1207,7 +1207,7 @@ export class LvGitLabDialog extends LitElement {
 
       if (existingAccount) {
         // Update existing account with OAuth token
-        console.log('[GitLab Dialog] Updating existing account:', existingAccount.id);
+        log.debug('Updating existing account', { accountId: existingAccount.id });
         await credentialService.storeAccountOAuthToken(
           'gitlab',
           existingAccount.id,
@@ -1229,7 +1229,7 @@ export class LvGitLabDialog extends LitElement {
         this.selectedAccountId = existingAccount.id;
       } else {
         // Create new global account
-        console.log('[GitLab Dialog] Creating new global account');
+        log.debug('Creating new global account');
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
         const newAccount: IntegrationAccount = {
           ...createEmptyIntegrationAccount('gitlab', this.instanceUrlInput),
@@ -1244,9 +1244,9 @@ export class LvGitLabDialog extends LitElement {
           } : null,
         };
 
-        console.log('[GitLab Dialog] New account to create:', newAccount);
+        log.debug('New account to create', { id: newAccount.id, name: newAccount.name });
         const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
-        console.log('[GitLab Dialog] Saved account:', savedAccount);
+        log.debug('Saved account', { id: savedAccount.id });
         await credentialService.storeAccountOAuthToken(
           'gitlab',
           savedAccount.id,
@@ -1259,7 +1259,7 @@ export class LvGitLabDialog extends LitElement {
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();
         this.accounts = getAccountsByType('gitlab');
-        console.log('[GitLab Dialog] Account created, accounts:', this.accounts.length);
+        log.debug('Account created', { count: this.accounts.length });
       }
 
       // Force UI update

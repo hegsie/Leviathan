@@ -2310,6 +2310,19 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   /**
+   * Switch directly to the standalone Accounts view. Public so the host can land
+   * an already-open manager on Accounts when the `open` property doesn't transition
+   * false→true (e.g. "Manage Accounts" clicked from a provider dialog that was
+   * itself launched from this manager — the manager is already open & demoted, so
+   * `willUpdate`'s open-transition logic never runs). Reloads accounts so the list
+   * is fresh.
+   */
+  public showAccountsView(): void {
+    this.viewMode = 'accounts';
+    void this.loadProfiles().then(() => this.refreshConnectionStatuses());
+  }
+
+  /**
    * Called by the host when a provider/OIDC dialog that was opened FROM this
    * manager closes. Driven by the EXPLICIT context captured at open time — not by
    * guessing global state. Reloads accounts and, when the context carried an

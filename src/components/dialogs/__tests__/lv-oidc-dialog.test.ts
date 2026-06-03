@@ -24,7 +24,7 @@ const keyringStore = new Map<string, string>();
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
-import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
+import { createEmptyIntegrationAccount, createEmptyUnifiedProfile } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-oidc-dialog.ts';
 import type { LvOidcDialog } from '../lv-oidc-dialog.ts';
@@ -407,6 +407,42 @@ describe('lv-oidc-dialog', () => {
       expect(elState.clientIdInput).to.equal('new-client');
       expect(elState.nameInput).to.equal('My New SSO');
       expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+    });
+
+    it('does not clobber a half-typed Add form when the active profile changes', async () => {
+      const connectedAccount = {
+        ...mockAccount,
+        cachedUser: { username: 'ssouser', displayName: 'SSO User', email: null, avatarUrl: null },
+      };
+      unifiedProfileStore.getState().setAccounts([connectedAccount]);
+
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      // User clicks "Add account" and starts typing a new SSO config.
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      const elState = el as unknown as {
+        issuerUrlInput: string;
+        clientIdInput: string;
+        nameInput: string;
+        selectedAccountId: string | null;
+      };
+      elState.issuerUrlInput = 'https://new-issuer.example.com';
+      elState.clientIdInput = 'new-client';
+      elState.nameInput = 'My New SSO';
+
+      // A profile switch lands while the user is mid-typing (the active-profile
+      // -change branch of the store subscription). It must respect isAddingAccount
+      // and NOT apply the preferred account over the half-typed form.
+      const newProfile = { ...createEmptyUnifiedProfile(), id: 'profile-2' };
+      unifiedProfileStore.getState().setActiveProfile(newProfile);
+      await el.updateComplete;
+
+      expect(elState.issuerUrlInput).to.equal('https://new-issuer.example.com');
+      expect(elState.clientIdInput).to.equal('new-client');
+      expect(elState.nameInput).to.equal('My New SSO');
+      expect(elState.selectedAccountId).to.equal(null);
     });
   });
 });

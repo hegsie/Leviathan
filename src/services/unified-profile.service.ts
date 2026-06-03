@@ -820,8 +820,14 @@ export async function validateAllAccountTokens(): Promise<{
   log.debug('Validating all account tokens');
 
   for (const account of accounts) {
-    const cachedUser = await refreshAccountCachedUser(account);
-    if (cachedUser) {
+    await refreshAccountCachedUser(account);
+    // Tally on the authoritative connection status that refreshAccountCachedUser
+    // just wrote, NOT on the returned cachedUser. An OIDC account with a stored
+    // token but no cachedUser is marked 'connected' (there's no cheap identity
+    // ping for OIDC) yet returns null — counting that as invalid was a false
+    // negative. Using the status keeps the tally consistent across all providers.
+    const status = unifiedProfileStore.getState().accountConnectionStatus[account.id]?.status;
+    if (status === 'connected') {
       result.valid++;
     } else {
       result.invalid++;

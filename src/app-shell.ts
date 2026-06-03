@@ -1860,7 +1860,16 @@ export class AppShell extends LitElement {
     this.integrationContext = null;
     this.manageAccountsReturnProvider = from;
     this.profileManagerView = 'accounts';
-    this.showProfileManager = true;
+    // If the manager is ALREADY open (the provider dialog was launched FROM it,
+    // so it's open & demoted), the `open` property won't transition false→true and
+    // the manager's willUpdate/open-transition logic that applies `initialView`
+    // never runs — it would reveal on its prior view (select-account/edit). Drive
+    // the Accounts view explicitly instead so the click isn't a no-op.
+    if (this.showProfileManager) {
+      this.profileManagerDialog?.showAccountsView();
+    } else {
+      this.showProfileManager = true;
+    }
   }
 
   // The profile manager closed. If it was opened via "Manage Accounts" from a

@@ -936,8 +936,12 @@ export class LvContextDashboard extends LitElement {
   }
 
   private openIntegrationDialog(type: IntegrationType): void {
-    // Only dispatch for types that have registered handlers in app-shell
-    const supportedTypes = ['github', 'gitlab', 'azure-devops', 'bitbucket', 'oidc'];
+    // Only dispatch for types that have registered handlers in app-shell.
+    // 'oidc' is intentionally excluded: the dashboard only ever calls this with a
+    // provider from detectProvider() (or an account resolved through it), which
+    // never returns 'oidc' (OIDC isn't a repo-remote provider). The app-shell
+    // @open-oidc listener remains live for the profile manager / command palette.
+    const supportedTypes = ['github', 'gitlab', 'azure-devops', 'bitbucket'];
     if (!supportedTypes.includes(type)) {
       console.warn(`No dialog handler for integration type: ${type}`);
       return;
