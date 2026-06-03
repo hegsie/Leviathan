@@ -2372,19 +2372,151 @@ mod tests {
         let result = parse_github_url("not-a-valid-url");
         assert!(result.is_none());
     }
+
+    // ========================================================================
+    // GitHub App Config Serialization Tests (M1)
+    // ========================================================================
+
+    /// Round-trip: serialise then deserialise should produce identical values.
+    #[test]
+    fn test_app_config_roundtrip() {
+        let original = StoredGithubAppConfig {
+            app_id: 123456,
+            installation_id: 987654,
+            private_key_pem:
+                "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQ\n-----END RSA PRIVATE KEY-----"
+                    .to_string(),
+        };
+
+        let json = serialize_app_config(&original).expect("serialize failed");
+
+        // The private key must be present in the serialized form (it's stored
+        // in the keyring secret, not exposed to the frontend).
+        assert!(json.contains("privateKeyPem"));
+        assert!(json.contains("appId"));
+        assert!(json.contains("installationId"));
+
+        let restored = deserialize_app_config(&json).expect("deserialize failed");
+        assert_eq!(restored.app_id, original.app_id);
+        assert_eq!(restored.installation_id, original.installation_id);
+        assert_eq!(restored.private_key_pem, original.private_key_pem);
+    }
+
+    /// Verify that `serialize_app_config` uses camelCase keys (serde rename_all).
+    #[test]
+    fn test_app_config_serializes_camel_case() {
+        let cfg = StoredGithubAppConfig {
+            app_id: 1,
+            installation_id: 2,
+            private_key_pem: "key".to_string(),
+        };
+
+        let json = serialize_app_config(&cfg).expect("serialize failed");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse failed");
+
+        // camelCase keys must be present
+        assert!(v.get("appId").is_some(), "expected appId key");
+        assert!(
+            v.get("installationId").is_some(),
+            "expected installationId key"
+        );
+        assert!(
+            v.get("privateKeyPem").is_some(),
+            "expected privateKeyPem key"
+        );
+
+        // snake_case keys must NOT be present
+        assert!(v.get("app_id").is_none(), "unexpected app_id key");
+        assert!(
+            v.get("installation_id").is_none(),
+            "unexpected installation_id key"
+        );
+        assert!(
+            v.get("private_key_pem").is_none(),
+            "unexpected private_key_pem key"
+        );
+    }
+
+    /// Deserializing invalid JSON must return an Err, not panic.
+    #[test]
+    fn test_app_config_deserialize_invalid_json() {
+        let result = deserialize_app_config("this is not json");
+        assert!(result.is_err(), "expected error for invalid JSON");
+    }
+
+    /// Deserializing JSON that is missing required fields must return an Err.
+    #[test]
+    fn test_app_config_deserialize_missing_fields() {
+        let result = deserialize_app_config(r#"{"appId": 1}"#);
+        assert!(result.is_err(), "expected error for incomplete JSON");
+    }
+
+    /// The keyring key constant must follow the expected naming pattern.
+    #[test]
+    fn test_github_app_keyring_key_format() {
+        // The key must not contain characters that could cause keyring injection
+        // (spaces, quotes, control chars etc.).
+        assert!(!GITHUB_APP_KEYRING_KEY.is_empty());
+        for ch in GITHUB_APP_KEYRING_KEY.chars() {
+            assert!(
+                ch.is_ascii_alphanumeric() || ch == '_',
+                "unexpected char {:?} in GITHUB_APP_KEYRING_KEY",
+                ch
+            );
+        }
+    }
 }
 
 // ========================================================================
 // GitHub App Installation Commands
 // ========================================================================
 
-/// Configure a GitHub App for authentication
+/// Keyring key used to store the GitHub App configuration JSON.
+///
+/// A single key is used (no per-app-id sharding) because Leviathan supports
+/// at most one GitHub App installation at a time.  The stored value is a JSON
+/// object containing `appId`, `installationId`, and `privateKeyPem`.
+const GITHUB_APP_KEYRING_KEY: &str = "github_app_config";
+
+/// Serialised form of the GitHub App configuration that is persisted to the
+/// system keyring.  The private key PEM is stored in the secret value; the
+/// app/installation IDs travel with it so we can reconstruct the full config
+/// on retrieval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredGithubAppConfig {
+    app_id: u64,
+    installation_id: u64,
+    private_key_pem: String,
+}
+
+/// Serialise `StoredGithubAppConfig` to a JSON string for keyring storage.
+fn serialize_app_config(cfg: &StoredGithubAppConfig) -> Result<String> {
+    serde_json::to_string(cfg).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to serialize GitHub App config: {}", e))
+    })
+}
+
+/// Deserialise `StoredGithubAppConfig` from a JSON string retrieved from the keyring.
+fn deserialize_app_config(json: &str) -> Result<StoredGithubAppConfig> {
+    serde_json::from_str(json).map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to deserialize GitHub App config: {}", e))
+    })
+}
+
+/// Configure a GitHub App for authentication.
+///
+/// M1: After validating `private_key_pem` by generating a JWT and exchanging
+/// it for an installation token, the full config (`app_id`, `installation_id`,
+/// `private_key_pem`) is persisted to the system keyring so that subsequent
+/// calls to `get_github_app_config` can confirm the connection is live.
 #[command]
 pub async fn configure_github_app(
     app_id: u64,
     private_key_pem: String,
     installation_id: u64,
 ) -> Result<GitHubConnectionStatus> {
+    use crate::commands::credentials::{delete_keyring_token, store_keyring_token};
     use crate::services::github_app;
 
     // Generate JWT to validate the key
@@ -2417,6 +2549,24 @@ pub async fn configure_github_app(
         ));
     }
 
+    // M1: Persist the app config to the system keyring.
+    // Remove any pre-existing entry first (idempotent reconfigure).
+    let _ = delete_keyring_token(GITHUB_APP_KEYRING_KEY.to_string()).await;
+
+    let stored = StoredGithubAppConfig {
+        app_id,
+        installation_id,
+        private_key_pem,
+    };
+    let json = serialize_app_config(&stored)?;
+    store_keyring_token(GITHUB_APP_KEYRING_KEY.to_string(), json).await?;
+
+    tracing::info!(
+        "GitHub App {} (installation {}) persisted to keyring",
+        app_id,
+        installation_id
+    );
+
     Ok(GitHubConnectionStatus {
         connected: true,
         user: None,
@@ -2424,16 +2574,42 @@ pub async fn configure_github_app(
     })
 }
 
-/// Get the current GitHub App configuration (without private key)
+/// Get the current GitHub App configuration (without the private key).
+///
+/// M1: Returns `Ok(Some(..))` only when a config has actually been persisted
+/// via `configure_github_app`, so the UI can distinguish "connected" from
+/// "never configured".  The private key is deliberately excluded from the
+/// returned JSON.
 #[command]
 pub async fn get_github_app_config() -> Result<Option<serde_json::Value>> {
-    // Config retrieval would be from keyring - placeholder for now
-    Ok(None)
+    use crate::commands::credentials::get_keyring_token;
+
+    let raw = match get_keyring_token(GITHUB_APP_KEYRING_KEY.to_string()).await? {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let cfg = deserialize_app_config(&raw)?;
+
+    // Return only the non-secret fields so the private key never leaves
+    // the backend.
+    let public_config = serde_json::json!({
+        "appId": cfg.app_id,
+        "installationId": cfg.installation_id,
+    });
+
+    Ok(Some(public_config))
 }
 
-/// Remove GitHub App configuration
+/// Remove GitHub App configuration from the system keyring.
+///
+/// M1: After this call `get_github_app_config` will return `Ok(None)`.
 #[command]
 pub async fn remove_github_app_config() -> Result<()> {
+    use crate::commands::credentials::delete_keyring_token;
+
+    delete_keyring_token(GITHUB_APP_KEYRING_KEY.to_string()).await?;
+    tracing::info!("GitHub App config removed from keyring");
     Ok(())
 }
 
