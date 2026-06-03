@@ -767,6 +767,12 @@ export class LvContextDashboard extends LitElement {
         this.activeRepository.repository.path,
         profile.id
       );
+    } catch (err) {
+      // Surface the failure — a silent catch would leave the user staring at
+      // an unchanged profile with no explanation (CLAUDE.md error-feedback rule).
+      repositoryStore.getState().setError(
+        `Failed to switch profile: ${err instanceof Error ? err.message : 'Unknown error'}`
+      );
     } finally {
       this.isApplyingProfile = false;
     }
@@ -780,6 +786,16 @@ export class LvContextDashboard extends LitElement {
     if (!this.activeProfile) return false;
     const defaultAccountId = this.activeProfile.defaultAccounts[account.integrationType];
     return defaultAccountId === account.id;
+  }
+
+  /**
+   * Whether this account is the global fallback default for its provider
+   * (account.isDefault). The card shows this as a muted "Global default" badge
+   * only when the active profile has no explicit preference (profile default
+   * takes precedence — see lv-integration-card.renderDefaultBadge).
+   */
+  private isGlobalDefaultAccount(account: IntegrationAccount): boolean {
+    return account.isDefault === true;
   }
 
   private getProfileAssignmentSource(): ProfileAssignmentSource {
@@ -1194,6 +1210,7 @@ export class LvContextDashboard extends LitElement {
                   .account=${relevantAccount}
                   .connectionStatus=${this.getAccountStatus(relevantAccount.id)}
                   .isProfileDefault=${this.isProfileDefaultAccount(relevantAccount)}
+                  .isGlobalDefault=${this.isGlobalDefaultAccount(relevantAccount)}
                   @open-dialog=${() => this.openIntegrationDialog(relevantAccount.integrationType)}
                   @refresh-account=${this.handleRefreshAccount}
                 ></lv-integration-card>

@@ -358,6 +358,40 @@ export class LvMigrationDialog extends LitElement {
         margin: 0 auto var(--spacing-md);
       }
 
+      .warning-icon {
+        width: 64px;
+        height: 64px;
+        color: var(--color-warning);
+        margin: 0 auto var(--spacing-md);
+      }
+
+      .error-section {
+        text-align: left;
+        background: var(--color-warning-bg);
+        border: 1px solid var(--color-warning);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-md);
+        margin-top: var(--spacing-lg);
+      }
+
+      .error-section-title {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-warning);
+        margin-bottom: var(--spacing-sm);
+      }
+
+      .error-list {
+        margin: 0;
+        padding-left: var(--spacing-lg);
+      }
+
+      .error-item {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        margin-bottom: var(--spacing-xs);
+      }
+
       .stats {
         display: flex;
         justify-content: center;
@@ -747,6 +781,13 @@ export class LvMigrationDialog extends LitElement {
   private renderComplete() {
     const result = this.migrationResult;
 
+    // Branch on the real success flag. A migration can complete with errors —
+    // some items were skipped — and we must surface that instead of always
+    // claiming success (which previously hid skipped items from the user).
+    if (result && !result.success) {
+      return this.renderCompleteWithErrors(result);
+    }
+
     return html`
       <div class="complete-content">
         <svg class="success-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -773,6 +814,34 @@ export class LvMigrationDialog extends LitElement {
               </div>
             `
           : nothing}
+      </div>
+    `;
+  }
+
+  private renderCompleteWithErrors(result: UnifiedMigrationResult) {
+    return html`
+      <div class="complete-content">
+        <svg class="warning-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+          <line x1="12" y1="9" x2="12" y2="13"></line>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+        <div class="intro-title">Migration Completed With Issues</div>
+        <div class="intro-description">
+          We migrated ${result.profilesMigrated}
+          ${result.profilesMigrated === 1 ? 'profile' : 'profiles'} and
+          ${result.accountsMigrated}
+          ${result.accountsMigrated === 1 ? 'account' : 'accounts'}, but
+          ${result.errors.length} ${result.errors.length === 1 ? 'item' : 'items'}
+          could not be migrated and ${result.errors.length === 1 ? 'was' : 'were'} skipped.
+        </div>
+
+        <div class="error-section">
+          <div class="error-section-title">Skipped items</div>
+          <ul class="error-list">
+            ${result.errors.map((err) => html`<li class="error-item">${err}</li>`)}
+          </ul>
+        </div>
       </div>
     `;
   }
@@ -804,13 +873,22 @@ export class LvMigrationDialog extends LitElement {
             <button class="btn btn-primary" disabled>Migrating...</button>
           </div>
         `;
-      case 'complete':
+      case 'complete': {
+        const hadErrors = this.migrationResult ? !this.migrationResult.success : false;
         return html`
           <div></div>
           <div class="footer-right">
+            ${hadErrors
+              ? html`
+                  <button class="btn" @click=${this.handleOpenProfileManager}>
+                    Review in Profile Manager
+                  </button>
+                `
+              : nothing}
             <button class="btn btn-primary" @click=${this.handleContinue}>Done</button>
           </div>
         `;
+      }
     }
   }
 }

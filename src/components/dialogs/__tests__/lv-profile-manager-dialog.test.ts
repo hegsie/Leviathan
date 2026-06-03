@@ -1933,4 +1933,201 @@ describe('lv-profile-manager-dialog', () => {
       expect(toasts.some((t) => t.type === 'success')).to.be.true;
     });
   });
+
+  // ── Account config fields in the edit-account view (Wave 1, item 1) ────────
+  describe('account config fields (Wave 1)', () => {
+    it('renders the GitLab instance URL field when editing a GitLab account', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = { ...gitlabAccount };
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('.form-group label')).map(
+        (l) => l.textContent?.trim()
+      );
+      expect(labels.some((l) => l?.includes('GitLab Instance URL'))).to.be.true;
+
+      // The field is pre-filled from the account's existing config.
+      const urlInput = el.shadowRoot!.querySelector(
+        'input[type="url"]'
+      ) as HTMLInputElement;
+      expect(urlInput).to.not.be.null;
+      expect(urlInput.value).to.equal('https://gitlab.com');
+    });
+
+    it('persists an edited GitLab instanceUrl on save', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = { ...gitlabAccount };
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const urlInput = el.shadowRoot!.querySelector(
+        'input[type="url"]'
+      ) as HTMLInputElement;
+      urlInput.value = 'https://gitlab.mycompany.com';
+      urlInput.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      clearHistory();
+      await shell.handleSaveAccount();
+      await el.updateComplete;
+
+      const saves = findCommands('save_global_account');
+      expect(saves.length).to.equal(1);
+      const saved = (saves[0].args as { account?: IntegrationAccount }).account!;
+      expect(saved.config).to.deep.include({
+        type: 'gitlab',
+        instanceUrl: 'https://gitlab.mycompany.com',
+      });
+    });
+
+    it('renders the Azure DevOps organization field when editing an Azure account', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = makeAccount({
+        id: 'acc-azure',
+        name: 'Work Azure',
+        integrationType: 'azure-devops',
+        config: { type: 'azure-devops', organization: 'myorg' },
+      });
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('.form-group label')).map(
+        (l) => l.textContent?.trim()
+      );
+      expect(labels.some((l) => l === 'Organization')).to.be.true;
+    });
+  });
+
+  // ── Delete-confirm copy (Wave 1, item 3) ───────────────────────────────────
+  describe('delete profile confirmation copy (Wave 1)', () => {
+    it('explains accounts remain global and does NOT claim they are removed', async () => {
+      let confirmMessage = '';
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return {
+              version: 3,
+              profiles: testProfiles,
+              accounts: testAccounts,
+              repositoryAssignments: {},
+            };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'plugin:dialog|message':
+            confirmMessage = (args as { message?: string } | undefined)?.message ?? '';
+            return 'Ok';
+          case 'delete_unified_profile':
+            return null;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      const deleteBtn = el.shadowRoot!.querySelector(
+        '.profile-item .action-btn.delete'
+      ) as HTMLButtonElement;
+      expect(deleteBtn).to.not.be.null;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(confirmMessage).to.include('repository assignments');
+      expect(confirmMessage).to.include('remain available globally');
+      expect(confirmMessage).to.not.include('remove all associated integration accounts');
+      expect(findCommands('delete_unified_profile').length).to.equal(1);
+    });
+  });
+
+  // ── Single-repo unassign (Wave 1, item 4) ──────────────────────────────────
+  describe('unassign a single repository (Wave 1)', () => {
+    it('shows an unassign button per assigned repo and unassigns on click', async () => {
+      let unassignedPath: string | undefined;
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return {
+              version: 3,
+              profiles: testProfiles,
+              accounts: testAccounts,
+              repositoryAssignments: { '/repo/work': 'profile-1' },
+            };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'unassign_unified_profile_from_repository':
+            unassignedPath = (args as { path?: string } | undefined)?.path;
+            return null;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      // Edit the Work profile (it has /repo/work assigned).
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      // The assigned-repositories list shows the one assigned repo with an unassign button.
+      const unassignBtn = el.shadowRoot!.querySelector(
+        '.accounts-section .account-item .action-btn.delete'
+      ) as HTMLButtonElement;
+      expect(unassignBtn, 'an unassign button is rendered for the assigned repo').to.not.be.null;
+      expect(unassignBtn.getAttribute('title')).to.include('Unassign');
+
+      uiStore.getState().toasts.length = 0;
+      clearHistory();
+      unassignBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(findCommands('unassign_unified_profile_from_repository').length).to.equal(1);
+      expect(unassignedPath).to.equal('/repo/work');
+
+      // User-visible feedback on success.
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success')).to.be.true;
+    });
+
+    it('surfaces an error toast when unassign fails', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return {
+              version: 3,
+              profiles: testProfiles,
+              accounts: testAccounts,
+              repositoryAssignments: { '/repo/work': 'profile-1' },
+            };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'unassign_unified_profile_from_repository':
+            throw new Error('locked');
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      const unassignBtn = el.shadowRoot!.querySelector(
+        '.accounts-section .account-item .action-btn.delete'
+      ) as HTMLButtonElement;
+      unassignBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error')).to.be.true;
+    });
+  });
 });

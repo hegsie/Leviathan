@@ -965,13 +965,35 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
+  /**
+   * Unassign a single repository from the profile being edited. The global
+   * accounts and the profile itself are untouched — only the repo→profile
+   * assignment is removed. The store subscription re-renders the trimmed list.
+   *
+   * D5: No change event dispatched here by design — see handleSave. The store
+   * subscription is the single source of truth for UI sync.
+   */
+  private async handleUnassignRepository(repoPath: string): Promise<void> {
+    try {
+      await unifiedProfileService.unassignUnifiedProfileFromRepository(repoPath);
+      // Reload profiles to update repositoryAssignments in the store.
+      await unifiedProfileService.loadUnifiedProfiles();
+      showToast(`Unassigned ${this.formatRepoPath(repoPath)}`, 'success');
+    } catch (error) {
+      showToast(
+        `Failed to unassign repository: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'error'
+      );
+    }
+  }
+
   // D5: No change event dispatched here by design — see handleSave. The store
   // subscription is the single source of truth for UI sync.
   private async handleDelete(profile: UnifiedProfile, e: Event): Promise<void> {
     e.stopPropagation();
     const confirmed = await showConfirm(
       'Delete Profile',
-      `Delete profile "${profile.name}"? This will also remove all associated integration accounts.`,
+      `Delete profile "${profile.name}"? This removes the profile and its repository assignments. Your integration accounts remain available globally.`,
       'warning'
     );
     if (!confirmed) {
@@ -1724,6 +1746,18 @@ export class LvProfileManagerDialog extends LitElement {
                         <div class="account-name">${this.formatRepoPath(repoPath)}</div>
                         <div class="account-detail">${repoPath}</div>
                       </div>
+                      <div class="account-actions">
+                        <button
+                          class="action-btn delete"
+                          @click=${() => this.handleUnassignRepository(repoPath)}
+                          title="Unassign repository from this profile"
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                          </svg>
+                        </button>
+                      </div>
                     </div>
                   `
                 )}
@@ -2102,6 +2136,8 @@ export class LvProfileManagerDialog extends LitElement {
         </select>
         <div class="form-hint">Integration type cannot be changed</div>
       </div>
+
+      ${this.renderAccountConfigFields()}
 
       <div class="form-group">
         <label>Color (optional)</label>

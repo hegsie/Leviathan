@@ -595,4 +595,90 @@ describe('lv-context-dashboard', () => {
       expect(openProfileManager, 'edit-profile -> open-profile-manager').to.be.true;
     });
   });
+
+  // ── Profile-switch error feedback (Wave 1, item 5) ─────────────────────────
+  describe('profile switch error feedback (Wave 1)', () => {
+    it('surfaces an error when applying a profile fails (no silent catch)', async () => {
+      setupStores({
+        profiles: [defaultProfile, makeProfile({ id: 'profile-2', name: 'Personal' })],
+      });
+      mockInvoke = async (command: string) => {
+        if (command === 'apply_unified_profile') {
+          throw new Error('git config is locked');
+        }
+        return null;
+      };
+
+      const el = await renderDashboard();
+      repositoryStore.getState().setError(null);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dash = el as any;
+      await dash.handleSelectProfile(makeProfile({ id: 'profile-2', name: 'Personal' }));
+      await el.updateComplete;
+
+      const error = repositoryStore.getState().error;
+      expect(error, 'an error message is surfaced').to.be.a('string');
+      expect(error).to.include('Failed to switch profile');
+      expect(error).to.include('git config is locked');
+    });
+
+    it('does not set an error on a successful profile switch', async () => {
+      setupStores({
+        profiles: [defaultProfile, makeProfile({ id: 'profile-2', name: 'Personal' })],
+      });
+      mockInvoke = async () => null;
+
+      const el = await renderDashboard();
+      repositoryStore.getState().setError(null);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dash = el as any;
+      await dash.handleSelectProfile(makeProfile({ id: 'profile-2', name: 'Personal' }));
+      await el.updateComplete;
+
+      expect(repositoryStore.getState().error).to.be.null;
+    });
+  });
+
+  // ── Default-account precedence (Wave 1, item 6) ────────────────────────────
+  describe('default account precedence badge (Wave 1)', () => {
+    it('marks the active account as Global default when it is account.isDefault but not a profile preference', async () => {
+      const globalDefaultAccount = makeAccount({ id: 'account-1', isDefault: true });
+      setupStores({
+        accounts: [globalDefaultAccount],
+        // No defaultAccounts preference on the active profile.
+        profile: makeProfile({ defaultAccounts: {} }),
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+      const badge = card!.shadowRoot!.querySelector('.default-badge');
+      expect(badge, 'a default badge is shown').to.not.be.null;
+      expect(badge!.textContent!.trim()).to.equal('Global default');
+      expect(badge!.classList.contains('global')).to.be.true;
+    });
+
+    it('marks the active account as Profile default when the profile prefers it', async () => {
+      const account = makeAccount({ id: 'account-1', isDefault: true });
+      setupStores({
+        accounts: [account],
+        // Profile explicitly prefers this account — takes precedence over global.
+        profile: makeProfile({ defaultAccounts: { github: 'account-1' } }),
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      const badge = card!.shadowRoot!.querySelector('.default-badge');
+      expect(badge!.textContent!.trim()).to.equal('Profile default');
+      expect(badge!.classList.contains('global')).to.be.false;
+    });
+  });
 });

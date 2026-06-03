@@ -97,6 +97,14 @@ export class LvIntegrationCard extends LitElement {
         color: var(--color-accent);
         background: var(--color-accent-bg);
         border-radius: var(--radius-xs);
+        cursor: help;
+      }
+
+      /* Global fallback default is a weaker signal than the profile's explicit
+         preference, so render it in a muted/secondary style. */
+      .default-badge.global {
+        color: var(--color-text-tertiary);
+        background: var(--color-bg-tertiary);
       }
 
       .card-actions {
@@ -247,7 +255,10 @@ export class LvIntegrationCard extends LitElement {
 
   @property({ type: Object }) account: IntegrationAccount | null = null;
   @property({ type: String }) connectionStatus: ConnectionStatus = 'unknown';
+  /** This account is the active profile's preferred account for its provider. */
   @property({ type: Boolean }) isProfileDefault = false;
+  /** This account is the global fallback default (account.isDefault) for its provider. */
+  @property({ type: Boolean }) isGlobalDefault = false;
 
   private handleOpenDialog(): void {
     this.dispatchEvent(new CustomEvent('open-dialog', { bubbles: true, composed: true }));
@@ -260,6 +271,33 @@ export class LvIntegrationCard extends LitElement {
       bubbles: true,
       composed: true
     }));
+  }
+
+  /**
+   * Render the "default" badge with a label/tooltip that disambiguates *why*
+   * this account is the default:
+   *  - "Profile default": the active profile explicitly prefers this account
+   *    for its provider (it's in the profile's defaultAccounts map).
+   *  - "Global default": no profile preference, so the account's own
+   *    account.isDefault flag is used as the global fallback.
+   * Profile default takes precedence when both are true.
+   */
+  private renderDefaultBadge() {
+    if (this.isProfileDefault) {
+      return html`<span
+        class="default-badge"
+        title="This profile prefers this account for its provider"
+        >Profile default</span
+      >`;
+    }
+    if (this.isGlobalDefault) {
+      return html`<span
+        class="default-badge global"
+        title="Used as the fallback when no profile preference is set"
+        >Global default</span
+      >`;
+    }
+    return nothing;
   }
 
   private getIntegrationIcon(type: IntegrationType) {
@@ -330,9 +368,7 @@ export class LvIntegrationCard extends LitElement {
             <div class="account-details">
               <div class="account-name">
                 ${name}
-                ${this.isProfileDefault
-                  ? html`<span class="default-badge">Default</span>`
-                  : nothing}
+                ${this.renderDefaultBadge()}
               </div>
               ${secondaryInfo
                 ? html`<span class="secondary-info">${secondaryInfo}</span>`

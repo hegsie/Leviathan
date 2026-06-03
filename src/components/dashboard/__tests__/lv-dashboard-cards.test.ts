@@ -253,15 +253,17 @@ describe('lv-profile-card', () => {
       expect(source!.textContent).to.include('Default profile');
     });
 
-    it('hides assignment source when source is "none"', async () => {
+    it('shows fallback label when source is "none" (first-available)', async () => {
       const profile = makeProfile();
       const el = await fixture<LvProfileCard>(
         html`<lv-profile-card .profile=${profile} .assignmentSource=${'none' as ProfileAssignmentSource}></lv-profile-card>`
       );
       await el.updateComplete;
 
-      const source = el.shadowRoot!.querySelector('.assignment-source');
-      expect(source).to.be.null;
+      const source = el.shadowRoot!.querySelector('.assignment-source.fallback');
+      expect(source).to.not.be.null;
+      expect(source!.textContent).to.include('no rule matched');
+      expect(source!.textContent).to.include('first available');
     });
 
     it('dispatches edit-profile event when edit button is clicked', async () => {
@@ -588,7 +590,7 @@ describe('lv-integration-card', () => {
       expect(statusText!.textContent).to.include('Unknown');
     });
 
-    it('shows "Default" badge when isProfileDefault is true', async () => {
+    it('shows "Profile default" badge when isProfileDefault is true', async () => {
       const account = makeAccount();
       const el = await fixture<LvIntegrationCard>(
         html`<lv-integration-card
@@ -600,15 +602,53 @@ describe('lv-integration-card', () => {
 
       const badge = el.shadowRoot!.querySelector('.default-badge');
       expect(badge).to.not.be.null;
-      expect(badge!.textContent).to.include('Default');
+      expect(badge!.textContent!.trim()).to.equal('Profile default');
+      // Not the muted global variant.
+      expect(badge!.classList.contains('global')).to.be.false;
+      expect(badge!.getAttribute('title')).to.include('profile prefers');
     });
 
-    it('does NOT show "Default" badge when isProfileDefault is false', async () => {
+    it('shows muted "Global default" badge when only isGlobalDefault is true', async () => {
       const account = makeAccount();
       const el = await fixture<LvIntegrationCard>(
         html`<lv-integration-card
           .account=${account}
           .isProfileDefault=${false}
+          .isGlobalDefault=${true}
+        ></lv-integration-card>`
+      );
+      await el.updateComplete;
+
+      const badge = el.shadowRoot!.querySelector('.default-badge');
+      expect(badge).to.not.be.null;
+      expect(badge!.textContent!.trim()).to.equal('Global default');
+      expect(badge!.classList.contains('global')).to.be.true;
+      expect(badge!.getAttribute('title')).to.include('fallback');
+    });
+
+    it('prefers "Profile default" over "Global default" when both are true', async () => {
+      const account = makeAccount();
+      const el = await fixture<LvIntegrationCard>(
+        html`<lv-integration-card
+          .account=${account}
+          .isProfileDefault=${true}
+          .isGlobalDefault=${true}
+        ></lv-integration-card>`
+      );
+      await el.updateComplete;
+
+      const badges = el.shadowRoot!.querySelectorAll('.default-badge');
+      expect(badges.length).to.equal(1);
+      expect(badges[0].textContent!.trim()).to.equal('Profile default');
+    });
+
+    it('does NOT show any default badge when neither default flag is set', async () => {
+      const account = makeAccount();
+      const el = await fixture<LvIntegrationCard>(
+        html`<lv-integration-card
+          .account=${account}
+          .isProfileDefault=${false}
+          .isGlobalDefault=${false}
         ></lv-integration-card>`
       );
       await el.updateComplete;
