@@ -38,3 +38,6 @@ playwright/.cache/
 
 # Misc
 *.tsbuildinfo
+
+# Claude Code transient agent worktrees
+.claude/worktrees/
