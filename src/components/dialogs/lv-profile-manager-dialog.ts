@@ -1947,7 +1947,7 @@ export class LvProfileManagerDialog extends LitElement {
    * the standalone Accounts view. Each opens the matching integration dialog.
    */
   private renderConnectButtons() {
-    const providers: IntegrationType[] = ['github', 'gitlab', 'bitbucket', 'azure-devops'];
+    const providers: IntegrationType[] = ['github', 'gitlab', 'bitbucket', 'azure-devops', 'oidc'];
     return html`
       <div class="form-section-title" style="margin-top: var(--spacing-lg);">
         Connect a new account
@@ -2142,6 +2142,7 @@ export class LvProfileManagerDialog extends LitElement {
           <option value="gitlab" ?selected=${this.editingAccount.integrationType === 'gitlab'}>GitLab</option>
           <option value="azure-devops" ?selected=${this.editingAccount.integrationType === 'azure-devops'}>Azure DevOps</option>
           <option value="bitbucket" ?selected=${this.editingAccount.integrationType === 'bitbucket'}>Bitbucket</option>
+          <option value="oidc" ?selected=${this.editingAccount.integrationType === 'oidc'}>Enterprise SSO (OIDC)</option>
         </select>
         <div class="form-hint">Integration type cannot be changed</div>
       </div>
@@ -2310,6 +2311,41 @@ export class LvProfileManagerDialog extends LitElement {
             })}
           />
           <div class="form-hint">Your Bitbucket workspace (usually your username or organization)</div>
+        </div>
+      `;
+    }
+
+    if (type === 'oidc') {
+      const issuerUrl = config?.type === 'oidc' ? config.issuerUrl : '';
+      const clientId = config?.type === 'oidc' ? config.clientId : '';
+      return html`
+        <div class="form-group">
+          <label>Issuer URL</label>
+          <input
+            type="url"
+            placeholder="https://auth.example.com"
+            .value=${issuerUrl ?? ''}
+            @input=${(e: Event) => this.updateEditingAccount('config', {
+              type: 'oidc',
+              issuerUrl: (e.target as HTMLInputElement).value || '',
+              clientId,
+            })}
+          />
+          <div class="form-hint">Your OpenID Connect issuer URL (Enterprise SSO).</div>
+        </div>
+        <div class="form-group">
+          <label>Client ID</label>
+          <input
+            type="text"
+            placeholder="your-client-id"
+            .value=${clientId ?? ''}
+            @input=${(e: Event) => this.updateEditingAccount('config', {
+              type: 'oidc',
+              issuerUrl,
+              clientId: (e.target as HTMLInputElement).value || '',
+            })}
+          />
+          <div class="form-hint">The OAuth client ID registered with your IdP.</div>
         </div>
       `;
     }

@@ -33,6 +33,7 @@ import './components/dialogs/lv-config-dialog.ts';
 import './components/dialogs/lv-credentials-dialog.ts';
 import './components/dialogs/lv-github-dialog.ts';
 import './components/dialogs/lv-gitlab-dialog.ts';
+import './components/dialogs/lv-oidc-dialog.ts';
 import './components/dialogs/lv-bitbucket-dialog.ts';
 import './components/dialogs/lv-azure-devops-dialog.ts';
 import './components/dialogs/lv-profile-manager-dialog.ts';
@@ -573,6 +574,9 @@ export class AppShell extends LitElement {
   // Azure DevOps dialog
   @state() private showAzureDevOps = false;
 
+  // OIDC / Enterprise SSO dialog
+  @state() private showOidc = false;
+
   // Profile Manager dialog
   @state() private showProfileManager = false;
   // Which view the Profile Manager should open to. 'accounts' is set when the
@@ -976,6 +980,9 @@ export class AppShell extends LitElement {
       case 'ado':
         this.showAzureDevOps = true;
         break;
+      case 'oidc':
+        this.showOidc = true;
+        break;
     }
   }
 
@@ -1359,7 +1366,7 @@ export class AppShell extends LitElement {
   // behind it (it stays open underneath), so closing the integration dialog reveals
   // the account picker again exactly where the user left off.
   private get integrationDialogOpen(): boolean {
-    return this.showGitHub || this.showGitLab || this.showBitbucket || this.showAzureDevOps;
+    return this.showGitHub || this.showGitLab || this.showBitbucket || this.showAzureDevOps || this.showOidc;
   }
 
   private handleTriggerAbort = (): void => {
@@ -1751,6 +1758,7 @@ export class AppShell extends LitElement {
     this.showGitLab = false;
     this.showBitbucket = false;
     this.showAzureDevOps = false;
+    this.showOidc = false;
     this.profileManagerView = 'accounts';
     this.showProfileManager = true;
   }
@@ -2082,6 +2090,13 @@ export class AppShell extends LitElement {
         category: 'action',
         icon: 'azure',
         action: this.requiresRepository(() => { this.showAzureDevOps = true; }),
+      },
+      {
+        id: 'oidc',
+        label: 'Enterprise SSO (OIDC) Integration',
+        category: 'action',
+        icon: 'key',
+        action: () => { this.showOidc = true; },
       },
       {
         id: 'profiles',
@@ -2479,6 +2494,7 @@ export class AppShell extends LitElement {
               @open-gitlab=${() => { this.showGitLab = true; }}
               @open-bitbucket=${() => { this.showBitbucket = true; }}
               @open-azure-devops=${() => { this.showAzureDevOps = true; }}
+              @open-oidc=${() => { this.showOidc = true; }}
               @refresh-account=${this.handleRefreshAccount}
               @repository-refresh=${() => this.handleRefresh()}
             ></lv-context-dashboard>
@@ -3031,6 +3047,13 @@ export class AppShell extends LitElement {
         @manage-accounts=${this.handleManageAccounts}
       ></lv-azure-devops-dialog>
 
+      <lv-oidc-dialog
+        ?open=${this.showOidc}
+        ?backButton=${this.showProfileManager}
+        @close=${() => { this.showOidc = false; }}
+        @manage-accounts=${this.handleManageAccounts}
+      ></lv-oidc-dialog>
+
       <lv-profile-manager-dialog
         ?open=${this.showProfileManager}
         ?demoted=${this.integrationDialogOpen}
@@ -3041,6 +3064,7 @@ export class AppShell extends LitElement {
         @open-gitlab=${() => { this.showGitLab = true; }}
         @open-bitbucket=${() => { this.showBitbucket = true; }}
         @open-azure-devops=${() => { this.showAzureDevOps = true; }}
+        @open-oidc=${() => { this.showOidc = true; }}
         @migration-needed=${() => { this.showMigrationDialog = true; }}
       ></lv-profile-manager-dialog>
 

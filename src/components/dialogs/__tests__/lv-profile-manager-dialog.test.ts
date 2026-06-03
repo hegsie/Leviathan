@@ -1652,6 +1652,23 @@ describe('lv-profile-manager-dialog', () => {
       expect(labels).to.include('GitLab');
       expect(labels).to.include('Bitbucket');
       expect(labels).to.include('Azure DevOps');
+      expect(labels).to.include('Enterprise SSO (OIDC)');
+    });
+
+    it('dispatches open-oidc when the Enterprise SSO connect button is clicked', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      let opened = false;
+      el.addEventListener('open-oidc', () => { opened = true; });
+      const oidcBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.form-section .btn.btn-sm')
+      ).find((b) => b.textContent?.trim() === 'Enterprise SSO (OIDC)') as HTMLButtonElement;
+      oidcBtn.click();
+      await el.updateComplete;
+
+      expect(opened).to.be.true;
     });
 
     it('dispatches open-<provider> when a connect button is clicked from the accounts view', async () => {

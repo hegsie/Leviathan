@@ -19,6 +19,7 @@ export {
   createEmptyGitLabAccount,
   createEmptyAzureDevOpsAccount,
   createEmptyBitbucketAccount,
+  createEmptyOidcAccount,
   getAccountDisplayLabel,
   generateAccountId,
 } from './integration-accounts.types';
@@ -28,6 +29,7 @@ import {
   createEmptyGitLabAccount as _createEmptyGitLabAccount,
   createEmptyAzureDevOpsAccount as _createEmptyAzureDevOpsAccount,
   createEmptyBitbucketAccount as _createEmptyBitbucketAccount,
+  createEmptyOidcAccount as _createEmptyOidcAccount,
 } from './integration-accounts.types';
 
 /**
@@ -268,6 +270,10 @@ export function createEmptyIntegrationAccount(
       return _createEmptyAzureDevOpsAccount(instanceOrOrg ?? '');
     case 'bitbucket':
       return _createEmptyBitbucketAccount(instanceOrOrg ?? '');
+    case 'oidc':
+      // For OIDC, `instanceOrOrg` carries the issuer URL. The client ID is set
+      // by the dialog after the user enters it (or via createOidcAccount).
+      return _createEmptyOidcAccount(instanceOrOrg ?? '');
     default:
       throw new Error(`Unknown integration type: ${integrationType}`);
   }

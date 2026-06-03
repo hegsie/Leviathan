@@ -55,6 +55,11 @@ pub struct PendingOAuthFlow {
     pub verifier: String,
     /// Instance / issuer URL (GitLab self-hosted, Azure tenant, OIDC issuer).
     pub instance_url: Option<String>,
+    /// The client ID used to build the authorize URL. Stored so the token
+    /// exchange can reuse it for providers (e.g. OIDC) whose client ID is
+    /// per-account and therefore not available from the embedded client-ID map
+    /// the frontend uses for the built-in providers.
+    pub client_id: String,
     /// The redirect URI used when building the authorize URL.
     pub redirect_uri: String,
     /// Creation timestamp for TTL enforcement.
@@ -288,6 +293,7 @@ pub async fn oauth_get_authorize_url(
             provider: provider_enum,
             verifier: pkce.verifier,
             instance_url,
+            client_id: config.client_id.clone(),
             redirect_uri: config.redirect_uri.clone(),
             created_at: std::time::Instant::now(),
         },
@@ -334,6 +340,16 @@ pub async fn oauth_exchange_code(
     let verifier = flow.verifier.clone();
     let redirect_uri = flow.redirect_uri.clone();
     let instance_url = flow.instance_url.clone();
+
+    // Prefer the frontend-supplied client ID (built-in providers source it from
+    // the embedded client-ID map), but fall back to the one captured when the
+    // authorize URL was built. OIDC client IDs are per-account, so the frontend
+    // passes an empty string for them and we must use the stored value.
+    let client_id = if client_id.trim().is_empty() {
+        flow.client_id.clone()
+    } else {
+        client_id
+    };
 
     // Build token URL based on provider
     let token_url = match provider_enum {
@@ -1055,9 +1071,63 @@ mod tests {
             provider,
             verifier: verifier.to_string(),
             instance_url: None,
+            client_id: "test-client-id".to_string(),
             redirect_uri: "http://127.0.0.1:8080/callback".to_string(),
             created_at: std::time::Instant::now(),
         }
+    }
+
+    #[test]
+    fn test_pending_flow_stores_client_id() {
+        // The pending flow must retain the client ID used to build the authorize
+        // URL so the token exchange can reuse it for per-account providers (OIDC).
+        let state = OAuthState::default();
+        let mut flow = make_flow(OAuthProvider::Oidc, "oidc-verifier");
+        flow.client_id = "oidc-account-client".to_string();
+        flow.instance_url = Some("https://auth.example.com".to_string());
+        state
+            .insert_pending("oidc-state".to_string(), flow)
+            .unwrap();
+
+        let retrieved = state.take_pending("oidc-state").unwrap().unwrap();
+        assert_eq!(retrieved.provider, OAuthProvider::Oidc);
+        assert_eq!(retrieved.client_id, "oidc-account-client");
+        assert_eq!(
+            retrieved.instance_url,
+            Some("https://auth.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_exchange_client_id_fallback_semantics() {
+        // Mirrors the fallback used in oauth_exchange_code: an empty/whitespace
+        // client ID from the frontend falls back to the one stored on the flow
+        // (OIDC), while a non-empty value is preserved (built-in providers).
+        let stored = "stored-oidc-client".to_string();
+
+        let frontend_empty = String::new();
+        let resolved = if frontend_empty.trim().is_empty() {
+            stored.clone()
+        } else {
+            frontend_empty
+        };
+        assert_eq!(resolved, "stored-oidc-client");
+
+        let frontend_whitespace = "   ".to_string();
+        let resolved = if frontend_whitespace.trim().is_empty() {
+            stored.clone()
+        } else {
+            frontend_whitespace
+        };
+        assert_eq!(resolved, "stored-oidc-client");
+
+        let frontend_present = "github-embedded-client".to_string();
+        let resolved = if frontend_present.trim().is_empty() {
+            stored.clone()
+        } else {
+            frontend_present
+        };
+        assert_eq!(resolved, "github-embedded-client");
     }
 
     #[test]

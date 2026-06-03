@@ -937,7 +937,7 @@ export class LvContextDashboard extends LitElement {
 
   private openIntegrationDialog(type: IntegrationType): void {
     // Only dispatch for types that have registered handlers in app-shell
-    const supportedTypes = ['github', 'gitlab', 'azure-devops', 'bitbucket'];
+    const supportedTypes = ['github', 'gitlab', 'azure-devops', 'bitbucket', 'oidc'];
     if (!supportedTypes.includes(type)) {
       console.warn(`No dialog handler for integration type: ${type}`);
       return;

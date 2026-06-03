@@ -170,6 +170,24 @@ export function createEmptyBitbucketAccount(
 }
 
 /**
+ * Create an empty OIDC (Enterprise SSO) account
+ */
+export function createEmptyOidcAccount(
+  issuerUrl: string = '',
+  clientId: string = ''
+): Omit<IntegrationAccount, 'id'> {
+  return {
+    name: '',
+    integrationType: 'oidc',
+    urlPatterns: [],
+    isDefault: false,
+    color: null,
+    config: { type: 'oidc', issuerUrl, clientId },
+    cachedUser: null,
+  };
+}
+
+/**
  * Get the instance URL from an account's config (for GitLab)
  */
 export function getInstanceUrl(account: IntegrationAccount): string | null {
@@ -287,6 +305,26 @@ export function createBitbucketAccount(
     isDefault: false,
     color: null,
     config: { type: 'bitbucket', workspace },
+    cachedUser: null,
+  };
+}
+
+/**
+ * Create a new OIDC (Enterprise SSO) account with a generated ID
+ */
+export function createOidcAccount(
+  name: string = '',
+  issuerUrl: string = '',
+  clientId: string = ''
+): IntegrationAccount {
+  return {
+    id: generateAccountId(),
+    name,
+    integrationType: 'oidc',
+    urlPatterns: [],
+    isDefault: false,
+    color: null,
+    config: { type: 'oidc', issuerUrl, clientId },
     cachedUser: null,
   };
 }
