@@ -615,7 +615,7 @@ export class LvBitbucketDialog extends LitElement {
   @state() private createIssueTitle = '';
   @state() private createIssueContent = '';
 
-  async connectedCallback(): Promise<void> {
+  connectedCallback(): void {
     super.connectedCallback();
 
     // Set up OAuth event listeners
@@ -636,7 +636,7 @@ export class LvBitbucketDialog extends LitElement {
     // re-derive the preferred account so a profile switch is reflected here.
     let lastActiveProfileId = unifiedProfileStore.getState().activeProfile?.id ?? null;
     this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
-      this.accounts = getAccountsByType('bitbucket');
+      this.syncBitbucketAccounts();
       if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
         this.selectedAccountId = null;
       }
@@ -654,7 +654,7 @@ export class LvBitbucketDialog extends LitElement {
     });
 
     // Initialize from current state
-    this.accounts = getAccountsByType('bitbucket');
+    this.syncBitbucketAccounts();
     if (this.accounts.length > 0 && !this.selectedAccountId) {
       const preferred = getActiveProfilePreferredAccount('bitbucket')
         ?? selectDefaultGlobalAccount('bitbucket')
@@ -662,8 +662,23 @@ export class LvBitbucketDialog extends LitElement {
       this.selectedAccountId = preferred?.id ?? null;
     }
 
-    if (this.open) {
-      await this.loadInitialData();
+    // loadInitialData() is intentionally NOT called here — updated() runs it on
+    // the initial 'open' change. Calling it in both places double-loaded and
+    // caused render churn (the auth-method toggle/form detaching mid-interaction).
+  }
+
+  /**
+   * Update `accounts` only when the bitbucket account set actually changed, so a
+   * spurious store emit doesn't replace the array reference and force a needless
+   * re-render (a source of the open-load render churn).
+   */
+  private syncBitbucketAccounts(): void {
+    const next = getAccountsByType('bitbucket');
+    if (
+      next.length !== this.accounts.length ||
+      next.some((a, i) => a.id !== this.accounts[i]?.id)
+    ) {
+      this.accounts = next;
     }
   }
 
@@ -710,7 +725,7 @@ export class LvBitbucketDialog extends LitElement {
       // nothing is selected (fresh open clears selectedAccountId in updated()).
       // Manual switches set selectedAccountId before calling loadInitialData()
       // and must not be overwritten.
-      this.accounts = getAccountsByType('bitbucket');
+      this.syncBitbucketAccounts();
       if (this.accounts.length > 0 && !this.selectedAccountId) {
         const preferred = getActiveProfilePreferredAccount('bitbucket')
           ?? selectDefaultGlobalAccount('bitbucket');
@@ -974,7 +989,7 @@ export class LvBitbucketDialog extends LitElement {
 
           // Refresh accounts list
           await unifiedProfileService.loadUnifiedProfiles();
-          this.accounts = getAccountsByType('bitbucket');
+          this.syncBitbucketAccounts();
         }
 
         this.syncSharedConnectionStatus(true);
@@ -1033,7 +1048,7 @@ export class LvBitbucketDialog extends LitElement {
       await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
 
       await unifiedProfileService.loadUnifiedProfiles();
-      this.accounts = getAccountsByType('bitbucket');
+      this.syncBitbucketAccounts();
 
       this.selectedAccountId = this.accounts.length > 0 ? this.accounts[0].id : null;
       this.connectionStatus = null;
@@ -1148,7 +1163,7 @@ export class LvBitbucketDialog extends LitElement {
         this.selectedAccountId = savedAccount.id;
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();
-        this.accounts = getAccountsByType('bitbucket');
+        this.syncBitbucketAccounts();
       }
 
       // Force UI update
