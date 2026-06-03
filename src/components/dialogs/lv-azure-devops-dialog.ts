@@ -1202,6 +1202,9 @@ export class LvAzureDevOpsDialog extends LitElement {
       this.pullRequests = [];
       this.workItems = [];
       this.pipelineRuns = [];
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to disconnect';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }
@@ -1221,18 +1224,14 @@ export class LvAzureDevOpsDialog extends LitElement {
 
     this.isLoading = true;
 
+    // Delete the account record (source of truth) FIRST, then best-effort token
+    // cleanup, matching GitHub/GitLab/OIDC. Deleting tokens first leaves a
+    // zombie account on a partial failure.
+    const accountId = this.selectedAccountId;
+    const organization = this.organizationInput;
     try {
-      // Delete the stored token
-      await credentialService.deleteAccountToken('azure-devops', this.selectedAccountId);
-
-      // Delete git credentials from keyring
-      await gitService.deleteGitCredentials('https://dev.azure.com');
-      if (this.organizationInput) {
-        await gitService.deleteGitCredentials(`https://${this.organizationInput}.visualstudio.com`);
-      }
-
       // Delete the account from unified profiles
-      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+      await unifiedProfileService.deleteGlobalAccount(accountId);
 
       // Refresh accounts list
       await unifiedProfileService.loadUnifiedProfiles();
@@ -1247,12 +1246,29 @@ export class LvAzureDevOpsDialog extends LitElement {
       this.pipelineRuns = [];
       this.organizationInput = '';
 
+      // Best-effort token/credential cleanup after the record is gone.
+      try {
+        await credentialService.deleteAccountToken('azure-devops', accountId);
+        await gitService.deleteGitCredentials('https://dev.azure.com');
+        if (organization) {
+          await gitService.deleteGitCredentials(`https://${organization}.visualstudio.com`);
+        }
+      } catch (tokenErr) {
+        const msg =
+          tokenErr instanceof Error
+            ? `Account deleted, but its stored token could not be removed: ${tokenErr.message}`
+            : 'Account deleted, but its stored token could not be removed.';
+        this.error = msg;
+        showToast(msg, 'error');
+      }
+
       // If there are remaining accounts, reload data for the first one
       if (this.selectedAccountId) {
         await this.loadInitialData();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to delete integration';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }

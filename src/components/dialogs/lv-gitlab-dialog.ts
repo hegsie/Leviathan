@@ -1053,6 +1053,9 @@ export class LvGitLabDialog extends LitElement {
       this.mergeRequests = [];
       this.issues = [];
       this.pipelines = [];
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to disconnect';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }

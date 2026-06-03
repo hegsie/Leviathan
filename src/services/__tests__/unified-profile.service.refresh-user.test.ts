@@ -302,6 +302,52 @@ describe('unified-profile.service - refreshAccountCachedUser', () => {
     expect(status).to.not.be.undefined;
     expect(status.status).to.equal('disconnected');
   });
+
+  it('marks an OIDC account with a stored token as connected and keeps cachedUser', async () => {
+    const cachedUser = {
+      username: 'ssouser',
+      displayName: 'SSO User',
+      avatarUrl: null,
+      email: 'sso@example.com',
+    };
+    const account = createTestAccount({
+      id: 'oidc-token-1',
+      name: 'Enterprise SSO',
+      integrationType: 'oidc',
+      config: { type: 'oidc', issuerUrl: 'https://auth.example.com', clientId: 'cid' },
+      cachedUser,
+    });
+    unifiedProfileStore.getState().setAccounts([account]);
+    setMockToken('oidc', 'oidc-token-1', 'oidc-access-token');
+
+    const result = await refreshAccountCachedUser(account);
+
+    // OIDC has no cheap server ping — a present token means "connected" and the
+    // existing cachedUser must NOT be wiped.
+    expect(result).to.not.be.null;
+    expect(result!.username).to.equal('ssouser');
+    expect(result!.email).to.equal('sso@example.com');
+
+    const status = unifiedProfileStore.getState().accountConnectionStatus['oidc-token-1'];
+    expect(status.status).to.equal('connected');
+  });
+
+  it('marks an OIDC account without a token as disconnected', async () => {
+    const account = createTestAccount({
+      id: 'oidc-notoken-1',
+      name: 'Enterprise SSO',
+      integrationType: 'oidc',
+      config: { type: 'oidc', issuerUrl: 'https://auth.example.com', clientId: 'cid' },
+    });
+    unifiedProfileStore.getState().setAccounts([account]);
+    // No token stored
+
+    const result = await refreshAccountCachedUser(account);
+    expect(result).to.be.null;
+
+    const status = unifiedProfileStore.getState().accountConnectionStatus['oidc-notoken-1'];
+    expect(status.status).to.equal('disconnected');
+  });
 });
 
 describe('unified-profile.service - validateAllAccountTokens', () => {

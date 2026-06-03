@@ -338,6 +338,19 @@ export class LvProfileManagerDialog extends LitElement {
         margin-top: var(--spacing-xs);
       }
 
+      .attach-hint {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        font-size: var(--font-size-xs);
+        color: var(--color-warning, var(--color-text-secondary));
+      }
+
+      .btn-emphasized {
+        box-shadow: 0 0 0 2px var(--color-primary);
+      }
+
       .form-row {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -654,6 +667,10 @@ export class LvProfileManagerDialog extends LitElement {
   // Tracks unsaved edits so we can warn before discarding them (back/close).
   @state() private profileFormDirty = false;
   @state() private accountFormDirty = false;
+  // Name of an account just connected+attached via revealAfterConnect. Drives an
+  // inline "Save Profile to keep <account> attached" hint so the user doesn't
+  // assume the freshly-connected account is already persisted on the profile.
+  @state() private justAttachedAccountName: string | null = null;
   // Where the account edit form should return to (it can be reached from the
   // profile form or from the standalone Accounts view).
   private accountReturnView: ViewMode = 'edit';
@@ -931,6 +948,7 @@ export class LvProfileManagerDialog extends LitElement {
         this.viewMode = 'list';
         this.editingProfile = null;
         this.profileFormDirty = false;
+        this.justAttachedAccountName = null;
     }
   }
 
@@ -1110,6 +1128,7 @@ export class LvProfileManagerDialog extends LitElement {
       // Changes are persisted — clear the dirty flag so navigating back doesn't
       // prompt to discard.
       this.profileFormDirty = false;
+      this.justAttachedAccountName = null;
       this.handleBack();
     } catch (error) {
       showToast(`Failed to save profile: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
@@ -1417,7 +1436,16 @@ export class LvProfileManagerDialog extends LitElement {
       case 'edit':
         return html`
           <button class="btn btn-secondary" @click=${this.handleBack}>Cancel</button>
-          <button class="btn btn-primary" @click=${this.handleSave} ?disabled=${this.isSaving}>
+          ${this.justAttachedAccountName
+            ? html`<span class="attach-hint" data-testid="attach-keep-hint">
+                Save Profile to keep <strong>${this.justAttachedAccountName}</strong> attached
+              </span>`
+            : html`<div style="flex: 1;"></div>`}
+          <button
+            class="btn btn-primary ${this.justAttachedAccountName ? 'btn-emphasized' : ''}"
+            @click=${this.handleSave}
+            ?disabled=${this.isSaving}
+          >
             ${this.isSaving ? 'Saving...' : 'Save Profile'}
           </button>
         `;
@@ -2319,6 +2347,9 @@ export class LvProfileManagerDialog extends LitElement {
         showToast(`Replaced the previously attached ${INTEGRATION_TYPE_NAMES[type]} account`, 'info');
       }
       this.setEditingProfileAccount(type, newlyConnected.id);
+      // Surface a hint near Save: the account is attached to the in-memory draft
+      // only and is dropped if the user backs out without saving.
+      this.justAttachedAccountName = newlyConnected.name;
       this.viewMode = this.editingProfile.id ? 'edit' : 'create';
       return;
     }

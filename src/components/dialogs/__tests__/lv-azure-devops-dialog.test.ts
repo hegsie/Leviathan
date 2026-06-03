@@ -21,6 +21,7 @@ const keyringStore = new Map<string, string>();
 
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-azure-devops-dialog.ts';
@@ -671,6 +672,61 @@ describe('lv-azure-devops-dialog', () => {
       await el.updateComplete;
 
       expect((el as unknown as { error: string | null }).error).to.include('ado detect boom');
+    });
+  });
+
+  describe('Delete', () => {
+    async function openConnectedDialog(): Promise<LvAzureDevOpsDialog> {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'ado-acc-1';
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      await el.updateComplete;
+      return el;
+    }
+
+    it('deletes the account record BEFORE the keyring token (record is source of truth)', async () => {
+      const el = await openConnectedDialog();
+      invokeHistory.length = 0;
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      const deleteAccountIdx = invokeHistory.findIndex((h) => h.command === 'delete_global_account');
+      const deleteTokenIdx = invokeHistory.findIndex((h) => h.command === 'delete_keyring_token');
+      expect(deleteAccountIdx, 'account record deletion happened').to.be.greaterThan(-1);
+      expect(deleteTokenIdx, 'token deletion happened').to.be.greaterThan(-1);
+      expect(deleteAccountIdx).to.be.lessThan(deleteTokenIdx);
+    });
+
+    it('surfaces an error (inline + toast) when account deletion fails', async () => {
+      const el = await openConnectedDialog();
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        if (command === 'delete_global_account') throw new Error('delete record boom');
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.include('delete record boom');
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /delete record boom/.test(t.message))).to.be.true;
     });
   });
 });

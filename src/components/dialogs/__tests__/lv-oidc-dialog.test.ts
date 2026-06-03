@@ -96,7 +96,12 @@ function setupMockInvoke(): void {
     }
 
     if (command === 'get_unified_profiles_config') {
-      return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+      return {
+        version: 3,
+        profiles: [],
+        accounts: unifiedProfileStore.getState().accounts,
+        repositoryAssignments: {},
+      };
     }
     if (command === 'load_unified_profile_for_repository') return null;
     if (command === 'save_global_account') return params;
@@ -308,6 +313,100 @@ describe('lv-oidc-dialog', () => {
       const status = el.shadowRoot!.querySelector('.connection-status');
       expect(status).to.not.be.null;
       expect(status!.textContent).to.include('SSO User');
+    });
+  });
+
+  describe('Disconnect', () => {
+    it('persists a cleared cachedUser so the account does not re-show Connected', async () => {
+      const connectedAccount = {
+        ...mockAccount,
+        cachedUser: { username: 'ssouser', displayName: 'SSO User', email: null, avatarUrl: null },
+      };
+      unifiedProfileStore.getState().setAccounts([connectedAccount]);
+
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+      expect((el as unknown as { connected: boolean }).connected).to.be.true;
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleDisconnect: () => Promise<void> }).handleDisconnect();
+      await el.updateComplete;
+
+      // Token deleted from keyring.
+      expect(invokeHistory.some((h) => h.command === 'delete_keyring_token')).to.be.true;
+
+      // cachedUser cleared via save_global_account (drives connected state on reopen).
+      const saveCall = invokeHistory.find((h) => h.command === 'save_global_account');
+      expect(saveCall, 'save_global_account called to clear cachedUser').to.not.be.undefined;
+      const saved = (saveCall!.args as Record<string, unknown>).account as IntegrationAccount;
+      expect(saved.cachedUser).to.equal(null);
+
+      // UI reflects disconnected immediately.
+      expect((el as unknown as { connected: boolean }).connected).to.be.false;
+      expect((el as unknown as { connectedUser: unknown }).connectedUser).to.equal(null);
+    });
+
+    it('surfaces an error toast when disconnect fails', async () => {
+      const connectedAccount = {
+        ...mockAccount,
+        cachedUser: { username: 'ssouser', displayName: 'SSO User', email: null, avatarUrl: null },
+      };
+      unifiedProfileStore.getState().setAccounts([connectedAccount]);
+
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        // saveGlobalAccount (clearing cachedUser) throws on the invoke layer.
+        if (command === 'save_global_account') throw new Error('persist boom');
+        return origMock(command, args);
+      };
+
+      uiStore.getState().toasts.length = 0;
+      await (el as unknown as { handleDisconnect: () => Promise<void> }).handleDisconnect();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.include('persist boom');
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error')).to.be.true;
+    });
+  });
+
+  describe('Add account guard', () => {
+    it('does not clobber a half-typed Add form when a background store emit fires', async () => {
+      const connectedAccount = {
+        ...mockAccount,
+        cachedUser: { username: 'ssouser', displayName: 'SSO User', email: null, avatarUrl: null },
+      };
+      unifiedProfileStore.getState().setAccounts([connectedAccount]);
+
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      // User clicks "Add account": selection cleared, form blanked.
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+
+      // User starts typing a new issuer/client/name.
+      const elState = el as unknown as {
+        issuerUrlInput: string;
+        clientIdInput: string;
+        nameInput: string;
+      };
+      elState.issuerUrlInput = 'https://new-issuer.example.com';
+      elState.clientIdInput = 'new-client';
+      elState.nameInput = 'My New SSO';
+
+      // A background validation emit (e.g. setAccountConnectionStatus) fires.
+      unifiedProfileStore.getState().setAccountConnectionStatus('oidc-acc-1', 'connected');
+      await el.updateComplete;
+
+      // The half-typed form must be preserved (not overwritten by applyAccount).
+      expect(elState.issuerUrlInput).to.equal('https://new-issuer.example.com');
+      expect(elState.clientIdInput).to.equal('new-client');
+      expect(elState.nameInput).to.equal('My New SSO');
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
     });
   });
 });

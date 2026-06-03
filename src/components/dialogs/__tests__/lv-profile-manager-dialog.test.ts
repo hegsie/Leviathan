@@ -1088,33 +1088,47 @@ describe('lv-profile-manager-dialog', () => {
       expect(findCommands('get_unified_profiles_config').length).to.be.greaterThan(0);
     });
 
-    it('emits an explicit return-target context with attach intent from the picker', async () => {
-      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
-      useConfig([profile], []);
-      const el = await renderDialog();
-      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
-      await el.updateComplete;
-      getAddButton(el).click();
-      await el.updateComplete;
+    // Every provider's connect button must carry the same explicit attach
+    // context — not just GitHub. The button label is INTEGRATION_TYPE_NAMES[type]
+    // and the event is `open-${type}`.
+    const providerCases: Array<{ type: string; label: string }> = [
+      { type: 'github', label: 'GitHub' },
+      { type: 'gitlab', label: 'GitLab' },
+      { type: 'bitbucket', label: 'Bitbucket' },
+      { type: 'azure-devops', label: 'Azure DevOps' },
+      { type: 'oidc', label: 'Enterprise SSO (OIDC)' },
+    ];
 
-      let detail: unknown = null;
-      el.addEventListener('open-github', (e) => {
-        detail = (e as CustomEvent).detail;
-      });
-      const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
-        (b) => b.textContent?.trim() === 'GitHub'
-      ) as HTMLButtonElement;
-      githubBtn.click();
-      await el.updateComplete;
+    providerCases.forEach(({ type, label }) => {
+      it(`emits an explicit return-target context with attach intent from the picker (${type})`, async () => {
+        const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
+        useConfig([profile], []);
+        const el = await renderDialog();
+        (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+        await el.updateComplete;
+        getAddButton(el).click();
+        await el.updateComplete;
 
-      // Connecting from the attach picker carries an explicit context: return to
-      // the profile manager, target this profile, WITH attach intent.
-      expect(detail).to.deep.equal({
-        returnTo: 'profile-manager',
-        integrationType: 'github',
-        profileId: 'p1',
-        profileName: 'P1',
-        attach: true,
+        let detail: unknown = null;
+        el.addEventListener(`open-${type}`, (e) => {
+          detail = (e as CustomEvent).detail;
+        });
+        const providerBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+          (b) => b.textContent?.trim() === label
+        ) as HTMLButtonElement;
+        expect(providerBtn, `connect button for ${type}`).to.not.be.undefined;
+        providerBtn.click();
+        await el.updateComplete;
+
+        // Connecting from the attach picker carries an explicit context: return to
+        // the profile manager, target this profile, WITH attach intent.
+        expect(detail).to.deep.equal({
+          returnTo: 'profile-manager',
+          integrationType: type,
+          profileId: 'p1',
+          profileName: 'P1',
+          attach: true,
+        });
       });
     });
 
@@ -1159,6 +1173,50 @@ describe('lv-profile-manager-dialog', () => {
       const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
       expect(accountsSection!.querySelectorAll('.account-item').length).to.equal(1);
       expect(accountsSection!.textContent).to.include('New GH');
+    });
+
+    it('shows a "Save Profile to keep <account>" hint after attach-on-connect and emphasizes Save', async () => {
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
+      useConfig([profile], []);
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'GitHub'
+      ) as HTMLButtonElement;
+      githubBtn.click();
+      await el.updateComplete;
+
+      el.demoted = true;
+      await el.updateComplete;
+      const newGh = makeAccount({ id: 'gh-new', name: 'New GH', integrationType: 'github' });
+      useConfig([profile], [newGh]);
+
+      el.demoted = false;
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: true,
+      });
+      await el.updateComplete;
+
+      // Inline hint near Save reduces the surprise of a Cancel dropping the attach.
+      const hint = el.shadowRoot!.querySelector('[data-testid="attach-keep-hint"]');
+      expect(hint, 'attach-keep hint visible').to.not.be.null;
+      expect(hint!.textContent).to.include('New GH');
+
+      // Save button is visually emphasized while the hint is showing.
+      const saveBtn = Array.from(el.shadowRoot!.querySelectorAll('.dialog-footer .btn-primary')).find(
+        (b) => b.textContent?.trim().includes('Save Profile')
+      ) as HTMLButtonElement;
+      expect(saveBtn).to.not.be.undefined;
+      expect(saveBtn.classList.contains('btn-emphasized')).to.be.true;
     });
 
     it('auto-attaches the existing default account when re-connecting a provider', async () => {

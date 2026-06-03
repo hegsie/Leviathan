@@ -75,14 +75,28 @@ export async function saveUnifiedProfile(profile: UnifiedProfile): Promise<Unifi
   }
 
   // Update store
-  const existingProfile = unifiedProfileStore.getState().profiles.find((p) => p.id === profile.id);
+  const saved = result.data!;
+  const store = unifiedProfileStore.getState();
+  const existingProfile = store.profiles.find((p) => p.id === saved.id);
   if (existingProfile) {
-    unifiedProfileStore.getState().updateProfile(result.data!);
+    store.updateProfile(saved);
   } else {
-    unifiedProfileStore.getState().addProfile(result.data!);
+    store.addProfile(saved);
   }
 
-  return result.data!;
+  // The Rust backend clears isDefault on all OTHER profiles when one is saved as
+  // default, but the store only knows about the single saved entry. Mirror the
+  // backend so stale "Default" badges disappear immediately without a full
+  // loadUnifiedProfiles() reload.
+  if (saved.isDefault) {
+    for (const p of unifiedProfileStore.getState().profiles) {
+      if (p.id !== saved.id && p.isDefault) {
+        unifiedProfileStore.getState().updateProfile({ ...p, isDefault: false });
+      }
+    }
+  }
+
+  return saved;
 }
 
 /**
@@ -169,14 +183,28 @@ export async function saveGlobalAccount(account: IntegrationAccount): Promise<In
   }
 
   // Update store
-  const existingAccount = unifiedProfileStore.getState().accounts.find((a) => a.id === account.id);
+  const saved = result.data!;
+  const store = unifiedProfileStore.getState();
+  const existingAccount = store.accounts.find((a) => a.id === saved.id);
   if (existingAccount) {
-    unifiedProfileStore.getState().updateAccount(result.data!);
+    store.updateAccount(saved);
   } else {
-    unifiedProfileStore.getState().addAccount(result.data!);
+    store.addAccount(saved);
   }
 
-  return result.data!;
+  // The Rust backend clears isDefault on all OTHER accounts of the same
+  // integration type when one is saved as default. The store only updated the
+  // single saved entry, so mirror the backend here to keep "Default" badges in
+  // sync without a full loadUnifiedProfiles() reload.
+  if (saved.isDefault) {
+    for (const a of unifiedProfileStore.getState().accounts) {
+      if (a.id !== saved.id && a.integrationType === saved.integrationType && a.isDefault) {
+        unifiedProfileStore.getState().updateAccount({ ...a, isDefault: false });
+      }
+    }
+  }
+
+  return saved;
 }
 
 /**
@@ -716,6 +744,16 @@ export async function refreshAccountCachedUser(
             email: null, // Bitbucket API doesn't return email in user endpoint
           };
         }
+        break;
+      }
+      case 'oidc': {
+        // OIDC has no cheap server-side identity ping (the id_token is decoded
+        // once at sign-in and cached). Treat the presence of a stored token as
+        // "connected" and keep the existing cachedUser rather than wiping it.
+        // We already early-returned 'disconnected' above when no token exists,
+        // so reaching here means a token is present.
+        isConnected = true;
+        cachedUser = account.cachedUser;
         break;
       }
     }

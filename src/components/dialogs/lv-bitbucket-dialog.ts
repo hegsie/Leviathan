@@ -1035,6 +1035,9 @@ export class LvBitbucketDialog extends LitElement {
       this.pullRequests = [];
       this.issues = [];
       this.pipelines = [];
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to disconnect';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }
@@ -1054,9 +1057,12 @@ export class LvBitbucketDialog extends LitElement {
 
     this.isLoading = true;
 
+    // Delete the account record (source of truth) FIRST, then best-effort token
+    // cleanup, matching GitHub/GitLab/OIDC. Deleting the token first leaves a
+    // zombie account on a partial failure.
+    const accountId = this.selectedAccountId;
     try {
-      await credentialService.deleteAccountToken('bitbucket', this.selectedAccountId);
-      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+      await unifiedProfileService.deleteGlobalAccount(accountId);
 
       await unifiedProfileService.loadUnifiedProfiles();
       this.syncBitbucketAccounts();
@@ -1067,11 +1073,23 @@ export class LvBitbucketDialog extends LitElement {
       this.issues = [];
       this.pipelines = [];
 
+      try {
+        await credentialService.deleteAccountToken('bitbucket', accountId);
+      } catch (tokenErr) {
+        const msg =
+          tokenErr instanceof Error
+            ? `Account deleted, but its stored token could not be removed: ${tokenErr.message}`
+            : 'Account deleted, but its stored token could not be removed.';
+        this.error = msg;
+        showToast(msg, 'error');
+      }
+
       if (this.accounts.length > 0) {
         await this.loadInitialData();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to delete integration';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }

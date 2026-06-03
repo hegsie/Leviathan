@@ -266,6 +266,14 @@ export class LvOidcDialog extends LitElement {
   @state() private accounts: IntegrationAccount[] = [];
   @state() private selectedAccountId: string | null = null;
 
+  /**
+   * True while the user is filling out the "Add account" form. Guards the store
+   * subscription's auto-apply branch so a background validation emit
+   * (validateAllAccountTokens / setAccountConnectionStatus) cannot re-apply an
+   * existing account and clobber the half-typed issuer/clientId/name.
+   */
+  private isAddingAccount = false;
+
   private unsubscribeStore?: () => void;
   private oauthStateUnsubscribe?: () => void;
   private boundOAuthComplete = this.handleOAuthComplete.bind(this);
@@ -292,7 +300,7 @@ export class LvOidcDialog extends LitElement {
         const preferred = getActiveProfilePreferredAccount('oidc') ?? this.accounts[0];
         this.applyAccount(preferred);
         lastActiveProfileId = activeProfileId;
-      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+      } else if (!this.isAddingAccount && !this.selectedAccountId && this.accounts.length > 0) {
         this.applyAccount(
           getActiveProfilePreferredAccount('oidc') ??
             selectDefaultGlobalAccount('oidc') ??
@@ -369,6 +377,9 @@ export class LvOidcDialog extends LitElement {
 
   private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
+    // The user explicitly selected an existing account, so we're no longer
+    // adding a new one — re-enable the subscription's auto-apply branch.
+    this.isAddingAccount = false;
     this.error = null;
     this.discovery = null;
     this.applyAccount(account);
@@ -377,6 +388,7 @@ export class LvOidcDialog extends LitElement {
   private handleAddAccount(): void {
     // Clear selection so the next sign-in creates a NEW account rather than
     // overwriting the previously-selected one's token/config.
+    this.isAddingAccount = true;
     this.selectedAccountId = null;
     this.nameInput = '';
     this.issuerUrlInput = '';
@@ -539,6 +551,7 @@ export class LvOidcDialog extends LitElement {
         this.accounts = getAccountsByType('oidc');
       }
 
+      this.isAddingAccount = false;
       this.connected = true;
       this.connectedUser = user;
       this.oauthState = { status: 'idle' };
@@ -575,10 +588,19 @@ export class LvOidcDialog extends LitElement {
     try {
       if (this.selectedAccountId) {
         await credentialService.deleteAccountToken('oidc', this.selectedAccountId);
+        // OIDC connected-state derives from cachedUser (applyAccount sets
+        // this.connected = !!account.cachedUser). Deleting only the token would
+        // leave the account showing "Connected" on reopen, so persist a cleared
+        // identity alongside the token removal.
+        const acct = getAccountById(this.selectedAccountId);
+        if (acct) {
+          await unifiedProfileService.saveGlobalAccount({ ...acct, cachedUser: null });
+        }
       }
       this.syncSharedConnectionStatus(false);
       this.connected = false;
       this.connectedUser = null;
+      this.accounts = getAccountsByType('oidc');
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to disconnect';
       showToast(this.error, 'error');

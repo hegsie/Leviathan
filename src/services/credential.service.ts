@@ -205,11 +205,17 @@ export const AccountCredentials = {
   },
 
   /**
-   * Delete a token for a specific account
+   * Delete a token for a specific account.
+   *
+   * Removes BOTH the main credential key and the `${key}_oauth` companion blob
+   * written by storeAccountOAuthToken. Deleting only the main key would orphan
+   * the refresh-token blob in the keyring, accumulating stale secrets on every
+   * disconnect/delete for OAuth providers.
    */
   async deleteToken(integrationType: IntegrationType, accountId: string): Promise<void> {
     const key = getAccountCredentialKey(integrationType, accountId);
-    return keyringDelete(key);
+    await keyringDelete(key);
+    await keyringDelete(`${key}_oauth`);
   },
 
   /**
