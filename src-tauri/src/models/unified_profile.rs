@@ -384,7 +384,15 @@ impl UnifiedProfileV2 {
         }
     }
 
-    /// Extract accounts from v2 profile as global IntegrationAccounts
+    /// Extract accounts from v2 profile as global IntegrationAccounts.
+    ///
+    /// V8: url_patterns are copied from the owning v2 profile so that
+    /// account-level auto-detection survives the migration (both the
+    /// `UnifiedProfilesConfigV2::to_v3` migration path and the
+    /// command-level `execute_unified_profiles_migration` path carry
+    /// `url_patterns` from the legacy account — for v2 profiles the
+    /// per-account patterns are the profile's own patterns, since
+    /// `ProfileIntegrationAccount` never had its own).
     pub fn extract_accounts(&self) -> Vec<IntegrationAccount> {
         self.integration_accounts
             .iter()
@@ -395,7 +403,9 @@ impl UnifiedProfileV2 {
                 config: a.config.clone(),
                 color: a.color.clone(),
                 cached_user: a.cached_user.clone(),
-                url_patterns: Vec::new(), // v2 accounts didn't have their own patterns
+                // V8: inherit the owning profile's url_patterns so that
+                // auto-detection works the same regardless of migration path.
+                url_patterns: self.url_patterns.clone(),
                 is_default: a.is_default_for_type,
             })
             .collect()
@@ -593,8 +603,20 @@ impl UnifiedProfilesConfig {
         }
     }
 
-    /// Get the profile's preferred account for a specific type
-    /// Falls back to global default if profile has no preference
+    /// Get the profile's preferred account for a specific integration type.
+    ///
+    /// Precedence (V3 — explicit and safe):
+    /// 1. Profile-level explicit default: the account stored in
+    ///    `profile.default_accounts[integration_type]`.  If that account ID
+    ///    still exists in the global pool, it is returned immediately.
+    /// 2. Global `is_default` fallback: the global account whose `is_default`
+    ///    flag is set for the requested type (via
+    ///    [`set_default_account`][Self::set_default_account]).  Use
+    ///    [`clear_profile_default_account`][Self::clear_profile_default_account]
+    ///    to remove a profile-level preference so that a profile reverts to
+    ///    this fallback.
+    ///
+    /// Returns `None` when there are no accounts of the requested type at all.
     pub fn get_profile_preferred_account(
         &self,
         profile_id: &str,
@@ -609,6 +631,33 @@ impl UnifiedProfilesConfig {
         }
         // Fall back to global default
         self.get_default_account(integration_type)
+    }
+
+    /// Clear the per-profile explicit default account for an integration type.
+    ///
+    /// After calling this the profile no longer has a local preference and
+    /// [`get_profile_preferred_account`][Self::get_profile_preferred_account]
+    /// will fall back to the global `is_default` account for the type.
+    ///
+    /// Returns `true` when a preference was present and removed, `false` when
+    /// the profile had no preference for the given type (or did not exist).
+    ///
+    /// Note: a corresponding Tauri command `clear_profile_default_account`
+    /// should be registered in `lib.rs` for the UI to consume this.  That
+    /// registration is intentionally left to the caller because it requires
+    /// editing `lib.rs` which is out of scope here.
+    pub fn clear_profile_default_account(
+        &mut self,
+        profile_id: &str,
+        integration_type: &IntegrationType,
+    ) -> bool {
+        if let Some(profile) = self.get_profile_mut(profile_id) {
+            let had_entry = profile.default_accounts.contains_key(integration_type);
+            profile.default_accounts.remove(integration_type);
+            had_entry
+        } else {
+            false
+        }
     }
 
     /// Get count of accounts by type
@@ -901,7 +950,7 @@ mod tests {
         // Add global accounts
         let mut account1 = IntegrationAccount::new_github("GitHub Global Default".to_string());
         account1.is_default = true;
-        let account1_id = account1.id.clone();
+        let _account1_id = account1.id.clone();
         config.save_account(account1);
 
         let account2 = IntegrationAccount::new_github("GitHub Work".to_string());
@@ -1113,7 +1162,7 @@ mod tests {
     #[test]
     fn test_v2_to_v3_migration() {
         // Create a v2 config
-        let mut v2_profile = UnifiedProfileV2 {
+        let v2_profile = UnifiedProfileV2 {
             id: "profile-1".to_string(),
             name: "Work".to_string(),
             git_name: "John".to_string(),
@@ -1190,5 +1239,157 @@ mod tests {
             v3_config.repository_assignments.get("/path/to/repo"),
             Some(&"profile-1".to_string())
         );
+    }
+
+    // =========================================================================
+    // V8: extract_accounts inherits profile url_patterns
+    // =========================================================================
+
+    #[allow(deprecated)]
+    #[test]
+    fn test_extract_accounts_inherits_url_patterns() {
+        // V8: accounts extracted from a v2 profile must carry the profile's
+        // url_patterns so that account auto-detection survives migration.
+        let v2_profile = UnifiedProfileV2 {
+            id: "p1".to_string(),
+            name: "Work".to_string(),
+            git_name: "Alice".to_string(),
+            git_email: "alice@work.com".to_string(),
+            signing_key: None,
+            url_patterns: vec![
+                "github.com/work-org/*".to_string(),
+                "gitlab.work.com/*".to_string(),
+            ],
+            is_default: false,
+            color: "#3b82f6".to_string(),
+            integration_accounts: vec![ProfileIntegrationAccount {
+                id: "acct-1".to_string(),
+                name: "Work GitHub".to_string(),
+                integration_type: IntegrationType::GitHub,
+                config: IntegrationConfig::GitHub,
+                color: None,
+                cached_user: None,
+                is_default_for_type: true,
+            }],
+        };
+
+        let extracted = v2_profile.extract_accounts();
+        assert_eq!(extracted.len(), 1);
+        let account = &extracted[0];
+        // The account must inherit the profile's url_patterns (V8)
+        assert_eq!(
+            account.url_patterns,
+            vec![
+                "github.com/work-org/*".to_string(),
+                "gitlab.work.com/*".to_string(),
+            ]
+        );
+        assert_eq!(account.id, "acct-1");
+        assert!(account.is_default);
+    }
+
+    // =========================================================================
+    // V3: clear_profile_default_account and explicit precedence
+    // =========================================================================
+
+    #[test]
+    fn test_profile_pref_wins_over_global_default() {
+        // V3: profile-level explicit default must win over global is_default.
+        let mut config = UnifiedProfilesConfig::default();
+
+        let mut global_default = IntegrationAccount::new_github("Global Default".to_string());
+        global_default.is_default = true;
+        let global_id = global_default.id.clone();
+        config.save_account(global_default);
+
+        let profile_specific = IntegrationAccount::new_github("Profile Specific".to_string());
+        let specific_id = profile_specific.id.clone();
+        config.save_account(profile_specific);
+
+        let mut profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice".to_string(),
+            "alice@work.com".to_string(),
+        );
+        profile.set_default_account(IntegrationType::GitHub, specific_id.clone());
+        let profile_id = profile.id.clone();
+        config.save_profile(profile);
+
+        // Profile preference wins over global is_default
+        let preferred = config.get_profile_preferred_account(&profile_id, &IntegrationType::GitHub);
+        assert!(preferred.is_some());
+        assert_eq!(
+            preferred.unwrap().id,
+            specific_id,
+            "profile-level explicit default must win over global is_default"
+        );
+
+        // Sanity: the global default is still set on the other account
+        let global = config
+            .get_default_account(&IntegrationType::GitHub)
+            .unwrap();
+        assert_eq!(global.id, global_id);
+    }
+
+    #[test]
+    fn test_clear_profile_default_falls_back_to_global() {
+        // V3: after clearing the profile preference, global is_default resolves.
+        let mut config = UnifiedProfilesConfig::default();
+
+        let mut global_default = IntegrationAccount::new_github("Global Default".to_string());
+        global_default.is_default = true;
+        let global_id = global_default.id.clone();
+        config.save_account(global_default);
+
+        let profile_specific = IntegrationAccount::new_github("Profile Specific".to_string());
+        let specific_id = profile_specific.id.clone();
+        config.save_account(profile_specific);
+
+        let mut profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice".to_string(),
+            "alice@work.com".to_string(),
+        );
+        profile.set_default_account(IntegrationType::GitHub, specific_id.clone());
+        let profile_id = profile.id.clone();
+        config.save_profile(profile);
+
+        // Confirm profile preference is active
+        assert_eq!(
+            config
+                .get_profile_preferred_account(&profile_id, &IntegrationType::GitHub)
+                .map(|a| a.id.as_str()),
+            Some(specific_id.as_str())
+        );
+
+        // Clear the profile-level preference
+        let removed = config.clear_profile_default_account(&profile_id, &IntegrationType::GitHub);
+        assert!(removed, "should report that a preference was present");
+
+        // Now the global default should resolve
+        let preferred = config.get_profile_preferred_account(&profile_id, &IntegrationType::GitHub);
+        assert!(preferred.is_some());
+        assert_eq!(
+            preferred.unwrap().id,
+            global_id,
+            "after clearing profile pref, global is_default must resolve"
+        );
+    }
+
+    #[test]
+    fn test_clear_profile_default_nonexistent_returns_false() {
+        // V3: clearing a preference that was never set returns false without panic.
+        let mut config = UnifiedProfilesConfig::default();
+
+        let profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice".to_string(),
+            "alice@work.com".to_string(),
+        );
+        let profile_id = profile.id.clone();
+        config.save_profile(profile);
+
+        let removed = config.clear_profile_default_account(&profile_id, &IntegrationType::GitHub);
+        assert!(!removed);
     }
 }
