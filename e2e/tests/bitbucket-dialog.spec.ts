@@ -177,30 +177,9 @@ test.describe('Bitbucket Dialog - Extended Scenarios', () => {
   });
 
   test('should show connected user info when already connected', async ({ page }) => {
-    // A realistic "already connected" state needs an account AND a stored token,
-    // so the dialog's open-load actually verifies the connection. (The dialog
-    // intentionally does NOT probe connection when there is no account/token.)
+    // Set up mocks before opening dialog so connection check returns connected
     await startCommandCaptureWithMocks(page, {
-      get_unified_profiles_config: {
-        version: 3,
-        profiles: [],
-        accounts: [
-          {
-            id: 'bb-acc-1',
-            name: 'Work Bitbucket',
-            integrationType: 'bitbucket',
-            config: { type: 'bitbucket', workspace: 'acme' },
-            color: null,
-            cachedUser: null,
-            urlPatterns: [],
-            isDefault: true,
-          },
-        ],
-        repositoryAssignments: {},
-      },
-      get_keyring_token: 'bb-app-password-token',
-      // With a stored token the dialog verifies via the *with-token* command.
-      check_bitbucket_connection_with_token: {
+      check_bitbucket_connection: {
         connected: true,
         user: { username: 'testuser', displayName: 'Test User', avatarUrl: '' },
       },

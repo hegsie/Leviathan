@@ -754,14 +754,7 @@ export class LvBitbucketDialog extends LitElement {
         await this.detectRepo();
         if (generation !== this.loadGeneration) return;
       }
-      // Only verify the connection when we actually have an account AND a token
-      // to check. With neither, the dialog is definitively disconnected and
-      // should show the connect form — checking anyway makes a pointless
-      // check_bitbucket_connection call that, on a fresh open, can momentarily
-      // render a 'connected' state (and races a late connection mock in tests).
-      if (this.selectedAccountId && this.oauthToken) {
-        await this.checkConnection();
-      }
+      await this.checkConnection();
     } catch (err) {
       if (generation !== this.loadGeneration) return;
       this.error = err instanceof Error ? err.message : 'Failed to load data';
