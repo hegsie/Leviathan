@@ -422,6 +422,147 @@ describe('lv-azure-devops-dialog', () => {
     });
   });
 
+  describe('Create Work Item', () => {
+    it('shows New Work Item button on the Work Items tab', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const newBtn = Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Work Item')
+      );
+      expect(newBtn).to.not.be.undefined;
+    });
+
+    it('renders the create-work-item form (type, title, description)', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Work Item')
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const form = el.shadowRoot!.querySelector('.token-form');
+      expect(form).to.not.be.null;
+      expect(form!.querySelector('select')).to.not.be.null;
+      expect(form!.querySelector('input[type="text"]')).to.not.be.null;
+      expect(form!.querySelector('textarea')).to.not.be.null;
+    });
+
+    it('submits create_azure_devops_work_item with the right args and refreshes', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const createdItem = {
+        id: 999,
+        title: 'New task',
+        workItemType: 'Task',
+        state: 'New',
+        assignedTo: null,
+        createdDate: '2025-02-01T10:00:00Z',
+        url: 'https://dev.azure.com/testorg/test-project/_workitems/edit/999',
+      };
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'create_azure_devops_work_item') return createdItem;
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Work Item')
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector('.token-form input[type="text"]') as HTMLInputElement;
+      titleInput.value = 'New task';
+      titleInput.dispatchEvent(new Event('input'));
+      const textarea = el.shadowRoot!.querySelector('.token-form textarea') as HTMLTextAreaElement;
+      textarea.value = 'Do it';
+      textarea.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim() === 'Create Work Item'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const createCall = invokeHistory.find((c) => c.command === 'create_azure_devops_work_item');
+      expect(createCall, 'create_azure_devops_work_item should be invoked').to.not.be.undefined;
+      const callArgs = createCall!.args as Record<string, unknown>;
+      expect(callArgs.organization).to.equal('testorg');
+      expect(callArgs.project).to.equal('test-project');
+      const input = callArgs.input as Record<string, unknown>;
+      expect(input.title).to.equal('New task');
+      expect(input.workItemType).to.equal('Task');
+      expect(input.description).to.equal('Do it');
+
+      // Refreshes work items list
+      expect(invokeHistory.some((c) => c.command === 'query_ado_work_items')).to.be.true;
+    });
+
+    it('shows an error when create_azure_devops_work_item fails (not silent)', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'create_azure_devops_work_item') throw new Error('Permission denied');
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Work Item')
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector('.token-form input[type="text"]') as HTMLInputElement;
+      titleInput.value = 'Will fail';
+      titleInput.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim() === 'Create Work Item'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const errorBanner = el.shadowRoot!.querySelector('.error');
+      expect(errorBanner).to.not.be.null;
+      expect(errorBanner!.textContent).to.include('Permission denied');
+    });
+  });
+
   describe('Pipelines Tab', () => {
     it('renders pipeline runs with status indicator, name, and branch', async () => {
       connectionResponse = mockConnectedStatus;

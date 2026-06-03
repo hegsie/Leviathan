@@ -3483,6 +3483,26 @@ export async function queryAdoWorkItems(
   });
 }
 
+export interface CreateAdoWorkItemInput {
+  workItemType?: string;
+  title: string;
+  description?: string;
+}
+
+export async function createAzureDevOpsWorkItem(
+  organization: string,
+  project: string,
+  input: CreateAdoWorkItemInput,
+  token?: string | null,
+): Promise<CommandResult<AdoWorkItem>> {
+  return invokeCommand<AdoWorkItem>("create_azure_devops_work_item", {
+    organization,
+    project,
+    input,
+    token,
+  });
+}
+
 // Azure DevOps Pipelines
 
 export async function listAdoPipelineRuns(
@@ -3992,6 +4012,27 @@ export async function listBitbucketIssues(
     workspace,
     repoSlug,
     state,
+    token,
+  });
+}
+
+export interface CreateBitbucketIssueInput {
+  title: string;
+  content?: string;
+  kind?: string;
+  priority?: string;
+}
+
+export async function createBitbucketIssue(
+  workspace: string,
+  repoSlug: string,
+  input: CreateBitbucketIssueInput,
+  token?: string | null,
+): Promise<CommandResult<BitbucketIssue>> {
+  return invokeCommand<BitbucketIssue>("create_bitbucket_issue", {
+    workspace,
+    repoSlug,
+    input,
     token,
   });
 }

@@ -18,6 +18,7 @@ import type {
   BitbucketIssue,
   BitbucketPipeline,
   CreateBitbucketPullRequestInput,
+  CreateBitbucketIssueInput,
 } from '../../services/git.service.ts';
 import * as oauthService from '../../services/oauth.service.ts';
 import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts';
@@ -29,7 +30,7 @@ import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
-type TabType = 'connection' | 'pull-requests' | 'issues' | 'pipelines' | 'create-pr';
+type TabType = 'connection' | 'pull-requests' | 'issues' | 'pipelines' | 'create-pr' | 'create-issue';
 
 @customElement('lv-bitbucket-dialog')
 export class LvBitbucketDialog extends LitElement {
@@ -609,6 +610,10 @@ export class LvBitbucketDialog extends LitElement {
   @state() private createPrDestination = '';
   @state() private createPrCloseSource = false;
   @state() private generatingPrDescription = false;
+
+  // Create Issue form
+  @state() private createIssueTitle = '';
+  @state() private createIssueContent = '';
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -1238,6 +1243,41 @@ export class LvBitbucketDialog extends LitElement {
     }
   }
 
+  private async handleCreateIssue(): Promise<void> {
+    if (!this.detectedRepo || !this.createIssueTitle.trim()) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const input: CreateBitbucketIssueInput = {
+        title: this.createIssueTitle,
+        content: this.createIssueContent || undefined,
+      };
+
+      const result = await gitService.createBitbucketIssue(
+        this.detectedRepo.workspace,
+        this.detectedRepo.repoSlug,
+        input,
+        this.oauthToken
+      );
+
+      if (result.success && result.data) {
+        this.createIssueTitle = '';
+        this.createIssueContent = '';
+        this.activeTab = 'issues';
+        await this.loadIssues();
+        showToast('Issue created successfully', 'success');
+      } else {
+        this.error = result.error?.message ?? 'Failed to create issue';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to create issue';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
   private handleClose(): void {
     this.dispatchEvent(new CustomEvent('close'));
   }
@@ -1452,6 +1492,11 @@ export class LvBitbucketDialog extends LitElement {
 
     if (this.issues.length === 0) {
       return html`
+        <div class="filter-row">
+          <button class="btn" @click=${() => this.activeTab = 'create-issue'}>
+            + New Issue
+          </button>
+        </div>
         <div class="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"></circle>
@@ -1464,6 +1509,11 @@ export class LvBitbucketDialog extends LitElement {
     }
 
     return html`
+      <div class="filter-row">
+        <button class="btn" @click=${() => this.activeTab = 'create-issue'}>
+          + New Issue
+        </button>
+      </div>
       <div class="issue-list">
         ${this.issues.map(issue => html`
           <div class="issue-item" @click=${() => this.openInBrowser(issue.url)}>
@@ -1599,6 +1649,42 @@ export class LvBitbucketDialog extends LitElement {
     `;
   }
 
+  private renderCreateIssueTab() {
+    return html`
+      <div class="token-form">
+        <div class="form-group">
+          <label>Title</label>
+          <input
+            type="text"
+            placeholder="Issue title"
+            .value=${this.createIssueTitle}
+            @input=${(e: Event) => this.createIssueTitle = (e.target as HTMLInputElement).value}
+          />
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea
+            placeholder="Describe the issue..."
+            .value=${this.createIssueContent}
+            @input=${(e: Event) => this.createIssueContent = (e.target as HTMLTextAreaElement).value}
+          ></textarea>
+        </div>
+        <div class="btn-row">
+          <button class="btn" @click=${() => this.activeTab = 'issues'}>
+            Cancel
+          </button>
+          <button
+            class="btn btn-primary"
+            @click=${this.handleCreateIssue}
+            ?disabled=${this.isLoading || !this.createIssueTitle.trim()}
+          >
+            Create Issue
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   private renderNotConnected(feature: string) {
     return html`
       <div class="empty-state">
@@ -1695,6 +1781,7 @@ export class LvBitbucketDialog extends LitElement {
             ${this.activeTab === 'issues' ? this.renderIssuesTab() : ''}
             ${this.activeTab === 'pipelines' ? this.renderPipelinesTab() : ''}
             ${this.activeTab === 'create-pr' ? this.renderCreatePrTab() : ''}
+            ${this.activeTab === 'create-issue' ? this.renderCreateIssueTab() : ''}
           </div>
         </div>
       </lv-modal>

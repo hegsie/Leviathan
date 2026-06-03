@@ -415,6 +415,152 @@ describe('lv-bitbucket-dialog', () => {
     });
   });
 
+  describe('Create Issue', () => {
+    it('shows New Issue button on the Issues tab', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const issuesTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Issues') as HTMLButtonElement;
+      issuesTab.click();
+      await waitForLoad(el);
+
+      const newIssueBtn = Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Issue')
+      );
+      expect(newIssueBtn).to.not.be.undefined;
+    });
+
+    it('renders the create-issue form (title + description) when navigated to', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Issues') as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const newIssueBtn = Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Issue')
+      ) as HTMLButtonElement;
+      newIssueBtn.click();
+      await waitForLoad(el);
+
+      const form = el.shadowRoot!.querySelector('.token-form');
+      expect(form).to.not.be.null;
+      expect(form!.querySelector('input[type="text"]')).to.not.be.null;
+      expect(form!.querySelector('textarea')).to.not.be.null;
+    });
+
+    it('submits create_bitbucket_issue with the right args and refreshes the list', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const createdIssue = {
+        id: 11,
+        title: 'New bug',
+        content: 'Something broke',
+        state: 'new',
+        priority: 'major',
+        kind: 'bug',
+        reporter: mockBitbucketUser,
+        assignee: null,
+        createdOn: '2025-02-01T10:00:00Z',
+        url: 'https://bitbucket.org/test-workspace/test-repo/issues/11',
+      };
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'create_bitbucket_issue') return createdIssue;
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Issues') as HTMLButtonElement).click();
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Issue')
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector('.token-form input[type="text"]') as HTMLInputElement;
+      titleInput.value = 'New bug';
+      titleInput.dispatchEvent(new Event('input'));
+      const textarea = el.shadowRoot!.querySelector('.token-form textarea') as HTMLTextAreaElement;
+      textarea.value = 'Something broke';
+      textarea.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      const createBtn = Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim() === 'Create Issue'
+      ) as HTMLButtonElement;
+      createBtn.click();
+      await waitForLoad(el);
+
+      const createCall = invokeHistory.find((c) => c.command === 'create_bitbucket_issue');
+      expect(createCall, 'create_bitbucket_issue should be invoked').to.not.be.undefined;
+      const callArgs = createCall!.args as Record<string, unknown>;
+      expect(callArgs.workspace).to.equal('test-workspace');
+      expect(callArgs.repoSlug).to.equal('test-repo');
+      const input = callArgs.input as Record<string, unknown>;
+      expect(input.title).to.equal('New bug');
+      expect(input.content).to.equal('Something broke');
+
+      // Returns to issues list and reloads
+      expect(invokeHistory.some((c) => c.command === 'list_bitbucket_issues')).to.be.true;
+    });
+
+    it('shows an error when create_bitbucket_issue fails (not silent)', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'create_bitbucket_issue') throw new Error('Issue tracker disabled');
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Issues') as HTMLButtonElement).click();
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Issue')
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector('.token-form input[type="text"]') as HTMLInputElement;
+      titleInput.value = 'Will fail';
+      titleInput.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim() === 'Create Issue'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const errorBanner = el.shadowRoot!.querySelector('.error');
+      expect(errorBanner).to.not.be.null;
+      expect(errorBanner!.textContent).to.include('Issue tracker disabled');
+    });
+  });
+
   describe('Pipelines Tab', () => {
     it('renders pipeline items with status dot, build number, and branch', async () => {
       connectionResponse = mockConnectedStatus;

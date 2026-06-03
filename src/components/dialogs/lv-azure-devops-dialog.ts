@@ -21,6 +21,7 @@ import type {
   AdoWorkItem,
   AdoPipelineRun,
   CreateAdoPullRequestInput,
+  CreateAdoWorkItemInput,
 } from '../../services/git.service.ts';
 import { unifiedProfileStore, getAccountsByType, selectDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
@@ -29,7 +30,7 @@ import * as credentialService from '../../services/credential.service.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
-type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr';
+type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr' | 'create-work-item';
 
 @customElement('lv-azure-devops-dialog')
 export class LvAzureDevOpsDialog extends LitElement {
@@ -600,6 +601,11 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private createPrTarget = '';
   @state() private createPrDraft = false;
   @state() private generatingPrDescription = false;
+
+  // Create Work Item form
+  @state() private createWorkItemType = 'Task';
+  @state() private createWorkItemTitle = '';
+  @state() private createWorkItemDescription = '';
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -1314,6 +1320,44 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
   }
 
+  private async handleCreateWorkItem(): Promise<void> {
+    if (!this.detectedRepo || !this.createWorkItemTitle.trim()) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const input: CreateAdoWorkItemInput = {
+        workItemType: this.createWorkItemType || 'Task',
+        title: this.createWorkItemTitle,
+        description: this.createWorkItemDescription || undefined,
+      };
+
+      const token = await this.getSelectedAccountToken();
+      const result = await gitService.createAzureDevOpsWorkItem(
+        this.detectedRepo.organization,
+        this.detectedRepo.project,
+        input,
+        token
+      );
+
+      if (result.success && result.data) {
+        this.createWorkItemType = 'Task';
+        this.createWorkItemTitle = '';
+        this.createWorkItemDescription = '';
+        this.activeTab = 'work-items';
+        await this.loadWorkItems();
+        showToast('Work item created successfully', 'success');
+      } else {
+        this.error = result.error?.message ?? 'Failed to create work item';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to create work item';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
   private handleClose(): void {
     this.dispatchEvent(new CustomEvent('close'));
   }
@@ -1589,6 +1633,11 @@ export class LvAzureDevOpsDialog extends LitElement {
 
     if (this.workItems.length === 0) {
       return html`
+        <div class="filter-row">
+          <button class="btn" @click=${() => this.activeTab = 'create-work-item'}>
+            + New Work Item
+          </button>
+        </div>
         <div class="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M9 11l3 3L22 4"></path>
@@ -1600,6 +1649,11 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
 
     return html`
+      <div class="filter-row">
+        <button class="btn" @click=${() => this.activeTab = 'create-work-item'}>
+          + New Work Item
+        </button>
+      </div>
       <div class="pr-list">
         ${this.workItems.map(item => html`
           <div class="work-item" @click=${() => this.openInBrowser(item.url)}>
@@ -1750,6 +1804,55 @@ export class LvAzureDevOpsDialog extends LitElement {
     `;
   }
 
+  private renderCreateWorkItemTab() {
+    return html`
+      <div class="token-form">
+        <div class="form-group">
+          <label>Type</label>
+          <select
+            class="filter-select"
+            @change=${(e: Event) => this.createWorkItemType = (e.target as HTMLSelectElement).value}
+          >
+            <option value="Task" ?selected=${this.createWorkItemType === 'Task'}>Task</option>
+            <option value="Bug" ?selected=${this.createWorkItemType === 'Bug'}>Bug</option>
+            <option value="User Story" ?selected=${this.createWorkItemType === 'User Story'}>User Story</option>
+            <option value="Feature" ?selected=${this.createWorkItemType === 'Feature'}>Feature</option>
+            <option value="Epic" ?selected=${this.createWorkItemType === 'Epic'}>Epic</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Title</label>
+          <input
+            type="text"
+            placeholder="Work item title"
+            .value=${this.createWorkItemTitle}
+            @input=${(e: Event) => this.createWorkItemTitle = (e.target as HTMLInputElement).value}
+          />
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea
+            placeholder="Describe the work item..."
+            .value=${this.createWorkItemDescription}
+            @input=${(e: Event) => this.createWorkItemDescription = (e.target as HTMLTextAreaElement).value}
+          ></textarea>
+        </div>
+        <div class="btn-row">
+          <button class="btn" @click=${() => this.activeTab = 'work-items'}>
+            Cancel
+          </button>
+          <button
+            class="btn btn-primary"
+            @click=${this.handleCreateWorkItem}
+            ?disabled=${this.isLoading || !this.createWorkItemTitle.trim()}
+          >
+            Create Work Item
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   private renderDetectedRepo() {
     if (!this.detectedRepo) return '';
 
@@ -1822,6 +1925,7 @@ export class LvAzureDevOpsDialog extends LitElement {
             ${this.activeTab === 'work-items' ? this.renderWorkItemsTab() : ''}
             ${this.activeTab === 'pipelines' ? this.renderPipelinesTab() : ''}
             ${this.activeTab === 'create-pr' ? this.renderCreatePrTab() : ''}
+            ${this.activeTab === 'create-work-item' ? this.renderCreateWorkItemTab() : ''}
           </div>
         </div>
       </lv-modal>
