@@ -401,7 +401,7 @@ test.describe('Profile Manager Dialog - Integration Accounts', () => {
     await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(0);
   });
 
-  test('edit account URL patterns and persist them in save_global_account (Wave 3)', async ({
+  test('edit account URL patterns and persist them in save_global_account', async ({
     page,
   }) => {
     await openProfileManager(page);

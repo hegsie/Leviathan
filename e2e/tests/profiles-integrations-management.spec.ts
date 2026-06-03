@@ -1,15 +1,15 @@
 /**
- * Wave 1 coherence fixes + back-fill hardening — E2E validation
+ * Profiles & integrations management — E2E validation
  *
- * These specs validate recently-shipped, user-visible behavior:
- *   1. Account config fields are editable (GitLab instance URL, ADO org, Bitbucket workspace)
- *   2. Migration "complete" view is honest about partial failures
- *   3. Profile delete confirmation copy ("...remain available globally")
- *   4. Single-repo unassign from a profile's assigned-repositories view
- *   5. Profile switch failure surfaces an error (no silent failure)
- *   6. Default-account badges: "Profile default" vs "Global default"
- *   7. GitLab account delete error is surfaced (used to be silent)
- *   8. GitHub App connect honors the backend `connected` flag
+ * Covers user-visible profile/account management behavior:
+ *   - Account config fields are editable (GitLab instance URL, ADO org, Bitbucket workspace)
+ *   - Migration "complete" view is honest about partial failures
+ *   - Profile delete confirmation copy ("...remain available globally")
+ *   - Single-repo unassign from a profile's assigned-repositories view
+ *   - Profile switch failure surfaces an error (no silent failure)
+ *   - Default-account badges: "Profile default" vs "Global default"
+ *   - GitLab account delete error is surfaced
+ *   - GitHub App connect honors the backend `connected` flag
  *
  * Conventions follow profiles-integrations*.spec.ts: standardized helpers,
  * auto-retrying assertions (no waitForTimeout), shadow-DOM-piercing locators,
@@ -127,7 +127,7 @@ async function openAccountEditFromAccountsView(page: Page): Promise<void> {
 // 1. Account config fields are editable
 // ===========================================================================
 
-test.describe('Wave 1 #1 — account config fields are editable', () => {
+test.describe('account config fields are editable', () => {
   test('GitLab account edit shows an editable instance-URL field and persists the value', async ({
     page,
   }) => {
@@ -247,7 +247,7 @@ test.describe('Wave 1 #1 — account config fields are editable', () => {
 // 2. Migration "complete" view is honest about partial failures
 // ===========================================================================
 
-test.describe('Wave 1 #2 — migration honest results', () => {
+test.describe('migration honest results', () => {
   const backupInfo = {
     hasBackup: true,
     backupDate: '2026-01-01T12:00:00Z',
@@ -373,7 +373,7 @@ test.describe('Wave 1 #2 — migration honest results', () => {
 // 3. Profile delete confirmation copy
 // ===========================================================================
 
-test.describe('Wave 1 #3 — profile delete confirmation copy', () => {
+test.describe('profile delete confirmation copy', () => {
   test('confirm text reads "remain available globally" and not the old removal copy', async ({
     page,
   }) => {
@@ -417,7 +417,7 @@ test.describe('Wave 1 #3 — profile delete confirmation copy', () => {
 // 4. Single-repo unassign from a profile's assigned-repositories view
 // ===========================================================================
 
-test.describe('Wave 1 #4 — single-repo unassign', () => {
+test.describe('single-repo unassign', () => {
   test('clicking a per-row unassign calls unassign_unified_profile_from_repository and removes the row', async ({
     page,
   }) => {
@@ -490,7 +490,7 @@ test.describe('Wave 1 #4 — single-repo unassign', () => {
 // 5. Profile switch failure surfaces an error (no silent failure)
 // ===========================================================================
 
-test.describe('Wave 1 #5 — profile switch error is surfaced', () => {
+test.describe('profile switch error is surfaced', () => {
   const personalProfile: MockUnifiedProfile = {
     ...workProfile,
     id: 'profile-personal',
@@ -572,7 +572,7 @@ test.describe('Wave 1 #5 — profile switch error is surfaced', () => {
 // 6. Default-account badges: "Profile default" vs "Global default"
 // ===========================================================================
 
-test.describe('Wave 1 #6 — default-account badges', () => {
+test.describe('default-account badges', () => {
   // The integration card only renders in the dashboard's EXPANDED view, so each
   // test expands the dashboard first.
   async function expandDashboard(page: Page): Promise<void> {
@@ -649,7 +649,7 @@ test.describe('Wave 1 #6 — default-account badges', () => {
 // 7. GitLab account delete error is surfaced (used to be silent)
 // ===========================================================================
 
-test.describe('Back-fill #7 — GitLab delete error surfaced', () => {
+test.describe('GitLab delete error surfaced', () => {
   const gitlabProfile: MockUnifiedProfile = {
     ...workProfile,
     defaultAccounts: { gitlab: 'account-gitlab' },
@@ -709,7 +709,7 @@ test.describe('Back-fill #7 — GitLab delete error surfaced', () => {
 // 8. GitHub App connect honors the backend `connected` flag
 // ===========================================================================
 
-test.describe('Back-fill #8 — GitHub App connect honors backend status', () => {
+test.describe('GitHub App connect honors backend status', () => {
   /**
    * Drive the GitHub App connection form: switch to the App method, fill the
    * App ID / private key / installation ID, and click Connect.

@@ -1952,7 +1952,7 @@ describe('lv-profile-manager-dialog', () => {
   });
 
   // ── Account config fields in the edit-account view (Wave 1, item 1) ────────
-  describe('account config fields (Wave 1)', () => {
+  describe('account config fields', () => {
     it('renders the GitLab instance URL field when editing a GitLab account', async () => {
       const el = await renderDialog();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2022,8 +2022,8 @@ describe('lv-profile-manager-dialog', () => {
     });
   });
 
-  // ── Account URL patterns (Wave 3) ─────────────────────────────────────────
-  describe('account URL patterns (Wave 3)', () => {
+  // ── Account URL patterns ─────────────────────────────────────────
+  describe('account URL patterns', () => {
     it('renders a URL patterns textarea in the account edit form', async () => {
       const el = await renderDialog();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2085,7 +2085,7 @@ describe('lv-profile-manager-dialog', () => {
   });
 
   // ── Delete-confirm copy (Wave 1, item 3) ───────────────────────────────────
-  describe('delete profile confirmation copy (Wave 1)', () => {
+  describe('delete profile confirmation copy', () => {
     it('explains accounts remain global and does NOT claim they are removed', async () => {
       let confirmMessage = '';
       mockInvoke = async (command: string, args?: unknown) => {
@@ -2126,7 +2126,7 @@ describe('lv-profile-manager-dialog', () => {
   });
 
   // ── Single-repo unassign (Wave 1, item 4) ──────────────────────────────────
-  describe('unassign a single repository (Wave 1)', () => {
+  describe('unassign a single repository', () => {
     it('shows an unassign button per assigned repo and unassigns on click', async () => {
       let unassignedPath: string | undefined;
       mockInvoke = async (command: string, args?: unknown) => {

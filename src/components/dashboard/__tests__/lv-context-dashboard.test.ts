@@ -598,7 +598,7 @@ describe('lv-context-dashboard', () => {
   });
 
   // ── Profile-switch error feedback (Wave 1, item 5) ─────────────────────────
-  describe('profile switch error feedback (Wave 1)', () => {
+  describe('profile switch error feedback', () => {
     it('surfaces an error toast when applying a profile fails (no silent catch)', async () => {
       setupStores({
         profiles: [defaultProfile, makeProfile({ id: 'profile-2', name: 'Personal' })],
@@ -645,7 +645,7 @@ describe('lv-context-dashboard', () => {
   });
 
   // ── Default-account precedence (Wave 1, item 6) ────────────────────────────
-  describe('default account precedence badge (Wave 1)', () => {
+  describe('default account precedence badge', () => {
     it('marks the active account as Global default when it is account.isDefault but not a profile preference', async () => {
       const globalDefaultAccount = makeAccount({ id: 'account-1', isDefault: true });
       setupStores({
