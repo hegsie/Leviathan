@@ -695,12 +695,30 @@ export class LvMigrationDialog extends LitElement {
                   </svg>
                   Accounts Needing Assignment
                 </div>
-                <div class="section-description" style="color: var(--color-text-secondary); margin-bottom: var(--spacing-sm);">
-                  These accounts couldn't be auto-matched. Choose which profile each should belong to.
-                </div>
-                ${unmatchedAccounts.map((account) =>
-                  this.renderUnmatchedAccount(account, profiles)
-                )}
+                ${profiles.length === 0
+                  ? html`
+                      <div class="section-description" style="color: var(--color-text-secondary); margin-bottom: var(--spacing-sm);">
+                        These accounts will be migrated as shared global accounts. Create a
+                        profile afterwards to set a default.
+                      </div>
+                      ${unmatchedAccounts.map((account) =>
+                        this.renderUnmatchedAccount(account, profiles)
+                      )}
+                      <div style="margin-top: var(--spacing-sm);">
+                        <button class="btn" @click=${this.handleOpenProfileManager}>
+                          Open Profile Manager
+                        </button>
+                      </div>
+                    `
+                  : html`
+                      <div class="section-description" style="color: var(--color-text-secondary); margin-bottom: var(--spacing-sm);">
+                        These accounts couldn't be auto-matched. Choose which profile each should
+                        belong to.
+                      </div>
+                      ${unmatchedAccounts.map((account) =>
+                        this.renderUnmatchedAccount(account, profiles)
+                      )}
+                    `}
               </div>
             </div>
           `
@@ -748,20 +766,27 @@ export class LvMigrationDialog extends LitElement {
             <div class="unmatched-account-type">${INTEGRATION_TYPE_NAMES[account.integrationType]}</div>
           </div>
         </div>
-        <select
-          class="profile-select"
-          @change=${(e: Event) =>
-            this.handleAssignmentChange(account.accountId, (e.target as HTMLSelectElement).value)}
-        >
-          ${profiles.map(
-            (profile) => html`
-              <option
-                value=${profile.profileId}
-                ?selected=${profile.profileId === selectedProfileId}
-              >${profile.profileName}</option>
-            `
-          )}
-        </select>
+        ${profiles.length === 0
+          ? html`<span class="account-tag">Shared global account</span>`
+          : html`
+              <select
+                class="profile-select"
+                @change=${(e: Event) =>
+                  this.handleAssignmentChange(
+                    account.accountId,
+                    (e.target as HTMLSelectElement).value
+                  )}
+              >
+                ${profiles.map(
+                  (profile) => html`
+                    <option
+                      value=${profile.profileId}
+                      ?selected=${profile.profileId === selectedProfileId}
+                    >${profile.profileName}</option>
+                  `
+                )}
+              </select>
+            `}
       </div>
     `;
   }

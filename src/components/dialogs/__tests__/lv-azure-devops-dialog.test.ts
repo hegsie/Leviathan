@@ -729,4 +729,100 @@ describe('lv-azure-devops-dialog', () => {
       expect(toasts.some((t) => t.type === 'error' && /delete record boom/.test(t.message))).to.be.true;
     });
   });
+
+  describe('Entra ID OAuth', () => {
+    it('persists a new IntegrationAccount via save_global_account (not just the token)', async () => {
+      connectionResponse = mockConnectedStatus;
+      // Start with no accounts so the OAuth path creates a brand-new one. The
+      // backend persists the saved account, so a stateful store mirrors that:
+      // get_unified_profiles_config must return what save_global_account wrote
+      // (otherwise the dialog's store subscription would drop the new selection).
+      const persistedAccounts: IntegrationAccount[] = [];
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [...persistedAccounts], repositoryAssignments: {} };
+          }
+          // Echo back the persisted account (with its generated id) like the backend does.
+          if (command === 'save_global_account') {
+            const account = (args as { account?: IntegrationAccount } | undefined)?.account;
+            if (account) persistedAccounts.push(account);
+            return account ?? null;
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { oauthClientId: string }).oauthClientId = 'client-abc';
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      // Registers the oauth-complete listener.
+      await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: { provider: 'azure', tokens: { accessToken: 'ado_oauth_token' } },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      const saveCall = invokeHistory.find((h) => h.command === 'save_global_account');
+      expect(saveCall, 'save_global_account should be invoked').to.not.be.undefined;
+      const storeCall = invokeHistory.find((h) => h.command === 'store_keyring_token');
+      expect(storeCall, 'token should be stored too').to.not.be.undefined;
+
+      // The account that was persisted carries the verified user as cachedUser.
+      const account = (saveCall!.args as Record<string, unknown>).account as Record<string, unknown>;
+      expect(account).to.not.be.undefined;
+      expect((account.config as Record<string, unknown>).type).to.equal('azure-devops');
+      expect((account.config as Record<string, unknown>).organization).to.equal('testorg');
+      expect(account.cachedUser).to.not.be.null;
+
+      // selectedAccountId now points at the persisted account (not a synthetic id).
+      const selected = (el as unknown as { selectedAccountId: string | null }).selectedAccountId;
+      expect(selected).to.equal((account as { id: string }).id);
+    });
+  });
+
+  describe('PAT rotation refreshes cachedUser', () => {
+    it('calls update_global_account_cached_user after storing the token on an existing account', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'ado-acc-1';
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { tokenInput: string }).tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleSaveToken: () => Promise<void> }).handleSaveToken();
+      await el.updateComplete;
+
+      const storeIdx = invokeHistory.findIndex((h) => h.command === 'store_keyring_token');
+      const cachedUserIdx = invokeHistory.findIndex(
+        (h) => h.command === 'update_global_account_cached_user'
+      );
+      expect(storeIdx, 'token stored').to.be.greaterThan(-1);
+      expect(cachedUserIdx, 'cachedUser refreshed').to.be.greaterThan(-1);
+      const cachedUserCall = invokeHistory[cachedUserIdx];
+      const args = cachedUserCall.args as Record<string, unknown>;
+      expect(args.accountId).to.equal('ado-acc-1');
+      expect(args.user).to.not.be.null;
+    });
+  });
 });

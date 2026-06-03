@@ -1843,6 +1843,30 @@ describe('lv-profile-manager-dialog', () => {
       // Still on the accounts view after deleting
       expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent!.trim()).to.equal('Accounts');
     });
+
+    it('also deletes the keyring token (record first, then token) when deleting a global account', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      clearHistory();
+      const deleteBtn = el.shadowRoot!.querySelector(
+        '.account-actions .action-btn.delete'
+      ) as HTMLButtonElement;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const deleteRecordIdx = invokeHistory.findIndex((h) => h.command === 'delete_global_account');
+      const deleteTokenIdx = invokeHistory.findIndex((h) => h.command === 'delete_keyring_token');
+      expect(deleteRecordIdx, 'account record deletion happened').to.be.greaterThan(-1);
+      expect(deleteTokenIdx, 'keyring token deletion happened').to.be.greaterThan(-1);
+      // Record is the source of truth — it must be deleted before the token.
+      expect(deleteRecordIdx).to.be.lessThan(deleteTokenIdx);
+      // The token deletion targets the deleted account's keyring key.
+      const tokenCall = invokeHistory[deleteTokenIdx];
+      expect((tokenCall.args as Record<string, string>).key).to.include('account-1');
+    });
   });
 
   // ── Replacing a same-provider account (#5) ─────────────────────────────────

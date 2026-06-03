@@ -1001,20 +1001,63 @@ export class LvAzureDevOpsDialog extends LitElement {
         }
 
         if (detail.tokens?.accessToken) {
-          // Store the OAuth token
-          const accountId = this.selectedAccountId || `ado-oauth-${Date.now()}`;
+          const accessToken = detail.tokens.accessToken;
+          const organization = this.organizationInput.trim();
 
-          await credentialService.storeAccountToken('azure-devops', accountId, detail.tokens.accessToken);
-
-          // Verify connection
-          const result = await gitService.checkAdoConnectionWithToken(
-            this.organizationInput,
-            detail.tokens.accessToken,
-          );
+          // Verify connection BEFORE persisting anything
+          const result = await gitService.checkAdoConnectionWithToken(organization, accessToken);
 
           if (result.success && result.data?.connected) {
+            const user = result.data.user;
+            const cachedUser = user
+              ? {
+                  username: user.displayName,
+                  displayName: user.displayName,
+                  email: null, // ADO API doesn't return email in this context
+                  avatarUrl: user.imageUrl ?? null,
+                }
+              : null;
+
+            if (this.selectedAccountId) {
+              // Rotating credentials on an existing account
+              await credentialService.storeAccountToken(
+                'azure-devops',
+                this.selectedAccountId,
+                accessToken,
+              );
+              if (cachedUser) {
+                await unifiedProfileService.updateGlobalAccountCachedUser(
+                  this.selectedAccountId,
+                  cachedUser,
+                );
+              }
+            } else {
+              // No account selected - create and persist a new global account
+              // (mirror the PAT path) BEFORE storing the token so the keyring
+              // entry is never orphaned.
+              const { createEmptyIntegrationAccount, generateId } = await import(
+                '../../types/unified-profile.types.ts'
+              );
+              const newAccount: IntegrationAccount = {
+                ...createEmptyIntegrationAccount('azure-devops', organization),
+                id: generateId(),
+                name: user?.displayName
+                  ? `Azure DevOps (${user.displayName})`
+                  : `Azure DevOps (${organization})`,
+                isDefault: this.accounts.length === 0,
+                cachedUser,
+              };
+
+              const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
+              await credentialService.storeAccountToken('azure-devops', savedAccount.id, accessToken);
+              this.selectedAccountId = savedAccount.id;
+
+              // Refresh accounts list
+              await unifiedProfileService.loadUnifiedProfiles();
+              this.accounts = getAccountsByType('azure-devops');
+            }
+
             this.connectionStatus = result.data;
-            this.selectedAccountId = accountId;
             this.syncSharedConnectionStatus(true);
             showToast('Connected to Azure DevOps via Microsoft Entra ID', 'success');
           } else {
@@ -1129,6 +1172,16 @@ export class LvAzureDevOpsDialog extends LitElement {
       // If we have a selected account, save token to that account
       if (this.selectedAccountId) {
         await credentialService.storeAccountToken('azure-devops', this.selectedAccountId, tokenToSave);
+        // Refresh cachedUser so the profile manager shows the up-to-date
+        // avatar/username immediately instead of waiting for background validation.
+        if (user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+            username: user.displayName,
+            displayName: user.displayName,
+            email: null, // ADO API doesn't return email in this context
+            avatarUrl: user.imageUrl ?? null,
+          });
+        }
       } else {
         // No account selected - create a new global account
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');

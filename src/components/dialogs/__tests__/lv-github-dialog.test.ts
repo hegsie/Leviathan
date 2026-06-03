@@ -833,4 +833,34 @@ describe('lv-github-dialog', () => {
       expect(toasts.some((t) => t.type === 'success' && /Connected GitHub/.test(t.message))).to.be.true;
     });
   });
+
+  describe('PAT rotation refreshes cachedUser', () => {
+    it('calls update_global_account_cached_user after storing the token on an existing account', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gh-acc-1';
+      (el as unknown as { tokenInput: string }).tokenInput = 'ghp_rotated_pat';
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleSaveToken: () => Promise<void> }).handleSaveToken();
+      await el.updateComplete;
+
+      const storeIdx = invokeHistory.findIndex((h) => h.command === 'store_keyring_token');
+      const cachedUserIdx = invokeHistory.findIndex(
+        (h) => h.command === 'update_global_account_cached_user'
+      );
+      expect(storeIdx, 'token stored').to.be.greaterThan(-1);
+      expect(cachedUserIdx, 'cachedUser refreshed').to.be.greaterThan(-1);
+      const args = invokeHistory[cachedUserIdx].args as Record<string, unknown>;
+      expect(args.accountId).to.equal('gh-acc-1');
+      expect(args.user).to.not.be.null;
+    });
+  });
 });

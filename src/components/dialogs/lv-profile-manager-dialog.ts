@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatus } from '../../stores/unified-profile.store.ts';
 import { repositoryStore, type RecentRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
+import * as credentialService from '../../services/credential.service.ts';
 import type { UnifiedProfile, IntegrationAccount, IntegrationType, IntegrationConfig, IntegrationOpenContext, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
 import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
@@ -1249,8 +1250,19 @@ export class LvProfileManagerDialog extends LitElement {
     );
     if (!confirmed) return;
 
+    // Resolve the integration type so we can clean up the keyring token too.
+    // Prefer the stored account record; fall back to the editing snapshot.
+    const integrationType =
+      this.getGlobalAccounts().find((a) => a.id === accountId)?.integrationType ??
+      (this.editingAccount?.id === accountId ? this.editingAccount.integrationType : undefined);
+
     try {
+      // Delete the record first (source of truth), then best-effort delete the
+      // keyring token (and its _oauth companion) so it isn't left orphaned.
       await unifiedProfileService.deleteGlobalAccount(accountId);
+      if (integrationType) {
+        await credentialService.deleteAccountToken(integrationType, accountId);
+      }
       // The editing profile is a local snapshot - drop the deleted account from it too.
       const attachedType = Object.entries(this.editingProfile?.defaultAccounts ?? {}).find(
         ([, id]) => id === accountId

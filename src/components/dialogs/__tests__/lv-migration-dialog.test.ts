@@ -77,6 +77,20 @@ const PREVIEW_NO_UNMATCHED: MigrationPreview = {
   unmatchedAccounts: [],
 };
 
+// A user who only ever configured accounts (never profiles): there are
+// unmatched accounts but zero profiles to assign them to.
+const PREVIEW_NO_PROFILES_WITH_UNMATCHED: MigrationPreview = {
+  profiles: [],
+  unmatchedAccounts: [
+    {
+      accountId: 'acc-9',
+      accountName: 'Solo GitHub',
+      integrationType: 'github',
+      suggestedProfileId: null,
+    },
+  ],
+};
+
 const MIGRATION_SUCCESS = {
   success: true,
   profilesMigrated: 2,
@@ -262,6 +276,44 @@ describe('lv-migration-dialog', () => {
       const noAccounts = el.shadowRoot!.querySelectorAll('.no-accounts');
       expect(noAccounts.length).to.equal(1);
       expect(noAccounts[0].textContent).to.include('No accounts matched');
+    });
+
+    it('shows an explanatory note (not empty selects) when there are unmatched accounts but no profiles', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_NO_PROFILES_WITH_UNMATCHED;
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      // The unmatched section still lists the account…
+      const unmatchedNames = el.shadowRoot!.querySelectorAll('.unmatched-account-name');
+      expect(unmatchedNames.length).to.equal(1);
+      expect(unmatchedNames[0].textContent).to.include('Solo GitHub');
+
+      // …but there are NO empty profile <select> dropdowns (the dead-end).
+      const selects = el.shadowRoot!.querySelectorAll('.profile-select');
+      expect(selects.length).to.equal(0);
+
+      // Instead an explanatory note about shared global accounts is shown.
+      const description = el.shadowRoot!.querySelector('.unmatched-section .section-description');
+      expect(description).to.not.be.null;
+      expect(description!.textContent).to.include('shared global accounts');
+
+      // And the "Open Profile Manager" affordance is offered in this case.
+      const buttons = Array.from(el.shadowRoot!.querySelectorAll('.unmatched-section button'));
+      const openMgrBtn = buttons.find((b) => b.textContent?.trim() === 'Open Profile Manager');
+      expect(openMgrBtn, 'Open Profile Manager button should exist').to.not.be.undefined;
     });
 
     it('transitions from preview to migrating when Start Migration is clicked', async () => {

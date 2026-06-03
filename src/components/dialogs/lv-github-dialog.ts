@@ -1308,6 +1308,16 @@ export class LvGitHubDialog extends LitElement {
       // If we have a selected account, save token to that account
       if (this.selectedAccountId) {
         await credentialService.storeAccountToken('github', this.selectedAccountId, tokenToSave);
+        // Refresh cachedUser so the profile manager shows the up-to-date
+        // avatar/username immediately instead of waiting for background validation.
+        if (user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+            username: user.login,
+            displayName: user.name ?? null,
+            email: user.email ?? null,
+            avatarUrl: user.avatarUrl ?? null,
+          });
+        }
       } else {
         // No account selected - create a new global account
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');

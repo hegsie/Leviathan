@@ -979,6 +979,16 @@ export class LvBitbucketDialog extends LitElement {
         // Create or update a global account for app-password connections
         if (this.selectedAccountId) {
           await credentialService.storeAccountToken('bitbucket', this.selectedAccountId, this.appPasswordInput);
+          // Refresh cachedUser so the profile manager shows the up-to-date
+          // avatar/username immediately instead of waiting for background validation.
+          if (user) {
+            await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+              username: user.username,
+              displayName: user.displayName ?? null,
+              email: null,
+              avatarUrl: user.avatarUrl ?? null,
+            });
+          }
         } else {
           const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
           const newAccount: IntegrationAccount = {
