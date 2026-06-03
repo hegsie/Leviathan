@@ -12,14 +12,26 @@ use std::time::Duration;
 
 use crate::error::LeviathanError;
 
+/// The result of a successful OAuth callback: the authorization code together
+/// with the `state` parameter echoed back by the provider. The caller is
+/// responsible for validating `state` against the value it issued (CSRF / PKCE
+/// flow-binding protection).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallbackResult {
+    /// The authorization code returned by the provider.
+    pub code: String,
+    /// The `state` parameter echoed back (empty string if the provider omitted it).
+    pub state: String,
+}
+
 /// A temporary loopback server for OAuth callbacks
 pub struct LoopbackServer {
     /// The port the server is listening on
     port: u16,
     /// Sender to signal shutdown
     shutdown_tx: Option<mpsc::Sender<()>>,
-    /// Receiver for the authorization code
-    code_rx: Option<mpsc::Receiver<Result<String, String>>>,
+    /// Receiver for the authorization code + state
+    code_rx: Option<mpsc::Receiver<Result<CallbackResult, String>>>,
 }
 
 /// Preferred ports for OAuth callbacks (should match redirect URIs registered with providers)
@@ -54,7 +66,7 @@ impl LoopbackServer {
 
         // Set up channels for shutdown and code reception
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
-        let (code_tx, code_rx) = mpsc::channel::<Result<String, String>>();
+        let (code_tx, code_rx) = mpsc::channel::<Result<CallbackResult, String>>();
 
         // Set non-blocking mode with timeout
         listener
@@ -99,11 +111,16 @@ impl LoopbackServer {
         format!("http://127.0.0.1:{}/callback", self.port)
     }
 
-    /// Wait for the OAuth callback and return the authorization code
+    /// Wait for the OAuth callback and return the authorization code + state.
     ///
-    /// Returns the authorization code on success, or an error message on failure.
+    /// Returns a [`CallbackResult`] (authorization code plus the echoed `state`)
+    /// on success, or an error message on failure. The caller MUST validate the
+    /// returned `state` against the value it issued.
     /// Times out after 5 minutes.
-    pub fn wait_for_callback(mut self, timeout: Duration) -> Result<String, LeviathanError> {
+    pub fn wait_for_callback(
+        mut self,
+        timeout: Duration,
+    ) -> Result<CallbackResult, LeviathanError> {
         let code_rx = self
             .code_rx
             .take()
@@ -111,12 +128,12 @@ impl LoopbackServer {
 
         // Wait for the code with timeout
         match code_rx.recv_timeout(timeout) {
-            Ok(Ok(code)) => {
+            Ok(Ok(result)) => {
                 // Shutdown the server
                 if let Some(tx) = self.shutdown_tx.take() {
                     let _ = tx.send(());
                 }
-                Ok(code)
+                Ok(result)
             }
             Ok(Err(error)) => {
                 if let Some(tx) = self.shutdown_tx.take() {
@@ -142,7 +159,7 @@ impl LoopbackServer {
     fn run_server(
         listener: TcpListener,
         shutdown_rx: mpsc::Receiver<()>,
-        code_tx: mpsc::Sender<Result<String, String>>,
+        code_tx: mpsc::Sender<Result<CallbackResult, String>>,
     ) {
         loop {
             // Check for shutdown signal
@@ -171,7 +188,7 @@ impl LoopbackServer {
     }
 
     /// Handle an incoming HTTP connection
-    fn handle_connection(mut stream: TcpStream) -> Option<Result<String, String>> {
+    fn handle_connection(mut stream: TcpStream) -> Option<Result<CallbackResult, String>> {
         let mut buffer = [0; 4096];
 
         // Set read timeout
@@ -220,10 +237,15 @@ impl LoopbackServer {
             return Some(Err(format!("{}: {}", error, description)));
         }
 
-        // Get the authorization code
+        // Get the authorization code (and the echoed state for CSRF validation)
         if let Some(code) = params.get("code") {
             Self::send_success_response(&mut stream);
-            return Some(Ok(code.to_string()));
+            let code = url_decode_component(code);
+            let state = params
+                .get("state")
+                .map(|s| url_decode_component(s))
+                .unwrap_or_default();
+            return Some(Ok(CallbackResult { code, state }));
         }
 
         Self::send_error_response(&mut stream, "No authorization code received");
@@ -334,6 +356,19 @@ impl Drop for LoopbackServer {
     }
 }
 
+/// Decode a single application/x-www-form-urlencoded query component
+/// (percent-decoding plus `+` -> space). Used for `code` and `state` so that
+/// state validation compares the decoded value the provider echoed back.
+fn url_decode_component(s: &str) -> String {
+    // `+` represents a space in query strings.
+    let s = s.replace('+', " ");
+    match urlencoding::decode(&s) {
+        Ok(decoded) => decoded.into_owned(),
+        // Fall back to the raw value if it isn't valid percent-encoding.
+        Err(_) => s,
+    }
+}
+
 /// Simple HTML escaping
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -359,5 +394,37 @@ mod tests {
         let server = LoopbackServer::new().unwrap();
         let uri = server.get_redirect_uri();
         assert!(uri.contains("/callback"));
+    }
+
+    #[test]
+    fn test_url_decode_component_plain() {
+        assert_eq!(url_decode_component("abc123"), "abc123");
+    }
+
+    #[test]
+    fn test_url_decode_component_percent_and_plus() {
+        assert_eq!(url_decode_component("a%2Bb"), "a+b");
+        assert_eq!(url_decode_component("hello+world"), "hello world");
+        assert_eq!(url_decode_component("state%20value"), "state value");
+    }
+
+    #[test]
+    fn test_url_decode_component_invalid_falls_back() {
+        // Incomplete percent-escape should not panic; return best-effort value.
+        let out = url_decode_component("%zz");
+        assert_eq!(out, "%zz");
+    }
+
+    #[test]
+    fn test_callback_result_equality() {
+        let a = CallbackResult {
+            code: "code1".to_string(),
+            state: "state1".to_string(),
+        };
+        let b = CallbackResult {
+            code: "code1".to_string(),
+            state: "state1".to_string(),
+        };
+        assert_eq!(a, b);
     }
 }

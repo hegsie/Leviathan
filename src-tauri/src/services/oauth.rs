@@ -235,8 +235,90 @@ pub struct OidcUserInfo {
     pub picture: Option<String>,
 }
 
+/// Validate a user-supplied issuer / instance URL before issuing a network
+/// request against it. Prevents SSRF by requiring `https` and rejecting hosts
+/// that point at the loopback interface, link-local addresses, or RFC-1918
+/// private ranges (which could let an attacker reach internal services or
+/// cloud metadata endpoints such as 169.254.169.254).
+pub fn validate_issuer_url(issuer_url: &str) -> Result<(), String> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    let parsed = url::Url::parse(issuer_url).map_err(|e| format!("Invalid issuer URL: {}", e))?;
+
+    // Require HTTPS — reject http://, file://, and any other scheme.
+    if parsed.scheme() != "https" {
+        return Err(format!(
+            "Issuer URL must use https (got scheme '{}')",
+            parsed.scheme()
+        ));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Issuer URL has no host".to_string())?;
+
+    // Reject obvious loopback hostnames before DNS-style checks.
+    let host_lower = host.to_ascii_lowercase();
+    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
+        return Err("Issuer URL host is not allowed (loopback)".to_string());
+    }
+
+    // If the host is an IP literal, reject private / loopback / link-local ranges.
+    let ip_literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = ip_literal.parse::<IpAddr>() {
+        if is_blocked_ip(&ip) {
+            return Err(
+                "Issuer URL host is not allowed (private, loopback, or link-local address)"
+                    .to_string(),
+            );
+        }
+    }
+
+    // Helper closures kept inline to avoid leaking std imports.
+    #[allow(clippy::let_and_return)]
+    fn is_blocked_ip(ip: &IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => is_blocked_ipv4(v4),
+            IpAddr::V6(v6) => is_blocked_ipv6(v6),
+        }
+    }
+
+    fn is_blocked_ipv4(ip: &Ipv4Addr) -> bool {
+        ip.is_loopback() // 127.0.0.0/8
+            || ip.is_private() // 10/8, 172.16/12, 192.168/16
+            || ip.is_link_local() // 169.254.0.0/16
+            || ip.is_unspecified() // 0.0.0.0
+            || ip.is_broadcast()
+    }
+
+    fn is_blocked_ipv6(ip: &Ipv6Addr) -> bool {
+        if ip.is_loopback() || ip.is_unspecified() {
+            return true;
+        }
+        // IPv4-mapped addresses (::ffff:a.b.c.d) — apply the IPv4 rules.
+        if let Some(v4) = ip.to_ipv4_mapped() {
+            return is_blocked_ipv4(&v4);
+        }
+        let seg = ip.segments();
+        // Link-local fe80::/10
+        if (seg[0] & 0xffc0) == 0xfe80 {
+            return true;
+        }
+        // Unique local fc00::/7
+        if (seg[0] & 0xfe00) == 0xfc00 {
+            return true;
+        }
+        false
+    }
+
+    Ok(())
+}
+
 /// Discover OIDC provider configuration from the well-known endpoint
 pub async fn discover_oidc_config(issuer_url: &str) -> Result<OidcDiscovery, String> {
+    // SSRF guard: validate the user-supplied issuer URL before any network call.
+    validate_issuer_url(issuer_url)?;
+
     let discovery_url = format!(
         "{}/.well-known/openid-configuration",
         issuer_url.trim_end_matches('/')
@@ -818,6 +900,60 @@ mod tests {
     // ==========================================================================
     // PKCE Deterministic Verification Test
     // ==========================================================================
+
+    // ==========================================================================
+    // SSRF Issuer URL Validation Tests (M9)
+    // ==========================================================================
+
+    #[test]
+    fn test_validate_issuer_url_rejects_http() {
+        assert!(validate_issuer_url("http://accounts.google.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_metadata_endpoint() {
+        // Cloud metadata endpoint (link-local 169.254.0.0/16) must be rejected.
+        assert!(validate_issuer_url("http://169.254.169.254/").is_err());
+        assert!(validate_issuer_url("https://169.254.169.254/").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_private_range() {
+        assert!(validate_issuer_url("https://10.0.0.1/").is_err());
+        assert!(validate_issuer_url("https://172.16.0.1/").is_err());
+        assert!(validate_issuer_url("https://192.168.1.1/").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_loopback() {
+        assert!(validate_issuer_url("https://127.0.0.1/").is_err());
+        assert!(validate_issuer_url("https://localhost/").is_err());
+        assert!(validate_issuer_url("https://[::1]/").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_file_scheme() {
+        assert!(validate_issuer_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_link_local_ipv6() {
+        assert!(validate_issuer_url("https://[fe80::1]/").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_accepts_public_https() {
+        assert!(validate_issuer_url("https://accounts.google.com").is_ok());
+        assert!(validate_issuer_url("https://auth.example.com/realms/main").is_ok());
+        // A public IP literal over https is allowed.
+        assert!(validate_issuer_url("https://8.8.8.8/").is_ok());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_garbage() {
+        assert!(validate_issuer_url("not a url").is_err());
+        assert!(validate_issuer_url("https://").is_err());
+    }
 
     #[test]
     fn test_pkce_challenge_matches_verifier() {
