@@ -90,6 +90,20 @@ export const sharedStyles = css`
   .mono {
     font-family: var(--font-family-mono);
   }
+
+  /* "Adding to <profile>" breadcrumb shown in a provider/OIDC connect dialog when
+     it was opened from the Profiles & Accounts manager's attach flow. */
+  .attach-breadcrumb {
+    font-size: var(--font-size-sm);
+    color: var(--color-text-secondary);
+    padding: var(--spacing-xs) var(--spacing-sm);
+    background: var(--color-bg-tertiary);
+    border-radius: var(--radius-sm);
+  }
+
+  .attach-breadcrumb strong {
+    color: var(--color-text-primary);
+  }
 `;
 
 /**

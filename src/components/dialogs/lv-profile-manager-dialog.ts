@@ -9,7 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatus } from '../../stores/unified-profile.store.ts';
 import { repositoryStore, type RecentRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import type { UnifiedProfile, IntegrationAccount, IntegrationType, IntegrationConfig, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
+import type { UnifiedProfile, IntegrationAccount, IntegrationType, IntegrationConfig, IntegrationOpenContext, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
 import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
@@ -67,6 +67,21 @@ export class LvProfileManagerDialog extends LitElement {
         display: flex;
         align-items: center;
         gap: var(--spacing-sm);
+      }
+
+      /* Breadcrumb shown in the attach picker so the user always knows which
+         profile a connected account will be attached to. */
+      .attach-breadcrumb {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        margin-bottom: var(--spacing-md);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-sm);
+      }
+
+      .attach-breadcrumb strong {
+        color: var(--color-text-primary);
       }
 
       .dialog-content {
@@ -647,9 +662,8 @@ export class LvProfileManagerDialog extends LitElement {
   private unsubscribeRepoStore?: () => void;
 
   // When the user picks "Connect a new account" for a provider in the picker, we
-  // remember the provider and the account ids that existed beforehand, so that on
-  // return we can auto-attach the account they just connected to the profile.
-  private pendingConnectType: IntegrationType | null = null;
+  // snapshot the account ids that existed beforehand, so revealAfterConnect() can
+  // identify the one they just connected and attach it to the target profile.
   private accountIdsBeforeConnect: Set<string> = new Set();
 
   connectedCallback(): void {
@@ -716,13 +730,10 @@ export class LvProfileManagerDialog extends LitElement {
       // Fresh open: load data, then verify connection status for accurate dots.
       void this.loadProfiles().then(() => this.refreshConnectionStatuses());
     }
-    // When a dialog stacked on top of us closes (e.g. an integration dialog opened
-    // from the picker), refresh and auto-attach the account the user just connected.
-    // We do NOT re-check connection status here — the integration dialog already
-    // wrote it to the shared store, and re-checking would overwrite it.
-    if (changedProperties.has('demoted') && !this.demoted && this.open) {
-      void this.handleRevealAfterConnect();
-    }
+    // NOTE: revealing-after-connect is now driven EXPLICITLY by the host calling
+    // revealAfterConnect(context) when the stacked provider dialog closes — not by
+    // inferring intent from a `demoted` flip. The `demoted` property remains purely
+    // a visual signal (render behind the stacked dialog).
   }
 
   private async loadProfiles(): Promise<void> {
@@ -838,17 +849,20 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private performClose(): void {
+    // Capture the view we are closing FROM before resetting, so the host can make
+    // reversible-navigation decisions (e.g. return to the provider dialog only
+    // when closing out of the Accounts view).
+    const fromView = this.viewMode;
     this.open = false;
     this.viewMode = 'list';
     this.editingProfile = null;
     this.editingAccount = null;
     this.profileFormDirty = false;
     this.accountFormDirty = false;
-    // Drop any in-flight "connect a new account" intent so it can't auto-attach
+    // Drop any in-flight "connect a new account" snapshot so it can't auto-attach
     // to an unrelated profile the next time the dialog is revealed.
-    this.pendingConnectType = null;
     this.accountIdsBeforeConnect = new Set();
-    this.dispatchEvent(new CustomEvent('close'));
+    this.dispatchEvent(new CustomEvent('close', { detail: { fromView } }));
   }
 
   private handleCreateNew(): void {
@@ -902,7 +916,15 @@ export class LvProfileManagerDialog extends LitElement {
         this.selectedReposForAssignment = new Set();
         break;
       case 'accounts':
-        this.viewMode = 'list';
+        // When the Accounts view was the landing view (e.g. opened via "Manage
+        // Accounts" from a provider dialog), Back closes the manager so the host
+        // can return to wherever it was opened from — keeping that navigation
+        // reversible. When reached from the profile list, Back returns there.
+        if (this.initialView === 'accounts') {
+          this.handleClose();
+        } else {
+          this.viewMode = 'list';
+        }
         break;
       default:
         // create / edit
@@ -1931,6 +1953,9 @@ export class LvProfileManagerDialog extends LitElement {
     return html`
       <div class="form-content">
         <div class="form-section">
+          <div class="attach-breadcrumb" data-testid="attach-breadcrumb">
+            Adding to <strong>${this.editingProfile?.name || 'this profile'}</strong>
+          </div>
           ${accounts.length === 0
             ? html`
                 <div class="empty-accounts">
@@ -2213,15 +2238,31 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private dispatchIntegrationOpen(type: IntegrationType): void {
-    // Remember which provider the user is connecting and the accounts that exist
-    // now, so that when the integration dialog closes we can auto-attach the
-    // account they just connected to the profile being edited.
-    this.pendingConnectType = type;
+    // Snapshot the accounts that exist now so revealAfterConnect() can identify
+    // the one the user just connected. This is captured at dispatch time (not
+    // inferred later) and travels with the explicit context below.
     this.accountIdsBeforeConnect = new Set(this.getGlobalAccounts().map((a) => a.id));
-    // Stay on the picker view: the host stacks the integration dialog on top and
-    // reveals this one again on close.
+
+    // EXPLICIT navigation intent: tell the host exactly how this dialog is being
+    // opened so the provider dialog can show a Back arrow that returns HERE, and
+    // (only when attaching) attach the just-connected account to this profile.
+    // Attach intent is true only when connecting from the per-profile attach
+    // picker — never from the standalone Accounts view, where there is no
+    // profile to attach to and an auto-attach would be a surprise.
+    const attach = this.viewMode === 'select-account' || this.viewMode === 'edit' || this.viewMode === 'create';
+    const context: IntegrationOpenContext = {
+      returnTo: 'profile-manager',
+      integrationType: type,
+      profileId: this.editingProfile?.id ?? '',
+      profileName: this.editingProfile?.name ?? '',
+      attach,
+    };
+
+    // Stay on the current view: the host stacks the integration dialog on top and
+    // reveals this one again on close (via revealAfterConnect with the context).
     this.dispatchEvent(
       new CustomEvent(`open-${type}`, {
+        detail: context,
         bubbles: true,
         composed: true,
       })
@@ -2229,20 +2270,46 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   /**
-   * After an integration dialog opened from the picker closes, attach the account
-   * the user just connected to the profile being edited, then return to the form
-   * so it shows as attached (ready to Save). Matches the user's intent: clicking
-   * "Connect <provider>" while attaching to a profile means "use this account".
+   * Called by the host when a provider/OIDC dialog that was opened FROM this
+   * manager closes. Driven by the EXPLICIT context captured at open time — not by
+   * guessing global state. Reloads accounts and, when the context carried an
+   * attach intent, attaches the just-connected account to the target profile and
+   * returns to its form so it shows as attached (ready to Save).
+   *
+   * Public so app-shell can invoke it deterministically on dialog close. When
+   * `context.attach` is false (e.g. opened from the standalone Accounts view),
+   * we just refresh the list with no surprise attach.
    */
-  private async handleRevealAfterConnect(): Promise<void> {
+  public async revealAfterConnect(context: IntegrationOpenContext): Promise<void> {
     await this.loadProfiles();
-    const type = this.pendingConnectType;
-    this.pendingConnectType = null;
-    if (!type || !this.editingProfile) return;
+
+    if (!context.attach) {
+      // Standalone "connect a new account" — no profile to attach to. The store
+      // subscription already re-rendered the account list; nothing else to do.
+      this.accountIdsBeforeConnect = new Set();
+      return;
+    }
+
+    const type = context.integrationType;
+
+    // Re-resolve the editing profile from the freshly loaded store so the attach
+    // lands on the right profile even if the snapshot drifted. For an unsaved
+    // (create-mode) profile, profileId is '' and we keep the in-memory draft.
+    if (context.profileId) {
+      const fresh = this.profiles.find((p) => p.id === context.profileId);
+      if (fresh) {
+        this.editingProfile = { ...fresh, defaultAccounts: { ...fresh.defaultAccounts } };
+      }
+    }
+    if (!this.editingProfile) {
+      this.accountIdsBeforeConnect = new Set();
+      return;
+    }
 
     const accountsOfType = this.getGlobalAccounts().filter((a) => a.integrationType === type);
     const previous = this.editingProfile.defaultAccounts?.[type];
     const newlyConnected = accountsOfType.find((a) => !this.accountIdsBeforeConnect.has(a.id));
+    this.accountIdsBeforeConnect = new Set();
 
     if (newlyConnected) {
       // The user explicitly connected this account while attaching to the

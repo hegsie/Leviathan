@@ -361,6 +361,49 @@ describe('lv-github-dialog', () => {
       const selector = el.shadowRoot!.querySelector('lv-account-selector');
       expect(selector).to.not.be.null;
     });
+
+    // Wave 5b: the Back arrow is driven by the EXPLICIT backButton flag (set by
+    // the host only when opened with a return target), not by global state.
+    it('shows the Back arrow only when opened with a return target (backButton=true)', async () => {
+      const withBack = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true} ?backButton=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(withBack);
+      const backBtn = withBack.shadowRoot!
+        .querySelector('lv-modal')!
+        .shadowRoot!.querySelector('[aria-label="Back"]');
+      expect(backBtn).to.not.be.null;
+    });
+
+    it('shows NO Back arrow when opened standalone (backButton=false)', async () => {
+      const standalone = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(standalone);
+      const modal = standalone.shadowRoot!.querySelector('lv-modal')!;
+      expect(modal.shadowRoot!.querySelector('[aria-label="Back"]')).to.be.null;
+      // Standalone shows the close × instead.
+      expect(modal.shadowRoot!.querySelector('[aria-label="Close"]')).to.not.be.null;
+    });
+
+    // Wave 5b: "Adding to <name>" breadcrumb shows only during the attach flow.
+    it('shows the "Adding to <name>" breadcrumb when attachToProfileName is set', async () => {
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true} .attachToProfileName=${'Work'}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      const crumb = el.shadowRoot!.querySelector('[data-testid="attach-breadcrumb"]');
+      expect(crumb).to.not.be.null;
+      expect(crumb!.textContent).to.include('Work');
+    });
+
+    it('shows no breadcrumb when opened standalone', async () => {
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      expect(el.shadowRoot!.querySelector('[data-testid="attach-breadcrumb"]')).to.be.null;
+    });
   });
 
   describe('Connection Tab', () => {

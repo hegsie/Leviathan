@@ -745,8 +745,19 @@ export class LvGitHubDialog extends LitElement {
 
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
-  /** Show a back arrow instead of a close ×, e.g. when opened from the profile manager. */
+  /**
+   * Show a back arrow instead of a close ×. Set explicitly by the host ONLY when
+   * this dialog was opened with a return target (the profile manager), so the
+   * arrow's presence reflects HOW the dialog was opened — not unrelated global
+   * state.
+   */
   @property({ type: Boolean }) backButton = false;
+  /**
+   * Name of the profile the connected account will be attached to, when opened
+   * from the profile manager's attach flow. Drives the "Adding to <name>"
+   * breadcrumb. Empty when opened standalone.
+   */
+  @property({ type: String }) attachToProfileName = '';
 
   @state() private activeTab: TabType = 'connection';
   @state() private connectionStatus: GitHubConnectionStatus | null = null;
@@ -2452,6 +2463,9 @@ export class LvGitHubDialog extends LitElement {
         @close=${this.handleClose}
       >
         <div class="content">
+          ${this.attachToProfileName
+            ? html`<div class="attach-breadcrumb" data-testid="attach-breadcrumb">Adding to <strong>${this.attachToProfileName}</strong></div>`
+            : nothing}
           ${this.detectedRepo ? html`
             <div class="repo-info">
               <svg class="repo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

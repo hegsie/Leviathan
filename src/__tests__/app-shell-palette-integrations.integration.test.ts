@@ -92,3 +92,121 @@ describe('app-shell palette integration entries (no repo required)', () => {
     expect(warnings.length, 'gated command still warns').to.be.greaterThan(0);
   });
 });
+
+// ── Wave 5b: explicit dialog navigation (return targets + attach) ───────────
+describe('app-shell explicit integration navigation', () => {
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  // The profile manager ref is a read-only @query getter; stub it for tests.
+  function stubProfileManager(el: AppShell, stub: unknown): void {
+    Object.defineProperty(el, 'profileManagerDialog', {
+      configurable: true,
+      get: () => stub,
+    });
+  }
+
+  it('standalone open sets no return context → no Back arrow, no attach name', () => {
+    const el = createAppShellNoRepo();
+    getCommand(el, 'github').action();
+    expect((el as any).showGitHub).to.equal(true);
+    expect((el as any).integrationContext, 'no context standalone').to.equal(null);
+    expect((el as any).integrationBackButton, 'no back arrow').to.equal(false);
+    expect((el as any).integrationAttachName, 'no breadcrumb').to.equal('');
+  });
+
+  it('open-from-manager captures the explicit context → Back arrow + breadcrumb', () => {
+    const el = createAppShellNoRepo();
+    const context = {
+      returnTo: 'profile-manager' as const,
+      integrationType: 'github' as const,
+      profileId: 'p1',
+      profileName: 'Work',
+      attach: true,
+    };
+    (el as any).handleOpenIntegrationFromManager('github', { detail: context });
+    expect((el as any).showGitHub).to.equal(true);
+    expect((el as any).integrationContext).to.deep.equal(context);
+    expect((el as any).integrationBackButton, 'back arrow shown').to.equal(true);
+    expect((el as any).integrationAttachName, 'breadcrumb name shown').to.equal('Work');
+    // The profile manager renders demoted (behind) only via this explicit context.
+    expect((el as any).profileManagerDemoted).to.equal(true);
+  });
+
+  it('a context with attach:false shows the Back arrow but no breadcrumb', () => {
+    const el = createAppShellNoRepo();
+    (el as any).handleOpenIntegrationFromManager('oidc', {
+      detail: {
+        returnTo: 'profile-manager',
+        integrationType: 'oidc',
+        profileId: '',
+        profileName: 'Work',
+        attach: false,
+      },
+    });
+    expect((el as any).integrationBackButton).to.equal(true);
+    expect((el as any).integrationAttachName, 'no breadcrumb without attach').to.equal('');
+  });
+
+  it('closing a from-manager dialog clears context and reveals the manager with attach', () => {
+    const el = createAppShellNoRepo();
+    const context = {
+      returnTo: 'profile-manager' as const,
+      integrationType: 'github' as const,
+      profileId: 'p1',
+      profileName: 'Work',
+      attach: true,
+    };
+    (el as any).handleOpenIntegrationFromManager('github', { detail: context });
+
+    let revealed: unknown = null;
+    stubProfileManager(el, {
+      revealAfterConnect: (ctx: unknown) => { revealed = ctx; },
+      get currentView() { return 'select-account'; },
+    });
+
+    (el as any).handleIntegrationDialogClose('github');
+    expect((el as any).showGitHub, 'provider dialog closed').to.equal(false);
+    expect((el as any).integrationContext, 'context cleared').to.equal(null);
+    expect(revealed, 'manager revealed with the explicit context').to.deep.equal(context);
+  });
+
+  it('closing a standalone dialog does NOT reveal/attach to the manager', () => {
+    const el = createAppShellNoRepo();
+    getCommand(el, 'gitlab').action();
+    let revealedCalled = false;
+    stubProfileManager(el, {
+      revealAfterConnect: () => { revealedCalled = true; },
+      get currentView() { return 'list'; },
+    });
+    (el as any).handleIntegrationDialogClose('gitlab');
+    expect((el as any).showGitLab).to.equal(false);
+    expect(revealedCalled, 'no reveal for standalone close').to.equal(false);
+  });
+
+  it('Manage Accounts is reversible: closing the Accounts view reopens the provider', () => {
+    const el = createAppShellNoRepo();
+    // Simulate a provider dialog open, then "Manage Accounts" from it.
+    (el as any).showGitHub = true;
+    (el as any).handleManageAccounts({ detail: { integrationType: 'github' } });
+    expect((el as any).showGitHub, 'provider dialog closed').to.equal(false);
+    expect((el as any).showProfileManager, 'manager opened').to.equal(true);
+    expect((el as any).profileManagerView, 'lands on Accounts view').to.equal('accounts');
+    // Not demoted — the manager is shown ON TOP (no stacked-overlay context).
+    expect((el as any).profileManagerDemoted).to.equal(false);
+
+    // Closing OUT OF the Accounts view returns to the provider dialog.
+    (el as any).handleProfileManagerClose({ detail: { fromView: 'accounts' } });
+    expect((el as any).showProfileManager).to.equal(false);
+    expect((el as any).showGitHub, 'returned to the provider dialog').to.equal(true);
+  });
+
+  it('Manage Accounts close does NOT reopen the provider if user navigated off Accounts', () => {
+    const el = createAppShellNoRepo();
+    (el as any).showGitHub = true;
+    (el as any).handleManageAccounts({ detail: { integrationType: 'github' } });
+    // User navigated into the profile list; closing should NOT bounce back.
+    (el as any).handleProfileManagerClose({ detail: { fromView: 'list' } });
+    expect((el as any).showProfileManager).to.equal(false);
+    expect((el as any).showGitHub, 'no surprise reopen off Accounts').to.equal(false);
+  });
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+});

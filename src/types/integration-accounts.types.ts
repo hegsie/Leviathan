@@ -11,6 +11,36 @@
 export type IntegrationType = 'github' | 'gitlab' | 'azure-devops' | 'bitbucket' | 'oidc';
 
 /**
+ * Explicit navigation context attached to an `open-<provider>` event so a
+ * provider/OIDC connect dialog knows HOW it was opened — and therefore whether
+ * to show a Back arrow and where Back returns to.
+ *
+ * When present, the dialog was opened from the Profiles & Accounts manager's
+ * "Connect a new account" flow: it should show a Back arrow, a breadcrumb, and
+ * — if `attach` is set — attach the just-connected account to `profileId` on
+ * return. When the context is `null` (command palette, dashboard, toolbar),
+ * the dialog is standalone: no Back arrow, no surprise attach.
+ */
+export interface IntegrationOpenContext {
+  /** The origin the Back arrow returns to. Currently only the profile manager. */
+  returnTo: 'profile-manager';
+  /** Provider being connected (drives attach-after-connect for that type). */
+  integrationType: IntegrationType;
+  /**
+   * Id of the profile being edited when the connect flow started. Empty string
+   * for an unsaved (create-mode) profile. Used to target attach-after-connect.
+   */
+  profileId: string;
+  /** Display name of the target profile, for the "Adding to <name>" breadcrumb. */
+  profileName: string;
+  /**
+   * When true, attach the just-connected account to the target profile on
+   * return. False for a plain "manage accounts" connect with no attach intent.
+   */
+  attach: boolean;
+}
+
+/**
  * Integration-specific configuration
  */
 export type IntegrationConfig =

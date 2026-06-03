@@ -1043,14 +1043,16 @@ describe('lv-profile-manager-dialog', () => {
       expect(title!.textContent).to.include('Attach Account');
     });
 
-    it('preserves the picker and refreshes when demoted then revealed', async () => {
+    it('preserves the picker visually while demoted behind a stacked dialog', async () => {
       const el = await renderDialog();
       (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
       await el.updateComplete;
       getAddButton(el).click();
       await el.updateComplete;
 
-      // Demote behind a stacked dialog (e.g. an integration dialog)
+      // Demote behind a stacked dialog (e.g. an integration dialog). `demoted` is
+      // now PURELY a visual signal (render-behind) — it no longer triggers any
+      // reveal/attach side effects; that is driven explicitly by revealAfterConnect.
       el.demoted = true;
       await el.updateComplete;
       expect(el.hasAttribute('demoted')).to.be.true;
@@ -1058,14 +1060,62 @@ describe('lv-profile-manager-dialog', () => {
       expect(el.shadowRoot!.querySelector('.dialog-overlay')).to.not.be.null;
       expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Attach Account');
 
-      // Revealing again refreshes the account list so a newly connected account shows
-      clearHistory();
       el.demoted = false;
       await el.updateComplete;
-      await new Promise((r) => setTimeout(r, 20));
       expect(el.hasAttribute('demoted')).to.be.false;
-      expect(findCommands('get_unified_profiles_config').length).to.be.greaterThan(0);
+      // No accidental reveal/attach from un-demoting alone.
       expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Attach Account');
+    });
+
+    it('refreshes the account list when the host calls revealAfterConnect', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      // The host explicitly reveals us after a non-attaching connect (e.g. opened
+      // from the standalone Accounts view). The list is reloaded; nothing attaches.
+      clearHistory();
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: false,
+      });
+      await el.updateComplete;
+      expect(findCommands('get_unified_profiles_config').length).to.be.greaterThan(0);
+    });
+
+    it('emits an explicit return-target context with attach intent from the picker', async () => {
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
+      useConfig([profile], []);
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      let detail: unknown = null;
+      el.addEventListener('open-github', (e) => {
+        detail = (e as CustomEvent).detail;
+      });
+      const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'GitHub'
+      ) as HTMLButtonElement;
+      githubBtn.click();
+      await el.updateComplete;
+
+      // Connecting from the attach picker carries an explicit context: return to
+      // the profile manager, target this profile, WITH attach intent.
+      expect(detail).to.deep.equal({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: true,
+      });
     });
 
     it('auto-attaches a newly connected account on return from the integration dialog', async () => {
@@ -1078,23 +1128,30 @@ describe('lv-profile-manager-dialog', () => {
       getAddButton(el).click();
       await el.updateComplete;
 
-      // Click the "Connect a new account → GitHub" button
+      // Click the "Connect a new account → GitHub" button — snapshots the
+      // pre-connect accounts and dispatches the explicit open context.
       const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
         (b) => b.textContent?.trim() === 'GitHub'
       ) as HTMLButtonElement;
       githubBtn.click();
       await el.updateComplete;
 
-      // Integration dialog opens (demoted); user connects an account
+      // Integration dialog opens (demoted); user connects a new account
       el.demoted = true;
       await el.updateComplete;
       const newGh = makeAccount({ id: 'gh-new', name: 'New GH', integrationType: 'github' });
       useConfig([profile], [newGh]);
 
-      // Closing the integration dialog reveals the picker and auto-attaches
+      // The host EXPLICITLY reveals and attaches via the captured context (the
+      // attach intent + target profile travel with the context — no guessing).
       el.demoted = false;
-      await el.updateComplete;
-      await new Promise((r) => setTimeout(r, 30));
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: true,
+      });
       await el.updateComplete;
 
       // Back on the edit form with the connected account attached
@@ -1129,10 +1186,15 @@ describe('lv-profile-manager-dialog', () => {
 
       el.demoted = true;
       await el.updateComplete;
-      // No new account (same id re-authed)
+      // No new account (same id re-authed). Host reveals + attaches explicitly.
       el.demoted = false;
-      await el.updateComplete;
-      await new Promise((r) => setTimeout(r, 30));
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: true,
+      });
       await el.updateComplete;
 
       // The existing default account is attached
@@ -1805,15 +1867,41 @@ describe('lv-profile-manager-dialog', () => {
     });
   });
 
-  // ── Pending connect intent cleanup ─────────────────────────────────────────
-  describe('connect intent cleanup', () => {
-    it('clears a pending connect intent when the dialog is closed', async () => {
+  // ── Explicit reveal-after-connect (no intent-guessing) ─────────────────────
+  describe('reveal after connect (explicit context)', () => {
+    it('does NOT auto-attach when revealed with no attach intent (standalone)', async () => {
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
+      useConfig([profile], []);
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      (Array.from(
+        el.shadowRoot!.querySelector('.accounts-section')!.querySelectorAll('button')
+      ).find((b) => b.textContent?.trim() === 'Add') as HTMLButtonElement).click();
+      await el.updateComplete;
+
+      // A brand-new account materialises while the (standalone) connect dialog is up.
+      const newGh = makeAccount({ id: 'gh-new', name: 'New GH', integrationType: 'github' });
+      useConfig([profile], [newGh]);
+
+      // Reveal with attach:false — the manager must NOT attach the account; it
+      // stays on the picker view and only refreshes the list.
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: false,
+      });
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Attach Account');
+    });
+
+    it('clears the pre-connect snapshot when the dialog is closed', async () => {
       const el = await renderDialog();
       (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
       await el.updateComplete;
 
-      // Open the picker and click a "Connect a new account" provider button,
-      // which records a pending connect intent.
       const addBtn = Array.from(
         el.shadowRoot!.querySelector('.accounts-section')!.querySelectorAll('button')
       ).find((b) => b.textContent?.trim() === 'Add') as HTMLButtonElement;
@@ -1826,13 +1914,11 @@ describe('lv-profile-manager-dialog', () => {
       githubConnect.click();
       await el.updateComplete;
 
-      const withPrivate = el as unknown as { pendingConnectType: string | null };
-      expect(withPrivate.pendingConnectType).to.equal('github');
-
-      // Closing the dialog must drop the pending intent so it can't auto-attach later.
+      const withPrivate = el as unknown as { accountIdsBeforeConnect: Set<string> };
+      // Closing the dialog drops the snapshot so it can't influence a later reveal.
       (el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement).click();
       await el.updateComplete;
-      expect(withPrivate.pendingConnectType).to.equal(null);
+      expect(withPrivate.accountIdsBeforeConnect.size).to.equal(0);
     });
   });
 

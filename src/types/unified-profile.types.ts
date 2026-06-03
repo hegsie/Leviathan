@@ -9,7 +9,7 @@
  */
 
 // Re-export common types and constants from integration accounts
-export type { IntegrationType, IntegrationConfig, CachedUser } from './integration-accounts.types';
+export type { IntegrationType, IntegrationConfig, CachedUser, IntegrationOpenContext } from './integration-accounts.types';
 export { ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from './integration-accounts.types';
 // Re-export IntegrationAccount from the canonical source (Task 4C)
 export type { IntegrationAccount } from './integration-accounts.types';
