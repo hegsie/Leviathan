@@ -932,11 +932,12 @@ pub async fn create_azure_devops_work_item(
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| "Task".to_string());
 
-    // Path includes a $-prefixed type: wit/workitems/$Task
+    // Path includes a $-prefixed type: wit/workitems/$Task. URL-encode the type
+    // so valid multi-word types (e.g. "User Story") produce a valid path.
     let url = build_api_url(
         &organization,
         &project,
-        &format!("wit/workitems/${}", work_item_type),
+        &format!("wit/workitems/${}", urlencoding::encode(&work_item_type)),
     );
 
     let patch = build_create_work_item_patch(&input);

@@ -338,7 +338,14 @@ pub fn validate_issuer_url(issuer_url: &str) -> Result<(), String> {
 /// Discover OIDC provider configuration from the well-known endpoint
 pub async fn discover_oidc_config(issuer_url: &str) -> Result<OidcDiscovery, String> {
     // SSRF guard: validate the user-supplied issuer URL before any network call.
-    validate_issuer_url(issuer_url)?;
+    // validate_issuer_url() does a blocking DNS lookup (ToSocketAddrs), so run it
+    // on a blocking thread to avoid stalling an async worker during discovery.
+    {
+        let issuer = issuer_url.to_string();
+        tokio::task::spawn_blocking(move || validate_issuer_url(&issuer))
+            .await
+            .map_err(|e| format!("Issuer URL validation task failed: {e}"))??;
+    }
 
     let discovery_url = format!(
         "{}/.well-known/openid-configuration",
