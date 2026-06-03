@@ -700,8 +700,12 @@ export class LvBitbucketDialog extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
-      // Fresh open: clear selectedAccountId so loadInitialData() re-derives
-      // it from the current active profile's preferred account.
+      // Fresh open: mark not-ready (the async open-load is about to run) and
+      // clear selectedAccountId so loadInitialData() re-derives it from the
+      // active profile's preferred account. The `data-ready` attribute lets
+      // tests/consumers wait for the open-load to settle rather than racing its
+      // re-renders.
+      this.removeAttribute('data-ready');
       this.selectedAccountId = null;
       await this.loadInitialData();
     }
@@ -750,13 +754,22 @@ export class LvBitbucketDialog extends LitElement {
         await this.detectRepo();
         if (generation !== this.loadGeneration) return;
       }
-      await this.checkConnection();
+      // Only verify the connection when we actually have an account AND a token
+      // to check. With neither, the dialog is definitively disconnected and
+      // should show the connect form — checking anyway makes a pointless
+      // check_bitbucket_connection call that, on a fresh open, can momentarily
+      // render a 'connected' state (and races a late connection mock in tests).
+      if (this.selectedAccountId && this.oauthToken) {
+        await this.checkConnection();
+      }
     } catch (err) {
       if (generation !== this.loadGeneration) return;
       this.error = err instanceof Error ? err.message : 'Failed to load data';
     } finally {
       if (generation === this.loadGeneration) {
         this.isLoading = false;
+        // Signal that the open-load has settled and the DOM is now stable.
+        this.setAttribute('data-ready', '');
       }
     }
   }
