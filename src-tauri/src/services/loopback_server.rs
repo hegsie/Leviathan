@@ -220,36 +220,21 @@ impl LoopbackServer {
             return None; // Continue listening
         }
 
-        // Parse query parameters
+        // Parse + validate the callback query. State binding is enforced here
+        // (pure, unit-tested below) BEFORE we tell the browser anything, so a
+        // callback missing its `state` shows a failure page rather than a
+        // misleading "Authorization Successful".
         let query = path.split('?').nth(1).unwrap_or("");
-        let params: std::collections::HashMap<&str, &str> = query
-            .split('&')
-            .filter_map(|param| {
-                let mut parts = param.splitn(2, '=');
-                Some((parts.next()?, parts.next()?))
-            })
-            .collect();
-
-        // Check for error
-        if let Some(error) = params.get("error") {
-            let description = params.get("error_description").unwrap_or(&"Unknown error");
-            Self::send_error_response(&mut stream, description);
-            return Some(Err(format!("{}: {}", error, description)));
+        match parse_callback_query(query) {
+            Ok(result) => {
+                Self::send_success_response(&mut stream);
+                Some(Ok(result))
+            }
+            Err(msg) => {
+                Self::send_error_response(&mut stream, &msg);
+                Some(Err(msg))
+            }
         }
-
-        // Get the authorization code (and the echoed state for CSRF validation)
-        if let Some(code) = params.get("code") {
-            Self::send_success_response(&mut stream);
-            let code = url_decode_component(code);
-            let state = params
-                .get("state")
-                .map(|s| url_decode_component(s))
-                .unwrap_or_default();
-            return Some(Ok(CallbackResult { code, state }));
-        }
-
-        Self::send_error_response(&mut stream, "No authorization code received");
-        Some(Err("No authorization code received".to_string()))
     }
 
     /// Send a success response to the browser
@@ -369,6 +354,43 @@ fn url_decode_component(s: &str) -> String {
     }
 }
 
+/// Parse and validate an OAuth callback query string.
+///
+/// Returns the authorization `code` together with the echoed `state`. The
+/// `state` MUST be present and non-empty — it binds the callback to the flow we
+/// started (CSRF / flow-binding). A provider error, a missing code, or a missing
+/// state all produce an `Err`, so the caller shows the browser a failure page
+/// instead of a misleading success page.
+fn parse_callback_query(query: &str) -> Result<CallbackResult, String> {
+    let params: std::collections::HashMap<&str, &str> = query
+        .split('&')
+        .filter_map(|param| {
+            let mut parts = param.splitn(2, '=');
+            Some((parts.next()?, parts.next()?))
+        })
+        .collect();
+
+    if let Some(error) = params.get("error") {
+        let description = params.get("error_description").unwrap_or(&"Unknown error");
+        return Err(format!("{}: {}", error, description));
+    }
+
+    let code = match params.get("code") {
+        Some(code) => url_decode_component(code),
+        None => return Err("No authorization code received".to_string()),
+    };
+
+    let state = params
+        .get("state")
+        .map(|s| url_decode_component(s))
+        .unwrap_or_default();
+    if state.is_empty() {
+        return Err("OAuth callback missing required state parameter".to_string());
+    }
+
+    Ok(CallbackResult { code, state })
+}
+
 /// Simple HTML escaping
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -426,5 +448,41 @@ mod tests {
             state: "state1".to_string(),
         };
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_parse_callback_query_accepts_code_and_state() {
+        let result = parse_callback_query("code=abc123&state=xyz789").unwrap();
+        assert_eq!(result.code, "abc123");
+        assert_eq!(result.state, "xyz789");
+    }
+
+    #[test]
+    fn test_parse_callback_query_rejects_missing_state() {
+        // A code with no state must be rejected BEFORE any success response.
+        let err = parse_callback_query("code=abc123").unwrap_err();
+        assert!(
+            err.contains("state"),
+            "missing state must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_callback_query_rejects_empty_state() {
+        let err = parse_callback_query("code=abc123&state=").unwrap_err();
+        assert!(err.contains("state"), "empty state must be rejected: {err}");
+    }
+
+    #[test]
+    fn test_parse_callback_query_rejects_missing_code() {
+        let err = parse_callback_query("state=xyz789").unwrap_err();
+        assert!(err.contains("code"), "missing code must be rejected: {err}");
+    }
+
+    #[test]
+    fn test_parse_callback_query_propagates_provider_error() {
+        let err = parse_callback_query("error=access_denied&error_description=The+user+said+no")
+            .unwrap_err();
+        assert!(err.contains("access_denied"));
     }
 }

@@ -246,22 +246,18 @@ fn validate_helper(helper: &str) -> Result<()> {
             "helper must not be empty".to_string(),
         ));
     }
+    // A credential helper may be a bare name (`manager`), an absolute path
+    // (including Windows `C:\...` / `C:/...`), or a shell command (`!aws ... $@`).
+    // The value is passed as a non-shell argument and git escapes it when
+    // writing the config, so we do NOT restrict the character set (an allowlist
+    // would break legitimate Windows paths and shell helpers). We only reject
+    // control characters (newlines, NULs, etc.) that could corrupt the config
+    // file or inject additional lines.
     for ch in helper.chars() {
         if ch.is_control() {
             return Err(LeviathanError::OperationFailed(format!(
                 "helper contains invalid control character U+{:04X}",
                 ch as u32
-            )));
-        }
-        // Allow characters needed for typical helpers:
-        // names, paths, flags (--timeout=3600), exclamation for shell helpers
-        if !matches!(ch,
-            'a'..='z' | 'A'..='Z' | '0'..='9'
-            | '.' | '-' | '_' | '/' | ' ' | '=' | '!'
-        ) {
-            return Err(LeviathanError::OperationFailed(format!(
-                "helper contains disallowed character {:?} — only letters, digits, and .-_/= !  are permitted",
-                ch
             )));
         }
     }
@@ -1206,14 +1202,16 @@ mod tests {
         assert!(result.is_err(), "newline in helper must be rejected");
     }
 
-    /// A quote in `helper` must be rejected.
+    /// A carriage return (control char) in `helper` must be rejected — this is
+    /// the real config-injection vector, not punctuation like quotes/colons.
     #[test]
-    fn test_validate_helper_rejects_quote() {
-        let result = validate_helper("osxkeychain\"evil");
-        assert!(result.is_err(), "double-quote in helper must be rejected");
+    fn test_validate_helper_rejects_control_char() {
+        assert!(validate_helper("osxkeychain\revil").is_err());
+        assert!(validate_helper("osxkeychain\u{0000}evil").is_err());
     }
 
-    /// Normal helper names and helper commands with flags must be accepted.
+    /// Normal names, paths (incl. Windows), flags, and shell helpers — which can
+    /// legitimately contain `:`, `\`, quotes, `$` — must all be accepted.
     #[test]
     fn test_validate_helper_accepts_valid() {
         assert!(validate_helper("osxkeychain").is_ok());
@@ -1221,6 +1219,12 @@ mod tests {
         assert!(validate_helper("cache --timeout=3600").is_ok());
         assert!(validate_helper("/usr/local/bin/git-credential-manager").is_ok());
         assert!(validate_helper("!/path/to/helper").is_ok());
+        // Windows absolute paths (the regression the reviewer flagged).
+        assert!(validate_helper("C:\\Program Files\\Git\\git-credential-manager.exe").is_ok());
+        assert!(validate_helper("C:/Program Files/Git/git-credential-manager.exe").is_ok());
+        // Shell credential helpers may contain quotes / `$` / `:`.
+        assert!(validate_helper("!aws codecommit credential-helper $@").is_ok());
+        assert!(validate_helper("!f() { echo \"username=x\"; }; f").is_ok());
     }
 
     /// Empty helper must be rejected.
