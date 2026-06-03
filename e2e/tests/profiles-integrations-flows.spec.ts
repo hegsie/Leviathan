@@ -2620,7 +2620,7 @@ test.describe('Accounts management view', () => {
 
     await expect(
       page.locator('lv-profile-manager-dialog .dialog-title'),
-    ).toContainText('Manage Accounts');
+    ).toContainText('Accounts');
     // Both global accounts are listed with edit + delete affordances.
     await expect(
       page.locator('lv-profile-manager-dialog .accounts-list .account-item'),
@@ -2677,7 +2677,7 @@ test.describe('Accounts management view', () => {
     // Still on the accounts view, now showing only the remaining account.
     await expect(
       page.locator('lv-profile-manager-dialog .dialog-title'),
-    ).toContainText('Manage Accounts');
+    ).toContainText('Accounts');
     await expect(
       page.locator('lv-profile-manager-dialog .accounts-list .account-item'),
     ).toHaveCount(1);
@@ -2716,7 +2716,7 @@ test.describe('Accounts management view', () => {
     await expect(page.locator('lv-profile-manager-dialog[open][demoted]')).toHaveCount(0);
     await expect(
       page.locator('lv-profile-manager-dialog .dialog-title'),
-    ).toContainText('Manage Accounts');
+    ).toContainText('Accounts');
   });
 });
 

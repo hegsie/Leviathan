@@ -102,7 +102,7 @@ async function openProfileManager(page: Page, dialogs: DialogsPage): Promise<voi
 }
 
 /**
- * From the profile manager, navigate to the standalone "Manage Accounts" view
+ * From the profile manager, navigate to the standalone "Accounts" view
  * then open the edit screen for the (only) account by clicking its pencil
  * (non-delete) action button.
  */
@@ -112,7 +112,7 @@ async function openAccountEditFromAccountsView(page: Page): Promise<void> {
     .getByRole('button', { name: 'Accounts' })
     .click();
   await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
-    'Manage Accounts',
+    'Accounts',
   );
   await page
     .locator('lv-profile-manager-dialog .accounts-list .account-item .account-actions .action-btn:not(.delete)')
