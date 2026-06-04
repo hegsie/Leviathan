@@ -870,6 +870,45 @@ describe('lv-azure-devops-dialog', () => {
       ).to.be.false;
       expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.be.null;
     });
+
+    it('surfaces an error and stops the spinner when Entra OAuth fails (not a stuck dead-end)', async () => {
+      // A failing authorize-url makes startOAuth emit OAuth state 'error' (it does
+      // NOT fire the success-only oauth-complete event). Without the OAuth state
+      // subscription this left the dialog spinning forever.
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          if (command === 'oauth_get_authorize_url') {
+            throw new Error('Entra discovery failed');
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { oauthClientId: string }).oauthClientId = 'client-abc';
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
+      await el.updateComplete;
+
+      await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      await el.updateComplete;
+
+      // The failure must clear the spinner, surface an error, and tear down the
+      // pending listener — not hang on "Waiting for Microsoft sign-in...".
+      expect((el as unknown as { oauthPending: boolean }).oauthPending, 'spinner cleared on failure').to.be.false;
+      expect((el as unknown as { error: string | null }).error, 'error surfaced').to.be.a('string').and.not.empty;
+      expect(
+        (el as unknown as { _pendingOAuthHandler?: EventListener })._pendingOAuthHandler,
+        'pending listener torn down'
+      ).to.be.undefined;
+    });
   });
 
   describe('PAT rotation refreshes cachedUser', () => {

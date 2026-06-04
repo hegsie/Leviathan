@@ -1401,6 +1401,7 @@ export class LvGitHubDialog extends LitElement {
       this.releases = [];
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to disconnect';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }

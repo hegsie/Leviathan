@@ -597,6 +597,7 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   private unsubscribeStore?: () => void;
   private _pendingOAuthHandler?: EventListener;
+  private oauthStateUnsubscribe?: () => void;
   private loadGeneration = 0;
 
   // Create PR form
@@ -643,6 +644,22 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
     });
 
+    // Subscribe to OAuth state so a FAILED/denied Entra sign-in is surfaced
+    // (Azure is deep-link only and the success-path `oauth-complete` event never
+    // fires on failure — without this the dialog would spin forever). Mirrors
+    // the other provider dialogs.
+    this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
+      if (state.provider !== 'azure') return;
+      if (state.status === 'error') {
+        this.oauthPending = false;
+        this.error = state.error ?? 'Microsoft sign-in failed';
+        showToast(this.error, 'error');
+        this.handleCancelEntraOAuth();
+      } else if (state.status === 'idle') {
+        this.oauthPending = false;
+      }
+    });
+
     // Initialize from current state
     this.accounts = getAccountsByType('azure-devops');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
@@ -661,6 +678,7 @@ export class LvAzureDevOpsDialog extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribeStore?.();
+    this.oauthStateUnsubscribe?.();
     // Clean up pending OAuth listener to prevent leak
     if (this._pendingOAuthHandler) {
       window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
