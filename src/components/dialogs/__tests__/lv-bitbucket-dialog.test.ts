@@ -726,6 +726,26 @@ describe('lv-bitbucket-dialog', () => {
     });
   });
 
+  describe('Add account guard', () => {
+    it('does not re-select an existing account when a background store emit fires mid-add', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+
+      unifiedProfileStore.getState().setAccountConnectionStatus('bb-acc-1', 'connected');
+      await el.updateComplete;
+
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+    });
+  });
+
   describe('OAuth completes after dialog closed', () => {
     it('persists the account and surfaces a toast instead of failing silently', async () => {
       connectionResponse = mockConnectedStatus;

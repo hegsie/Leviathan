@@ -783,6 +783,11 @@ export class LvGitHubDialog extends LitElement {
   @state() private loadingInstallations = false;
   @state() private oauthState: OAuthFlowState = { status: 'idle' };
   private oauthUnsubscribe?: () => void;
+  // Set while the user is mid-"Add account" (selection intentionally cleared so
+  // the next save creates a NEW account). Guards the store subscription from
+  // re-selecting an existing account on a background emit, which would route the
+  // token onto the wrong account.
+  private isAddingAccount = false;
   private boundOAuthComplete = this.handleOAuthComplete.bind(this);
 
   // Multi-account support (global accounts)
@@ -850,10 +855,16 @@ export class LvGitHubDialog extends LitElement {
       if (activeProfileId !== lastActiveProfileId) {
         // Active profile changed — re-derive the preferred account for the new
         // profile, even if the user had a selection from the previous profile.
-        const preferred = getActiveProfilePreferredAccount('github');
-        this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
+        // Track the id either way so this doesn't re-fire, but DON'T clobber a
+        // half-completed "Add account" flow (selectedAccountId is intentionally
+        // null then; a background store emit must not re-select an existing
+        // account, or the next save would overwrite it).
         lastActiveProfileId = activeProfileId;
-      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        if (!this.isAddingAccount) {
+          const preferred = getActiveProfilePreferredAccount('github');
+          this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
+        }
+      } else if (!this.isAddingAccount && !this.selectedAccountId && this.accounts.length > 0) {
         // First-time selection: prefer the active profile's default, falling
         // back to the global default.
         const preferred = getActiveProfilePreferredAccount('github') ?? selectDefaultGlobalAccount('github');
@@ -1009,6 +1020,9 @@ export class LvGitHubDialog extends LitElement {
    */
   private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
+    // The user explicitly selected an existing account, so we're no longer
+    // adding a new one — re-enable the subscription's auto-apply branch.
+    this.isAddingAccount = false;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
     this.error = null;
@@ -1025,6 +1039,7 @@ export class LvGitHubDialog extends LitElement {
     // selectedAccountId is essential — without it handleSaveToken would write
     // the new token onto the previously-selected account instead of creating
     // a new one, leaving the user with no way to add additional accounts.
+    this.isAddingAccount = true;
     this.activeTab = 'connection';
     this.connectionStatus = null;
     this.selectedAccountId = null;
@@ -1270,6 +1285,8 @@ export class LvGitHubDialog extends LitElement {
         log.debug('Saved account', { id: savedAccount.id });
         await credentialService.storeAccountToken('github', savedAccount.id, tokens.accessToken);
         this.selectedAccountId = savedAccount.id;
+        // The new account now exists and is selected — the add flow is complete.
+        this.isAddingAccount = false;
 
         // Refresh accounts list from store after adding new account
         await unifiedProfileService.loadUnifiedProfiles();
@@ -1356,6 +1373,8 @@ export class LvGitHubDialog extends LitElement {
         const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
         await credentialService.storeAccountToken('github', savedAccount.id, tokenToSave);
         this.selectedAccountId = savedAccount.id;
+        // The new account now exists and is selected — the add flow is complete.
+        this.isAddingAccount = false;
 
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();

@@ -607,6 +607,10 @@ export class LvBitbucketDialog extends LitElement {
   private oauthStateUnsubscribe?: () => void;
   private unsubscribeStore?: () => void;
   private loadGeneration = 0;
+  // Set while the user is mid-"Add account" (selection intentionally cleared so
+  // the next save creates a NEW account). Guards the store subscription from
+  // re-selecting an existing account on a background emit.
+  private isAddingAccount = false;
 
   // Create PR form
   @state() private createPrTitle = '';
@@ -647,10 +651,15 @@ export class LvBitbucketDialog extends LitElement {
       }
       const activeProfileId = state.activeProfile?.id ?? null;
       if (activeProfileId !== lastActiveProfileId) {
-        const preferred = getActiveProfilePreferredAccount('bitbucket') ?? this.accounts[0];
-        this.selectedAccountId = preferred?.id ?? null;
+        // Track the id either way so this doesn't re-fire, but DON'T clobber a
+        // half-completed "Add account" flow (a background store emit must not
+        // re-select an existing account, or the next save overwrites it).
         lastActiveProfileId = activeProfileId;
-      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        if (!this.isAddingAccount) {
+          const preferred = getActiveProfilePreferredAccount('bitbucket') ?? this.accounts[0];
+          this.selectedAccountId = preferred?.id ?? null;
+        }
+      } else if (!this.isAddingAccount && !this.selectedAccountId && this.accounts.length > 0) {
         const preferred = getActiveProfilePreferredAccount('bitbucket')
           ?? selectDefaultGlobalAccount('bitbucket')
           ?? this.accounts[0];
@@ -833,6 +842,9 @@ export class LvBitbucketDialog extends LitElement {
    */
   private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
+    // The user explicitly selected an existing account — re-enable the
+    // subscription's auto-apply branch.
+    this.isAddingAccount = false;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
     this.error = null;
@@ -848,6 +860,7 @@ export class LvBitbucketDialog extends LitElement {
   private handleAddAccount(): void {
     // Clear selection so the next save creates a new account instead of
     // overwriting the previously-selected account's credentials.
+    this.isAddingAccount = true;
     this.activeTab = 'connection';
     this.connectionStatus = null;
     this.selectedAccountId = null;
@@ -1007,6 +1020,8 @@ export class LvBitbucketDialog extends LitElement {
           const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
           await credentialService.storeAccountToken('bitbucket', savedAccount.id, this.appPasswordInput);
           this.selectedAccountId = savedAccount.id;
+          // The new account now exists and is selected — the add flow is complete.
+          this.isAddingAccount = false;
 
           // Refresh accounts list
           await unifiedProfileService.loadUnifiedProfiles();
@@ -1200,6 +1215,8 @@ export class LvBitbucketDialog extends LitElement {
         );
 
         this.selectedAccountId = savedAccount.id;
+        // The new account now exists and is selected — the add flow is complete.
+        this.isAddingAccount = false;
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();
         this.syncBitbucketAccounts();

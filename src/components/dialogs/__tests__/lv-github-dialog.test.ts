@@ -867,6 +867,32 @@ describe('lv-github-dialog', () => {
     });
   });
 
+  describe('Add account guard', () => {
+    it('does not re-select an existing account when a background store emit fires mid-add', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // User clicks "Add account": selection is intentionally cleared so the
+      // next token save creates a NEW account.
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+
+      // A background validation emit fires (e.g. periodic token validation).
+      unifiedProfileStore.getState().setAccountConnectionStatus('gh-acc-1', 'connected');
+      await el.updateComplete;
+
+      // Selection must stay null — re-selecting here would route the new token
+      // onto the existing account on the next save.
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+    });
+  });
+
   describe('PAT rotation refreshes cachedUser', () => {
     it('calls update_global_account_cached_user after storing the token on an existing account', async () => {
       connectionResponse = mockConnectedStatus;

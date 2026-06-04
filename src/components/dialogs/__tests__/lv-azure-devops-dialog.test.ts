@@ -920,6 +920,27 @@ describe('lv-azure-devops-dialog', () => {
     });
   });
 
+  describe('Add account guard', () => {
+    it('does not re-select an existing account when a background store emit fires mid-add', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+
+      unifiedProfileStore.getState().setAccountConnectionStatus('ado-acc-1', 'connected');
+      await el.updateComplete;
+
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+    });
+  });
+
   describe('PAT rotation refreshes cachedUser', () => {
     it('calls update_global_account_cached_user after storing the token on an existing account', async () => {
       connectionResponse = mockConnectedStatus;

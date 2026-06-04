@@ -599,6 +599,10 @@ export class LvAzureDevOpsDialog extends LitElement {
   private _pendingOAuthHandler?: EventListener;
   private oauthStateUnsubscribe?: () => void;
   private loadGeneration = 0;
+  // Set while the user is mid-"Add account" (selection intentionally cleared so
+  // the next save creates a NEW account). Guards the store subscription from
+  // re-selecting an existing account on a background emit.
+  private isAddingAccount = false;
 
   // Create PR form
   @state() private createPrTitle = '';
@@ -633,9 +637,14 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
       const activeProfileId = state.activeProfile?.id ?? null;
       if (activeProfileId !== lastActiveProfileId) {
-        applyAccount(getActiveProfilePreferredAccount('azure-devops') ?? this.accounts[0]);
+        // Track the id either way so this doesn't re-fire, but DON'T clobber a
+        // half-completed "Add account" flow (a background store emit must not
+        // re-select an existing account, or the next save overwrites it).
         lastActiveProfileId = activeProfileId;
-      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        if (!this.isAddingAccount) {
+          applyAccount(getActiveProfilePreferredAccount('azure-devops') ?? this.accounts[0]);
+        }
+      } else if (!this.isAddingAccount && !this.selectedAccountId && this.accounts.length > 0) {
         applyAccount(
           getActiveProfilePreferredAccount('azure-devops')
           ?? selectDefaultGlobalAccount('azure-devops')
@@ -866,6 +875,9 @@ export class LvAzureDevOpsDialog extends LitElement {
    */
   private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
+    // The user explicitly selected an existing account — re-enable the
+    // subscription's auto-apply branch.
+    this.isAddingAccount = false;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
     this.error = null;
@@ -889,6 +901,7 @@ export class LvAzureDevOpsDialog extends LitElement {
   private handleAddAccount(): void {
     // Clear selection so the next token save creates a new account instead of
     // overwriting the previously-selected account's token.
+    this.isAddingAccount = true;
     this.activeTab = 'connection';
     this.connectionStatus = null;
     this.selectedAccountId = null;
@@ -1093,6 +1106,8 @@ export class LvAzureDevOpsDialog extends LitElement {
               const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
               await credentialService.storeAccountToken('azure-devops', savedAccount.id, accessToken);
               this.selectedAccountId = savedAccount.id;
+              // The new account now exists and is selected — add flow complete.
+              this.isAddingAccount = false;
 
               // Refresh accounts list
               await unifiedProfileService.loadUnifiedProfiles();
@@ -1260,6 +1275,8 @@ export class LvAzureDevOpsDialog extends LitElement {
         const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
         await credentialService.storeAccountToken('azure-devops', savedAccount.id, tokenToSave);
         this.selectedAccountId = savedAccount.id;
+        // The new account now exists and is selected — add flow complete.
+        this.isAddingAccount = false;
 
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();
