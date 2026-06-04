@@ -792,6 +792,84 @@ describe('lv-azure-devops-dialog', () => {
       const selected = (el as unknown as { selectedAccountId: string | null }).selectedAccountId;
       expect(selected).to.equal((account as { id: string }).id);
     });
+
+    it('Cancel during a pending sign-in tears down the flow so a late deep link does NOT connect', async () => {
+      connectionResponse = mockConnectedStatus;
+      // Start with no accounts: if the (cancelled) flow ever completed it would
+      // create a brand-new account via save_global_account.
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          // Make startOAuth register a real pending flow so cancelOAuth('azure')
+          // has something to tear down (deep-link provider, no loopback port).
+          if (command === 'oauth_get_authorize_url') {
+            return {
+              authorizeUrl: 'https://login.microsoftonline.com/authorize',
+              state: 'azure-state-xyz',
+              loopbackPort: null,
+            };
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { oauthClientId: string }).oauthClientId = 'client-abc';
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
+      await el.updateComplete;
+
+      // Start the flow — registers the oauth-complete listener and sets pending.
+      await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.true;
+      expect(
+        (el as unknown as { _pendingOAuthHandler?: EventListener })._pendingOAuthHandler,
+        'a listener is registered after start'
+      ).to.not.be.undefined;
+
+      // User clicks Cancel.
+      invokeHistory.length = 0;
+      await (el as unknown as { handleCancelEntraOAuth: () => void }).handleCancelEntraOAuth();
+      await el.updateComplete;
+
+      // The underlying flow is cancelled and the listener is removed.
+      expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.false;
+      expect(
+        (el as unknown as { _pendingOAuthHandler?: EventListener })._pendingOAuthHandler,
+        'listener removed after cancel'
+      ).to.be.undefined;
+
+      // A late deep-link completion fires AFTER cancel. With the listener gone,
+      // it must NOT verify/persist/connect anything.
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: { provider: 'azure', tokens: { accessToken: 'ado_oauth_token' } },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      expect(
+        invokeHistory.some((h) => h.command === 'check_ado_connection_with_token'),
+        'no connection verification after cancel'
+      ).to.be.false;
+      expect(
+        invokeHistory.some((h) => h.command === 'save_global_account'),
+        'no account persisted after cancel'
+      ).to.be.false;
+      expect(
+        invokeHistory.some((h) => h.command === 'store_keyring_token'),
+        'no token stored after cancel'
+      ).to.be.false;
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.be.null;
+    });
   });
 
   describe('PAT rotation refreshes cachedUser', () => {

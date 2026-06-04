@@ -15,12 +15,15 @@ import * as unifiedProfileService from '../../services/unified-profile.service.t
 import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
+import { loggers } from '../../utils/index.ts';
 import type { UnifiedProfile, IntegrationAccount, IntegrationType, ProfileAssignmentSource } from '../../types/unified-profile.types.ts';
 import './lv-profile-card.ts';
 import './lv-integration-card.ts';
 import './lv-repository-card.ts';
 
 const STORAGE_KEY = 'lv-context-dashboard-expanded';
+
+const log = loggers.dashboard;
 
 @customElement('lv-context-dashboard')
 export class LvContextDashboard extends LitElement {
@@ -943,7 +946,7 @@ export class LvContextDashboard extends LitElement {
     // @open-oidc listener remains live for the profile manager / command palette.
     const supportedTypes = ['github', 'gitlab', 'azure-devops', 'bitbucket'];
     if (!supportedTypes.includes(type)) {
-      console.warn(`No dialog handler for integration type: ${type}`);
+      log.warn(`No dialog handler for integration type: ${type}`);
       return;
     }
     this.dispatchEvent(new CustomEvent(`open-${type}`, { bubbles: true, composed: true }));

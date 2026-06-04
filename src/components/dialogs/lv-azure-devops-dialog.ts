@@ -799,7 +799,7 @@ export class LvAzureDevOpsDialog extends LitElement {
           await gitService.storeGitCredentials(`https://${org}.visualstudio.com`, 'pat', token);
           log.debug(`Synced git credentials to keyring for dev.azure.com and ${org}.visualstudio.com`);
         } catch (err) {
-          console.warn('[AzureDevOps] Failed to sync git credentials to keyring:', err);
+          log.warn('Failed to sync git credentials to keyring:', err);
         }
       }
     } else if (!result.success) {
@@ -978,6 +978,13 @@ export class LvAzureDevOpsDialog extends LitElement {
   private async handleStartEntraOAuth(): Promise<void> {
     if (!this.organizationInput.trim() || !this.oauthClientId.trim()) return;
 
+    // Remove any existing listener from a prior sign-in attempt before
+    // registering a new one, to avoid orphaned 'oauth-complete' listeners.
+    if (this._pendingOAuthHandler) {
+      window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
+      this._pendingOAuthHandler = undefined;
+    }
+
     this.oauthPending = true;
     this.error = null;
 
@@ -1074,6 +1081,23 @@ export class LvAzureDevOpsDialog extends LitElement {
       showToast(this.error, 'error');
       this.oauthPending = false;
     }
+  }
+
+  /**
+   * Cancel a pending Entra ID OAuth sign-in.
+   *
+   * Azure uses a deep-link callback, so simply clearing `oauthPending` would
+   * leave the 'oauth-complete' listener registered — if the browser sign-in
+   * later completed, the deep link would silently verify/persist/connect an
+   * account. Cancel the underlying flow AND remove the listener.
+   */
+  private handleCancelEntraOAuth(): void {
+    oauthService.cancelOAuth('azure');
+    if (this._pendingOAuthHandler) {
+      window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
+      this._pendingOAuthHandler = undefined;
+    }
+    this.oauthPending = false;
   }
 
   private async handleConnectWithStoredToken(): Promise<void> {
@@ -1537,7 +1561,7 @@ export class LvAzureDevOpsDialog extends LitElement {
             <div style="display:flex;align-items:center;gap:8px;padding:12px;color:var(--color-text-secondary)">
               <div style="width:16px;height:16px;border:2px solid var(--color-border);border-top-color:var(--color-accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
               Waiting for Microsoft sign-in...
-              <button class="btn" @click=${() => { this.oauthPending = false; }}>Cancel</button>
+              <button class="btn" @click=${this.handleCancelEntraOAuth}>Cancel</button>
             </div>
           ` : html`
             <div class="btn-row">

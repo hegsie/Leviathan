@@ -308,8 +308,8 @@ export async function updateGlobalAccountCachedUser(
   }
 
   // V7: Update only the single account in the store instead of reloading the
-  // entire config. Callers like refreshAllAccountsCachedUser/validateAllAccountTokens
-  // loop over every account, so a full reload here was O(N) full config reloads.
+  // entire config. Callers like validateAllAccountTokens loop over every
+  // account, so a full reload here was O(N) full config reloads.
   const { accounts, updateAccount } = unifiedProfileStore.getState();
   const existing = accounts.find((a) => a.id === accountId);
   if (existing) {
@@ -773,25 +773,6 @@ export async function refreshAccountCachedUser(
     store.setAccountConnectionStatus(account.id, 'disconnected');
     return null;
   }
-}
-
-/**
- * Refresh cached user info for all global accounts
- * This runs in the background and doesn't block the UI
- */
-export async function refreshAllAccountsCachedUser(): Promise<void> {
-  const accounts = unifiedProfileStore.getState().accounts;
-
-  log.debug(` Refreshing cached user info for ${accounts.length} accounts`);
-
-  for (const account of accounts) {
-    // Only refresh if cachedUser is missing
-    if (!account.cachedUser) {
-      await refreshAccountCachedUser(account);
-    }
-  }
-
-  log.debug('Finished refreshing cached user info');
 }
 
 // =============================================================================

@@ -10,6 +10,7 @@ import { onOpenUrl, getCurrent } from '@tauri-apps/plugin-deep-link';
 import { open } from '@tauri-apps/plugin-shell';
 import { listen } from '@tauri-apps/api/event';
 import { invokeCommand } from './tauri-api.ts';
+import { loggers } from '../utils/logger.ts';
 import type {
   OAuthProvider,
   StartOAuthResponse,
@@ -56,6 +57,8 @@ const OAUTH_CLIENT_SECRETS: Partial<Record<OAuthProvider, string>> = {
   bitbucket: 'HAqqaX24y8QSexmnvfbQkEPShUjskmUm',
 };
 
+const log = loggers.oauth;
+
 /** Currently pending OAuth authentications, keyed by provider to prevent race conditions */
 const pendingAuthByProvider = new Map<OAuthProvider, PendingOAuth>();
 
@@ -90,7 +93,7 @@ export async function initOAuthListener(): Promise<void> {
     }
   } catch (e) {
     // Deep link plugin may not be available in dev mode
-    console.debug('Deep link getCurrent not available:', e);
+    log.debug('Deep link getCurrent not available:', e);
   }
 
   // Listen for deep links while app is running
@@ -101,7 +104,7 @@ export async function initOAuthListener(): Promise<void> {
       }
     });
   } catch (e) {
-    console.debug('Deep link onOpenUrl not available:', e);
+    log.debug('Deep link onOpenUrl not available:', e);
   }
 
   // Also listen for deep links via single-instance plugin (Windows/Linux)
@@ -110,7 +113,7 @@ export async function initOAuthListener(): Promise<void> {
       handleDeepLink(event.payload);
     });
   } catch (e) {
-    console.debug('Deep link event listener not available:', e);
+    log.debug('Deep link event listener not available:', e);
   }
 }
 
@@ -118,18 +121,19 @@ export async function initOAuthListener(): Promise<void> {
  * Handle incoming deep link
  */
 async function handleDeepLink(url: string): Promise<void> {
-  console.log('Received deep link:', url);
-
   if (!url.startsWith('leviathan://oauth/')) {
+    // Don't log the raw URL — it may carry sensitive query params (code/state).
+    log.debug('Ignoring non-OAuth deep link');
     return;
   }
+  log.debug('Received OAuth deep link');
 
   // Extract provider from URL path: leviathan://oauth/{provider}/callback?...
   const providerSegment = url.slice('leviathan://oauth/'.length).split('/')[0] as OAuthProvider;
   const pending = pendingAuthByProvider.get(providerSegment);
 
   if (!pending) {
-    console.warn('Received OAuth callback but no pending auth for provider:', providerSegment);
+    log.warn('Received OAuth callback but no pending auth for provider:', providerSegment);
     return;
   }
 
@@ -199,7 +203,7 @@ async function handleDeepLink(url: string): Promise<void> {
 
     pendingAuthByProvider.delete(pending.provider);
   } catch (e) {
-    console.error('OAuth callback error:', e);
+    log.error('OAuth callback error:', e);
     notifyStateChange({
       status: 'error',
       error: e instanceof Error ? e.message : 'Unknown error',
@@ -244,7 +248,7 @@ export async function startOAuth(
     // For providers using loopback server, poll for the callback
     if (response.loopbackPort) {
       pollLoopbackCallback(provider, response.loopbackPort).catch((e) => {
-        console.error(`OAuth polling error for ${provider}:`, e);
+        log.error(`OAuth polling error for ${provider}:`, e);
         pendingAuthByProvider.delete(provider);
         notifyStateChange({
           status: 'error',
@@ -254,7 +258,7 @@ export async function startOAuth(
       });
     }
   } catch (e) {
-    console.error('Failed to start OAuth:', e);
+    log.error('Failed to start OAuth:', e);
     notifyStateChange({
       status: 'error',
       error: e instanceof Error ? e.message : 'Failed to start OAuth',
@@ -327,7 +331,7 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
 
     pendingAuthByProvider.delete(provider);
   } catch (e) {
-    console.error(`${provider} OAuth error:`, e);
+    log.error(`${provider} OAuth error:`, e);
     notifyStateChange({
       status: 'error',
       error: e instanceof Error ? e.message : `${provider} OAuth failed`,
