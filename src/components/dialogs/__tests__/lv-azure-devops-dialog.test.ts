@@ -744,6 +744,15 @@ describe('lv-azure-devops-dialog', () => {
           if (command === 'get_unified_profiles_config') {
             return { version: 3, profiles: [], accounts: [...persistedAccounts], repositoryAssignments: {} };
           }
+          // startOAuth must succeed so the deep-link 'oauth-complete' listener is
+          // registered (Azure is deep-link only; no loopback port).
+          if (command === 'oauth_get_authorize_url') {
+            return {
+              authorizeUrl: 'https://login.microsoftonline.com/authorize',
+              state: 'azure-state-persist',
+              loopbackPort: null,
+            };
+          }
           // Echo back the persisted account (with its generated id) like the backend does.
           if (command === 'save_global_account') {
             const account = (args as { account?: IntegrationAccount } | undefined)?.account;

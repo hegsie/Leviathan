@@ -22,6 +22,7 @@ const keyringStore = new Map<string, string>();
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import * as oauthService from '../../../services/oauth.service.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-github-dialog.ts';
@@ -831,6 +832,38 @@ describe('lv-github-dialog', () => {
       // And a success toast was shown since the inline status is invisible when closed.
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'success' && /Connected GitHub/.test(t.message))).to.be.true;
+    });
+  });
+
+  describe('OAuth failure is surfaced (not a silent dead-end)', () => {
+    it('shows an error and a toast when the OAuth flow errors', async () => {
+      // A failing authorize-url makes startOAuth emit OAuth state 'error'. The
+      // spinner only renders for pending/exchanging, so without surfacing the
+      // error the form would silently reset to the sign-in button (dead-end).
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_unified_profiles_config') {
+          return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+        }
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return null;
+      };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await oauthService.startOAuth('github', 'test-client-id');
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error, 'error surfaced').to.be.a(
+        'string'
+      ).and.not.empty;
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error'), 'error toast shown').to.be.true;
     });
   });
 

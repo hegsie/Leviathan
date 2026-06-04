@@ -1261,7 +1261,14 @@ export class LvProfileManagerDialog extends LitElement {
       // keyring token (and its _oauth companion) so it isn't left orphaned.
       await unifiedProfileService.deleteGlobalAccount(accountId);
       if (integrationType) {
-        await credentialService.deleteAccountToken(integrationType, accountId);
+        // Best-effort: the record is already gone, so a keyring miss/failure
+        // must NOT surface as "Failed to delete account". Mirror the provider
+        // dialogs, which isolate token cleanup in its own try/catch.
+        try {
+          await credentialService.deleteAccountToken(integrationType, accountId);
+        } catch (tokenError) {
+          console.warn('Failed to delete account token (record already removed):', tokenError);
+        }
       }
       // The editing profile is a local snapshot - drop the deleted account from it too.
       const attachedType = Object.entries(this.editingProfile?.defaultAccounts ?? {}).find(

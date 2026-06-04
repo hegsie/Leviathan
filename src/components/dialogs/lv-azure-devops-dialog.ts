@@ -654,7 +654,16 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.oauthPending = false;
         this.error = state.error ?? 'Microsoft sign-in failed';
         showToast(this.error, 'error');
-        this.handleCancelEntraOAuth();
+        // Tear down the pending success-listener INLINE. Do NOT call
+        // handleCancelEntraOAuth() here: this callback can fire synchronously
+        // from inside oauthService (during startOAuth's own error dispatch),
+        // and handleCancelEntraOAuth() re-enters oauthService.cancelOAuth(),
+        // which re-emits state from within the in-flight dispatch — a re-entrant
+        // cascade. Cleaning up locally keeps this idempotent and loop-free.
+        if (this._pendingOAuthHandler) {
+          window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
+          this._pendingOAuthHandler = undefined;
+        }
       } else if (state.status === 'idle') {
         this.oauthPending = false;
       }
@@ -1009,6 +1018,14 @@ export class LvAzureDevOpsDialog extends LitElement {
     try {
       // Start OAuth flow with Entra ID
       await oauthService.startOAuth('azure', this.oauthClientId);
+
+      // If the flow already failed synchronously, the OAuth-state subscription
+      // above has cleared the spinner and surfaced the error. Don't register the
+      // success-path listener for a flow that never opened — that would leave an
+      // orphaned 'oauth-complete' listener after a failed start.
+      if (!this.oauthPending) {
+        return;
+      }
 
       // For Azure, deep link is used — wait for the oauth-complete event
       const handleComplete = async (e: Event) => {

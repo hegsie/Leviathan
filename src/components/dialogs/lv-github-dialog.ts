@@ -823,6 +823,12 @@ export class LvGitHubDialog extends LitElement {
     this.oauthUnsubscribe = oauthService.onOAuthStateChange((state) => {
       if (state.provider === 'github') {
         this.oauthState = state;
+        // A failed/denied sign-in clears the pending spinner — surface the error
+        // so the user isn't left staring at a silently reset form (dead-end).
+        if (state.status === 'error') {
+          this.error = state.error ?? 'GitHub sign-in failed';
+          showToast(this.error, 'error');
+        }
       }
     });
 

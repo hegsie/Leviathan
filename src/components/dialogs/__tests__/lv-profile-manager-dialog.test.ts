@@ -1891,6 +1891,38 @@ describe('lv-profile-manager-dialog', () => {
       const tokenCall = invokeHistory[deleteTokenIdx];
       expect((tokenCall.args as Record<string, string>).key).to.include('account-1');
     });
+
+    it('still reports success when keyring token deletion fails (record already removed)', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      // The account record deletes fine, but the keyring is unavailable. The
+      // record is the source of truth and is already gone, so the user must NOT
+      // see "Failed to delete account" — token cleanup is best-effort.
+      const prev = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'delete_keyring_token') {
+          throw new Error('keyring unavailable');
+        }
+        return prev(command, args);
+      };
+
+      clearHistory();
+      uiStore.getState().toasts.length = 0;
+      const deleteBtn = el.shadowRoot!.querySelector(
+        '.account-actions .action-btn.delete'
+      ) as HTMLButtonElement;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      // Record deletion still happened.
+      expect(findCommands('delete_global_account').length).to.equal(1);
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success' && /deleted/i.test(t.message)), 'success toast').to.be.true;
+      expect(toasts.some((t) => t.type === 'error'), 'no failure toast').to.be.false;
+    });
   });
 
   // ── Replacing a same-provider account (#5) ─────────────────────────────────

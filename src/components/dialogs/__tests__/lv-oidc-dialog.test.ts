@@ -24,6 +24,7 @@ const keyringStore = new Map<string, string>();
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import * as oauthService from '../../../services/oauth.service.ts';
 import { createEmptyIntegrationAccount, createEmptyUnifiedProfile } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-oidc-dialog.ts';
@@ -213,6 +214,33 @@ describe('lv-oidc-dialog', () => {
       const errorEl = el.shadowRoot!.querySelector('.error');
       expect(errorEl).to.not.be.null;
       expect(errorEl!.textContent).to.include('required');
+    });
+
+    it('surfaces an error and a toast when the OAuth flow errors (not a silent dead-end)', async () => {
+      // The spinner only renders for pending/exchanging; on 'error' the form
+      // resets to the sign-in button. Without surfacing the error the user is
+      // left with no feedback about why sign-in failed.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_unified_profiles_config') {
+          return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+        }
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return null;
+      };
+
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await oauthService.startOAuth('oidc', 'acme-client', ISSUER);
+      await el.updateComplete;
+
+      const errorEl = el.shadowRoot!.querySelector('.error');
+      expect(errorEl, 'error surfaced inline').to.not.be.null;
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error'), 'error toast shown').to.be.true;
     });
   });
 

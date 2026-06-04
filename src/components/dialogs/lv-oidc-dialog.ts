@@ -284,6 +284,12 @@ export class LvOidcDialog extends LitElement {
     this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
       if (state.provider === 'oidc') {
         this.oauthState = state;
+        // A failed/denied sign-in clears the pending spinner — surface the error
+        // so the user isn't left staring at a silently reset form (dead-end).
+        if (state.status === 'error') {
+          this.error = state.error ?? 'Enterprise SSO sign-in failed';
+          showToast(this.error, 'error');
+        }
       }
     });
 
