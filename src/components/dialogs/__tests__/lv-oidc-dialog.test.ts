@@ -286,6 +286,43 @@ describe('lv-oidc-dialog', () => {
       expect(status!.textContent).to.include('SSO User');
     });
 
+    it('creates a NEW account (not clobbering an existing same-issuer account) when adding', async () => {
+      // An account already exists for ISSUER. The user clicks "Add account" to
+      // sign in with a SECOND identity on the same SSO. The OAuth-complete
+      // find-existing fallback must NOT match the existing same-issuer account.
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      (el as unknown as { issuerUrlInput: string }).issuerUrlInput = ISSUER;
+      (el as unknown as { clientIdInput: string }).clientIdInput = 'acme-client';
+      (el as unknown as { nameInput: string }).nameInput = 'Second SSO Identity';
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: {
+            provider: 'oidc',
+            tokens: { accessToken: 'oidc-access-2', idToken: 'header.payload.sig' },
+            instanceUrl: ISSUER,
+          },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      const saveCall = invokeHistory.find((h) => h.command === 'save_global_account');
+      expect(saveCall, 'save_global_account was called').to.not.be.undefined;
+      const account = (saveCall!.args as Record<string, unknown>).account as IntegrationAccount;
+      // A brand-new account — NOT the pre-existing one.
+      expect(account.id).to.not.equal('oidc-acc-1');
+      expect(account.config).to.deep.include({ type: 'oidc', issuerUrl: ISSUER });
+    });
+
     it('ignores oauth-complete for other providers', async () => {
       const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
       await waitForLoad(el);

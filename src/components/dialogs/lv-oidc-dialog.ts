@@ -499,11 +499,16 @@ export class LvOidcDialog extends LitElement {
         : null;
 
       // Find existing account for this issuer, or use the selected account.
+      // When the user explicitly chose "Add account", never match an existing
+      // same-issuer account — that would clobber it instead of creating the new
+      // account they asked for (the common two-identities-on-one-SSO case).
       const existingAccount = this.selectedAccountId
         ? getAccountById(this.selectedAccountId)
-        : this.accounts.find(
-            (a) => a.config.type === 'oidc' && a.config.issuerUrl === issuerUrl
-          );
+        : this.isAddingAccount
+          ? undefined
+          : this.accounts.find(
+              (a) => a.config.type === 'oidc' && a.config.issuerUrl === issuerUrl
+            );
 
       if (existingAccount) {
         // If the user edited the Issuer URL / Client ID before re-signing in,

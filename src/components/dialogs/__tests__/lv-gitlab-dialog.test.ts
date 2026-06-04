@@ -649,6 +649,42 @@ describe('lv-gitlab-dialog', () => {
 
       expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
     });
+
+    it('creates a NEW account (not clobbering an existing same-instance account) on OAuth complete when adding', async () => {
+      connectionResponse = mockConnectedStatus;
+      // An account already exists for gitlab.com. The user adds a SECOND identity
+      // on the same instance — the find-existing fallback must not match it.
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      (el as unknown as { instanceUrlInput: string }).instanceUrlInput = 'https://gitlab.com';
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: {
+            provider: 'gitlab',
+            tokens: { accessToken: 'glpat_oauth_2' },
+            instanceUrl: 'https://gitlab.com',
+          },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      const saveCall = invokeHistory.find((h) => h.command === 'save_global_account');
+      expect(saveCall, 'save_global_account was called').to.not.be.undefined;
+      const account = (saveCall!.args as Record<string, unknown>).account as IntegrationAccount;
+      expect(account.id).to.not.equal('gl-acc-1');
+      expect(account.config).to.deep.include({ type: 'gitlab', instanceUrl: 'https://gitlab.com' });
+    });
   });
 
   describe('OAuth completes after dialog closed', () => {

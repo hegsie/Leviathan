@@ -1212,13 +1212,18 @@ export class LvGitLabDialog extends LitElement {
         accountsCount: this.accounts.length,
       });
 
-      // Find existing account for this instance URL, or use selected account
+      // Find existing account for this instance URL, or use selected account.
+      // When the user explicitly chose "Add account", never match an existing
+      // same-instance account — that would clobber it instead of creating the
+      // new account they asked for (the common two-identities-on-gitlab.com case).
       const existingAccount = this.selectedAccountId
         ? getAccountById(this.selectedAccountId)
-        : this.accounts.find((a) =>
-            a.config.type === 'gitlab' &&
-            a.config.instanceUrl === this.instanceUrlInput
-          );
+        : this.isAddingAccount
+          ? undefined
+          : this.accounts.find((a) =>
+              a.config.type === 'gitlab' &&
+              a.config.instanceUrl === this.instanceUrlInput
+            );
 
       if (existingAccount) {
         // Update existing account with OAuth token

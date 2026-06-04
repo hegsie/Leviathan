@@ -744,6 +744,45 @@ describe('lv-bitbucket-dialog', () => {
 
       expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
     });
+
+    it('creates a NEW account (not clobbering an existing same-workspace account) on OAuth complete when adding', async () => {
+      connectionResponse = mockConnectedStatus;
+      // Existing account uses workspace 'bbuser' — which is exactly what the
+      // OAuth-complete handler derives from the signed-in user (no repo detected).
+      // Adding a second identity must not match/overwrite it.
+      const existing = createTestAccount({
+        id: 'bb-acc-existing',
+        name: 'First Bitbucket',
+        integrationType: 'bitbucket',
+        config: { type: 'bitbucket', workspace: 'bbuser' },
+        isDefault: true,
+        cachedUser: { username: 'bbuser', displayName: 'BB User', avatarUrl: null, email: null },
+      });
+      unifiedProfileStore.getState().setAccounts([existing]);
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: { provider: 'bitbucket', tokens: { accessToken: 'bbp_oauth_2' } },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      const saveCall = invokeHistory.find((h) => h.command === 'save_global_account');
+      expect(saveCall, 'save_global_account was called').to.not.be.undefined;
+      const account = (saveCall!.args as Record<string, unknown>).account as IntegrationAccount;
+      expect(account.id).to.not.equal('bb-acc-existing');
+      expect((account.config as Record<string, unknown>).type).to.equal('bitbucket');
+    });
   });
 
   describe('OAuth completes after dialog closed', () => {

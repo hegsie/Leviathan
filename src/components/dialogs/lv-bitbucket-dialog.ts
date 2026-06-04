@@ -1160,13 +1160,18 @@ export class LvBitbucketDialog extends LitElement {
       // Get workspace from detected repo or user
       const workspace = this.detectedRepo?.workspace || user?.username || '';
 
-      // Find existing account for this workspace, or use selected account
+      // Find existing account for this workspace, or use selected account.
+      // When the user explicitly chose "Add account", never match an existing
+      // same-workspace account — that would clobber it instead of creating the
+      // new account they asked for.
       const existingAccount = this.selectedAccountId
         ? getAccountById(this.selectedAccountId)
-        : this.accounts.find((a) =>
-            a.config.type === 'bitbucket' &&
-            a.config.workspace === workspace
-          );
+        : this.isAddingAccount
+          ? undefined
+          : this.accounts.find((a) =>
+              a.config.type === 'bitbucket' &&
+              a.config.workspace === workspace
+            );
 
       if (existingAccount) {
         // Update existing account with OAuth token
