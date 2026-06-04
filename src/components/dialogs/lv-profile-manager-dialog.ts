@@ -2325,6 +2325,13 @@ export class LvProfileManagerDialog extends LitElement {
    * is fresh.
    */
   public showAccountsView(): void {
+    // Landing here means Accounts IS the entry view for this open session, so
+    // Back must close the manager (returning to whatever opened it), exactly as
+    // the open-transition path does. Set initialView directly rather than relying
+    // on the host's `.initialView` property binding having flushed yet — otherwise
+    // the Back button (which reads initialView) could fall through to the profile
+    // list and break the reversible "Manage Accounts" → Back → provider flow.
+    this.initialView = 'accounts';
     this.viewMode = 'accounts';
     void this.loadProfiles().then(() => this.refreshConnectionStatuses());
   }

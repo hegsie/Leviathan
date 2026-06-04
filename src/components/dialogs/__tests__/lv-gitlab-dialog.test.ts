@@ -22,6 +22,7 @@ const keyringStore = new Map<string, string>();
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import * as oauthService from '../../../services/oauth.service.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-gitlab-dialog.ts';
@@ -628,6 +629,32 @@ describe('lv-gitlab-dialog', () => {
       // Account is gone from the dialog and no error surfaced on the happy path.
       expect((el as unknown as { accounts: IntegrationAccount[] }).accounts).to.have.lengthOf(0);
       expect((el as unknown as { error: string | null }).error).to.be.null;
+    });
+  });
+
+  describe('OAuth failure is surfaced (not a silent dead-end)', () => {
+    it('shows an error and a toast when the OAuth flow errors', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'get_unified_profiles_config') {
+          return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+        }
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return null;
+      };
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await oauthService.startOAuth('gitlab', 'test-client-id', 'https://gitlab.com');
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error, 'error surfaced').to.be.a('string').and.not.empty;
+      expect(uiStore.getState().toasts.some((t) => t.type === 'error'), 'error toast shown').to.be.true;
     });
   });
 

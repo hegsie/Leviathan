@@ -662,6 +662,12 @@ export class LvGitLabDialog extends LitElement {
     this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
       if (state.provider === 'gitlab') {
         this.oauthState = state;
+        // A failed/denied sign-in clears the pending spinner — surface the error
+        // so the user isn't left with no feedback (matches the other providers).
+        if (state.status === 'error') {
+          this.error = state.error ?? 'GitLab sign-in failed';
+          showToast(this.error, 'error');
+        }
       }
     });
 

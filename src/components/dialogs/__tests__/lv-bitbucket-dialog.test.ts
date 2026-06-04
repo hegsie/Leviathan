@@ -22,6 +22,7 @@ const keyringStore = new Map<string, string>();
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import * as oauthService from '../../../services/oauth.service.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-bitbucket-dialog.ts';
@@ -723,6 +724,32 @@ describe('lv-bitbucket-dialog', () => {
       expect((el as unknown as { error: string | null }).error).to.include('delete record boom');
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'error' && /delete record boom/.test(t.message))).to.be.true;
+    });
+  });
+
+  describe('OAuth failure is surfaced (not a silent dead-end)', () => {
+    it('shows an error and a toast when the OAuth flow errors', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'get_unified_profiles_config') {
+          return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+        }
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return null;
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await oauthService.startOAuth('bitbucket', 'test-client-id');
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error, 'error surfaced').to.be.a('string').and.not.empty;
+      expect(uiStore.getState().toasts.some((t) => t.type === 'error'), 'error toast shown').to.be.true;
     });
   });
 

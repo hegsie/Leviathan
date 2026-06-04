@@ -1782,6 +1782,17 @@ describe('lv-profile-manager-dialog', () => {
       expect(elState.viewMode).to.equal('accounts');
       const title = el.shadowRoot!.querySelector('.dialog-title');
       expect(title!.textContent!.trim()).to.equal('Accounts');
+
+      // Accounts is the entry view for this session, so Back must CLOSE the
+      // manager (returning to the provider dialog that opened it) — not fall
+      // through to the profile list. This requires showAccountsView() to have
+      // set initialView itself, not rely on the host's property binding.
+      let closeFired = false;
+      el.addEventListener('close', () => { closeFired = true; });
+      const backBtn = el.shadowRoot!.querySelector('.back-btn') as HTMLButtonElement;
+      backBtn.click();
+      await el.updateComplete;
+      expect(closeFired, 'Back from showAccountsView-driven Accounts closes the manager').to.be.true;
     });
 
     it('offers connect-new buttons for every provider in the accounts view', async () => {

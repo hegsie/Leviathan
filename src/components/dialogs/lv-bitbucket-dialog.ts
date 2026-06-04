@@ -638,6 +638,12 @@ export class LvBitbucketDialog extends LitElement {
     this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
       if (state.provider === 'bitbucket') {
         this.oauthState = state;
+        // A failed/denied sign-in clears the pending spinner — surface the error
+        // so the user isn't left with no feedback (matches the other providers).
+        if (state.status === 'error') {
+          this.error = state.error ?? 'Bitbucket sign-in failed';
+          showToast(this.error, 'error');
+        }
       }
     });
 
