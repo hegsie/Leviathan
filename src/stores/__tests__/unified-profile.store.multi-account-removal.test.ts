@@ -18,7 +18,7 @@ type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 import {
   unifiedProfileStore,
   getAccountsByType,
-  getDefaultGlobalAccount,
+  selectDefaultGlobalAccount,
 } from '../unified-profile.store.ts';
 import type {
   IntegrationAccount,
@@ -154,7 +154,7 @@ describe('unified-profile.store - Multi-Account Removal', () => {
     });
   });
 
-  describe('getDefaultGlobalAccount - fallback behavior', () => {
+  describe('selectDefaultGlobalAccount - fallback behavior', () => {
     it('returns remaining account when default is removed and one exists', () => {
       const defaultAccount = makeAccount('gh-default', 'github', { isDefault: true });
       const remainingAccount = makeAccount('gh-remain', 'github', { isDefault: false });
@@ -164,7 +164,7 @@ describe('unified-profile.store - Multi-Account Removal', () => {
       unifiedProfileStore.getState().removeAccount('gh-default');
 
       // getDefaultGlobalAccount should fall back to the remaining account (first in list)
-      const fallbackAccount = getDefaultGlobalAccount('github');
+      const fallbackAccount = selectDefaultGlobalAccount('github');
       expect(fallbackAccount).to.not.be.undefined;
       expect(fallbackAccount!.id).to.equal('gh-remain');
     });
@@ -175,7 +175,7 @@ describe('unified-profile.store - Multi-Account Removal', () => {
 
       unifiedProfileStore.getState().removeAccount('gh-1');
 
-      const fallbackAccount = getDefaultGlobalAccount('github');
+      const fallbackAccount = selectDefaultGlobalAccount('github');
       expect(fallbackAccount).to.be.undefined;
     });
   });

@@ -22,6 +22,7 @@ const keyringStore = new Map<string, string>();
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import * as oauthService from '../../../services/oauth.service.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-gitlab-dialog.ts';
@@ -532,6 +533,184 @@ describe('lv-gitlab-dialog', () => {
       await el.updateComplete;
 
       expect((el as unknown as { error: string | null }).error).to.include('gitlab detect boom');
+    });
+  });
+
+  describe('Delete Integration (M7/M10)', () => {
+    function setupConnectedWithAccount(): void {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+    }
+
+    async function openConnectedDialog(): Promise<LvGitLabDialog> {
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      // Ensure the dialog has a selected account to delete.
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gl-acc-1';
+      await el.updateComplete;
+      return el;
+    }
+
+    it('M10: deletes the account record BEFORE the keyring token (record is source of truth)', async () => {
+      setupConnectedWithAccount();
+      const el = await openConnectedDialog();
+
+      uiStore.getState().toasts.length = 0;
+      invokeHistory.length = 0;
+
+      // Auto-confirm the destructive dialog.
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      const deleteAccountIdx = invokeHistory.findIndex((h) => h.command === 'delete_global_account');
+      const deleteTokenIdx = invokeHistory.findIndex((h) => h.command === 'delete_keyring_token');
+      expect(deleteAccountIdx, 'account record deletion happened').to.be.greaterThan(-1);
+      expect(deleteTokenIdx, 'token deletion happened').to.be.greaterThan(-1);
+      // M10: record must be deleted first; token cleanup is best-effort last.
+      expect(deleteAccountIdx).to.be.lessThan(deleteTokenIdx);
+    });
+
+    it('M7: surfaces an error (inline + toast) when account deletion fails', async () => {
+      setupConnectedWithAccount();
+      const el = await openConnectedDialog();
+
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        if (command === 'delete_global_account') throw new Error('delete record boom');
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      // Inline error surfaced.
+      expect((el as unknown as { error: string | null }).error).to.include('delete record boom');
+      // Toast surfaced (not console-only).
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /delete record boom/.test(t.message))).to.be.true;
+    });
+
+    it('M10: completes deletion and clears the account from the UI on success', async () => {
+      setupConnectedWithAccount();
+      const el = await openConnectedDialog();
+
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      let recordDeleted = false;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        if (command === 'delete_global_account') {
+          recordDeleted = true;
+          return null;
+        }
+        // After the record is deleted, the reloaded config no longer lists it,
+        // matching real backend behavior.
+        if (command === 'get_unified_profiles_config' && recordDeleted) {
+          return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+        }
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      // Account is gone from the dialog and no error surfaced on the happy path.
+      expect((el as unknown as { accounts: IntegrationAccount[] }).accounts).to.have.lengthOf(0);
+      expect((el as unknown as { error: string | null }).error).to.be.null;
+    });
+  });
+
+  describe('OAuth failure is surfaced (not a silent dead-end)', () => {
+    it('shows an error and a toast when the OAuth flow errors', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'get_unified_profiles_config') {
+          return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+        }
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return null;
+      };
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await oauthService.startOAuth('gitlab', 'test-client-id', 'https://gitlab.com');
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error, 'error surfaced').to.be.a('string').and.not.empty;
+      expect(uiStore.getState().toasts.some((t) => t.type === 'error'), 'error toast shown').to.be.true;
+    });
+  });
+
+  describe('Add account guard', () => {
+    it('does not re-select an existing account when a background store emit fires mid-add', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+
+      unifiedProfileStore.getState().setAccountConnectionStatus('gl-acc-1', 'connected');
+      await el.updateComplete;
+
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+    });
+
+    it('creates a NEW account (not clobbering an existing same-instance account) on OAuth complete when adding', async () => {
+      connectionResponse = mockConnectedStatus;
+      // An account already exists for gitlab.com. The user adds a SECOND identity
+      // on the same instance — the find-existing fallback must not match it.
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      (el as unknown as { instanceUrlInput: string }).instanceUrlInput = 'https://gitlab.com';
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: {
+            provider: 'gitlab',
+            tokens: { accessToken: 'glpat_oauth_2' },
+            instanceUrl: 'https://gitlab.com',
+          },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      const saveCall = invokeHistory.find((h) => h.command === 'save_global_account');
+      expect(saveCall, 'save_global_account was called').to.not.be.undefined;
+      const account = (saveCall!.args as Record<string, unknown>).account as IntegrationAccount;
+      expect(account.id).to.not.equal('gl-acc-1');
+      expect(account.config).to.deep.include({ type: 'gitlab', instanceUrl: 'https://gitlab.com' });
     });
   });
 

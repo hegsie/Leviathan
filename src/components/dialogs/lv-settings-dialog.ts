@@ -903,6 +903,14 @@ export class LvSettingsDialog extends LitElement {
     this.dispatchEvent(new CustomEvent('close'));
   }
 
+  private handleOpenProfileManager(): void {
+    this.dispatchEvent(new CustomEvent('open-profile-manager', {
+      bubbles: true,
+      composed: true,
+    }));
+    this.handleClose();
+  }
+
   private renderToggle(checked: boolean, setting: string): unknown {
     return html`
       <label class="toggle-switch">
@@ -995,6 +1003,26 @@ export class LvSettingsDialog extends LitElement {
                 `)}
               </div>
             </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-title">Profiles &amp; Accounts</div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Manage profiles and accounts</span>
+              <span class="setting-description">
+                Profiles set your git identity per repository. Accounts are shared
+                logins (GitHub, GitLab, Bitbucket, Azure DevOps, OIDC) you assign to profiles.
+              </span>
+            </div>
+            <button
+              class="primary"
+              @click=${this.handleOpenProfileManager}
+            >
+              Open Profiles &amp; Accounts
+            </button>
           </div>
         </div>
 

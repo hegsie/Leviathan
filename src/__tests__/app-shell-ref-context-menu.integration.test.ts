@@ -27,6 +27,7 @@ import { expect } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import type { OpenRepository } from '../stores/index.ts';
 import type { Repository } from '../types/git.types.ts';
+import { uiStore } from '../stores/ui.store.ts';
 
 // Import the real component
 import '../app-shell.ts';
@@ -405,6 +406,58 @@ describe('app-shell ref context menu handlers (integration)', () => {
         const openRepoCalls = findCommands('open_repository');
         expect(openRepoCalls.length, `${name} should call open_repository`).to.be.greaterThan(0);
       }
+    });
+  });
+
+  // D3: handleRefreshAccount must give the user feedback when the account can't
+  // be found, instead of silently returning.
+  describe('handleRefreshAccount (D3)', () => {
+    it('shows an error toast when the account is not found', async () => {
+      uiStore.setState({ toasts: [] });
+      // get_global_account resolves null (account missing).
+      mockInvoke = async (command: string) => {
+        if (command === 'get_global_account') return null;
+        return null;
+      };
+
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefreshAccount(
+        new CustomEvent('refresh-account', { detail: { accountId: 'missing-acc' } })
+      );
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /Account not found/i.test(t.message))).to.be.true;
+    });
+
+    it('does not show the not-found toast when the account exists', async () => {
+      uiStore.setState({ toasts: [] });
+      mockInvoke = async (command: string) => {
+        if (command === 'get_global_account') {
+          return {
+            id: 'acc-1',
+            name: 'Acc',
+            integrationType: 'github',
+            config: { type: 'github' },
+            color: null,
+            cachedUser: null,
+            urlPatterns: [],
+            isDefault: false,
+          };
+        }
+        // refreshAccountCachedUser path: no token -> disconnected, returns cleanly.
+        if (command === 'get_keyring_token') return null;
+        return null;
+      };
+
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefreshAccount(
+        new CustomEvent('refresh-account', { detail: { accountId: 'acc-1' } })
+      );
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => /Account not found/i.test(t.message))).to.be.false;
     });
   });
 });

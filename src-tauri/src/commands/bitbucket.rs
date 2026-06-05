@@ -94,6 +94,16 @@ pub struct CreateBitbucketPullRequestInput {
     pub close_source_branch: Option<bool>,
 }
 
+/// Create issue input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateBitbucketIssueInput {
+    pub title: String,
+    pub content: Option<String>,
+    pub kind: Option<String>,
+    pub priority: Option<String>,
+}
+
 /// Issue summary
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -872,6 +882,152 @@ pub async fn list_bitbucket_issues(
         .collect())
 }
 
+/// Create a new issue
+#[command]
+pub async fn create_bitbucket_issue(
+    workspace: String,
+    repo_slug: String,
+    input: CreateBitbucketIssueInput,
+    token: Option<String>,
+    username: Option<String>,
+    app_password: Option<String>,
+) -> Result<BitbucketIssue> {
+    let auth_header = get_auth_header_with_token(
+        token.as_deref(),
+        username.as_deref(),
+        app_password.as_deref(),
+    )?;
+
+    let url = format!(
+        "{}/repositories/{}/{}/issues",
+        BITBUCKET_API_BASE, workspace, repo_slug
+    );
+
+    let body = build_create_issue_body(&input);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to create issue: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "Bitbucket API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiIssue {
+        id: u64,
+        title: String,
+        content: Option<ApiContent>,
+        state: String,
+        priority: String,
+        kind: String,
+        reporter: Option<ApiUser>,
+        assignee: Option<ApiUser>,
+        created_on: String,
+        links: ApiIssueLinks,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiContent {
+        raw: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiUser {
+        uuid: String,
+        username: Option<String>,
+        display_name: String,
+        links: ApiLinks,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiLinks {
+        avatar: Option<ApiLink>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiLink {
+        href: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiIssueLinks {
+        html: ApiLink,
+    }
+
+    let issue: ApiIssue = response
+        .json()
+        .await
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse issue: {}", e)))?;
+
+    Ok(BitbucketIssue {
+        id: issue.id,
+        title: issue.title,
+        content: issue.content.and_then(|c| c.raw),
+        state: issue.state,
+        priority: issue.priority,
+        kind: issue.kind,
+        reporter: issue.reporter.map(|u| BitbucketUser {
+            uuid: u.uuid,
+            username: u.username.unwrap_or_default(),
+            display_name: u.display_name,
+            avatar_url: u.links.avatar.map(|a| a.href),
+        }),
+        assignee: issue.assignee.map(|u| BitbucketUser {
+            uuid: u.uuid,
+            username: u.username.unwrap_or_default(),
+            display_name: u.display_name,
+            avatar_url: u.links.avatar.map(|a| a.href),
+        }),
+        created_on: issue.created_on,
+        url: issue.links.html.href,
+    })
+}
+
+/// Build the JSON body for creating a Bitbucket issue.
+/// The Bitbucket Cloud API expects content as `{ "raw": "..." }`.
+fn build_create_issue_body(input: &CreateBitbucketIssueInput) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "title".to_string(),
+        serde_json::Value::String(input.title.clone()),
+    );
+
+    if let Some(content) = &input.content {
+        if !content.is_empty() {
+            body.insert("content".to_string(), serde_json::json!({ "raw": content }));
+        }
+    }
+
+    if let Some(kind) = &input.kind {
+        if !kind.is_empty() {
+            body.insert("kind".to_string(), serde_json::Value::String(kind.clone()));
+        }
+    }
+
+    if let Some(priority) = &input.priority {
+        if !priority.is_empty() {
+            body.insert(
+                "priority".to_string(),
+                serde_json::Value::String(priority.clone()),
+            );
+        }
+    }
+
+    serde_json::Value::Object(body)
+}
+
 // ============================================================================
 // Pipeline Commands
 // ============================================================================
@@ -1331,6 +1487,100 @@ mod tests {
         assert_eq!(issue.kind, "bug");
         assert_eq!(issue.priority, "major");
         assert!(issue.assignee.is_none());
+    }
+
+    // ========================================================================
+    // CreateBitbucketIssueInput / build_create_issue_body Tests
+    // ========================================================================
+
+    #[test]
+    fn test_create_issue_input_full() {
+        let input = CreateBitbucketIssueInput {
+            title: "Bug report".to_string(),
+            content: Some("Steps to reproduce".to_string()),
+            kind: Some("bug".to_string()),
+            priority: Some("major".to_string()),
+        };
+
+        assert_eq!(input.title, "Bug report");
+        assert_eq!(input.kind.as_deref(), Some("bug"));
+    }
+
+    #[test]
+    fn test_create_issue_input_minimal() {
+        let input = CreateBitbucketIssueInput {
+            title: "Just a title".to_string(),
+            content: None,
+            kind: None,
+            priority: None,
+        };
+
+        assert!(input.content.is_none());
+        assert!(input.kind.is_none());
+        assert!(input.priority.is_none());
+    }
+
+    #[test]
+    fn test_build_create_issue_body_full() {
+        let input = CreateBitbucketIssueInput {
+            title: "My Issue".to_string(),
+            content: Some("Detailed description".to_string()),
+            kind: Some("enhancement".to_string()),
+            priority: Some("minor".to_string()),
+        };
+
+        let body = build_create_issue_body(&input);
+        assert_eq!(body["title"], "My Issue");
+        // Content must be wrapped as { "raw": ... } per Bitbucket API
+        assert_eq!(body["content"]["raw"], "Detailed description");
+        assert_eq!(body["kind"], "enhancement");
+        assert_eq!(body["priority"], "minor");
+    }
+
+    #[test]
+    fn test_build_create_issue_body_title_only() {
+        let input = CreateBitbucketIssueInput {
+            title: "Title only".to_string(),
+            content: None,
+            kind: None,
+            priority: None,
+        };
+
+        let body = build_create_issue_body(&input);
+        assert_eq!(body["title"], "Title only");
+        // Optional fields must be omitted when not provided
+        assert!(body.get("content").is_none());
+        assert!(body.get("kind").is_none());
+        assert!(body.get("priority").is_none());
+    }
+
+    #[test]
+    fn test_build_create_issue_body_skips_empty_strings() {
+        let input = CreateBitbucketIssueInput {
+            title: "Title".to_string(),
+            content: Some(String::new()),
+            kind: Some(String::new()),
+            priority: Some(String::new()),
+        };
+
+        let body = build_create_issue_body(&input);
+        assert!(body.get("content").is_none());
+        assert!(body.get("kind").is_none());
+        assert!(body.get("priority").is_none());
+    }
+
+    #[test]
+    fn test_create_bitbucket_issue_input_serialization() {
+        let input = CreateBitbucketIssueInput {
+            title: "Serialize me".to_string(),
+            content: Some("body".to_string()),
+            kind: Some("task".to_string()),
+            priority: Some("trivial".to_string()),
+        };
+
+        let json = serde_json::to_string(&input).expect("Failed to serialize");
+        assert!(json.contains("title"));
+        assert!(json.contains("content"));
     }
 
     // ========================================================================

@@ -100,7 +100,7 @@ test.describe('Profile Manager Dialog - Basic Operations', () => {
 
   test('should open profile manager from command palette', async () => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await expect(dialogs.profileManager.addProfileButton).toBeVisible();
@@ -108,7 +108,7 @@ test.describe('Profile Manager Dialog - Basic Operations', () => {
 
   test('should display New Profile button', async () => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await expect(dialogs.profileManager.addProfileButton).toBeVisible();
@@ -117,7 +117,7 @@ test.describe('Profile Manager Dialog - Basic Operations', () => {
 
   test('should open create profile form when New Profile clicked', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -128,7 +128,7 @@ test.describe('Profile Manager Dialog - Basic Operations', () => {
 
   test('should have required git identity fields in create form', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -140,7 +140,7 @@ test.describe('Profile Manager Dialog - Basic Operations', () => {
 
   test('should close dialog with Escape', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await expect(dialogs.profileManager.addProfileButton).toBeVisible();
@@ -183,7 +183,7 @@ test.describe('Profile Manager Dialog - With Existing Profiles', () => {
 
   test('should display existing profiles in list', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Wait for New Profile button which indicates dialog is loaded
@@ -197,7 +197,7 @@ test.describe('Profile Manager Dialog - With Existing Profiles', () => {
 
   test('should show default badge on default profile', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Wait for New Profile button which indicates dialog is loaded
@@ -209,7 +209,7 @@ test.describe('Profile Manager Dialog - With Existing Profiles', () => {
 
   test('should show git email for each profile', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Wait for New Profile button which indicates dialog is loaded
@@ -222,7 +222,7 @@ test.describe('Profile Manager Dialog - With Existing Profiles', () => {
 
   test('should open edit mode when profile clicked', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Wait for New Profile button which indicates dialog is loaded
@@ -264,7 +264,7 @@ test.describe('Profile Manager Dialog - Integration Accounts', () => {
 
   async function openProfileManager(page: Page): Promise<void> {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
     await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
   }
@@ -400,6 +400,47 @@ test.describe('Profile Manager Dialog - Integration Accounts', () => {
     );
     await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(0);
   });
+
+  test('edit account URL patterns and persist them in save_global_account', async ({
+    page,
+  }) => {
+    await openProfileManager(page);
+
+    // Open the Work profile's attached GitHub account edit screen.
+    await page.locator('.profile-item').first().click();
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(1);
+    await dialogs.profileManager.attachedAccountItems
+      .first()
+      .locator('.account-actions .action-btn:not(.delete)')
+      .click();
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Edit Account'
+    );
+
+    // The account edit form exposes a URL patterns textarea pre-filled with the
+    // account's existing patterns (Work GitHub matches github.com/company/*).
+    const patternsTextarea = page.locator('lv-profile-manager-dialog textarea');
+    await expect(patternsTextarea).toBeVisible();
+    await expect(patternsTextarea).toHaveValue('github.com/company/*');
+
+    // Add a second pattern.
+    await patternsTextarea.fill('github.com/company/*\ngithub.com/company-labs/*');
+
+    await startCommandCaptureWithMocks(page, {
+      save_global_account: { ...testAccounts.githubWork },
+    });
+
+    await page.getByRole('button', { name: 'Save Account' }).click();
+    await waitForCommand(page, 'save_global_account');
+
+    const cmds = await findCommand(page, 'save_global_account');
+    expect(cmds.length).toBeGreaterThan(0);
+    const account = (cmds[0].args as { account: { urlPatterns: string[] } }).account;
+    expect(account.urlPatterns).toEqual([
+      'github.com/company/*',
+      'github.com/company-labs/*',
+    ]);
+  });
 });
 
 test.describe('Profile Manager Dialog - Attach with no accounts', () => {
@@ -426,7 +467,7 @@ test.describe('Profile Manager Dialog - Attach with no accounts', () => {
 
   test('picker offers connect-new buttons and opens the GitHub dialog', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
     await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
 
@@ -453,7 +494,7 @@ test.describe('Profile Manager Dialog - Attach with no accounts', () => {
 
   test('connecting a new account auto-attaches it to the profile', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
     await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
 
@@ -561,7 +602,7 @@ test.describe('Global Accounts Management', () => {
 
   test('should show global accounts section in profile manager', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Look for accounts info in profile cards (e.g., "1 default account")
@@ -571,7 +612,7 @@ test.describe('Global Accounts Management', () => {
 
   test('should display account count by type', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Wait for dialog to load with profile data
@@ -673,7 +714,7 @@ test.describe('Account Deletion Tests', () => {
 
   test('Profile manager should have New Profile button', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Profile manager should be open with the New Profile button
@@ -922,7 +963,7 @@ test.describe('Profile Creation Flow', () => {
 
   test('should have save/create button in profile form', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -934,7 +975,7 @@ test.describe('Profile Creation Flow', () => {
 
   test('should have color picker for profile', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -947,7 +988,7 @@ test.describe('Profile Creation Flow', () => {
 
   test('should have URL patterns textarea', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -1071,7 +1112,7 @@ test.describe('Profile CRUD Operations', () => {
 
   test('create profile end-to-end: fill form, save, verify save_unified_profile command called', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await expect(dialogs.profileManager.addProfileButton).toBeVisible();
@@ -1122,7 +1163,7 @@ test.describe('Profile CRUD Operations', () => {
     });
 
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
@@ -1167,7 +1208,7 @@ test.describe('Profile CRUD Operations', () => {
     });
 
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
@@ -1189,7 +1230,7 @@ test.describe('Profile CRUD Operations', () => {
 
   test('save profile form should include git name and email in command args', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -1224,7 +1265,7 @@ test.describe('Profile CRUD Operations', () => {
 
   test('cancel button in profile form should return to profile list', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -1241,7 +1282,7 @@ test.describe('Profile CRUD Operations', () => {
 
   test('profile form should validate required fields', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -1260,7 +1301,7 @@ test.describe('Profile CRUD Operations', () => {
 
   test('profile creation error should show error feedback', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -1285,7 +1326,7 @@ test.describe('Profile CRUD Operations', () => {
 
   test('color picker should highlight selected color', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await dialogs.profileManager.addProfileButton.click();
@@ -1315,7 +1356,7 @@ test.describe('Profiles - UI Outcome Verification', () => {
     await setupOpenRepository(page);
 
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await expect(dialogs.profileManager.addProfileButton).toBeVisible();
@@ -1387,7 +1428,7 @@ test.describe('Profiles - UI Outcome Verification', () => {
     });
 
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Wait for dialog with profiles loaded
@@ -1444,7 +1485,7 @@ test.describe('Profiles - UI Outcome Verification', () => {
     });
 
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Wait for dialog with profiles loaded
@@ -1471,5 +1512,92 @@ test.describe('Profiles - UI Outcome Verification', () => {
       '.toast, [class*="toast"], .applied-badge, .profile-item .status, .success-indicator'
     );
     await expect(feedbackLocator.first()).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ============================================================================
+// Wave 5a: Discoverability without an open repository
+// ============================================================================
+
+test.describe('Profiles & Accounts discoverability (no repository open)', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    // No repository: only mock IPC and navigate, do NOT initialize the repo store.
+    await setupTauriMocks(page);
+    await page.goto('/');
+    await page.waitForLoadState('domcontentloaded');
+    // The welcome screen is the no-repo state.
+    await expect(app.welcomeScreen).toBeVisible();
+  });
+
+  test('welcome screen exposes a Profiles & Accounts action that opens the manager', async ({ page }) => {
+    const action = page.locator('lv-welcome button.action-btn', { hasText: 'Profiles & Accounts' });
+    await expect(action).toBeVisible();
+    await action.click();
+
+    // Manager opens even with no repository, and shows the explainer + title.
+    await expect(dialogs.profileManager.addProfileButton).toBeVisible();
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Profiles & Accounts',
+    );
+    await expect(page.locator('lv-profile-manager-dialog .view-explainer')).toContainText(
+      'Profiles set your git identity per repository',
+    );
+  });
+
+  test('Settings has a Profiles & Accounts section that opens the manager and closes Settings', async ({ page }) => {
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    const openBtn = page.locator('lv-settings-dialog button', {
+      hasText: 'Open Profiles & Accounts',
+    });
+    await expect(openBtn).toBeVisible();
+    await openBtn.click();
+
+    // Settings closes and the manager opens.
+    await expect(dialogs.settings.dialog).not.toBeVisible();
+    await expect(dialogs.profileManager.addProfileButton).toBeVisible();
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText(
+      'Profiles & Accounts',
+    );
+  });
+
+  test('command palette opens the GitHub integration dialog with no repository open', async ({ page }) => {
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+
+    // Dialog opens (account management is repo-independent); no "open a
+    // repository first" warning toast is shown.
+    await expect(page.getByRole('dialog', { name: 'GitHub' })).toBeVisible();
+    await expect(
+      page.locator('.toast', { hasText: 'Please open a repository first' }),
+    ).toHaveCount(0);
+  });
+
+  test('connecting a GitHub account works with no repository (error path surfaced)', async ({ page }) => {
+    await injectCommandError(page, 'check_github_connection', 'Bad credentials');
+
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('GitHub Integration');
+    await dialogs.commandPalette.executeFirst();
+    await expect(page.getByRole('dialog', { name: 'GitHub' })).toBeVisible();
+
+    // Switch to PAT auth, enter a token, attempt connect.
+    if (await dialogs.github.authMethodToggle.isVisible()) {
+      await expect(dialogs.github.patButton).toBeVisible();
+      await dialogs.github.patButton.click();
+    }
+    await dialogs.github.tokenInput.fill('ghp_invalid');
+    await dialogs.github.connectButton.click();
+
+    // Error is surfaced to the user (not silent), still with no repository open.
+    await expect(page.locator('lv-github-dialog .error-message')).toBeVisible();
+    await expect(page.locator('lv-github-dialog .error-message')).toContainText('Bad credentials');
   });
 });

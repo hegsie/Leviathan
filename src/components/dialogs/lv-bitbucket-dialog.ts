@@ -18,18 +18,19 @@ import type {
   BitbucketIssue,
   BitbucketPipeline,
   CreateBitbucketPullRequestInput,
+  CreateBitbucketIssueInput,
 } from '../../services/git.service.ts';
 import * as oauthService from '../../services/oauth.service.ts';
 import { getClientId, isOAuthConfigured } from '../../services/oauth.service.ts';
 import type { OAuthFlowState, OAuthTokenResponse } from '../../types/oauth.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getAccountById, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, selectDefaultGlobalAccount, getAccountById, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
-type TabType = 'connection' | 'pull-requests' | 'issues' | 'pipelines' | 'create-pr';
+type TabType = 'connection' | 'pull-requests' | 'issues' | 'pipelines' | 'create-pr' | 'create-issue';
 
 @customElement('lv-bitbucket-dialog')
 export class LvBitbucketDialog extends LitElement {
@@ -573,8 +574,13 @@ export class LvBitbucketDialog extends LitElement {
 
   @property({ type: Boolean }) open = false;
   @property({ type: String }) repositoryPath = '';
-  /** Show a back arrow instead of a close ×, e.g. when opened from the profile manager. */
+  /**
+   * Show a back arrow instead of a close ×. Set explicitly by the host ONLY when
+   * this dialog was opened with a return target (the profile manager).
+   */
   @property({ type: Boolean }) backButton = false;
+  /** Profile name for the "Adding to <name>" breadcrumb; empty when standalone. */
+  @property({ type: String }) attachToProfileName = '';
 
   @state() private activeTab: TabType = 'connection';
   @state() private connectionStatus: BitbucketConnectionStatus | null = null;
@@ -601,6 +607,10 @@ export class LvBitbucketDialog extends LitElement {
   private oauthStateUnsubscribe?: () => void;
   private unsubscribeStore?: () => void;
   private loadGeneration = 0;
+  // Set while the user is mid-"Add account" (selection intentionally cleared so
+  // the next save creates a NEW account). Guards the store subscription from
+  // re-selecting an existing account on a background emit.
+  private isAddingAccount = false;
 
   // Create PR form
   @state() private createPrTitle = '';
@@ -610,7 +620,11 @@ export class LvBitbucketDialog extends LitElement {
   @state() private createPrCloseSource = false;
   @state() private generatingPrDescription = false;
 
-  async connectedCallback(): Promise<void> {
+  // Create Issue form
+  @state() private createIssueTitle = '';
+  @state() private createIssueContent = '';
+
+  connectedCallback(): void {
     super.connectedCallback();
 
     // Set up OAuth event listeners
@@ -624,6 +638,12 @@ export class LvBitbucketDialog extends LitElement {
     this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
       if (state.provider === 'bitbucket') {
         this.oauthState = state;
+        // A failed/denied sign-in clears the pending spinner — surface the error
+        // so the user isn't left with no feedback (matches the other providers).
+        if (state.status === 'error') {
+          this.error = state.error ?? 'Bitbucket sign-in failed';
+          showToast(this.error, 'error');
+        }
       }
     });
 
@@ -631,34 +651,54 @@ export class LvBitbucketDialog extends LitElement {
     // re-derive the preferred account so a profile switch is reflected here.
     let lastActiveProfileId = unifiedProfileStore.getState().activeProfile?.id ?? null;
     this.unsubscribeStore = unifiedProfileStore.subscribe((state) => {
-      this.accounts = getAccountsByType('bitbucket');
+      this.syncBitbucketAccounts();
       if (this.selectedAccountId && !this.accounts.some(a => a.id === this.selectedAccountId)) {
         this.selectedAccountId = null;
       }
       const activeProfileId = state.activeProfile?.id ?? null;
       if (activeProfileId !== lastActiveProfileId) {
-        const preferred = getActiveProfilePreferredAccount('bitbucket') ?? this.accounts[0];
-        this.selectedAccountId = preferred?.id ?? null;
+        // Track the id either way so this doesn't re-fire, but DON'T clobber a
+        // half-completed "Add account" flow (a background store emit must not
+        // re-select an existing account, or the next save overwrites it).
         lastActiveProfileId = activeProfileId;
-      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        if (!this.isAddingAccount) {
+          const preferred = getActiveProfilePreferredAccount('bitbucket') ?? this.accounts[0];
+          this.selectedAccountId = preferred?.id ?? null;
+        }
+      } else if (!this.isAddingAccount && !this.selectedAccountId && this.accounts.length > 0) {
         const preferred = getActiveProfilePreferredAccount('bitbucket')
-          ?? getDefaultGlobalAccount('bitbucket')
+          ?? selectDefaultGlobalAccount('bitbucket')
           ?? this.accounts[0];
         this.selectedAccountId = preferred?.id ?? null;
       }
     });
 
     // Initialize from current state
-    this.accounts = getAccountsByType('bitbucket');
+    this.syncBitbucketAccounts();
     if (this.accounts.length > 0 && !this.selectedAccountId) {
       const preferred = getActiveProfilePreferredAccount('bitbucket')
-        ?? getDefaultGlobalAccount('bitbucket')
+        ?? selectDefaultGlobalAccount('bitbucket')
         ?? this.accounts[0];
       this.selectedAccountId = preferred?.id ?? null;
     }
 
-    if (this.open) {
-      await this.loadInitialData();
+    // loadInitialData() is intentionally NOT called here — updated() runs it on
+    // the initial 'open' change. Calling it in both places double-loaded and
+    // caused render churn (the auth-method toggle/form detaching mid-interaction).
+  }
+
+  /**
+   * Update `accounts` only when the bitbucket account set actually changed, so a
+   * spurious store emit doesn't replace the array reference and force a needless
+   * re-render (a source of the open-load render churn).
+   */
+  private syncBitbucketAccounts(): void {
+    const next = getAccountsByType('bitbucket');
+    if (
+      next.length !== this.accounts.length ||
+      next.some((a, i) => a.id !== this.accounts[i]?.id)
+    ) {
+      this.accounts = next;
     }
   }
 
@@ -675,8 +715,12 @@ export class LvBitbucketDialog extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
-      // Fresh open: clear selectedAccountId so loadInitialData() re-derives
-      // it from the current active profile's preferred account.
+      // Fresh open: mark not-ready (the async open-load is about to run) and
+      // clear selectedAccountId so loadInitialData() re-derives it from the
+      // active profile's preferred account. The `data-ready` attribute lets
+      // tests/consumers wait for the open-load to settle rather than racing its
+      // re-renders.
+      this.removeAttribute('data-ready');
       this.selectedAccountId = null;
       await this.loadInitialData();
     }
@@ -705,10 +749,10 @@ export class LvBitbucketDialog extends LitElement {
       // nothing is selected (fresh open clears selectedAccountId in updated()).
       // Manual switches set selectedAccountId before calling loadInitialData()
       // and must not be overwritten.
-      this.accounts = getAccountsByType('bitbucket');
+      this.syncBitbucketAccounts();
       if (this.accounts.length > 0 && !this.selectedAccountId) {
         const preferred = getActiveProfilePreferredAccount('bitbucket')
-          ?? getDefaultGlobalAccount('bitbucket');
+          ?? selectDefaultGlobalAccount('bitbucket');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
       }
 
@@ -732,6 +776,8 @@ export class LvBitbucketDialog extends LitElement {
     } finally {
       if (generation === this.loadGeneration) {
         this.isLoading = false;
+        // Signal that the open-load has settled and the DOM is now stable.
+        this.setAttribute('data-ready', '');
       }
     }
   }
@@ -802,6 +848,9 @@ export class LvBitbucketDialog extends LitElement {
    */
   private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
+    // The user explicitly selected an existing account — re-enable the
+    // subscription's auto-apply branch.
+    this.isAddingAccount = false;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
     this.error = null;
@@ -817,6 +866,7 @@ export class LvBitbucketDialog extends LitElement {
   private handleAddAccount(): void {
     // Clear selection so the next save creates a new account instead of
     // overwriting the previously-selected account's credentials.
+    this.isAddingAccount = true;
     this.activeTab = 'connection';
     this.connectionStatus = null;
     this.selectedAccountId = null;
@@ -948,6 +998,16 @@ export class LvBitbucketDialog extends LitElement {
         // Create or update a global account for app-password connections
         if (this.selectedAccountId) {
           await credentialService.storeAccountToken('bitbucket', this.selectedAccountId, this.appPasswordInput);
+          // Refresh cachedUser so the profile manager shows the up-to-date
+          // avatar/username immediately instead of waiting for background validation.
+          if (user) {
+            await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+              username: user.username,
+              displayName: user.displayName ?? null,
+              email: null,
+              avatarUrl: user.avatarUrl ?? null,
+            });
+          }
         } else {
           const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
           const newAccount: IntegrationAccount = {
@@ -966,10 +1026,12 @@ export class LvBitbucketDialog extends LitElement {
           const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
           await credentialService.storeAccountToken('bitbucket', savedAccount.id, this.appPasswordInput);
           this.selectedAccountId = savedAccount.id;
+          // The new account now exists and is selected — the add flow is complete.
+          this.isAddingAccount = false;
 
           // Refresh accounts list
           await unifiedProfileService.loadUnifiedProfiles();
-          this.accounts = getAccountsByType('bitbucket');
+          this.syncBitbucketAccounts();
         }
 
         this.syncSharedConnectionStatus(true);
@@ -1004,6 +1066,9 @@ export class LvBitbucketDialog extends LitElement {
       this.pullRequests = [];
       this.issues = [];
       this.pipelines = [];
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to disconnect';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }
@@ -1023,12 +1088,15 @@ export class LvBitbucketDialog extends LitElement {
 
     this.isLoading = true;
 
+    // Delete the account record (source of truth) FIRST, then best-effort token
+    // cleanup, matching GitHub/GitLab/OIDC. Deleting the token first leaves a
+    // zombie account on a partial failure.
+    const accountId = this.selectedAccountId;
     try {
-      await credentialService.deleteAccountToken('bitbucket', this.selectedAccountId);
-      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+      await unifiedProfileService.deleteGlobalAccount(accountId);
 
       await unifiedProfileService.loadUnifiedProfiles();
-      this.accounts = getAccountsByType('bitbucket');
+      this.syncBitbucketAccounts();
 
       this.selectedAccountId = this.accounts.length > 0 ? this.accounts[0].id : null;
       this.connectionStatus = null;
@@ -1036,11 +1104,23 @@ export class LvBitbucketDialog extends LitElement {
       this.issues = [];
       this.pipelines = [];
 
+      try {
+        await credentialService.deleteAccountToken('bitbucket', accountId);
+      } catch (tokenErr) {
+        const msg =
+          tokenErr instanceof Error
+            ? `Account deleted, but its stored token could not be removed: ${tokenErr.message}`
+            : 'Account deleted, but its stored token could not be removed.';
+        this.error = msg;
+        showToast(msg, 'error');
+      }
+
       if (this.accounts.length > 0) {
         await this.loadInitialData();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to delete integration';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }
@@ -1086,13 +1166,18 @@ export class LvBitbucketDialog extends LitElement {
       // Get workspace from detected repo or user
       const workspace = this.detectedRepo?.workspace || user?.username || '';
 
-      // Find existing account for this workspace, or use selected account
+      // Find existing account for this workspace, or use selected account.
+      // When the user explicitly chose "Add account", never match an existing
+      // same-workspace account — that would clobber it instead of creating the
+      // new account they asked for.
       const existingAccount = this.selectedAccountId
         ? getAccountById(this.selectedAccountId)
-        : this.accounts.find((a) =>
-            a.config.type === 'bitbucket' &&
-            a.config.workspace === workspace
-          );
+        : this.isAddingAccount
+          ? undefined
+          : this.accounts.find((a) =>
+              a.config.type === 'bitbucket' &&
+              a.config.workspace === workspace
+            );
 
       if (existingAccount) {
         // Update existing account with OAuth token
@@ -1141,9 +1226,11 @@ export class LvBitbucketDialog extends LitElement {
         );
 
         this.selectedAccountId = savedAccount.id;
+        // The new account now exists and is selected — the add flow is complete.
+        this.isAddingAccount = false;
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();
-        this.accounts = getAccountsByType('bitbucket');
+        this.syncBitbucketAccounts();
       }
 
       // Force UI update
@@ -1233,6 +1320,41 @@ export class LvBitbucketDialog extends LitElement {
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to create pull request';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  private async handleCreateIssue(): Promise<void> {
+    if (!this.detectedRepo || !this.createIssueTitle.trim()) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const input: CreateBitbucketIssueInput = {
+        title: this.createIssueTitle,
+        content: this.createIssueContent || undefined,
+      };
+
+      const result = await gitService.createBitbucketIssue(
+        this.detectedRepo.workspace,
+        this.detectedRepo.repoSlug,
+        input,
+        this.oauthToken
+      );
+
+      if (result.success && result.data) {
+        this.createIssueTitle = '';
+        this.createIssueContent = '';
+        this.activeTab = 'issues';
+        await this.loadIssues();
+        showToast('Issue created successfully', 'success');
+      } else {
+        this.error = result.error?.message ?? 'Failed to create issue';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to create issue';
     } finally {
       this.isLoading = false;
     }
@@ -1452,6 +1574,11 @@ export class LvBitbucketDialog extends LitElement {
 
     if (this.issues.length === 0) {
       return html`
+        <div class="filter-row">
+          <button class="btn" @click=${() => this.activeTab = 'create-issue'}>
+            + New Issue
+          </button>
+        </div>
         <div class="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"></circle>
@@ -1464,6 +1591,11 @@ export class LvBitbucketDialog extends LitElement {
     }
 
     return html`
+      <div class="filter-row">
+        <button class="btn" @click=${() => this.activeTab = 'create-issue'}>
+          + New Issue
+        </button>
+      </div>
       <div class="issue-list">
         ${this.issues.map(issue => html`
           <div class="issue-item" @click=${() => this.openInBrowser(issue.url)}>
@@ -1599,6 +1731,42 @@ export class LvBitbucketDialog extends LitElement {
     `;
   }
 
+  private renderCreateIssueTab() {
+    return html`
+      <div class="token-form">
+        <div class="form-group">
+          <label>Title</label>
+          <input
+            type="text"
+            placeholder="Issue title"
+            .value=${this.createIssueTitle}
+            @input=${(e: Event) => this.createIssueTitle = (e.target as HTMLInputElement).value}
+          />
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea
+            placeholder="Describe the issue..."
+            .value=${this.createIssueContent}
+            @input=${(e: Event) => this.createIssueContent = (e.target as HTMLTextAreaElement).value}
+          ></textarea>
+        </div>
+        <div class="btn-row">
+          <button class="btn" @click=${() => this.activeTab = 'issues'}>
+            Cancel
+          </button>
+          <button
+            class="btn btn-primary"
+            @click=${this.handleCreateIssue}
+            ?disabled=${this.isLoading || !this.createIssueTitle.trim()}
+          >
+            Create Issue
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   private renderNotConnected(feature: string) {
     return html`
       <div class="empty-state">
@@ -1648,6 +1816,9 @@ export class LvBitbucketDialog extends LitElement {
         @close=${this.handleClose}
       >
         <div class="content">
+          ${this.attachToProfileName
+            ? html`<div class="attach-breadcrumb" data-testid="attach-breadcrumb">Adding to <strong>${this.attachToProfileName}</strong></div>`
+            : nothing}
           ${this.renderDetectedRepo()}
 
           ${this.accounts.length > 0 || this.connectionStatus?.connected ? html`
@@ -1695,6 +1866,7 @@ export class LvBitbucketDialog extends LitElement {
             ${this.activeTab === 'issues' ? this.renderIssuesTab() : ''}
             ${this.activeTab === 'pipelines' ? this.renderPipelinesTab() : ''}
             ${this.activeTab === 'create-pr' ? this.renderCreatePrTab() : ''}
+            ${this.activeTab === 'create-issue' ? this.renderCreateIssueTab() : ''}
           </div>
         </div>
       </lv-modal>

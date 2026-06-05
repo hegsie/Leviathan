@@ -9,7 +9,7 @@
  */
 
 // Re-export common types and constants from integration accounts
-export type { IntegrationType, IntegrationConfig, CachedUser } from './integration-accounts.types';
+export type { IntegrationType, IntegrationConfig, CachedUser, IntegrationOpenContext } from './integration-accounts.types';
 export { ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from './integration-accounts.types';
 // Re-export IntegrationAccount from the canonical source (Task 4C)
 export type { IntegrationAccount } from './integration-accounts.types';
@@ -19,6 +19,7 @@ export {
   createEmptyGitLabAccount,
   createEmptyAzureDevOpsAccount,
   createEmptyBitbucketAccount,
+  createEmptyOidcAccount,
   getAccountDisplayLabel,
   generateAccountId,
 } from './integration-accounts.types';
@@ -28,6 +29,7 @@ import {
   createEmptyGitLabAccount as _createEmptyGitLabAccount,
   createEmptyAzureDevOpsAccount as _createEmptyAzureDevOpsAccount,
   createEmptyBitbucketAccount as _createEmptyBitbucketAccount,
+  createEmptyOidcAccount as _createEmptyOidcAccount,
 } from './integration-accounts.types';
 
 /**
@@ -268,6 +270,10 @@ export function createEmptyIntegrationAccount(
       return _createEmptyAzureDevOpsAccount(instanceOrOrg ?? '');
     case 'bitbucket':
       return _createEmptyBitbucketAccount(instanceOrOrg ?? '');
+    case 'oidc':
+      // For OIDC, `instanceOrOrg` carries the issuer URL. The client ID is set
+      // by the dialog after the user enters it (or via createOidcAccount).
+      return _createEmptyOidcAccount(instanceOrOrg ?? '');
     default:
       throw new Error(`Unknown integration type: ${integrationType}`);
   }
@@ -304,9 +310,11 @@ export function filterAccountsByType(
 }
 
 /**
- * Get the default global account for a specific type
+ * V5: Pure helper (scope: "resolve" — operates on explicitly-passed accounts).
+ * Get the default global account for a specific type.
+ * Renamed from getDefaultGlobalAccount to disambiguate from the store selector.
  */
-export function getDefaultGlobalAccount(
+export function resolveDefaultGlobalAccount(
   accounts: IntegrationAccount[],
   integrationType: IntegrationType
 ): IntegrationAccount | undefined {
@@ -315,10 +323,13 @@ export function getDefaultGlobalAccount(
 }
 
 /**
- * Get the profile's preferred account for a specific type
- * Falls back to global default if profile has no preference
+ * V5: Pure helper (scope: "resolve" — operates on explicitly-passed accounts).
+ * Get the profile's preferred account for a specific type.
+ * Fallback semantics (must match store selector selectProfilePreferredAccount):
+ * profile defaultAccounts map first, then global default.
+ * Renamed from getProfilePreferredAccount to disambiguate from the store selector.
  */
-export function getProfilePreferredAccount(
+export function resolveProfilePreferredAccount(
   profile: UnifiedProfile,
   accounts: IntegrationAccount[],
   integrationType: IntegrationType
@@ -329,7 +340,7 @@ export function getProfilePreferredAccount(
     if (preferred) return preferred;
   }
   // Fall back to global default
-  return getDefaultGlobalAccount(accounts, integrationType);
+  return resolveDefaultGlobalAccount(accounts, integrationType);
 }
 
 /**
@@ -370,7 +381,7 @@ export function getAccountsByType(
 }
 
 /**
- * @deprecated Use getProfilePreferredAccount instead
+ * @deprecated Use resolveProfilePreferredAccount instead
  */
 export function getDefaultAccountForType(
   profile: UnifiedProfileV2,

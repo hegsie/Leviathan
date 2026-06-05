@@ -13,13 +13,17 @@ import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatu
 import { repositoryStore, type OpenRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus } from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
+import { loggers } from '../../utils/index.ts';
 import type { UnifiedProfile, IntegrationAccount, IntegrationType, ProfileAssignmentSource } from '../../types/unified-profile.types.ts';
 import './lv-profile-card.ts';
 import './lv-integration-card.ts';
 import './lv-repository-card.ts';
 
 const STORAGE_KEY = 'lv-context-dashboard-expanded';
+
+const log = loggers.dashboard;
 
 @customElement('lv-context-dashboard')
 export class LvContextDashboard extends LitElement {
@@ -682,6 +686,7 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitFetch({ path: this.activeRepository.repository.path });
       if (!result.success) {
+        // git.service already shows a failure toast; just record store state.
         repositoryStore.getState().setError(result.error?.message ?? 'Fetch failed');
       } else {
         // Refresh repository data after fetch
@@ -705,6 +710,7 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitPull({ path: this.activeRepository.repository.path });
       if (!result.success) {
+        // git.service already shows a failure toast; just record store state.
         repositoryStore.getState().setError(result.error?.message ?? 'Pull failed');
       } else {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
@@ -727,6 +733,7 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitPush({ path: this.activeRepository.repository.path });
       if (!result.success) {
+        // git.service already shows a failure toast; just record store state.
         repositoryStore.getState().setError(result.error?.message ?? 'Push failed');
       } else {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
@@ -767,6 +774,14 @@ export class LvContextDashboard extends LitElement {
         this.activeRepository.repository.path,
         profile.id
       );
+    } catch (err) {
+      // Surface the failure via a visible toast — the repository store's error
+      // field has no render sink, so setError alone would be silent (CLAUDE.md
+      // error-feedback rule).
+      showToast(
+        `Failed to switch profile: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error'
+      );
     } finally {
       this.isApplyingProfile = false;
     }
@@ -780,6 +795,16 @@ export class LvContextDashboard extends LitElement {
     if (!this.activeProfile) return false;
     const defaultAccountId = this.activeProfile.defaultAccounts[account.integrationType];
     return defaultAccountId === account.id;
+  }
+
+  /**
+   * Whether this account is the global fallback default for its provider
+   * (account.isDefault). The card shows this as a muted "Global default" badge
+   * only when the active profile has no explicit preference (profile default
+   * takes precedence — see lv-integration-card.renderDefaultBadge).
+   */
+  private isGlobalDefaultAccount(account: IntegrationAccount): boolean {
+    return account.isDefault === true;
   }
 
   private getProfileAssignmentSource(): ProfileAssignmentSource {
@@ -857,20 +882,42 @@ export class LvContextDashboard extends LitElement {
 
   /**
    * Get the relevant integration account for the current repository.
-   * Returns the profile's default account for the detected provider, or null if not configured.
+   *
+   * Resolution precedence (mirrors the backend
+   * `get_repository_preferred_account`, most repo-specific first):
+   * 1. An account of the detected provider whose `urlPatterns` match one of the
+   *    repository's remote URLs (account-level auto-detection).
+   * 2. The active profile's explicit default account for the provider.
+   * 3. Any account of the provider type (global fallback).
+   *
+   * Returns null if no account is configured for the detected provider.
    */
   private getRelevantAccount(): IntegrationAccount | null {
     const provider = this.detectProvider();
     if (!provider) return null;
 
-    // Get the default account ID for this provider from the active profile
+    // 1. Account-level URL pattern match against the repo's remote URLs.
+    const remotes = this.activeRepository?.remotes ?? [];
+    if (remotes.length > 0) {
+      const patternMatch = this.accounts.find(
+        (a) =>
+          a.integrationType === provider &&
+          a.urlPatterns.length > 0 &&
+          remotes.some((remote) =>
+            a.urlPatterns.some((pattern) => this.matchUrlPattern(remote.url, pattern))
+          )
+      );
+      if (patternMatch) return patternMatch;
+    }
+
+    // 2. The active profile's explicit default account for this provider.
     const defaultAccountId = this.activeProfile?.defaultAccounts[provider];
     if (defaultAccountId) {
       const account = this.accounts.find((a) => a.id === defaultAccountId);
       if (account) return account;
     }
 
-    // Fall back to any account of this provider type
+    // 3. Fall back to any account of this provider type.
     return this.accounts.find((a) => a.integrationType === provider) ?? null;
   }
 
@@ -892,10 +939,14 @@ export class LvContextDashboard extends LitElement {
   }
 
   private openIntegrationDialog(type: IntegrationType): void {
-    // Only dispatch for types that have registered handlers in app-shell
+    // Only dispatch for types that have registered handlers in app-shell.
+    // 'oidc' is intentionally excluded: the dashboard only ever calls this with a
+    // provider from detectProvider() (or an account resolved through it), which
+    // never returns 'oidc' (OIDC isn't a repo-remote provider). The app-shell
+    // @open-oidc listener remains live for the profile manager / command palette.
     const supportedTypes = ['github', 'gitlab', 'azure-devops', 'bitbucket'];
     if (!supportedTypes.includes(type)) {
-      console.warn(`No dialog handler for integration type: ${type}`);
+      log.warn(`No dialog handler for integration type: ${type}`);
       return;
     }
     this.dispatchEvent(new CustomEvent(`open-${type}`, { bubbles: true, composed: true }));
@@ -945,7 +996,7 @@ export class LvContextDashboard extends LitElement {
           <svg viewBox="0 0 16 16" fill="currentColor">
             <path fill-rule="evenodd" d="M7.429 1.525a6.593 6.593 0 0 1 1.142 0c.036.003.108.036.137.146l.289 1.105c.147.56.55.967.997 1.189.174.086.341.183.501.29.417.278.97.423 1.53.27l1.102-.303c.11-.03.175.016.195.046.219.31.41.641.573.989.014.031.022.11-.059.19l-.815.806c-.411.406-.562.957-.53 1.456a4.588 4.588 0 0 1 0 .582c-.032.499.119 1.05.53 1.456l.815.806c.08.08.073.159.059.19a6.494 6.494 0 0 1-.573.99c-.02.029-.086.074-.195.045l-1.103-.303c-.559-.153-1.112-.008-1.529.27-.16.107-.327.204-.5.29-.449.222-.851.628-.998 1.189l-.289 1.105c-.029.11-.101.143-.137.146a6.613 6.613 0 0 1-1.142 0c-.036-.003-.108-.037-.137-.146l-.289-1.105c-.147-.56-.55-.967-.997-1.189a4.502 4.502 0 0 1-.501-.29c-.417-.278-.97-.423-1.53-.27l-1.102.303c-.11.03-.175-.016-.195-.046a6.492 6.492 0 0 1-.573-.989c-.014-.031-.022-.11.059-.19l.815-.806c.411-.406.562-.957.53-1.456a4.587 4.587 0 0 1 0-.582c.032-.499-.119-1.05-.53-1.456l-.815-.806c-.08-.08-.073-.159-.059-.19.162-.348.354-.68.573-.99.02-.029.086-.074.195-.045l1.103.303c.559.153 1.112.008 1.529-.27.16-.107.327-.204.5-.29.449-.222.851-.628.998-1.189l.289-1.105c.029-.11.101-.143.137-.146ZM8 0c-.236 0-.47.01-.701.03-.743.065-1.29.615-1.458 1.261l-.29 1.106c-.017.066-.078.158-.211.232a5.489 5.489 0 0 0-.594.344c-.12.08-.234.115-.327.096l-1.103-.303c-.648-.178-1.392.02-1.82.63a7.986 7.986 0 0 0-.704 1.217c-.315.675-.111 1.422.363 1.891l.815.806c.05.048.098.147.088.294a6.084 6.084 0 0 0 0 .772c.01.147-.038.246-.088.294l-.815.806c-.474.469-.678 1.216-.363 1.891.2.428.436.835.704 1.218.428.609 1.172.806 1.82.63l1.103-.303c.093-.02.207.016.327.096.185.124.38.237.594.344.133.074.194.166.211.232l.29 1.106c.167.646.714 1.196 1.457 1.26.23.02.465.031.701.031.236 0 .47-.01.701-.03.743-.065 1.29-.615 1.458-1.261l.29-1.106c.017-.066.078-.158.211-.232a5.49 5.49 0 0 0 .594-.344c.12-.08.234-.115.327-.096l1.103.303c.648.178 1.392-.02 1.82-.63.268-.383.505-.79.704-1.217.315-.675.111-1.422-.364-1.891l-.814-.806c-.05-.048-.098-.147-.088-.294a6.083 6.083 0 0 0 0-.772c-.01-.147.039-.246.088-.294l.814-.806c.475-.469.679-1.216.364-1.891a7.992 7.992 0 0 0-.704-1.218c-.428-.609-1.172-.806-1.82-.63l-1.103.303c-.093.02-.207-.016-.327-.096a5.49 5.49 0 0 0-.594-.344c-.133-.074-.194-.166-.211-.232l-.29-1.106C9.992.645 9.444.095 8.701.031A8.566 8.566 0 0 0 8 0Zm1.5 8a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0ZM11 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/>
           </svg>
-          Manage Profiles
+          Profiles &amp; Accounts
         </button>
       </div>
     `;
@@ -1194,6 +1245,7 @@ export class LvContextDashboard extends LitElement {
                   .account=${relevantAccount}
                   .connectionStatus=${this.getAccountStatus(relevantAccount.id)}
                   .isProfileDefault=${this.isProfileDefaultAccount(relevantAccount)}
+                  .isGlobalDefault=${this.isGlobalDefaultAccount(relevantAccount)}
                   @open-dialog=${() => this.openIntegrationDialog(relevantAccount.integrationType)}
                   @refresh-account=${this.handleRefreshAccount}
                 ></lv-integration-card>

@@ -75,7 +75,7 @@ const githubPersonal = {
 
 async function openProfileManager(page: Page, dialogs: DialogsPage): Promise<void> {
   await dialogs.commandPalette.open();
-  await dialogs.commandPalette.search('Git Profiles');
+  await dialogs.commandPalette.search('Profiles & Accounts');
   await dialogs.commandPalette.executeFirst();
   await expect(page.getByRole('button', { name: 'New Profile' })).toBeVisible();
 }
@@ -1088,6 +1088,15 @@ test.describe('Workflow - Profile Manager ↔ Integration dialogs', () => {
     await expect(dialogs.github.dialog).toBeVisible();
     await expect(page.locator('lv-profile-manager-dialog[open][demoted]')).toHaveCount(1);
 
+    // EXPLICIT navigation: the GitHub dialog shows a Back arrow (opened with a
+    // return target) AND an "Adding to <profile>" breadcrumb naming the target.
+    await expect(
+      page.locator('lv-github-dialog').getByRole('button', { name: 'Back' }),
+    ).toBeVisible();
+    await expect(
+      page.locator('lv-github-dialog [data-testid="attach-breadcrumb"]'),
+    ).toContainText('Personal');
+
     // REAL save flow.
     await dialogs.github.selectPATMethod();
     await dialogs.github.tokenInput.waitFor({ state: 'visible', timeout: 5000 });
@@ -1119,6 +1128,98 @@ test.describe('Workflow - Profile Manager ↔ Integration dialogs', () => {
     const saves = await findCommand(page, 'save_unified_profile');
     const saved = (saves[saves.length - 1].args as { profile: { defaultAccounts: Record<string, string> } }).profile;
     expect(saved.defaultAccounts.github).toBe(newAccount.id);
+  });
+
+  // --- W7 -------------------------------------------------------------
+  test('W7: a provider dialog opened STANDALONE (command palette) shows no Back arrow and does NOT auto-attach', async ({ page }) => {
+    const dialogs = new DialogsPage(page);
+
+    // A profile with NO github account attached, plus a global github account
+    // already present. If a stray auto-attach happened, this account would get
+    // attached — we assert it does NOT.
+    const profileNoGithub = { ...personalProfile, defaultAccounts: {} };
+    await setupProfilesAndAccounts(page, {
+      profiles: [profileNoGithub],
+      accounts: [githubWork],
+      connectedAccounts: ['account-github-work'],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [profileNoGithub],
+        accounts: [githubWork],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+      load_unified_profile_for_repository: profileNoGithub,
+    });
+
+    const app = new AppPage(page);
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    // Opened standalone: NO Back arrow, only a Close ×; and no attach breadcrumb.
+    await expect(
+      page.locator('lv-github-dialog lv-modal').locator('[aria-label="Back"]'),
+    ).toHaveCount(0);
+    await expect(
+      page.locator('lv-github-dialog lv-modal').locator('[aria-label="Close"]'),
+    ).toBeVisible();
+    await expect(
+      page.locator('lv-github-dialog [data-testid="attach-breadcrumb"]'),
+    ).toHaveCount(0);
+
+    // Close it, open the manager, edit the profile — the github account must NOT
+    // have been auto-attached by the standalone open.
+    await page.locator('lv-github-dialog lv-modal [aria-label="Close"]').click();
+    await expect(dialogs.github.dialog).not.toBeVisible();
+
+    await openProfileManager(page, dialogs);
+    await page.locator('.profile-item').first().click();
+    await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(0);
+  });
+
+  // --- W8 -------------------------------------------------------------
+  test('W8: Manage Accounts from a provider dialog is reversible — Back returns to the provider dialog', async ({ page }) => {
+    const dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile],
+      accounts: [githubWork, githubPersonal],
+      connectedAccounts: ['account-github-work'],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile],
+        accounts: [githubWork, githubPersonal],
+        repositoryAssignments: {},
+      },
+      get_migration_backup_info: { hasBackup: false },
+      load_unified_profile_for_repository: workProfile,
+    });
+
+    const app = new AppPage(page);
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    // Manage Accounts → lands on the Profiles & Accounts manager (on top).
+    await page.locator('lv-github-dialog lv-account-selector .selector-btn').click();
+    await page
+      .locator('lv-github-dialog lv-account-selector .dropdown-action', {
+        hasText: 'Manage Accounts',
+      })
+      .click();
+    await expect(
+      page.locator('lv-profile-manager-dialog[open] .dialog-overlay'),
+    ).toBeVisible();
+    await expect(dialogs.github.dialog).not.toBeVisible();
+    await expect(page.locator('lv-profile-manager-dialog .dialog-title')).toContainText('Accounts');
+
+    // REVERSIBLE: Back from the Accounts view returns to the GitHub dialog.
+    await page.locator('lv-profile-manager-dialog .dialog-footer button', { hasText: 'Back' }).click();
+    await expect(page.locator('lv-profile-manager-dialog[open]')).toHaveCount(0);
+    await expect(dialogs.github.dialog).toBeVisible();
   });
 });
 
@@ -2620,7 +2721,7 @@ test.describe('Accounts management view', () => {
 
     await expect(
       page.locator('lv-profile-manager-dialog .dialog-title'),
-    ).toContainText('Manage Accounts');
+    ).toContainText('Accounts');
     // Both global accounts are listed with edit + delete affordances.
     await expect(
       page.locator('lv-profile-manager-dialog .accounts-list .account-item'),
@@ -2677,7 +2778,7 @@ test.describe('Accounts management view', () => {
     // Still on the accounts view, now showing only the remaining account.
     await expect(
       page.locator('lv-profile-manager-dialog .dialog-title'),
-    ).toContainText('Manage Accounts');
+    ).toContainText('Accounts');
     await expect(
       page.locator('lv-profile-manager-dialog .accounts-list .account-item'),
     ).toHaveCount(1);
@@ -2716,7 +2817,7 @@ test.describe('Accounts management view', () => {
     await expect(page.locator('lv-profile-manager-dialog[open][demoted]')).toHaveCount(0);
     await expect(
       page.locator('lv-profile-manager-dialog .dialog-title'),
-    ).toContainText('Manage Accounts');
+    ).toContainText('Accounts');
   });
 });
 

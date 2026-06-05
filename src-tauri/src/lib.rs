@@ -500,6 +500,7 @@ pub fn run() {
             commands::unified_profiles::remove_profile_default_account,
             commands::unified_profiles::update_global_account_cached_user,
             commands::unified_profiles::get_profile_preferred_account,
+            commands::unified_profiles::get_repository_preferred_account,
             // Deprecated profile-scoped account commands (kept for compatibility)
             commands::unified_profiles::add_account_to_profile,
             commands::unified_profiles::update_account_in_profile,
@@ -568,6 +569,7 @@ pub fn run() {
             commands::azure_devops::create_ado_pull_request,
             commands::azure_devops::get_ado_work_items,
             commands::azure_devops::query_ado_work_items,
+            commands::azure_devops::create_azure_devops_work_item,
             commands::azure_devops::list_ado_pipeline_runs,
             // GitLab integration
             commands::gitlab::check_gitlab_connection,
@@ -590,6 +592,7 @@ pub fn run() {
             commands::bitbucket::get_bitbucket_pull_request,
             commands::bitbucket::create_bitbucket_pull_request,
             commands::bitbucket::list_bitbucket_issues,
+            commands::bitbucket::create_bitbucket_issue,
             commands::bitbucket::list_bitbucket_pipelines,
             // Commit templates
             commands::templates::get_commit_template,

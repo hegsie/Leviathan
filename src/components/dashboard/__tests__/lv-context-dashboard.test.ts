@@ -24,6 +24,7 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { repositoryStore } from '../../../stores/repository.store.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 import type { UnifiedProfile, IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { Repository, Branch, Remote } from '../../../types/git.types.ts';
 import type { LvContextDashboard } from '../lv-context-dashboard.ts';
@@ -517,6 +518,170 @@ describe('lv-context-dashboard', () => {
       const collapseBtn = el.shadowRoot!.querySelector('.expand-btn.expanded') as HTMLButtonElement;
       expect(collapseBtn).to.not.be.null;
       expect(collapseBtn.getAttribute('aria-expanded')).to.equal('true');
+    });
+  });
+
+  // D10: the dashboard acts as an event bus — child-card events bubble in and are
+  // re-dispatched upward (to app-shell) by the dashboard.
+  describe('event bus relay (D10)', () => {
+    async function renderExpandedWithIntegrationCard(): Promise<LvContextDashboard> {
+      setupStores({
+        accounts: [defaultAccount],
+        profile: makeProfile({ defaultAccounts: { github: 'account-1' } }),
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+      return el;
+    }
+
+    it('re-dispatches integration-card refresh-account upward', async () => {
+      const el = await renderExpandedWithIntegrationCard();
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+
+      let relayed: CustomEvent | null = null;
+      el.addEventListener('refresh-account', ((e: CustomEvent) => {
+        relayed = e;
+      }) as EventListener);
+
+      card!.dispatchEvent(
+        new CustomEvent('refresh-account', {
+          detail: { accountId: 'account-1' },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      await el.updateComplete;
+
+      expect(relayed, 'refresh-account relayed').to.not.be.null;
+      expect((relayed! as CustomEvent).detail).to.deep.equal({ accountId: 'account-1' });
+    });
+
+    it('re-dispatches integration-card open-dialog as open-<provider> upward', async () => {
+      const el = await renderExpandedWithIntegrationCard();
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card).to.not.be.null;
+
+      let openGithub = false;
+      el.addEventListener('open-github', () => {
+        openGithub = true;
+      });
+
+      card!.dispatchEvent(new CustomEvent('open-dialog', { bubbles: true, composed: true }));
+      await el.updateComplete;
+
+      expect(openGithub, 'open-github relayed for a github account').to.be.true;
+    });
+
+    it('re-dispatches profile-card edit-profile as open-profile-manager upward', async () => {
+      setupStores();
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const profileCard = el.shadowRoot!.querySelector('lv-profile-card');
+      expect(profileCard).to.not.be.null;
+
+      let openProfileManager = false;
+      el.addEventListener('open-profile-manager', () => {
+        openProfileManager = true;
+      });
+
+      profileCard!.dispatchEvent(new CustomEvent('edit-profile', { bubbles: true, composed: true }));
+      await el.updateComplete;
+
+      expect(openProfileManager, 'edit-profile -> open-profile-manager').to.be.true;
+    });
+  });
+
+  // ── Profile-switch error feedback (Wave 1, item 5) ─────────────────────────
+  describe('profile switch error feedback', () => {
+    it('surfaces an error toast when applying a profile fails (no silent catch)', async () => {
+      setupStores({
+        profiles: [defaultProfile, makeProfile({ id: 'profile-2', name: 'Personal' })],
+      });
+      mockInvoke = async (command: string) => {
+        if (command === 'apply_unified_profile') {
+          throw new Error('git config is locked');
+        }
+        return null;
+      };
+
+      const el = await renderDashboard();
+      uiStore.setState({ toasts: [] });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dash = el as any;
+      await dash.handleSelectProfile(makeProfile({ id: 'profile-2', name: 'Personal' }));
+      await el.updateComplete;
+
+      // The repository store error field has no render sink, so the failure must
+      // be surfaced via a visible error toast.
+      const errorToasts = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errorToasts.length, 'an error toast is shown').to.be.greaterThan(0);
+      expect(errorToasts[0].message).to.include('Failed to switch profile');
+      expect(errorToasts[0].message).to.include('git config is locked');
+    });
+
+    it('does not show an error toast on a successful profile switch', async () => {
+      setupStores({
+        profiles: [defaultProfile, makeProfile({ id: 'profile-2', name: 'Personal' })],
+      });
+      mockInvoke = async () => null;
+
+      const el = await renderDashboard();
+      uiStore.setState({ toasts: [] });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dash = el as any;
+      await dash.handleSelectProfile(makeProfile({ id: 'profile-2', name: 'Personal' }));
+      await el.updateComplete;
+
+      expect(uiStore.getState().toasts.filter((t) => t.type === 'error')).to.have.lengthOf(0);
+    });
+  });
+
+  // ── Default-account precedence (Wave 1, item 6) ────────────────────────────
+  describe('default account precedence badge', () => {
+    it('marks the active account as Global default when it is account.isDefault but not a profile preference', async () => {
+      const globalDefaultAccount = makeAccount({ id: 'account-1', isDefault: true });
+      setupStores({
+        accounts: [globalDefaultAccount],
+        // No defaultAccounts preference on the active profile.
+        profile: makeProfile({ defaultAccounts: {} }),
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+      const badge = card!.shadowRoot!.querySelector('.default-badge');
+      expect(badge, 'a default badge is shown').to.not.be.null;
+      expect(badge!.textContent!.trim()).to.equal('Global default');
+      expect(badge!.classList.contains('global')).to.be.true;
+    });
+
+    it('marks the active account as Profile default when the profile prefers it', async () => {
+      const account = makeAccount({ id: 'account-1', isDefault: true });
+      setupStores({
+        accounts: [account],
+        // Profile explicitly prefers this account — takes precedence over global.
+        profile: makeProfile({ defaultAccounts: { github: 'account-1' } }),
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      const badge = card!.shadowRoot!.querySelector('.default-badge');
+      expect(badge!.textContent!.trim()).to.equal('Profile default');
+      expect(badge!.classList.contains('global')).to.be.false;
     });
   });
 });

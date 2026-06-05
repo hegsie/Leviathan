@@ -33,6 +33,7 @@ import './components/dialogs/lv-config-dialog.ts';
 import './components/dialogs/lv-credentials-dialog.ts';
 import './components/dialogs/lv-github-dialog.ts';
 import './components/dialogs/lv-gitlab-dialog.ts';
+import './components/dialogs/lv-oidc-dialog.ts';
 import './components/dialogs/lv-bitbucket-dialog.ts';
 import './components/dialogs/lv-azure-devops-dialog.ts';
 import './components/dialogs/lv-profile-manager-dialog.ts';
@@ -55,6 +56,8 @@ import type { LvCreateTagDialog } from './components/dialogs/lv-create-tag-dialo
 import type { LvCreateBranchDialog } from './components/dialogs/lv-create-branch-dialog.ts';
 import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dialog.ts';
 import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interactive-rebase-dialog.ts';
+import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-manager-dialog.ts';
+import type { IntegrationOpenContext, IntegrationType } from './types/integration-accounts.types.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
@@ -573,11 +576,26 @@ export class AppShell extends LitElement {
   // Azure DevOps dialog
   @state() private showAzureDevOps = false;
 
+  // OIDC / Enterprise SSO dialog
+  @state() private showOidc = false;
+
   // Profile Manager dialog
   @state() private showProfileManager = false;
   // Which view the Profile Manager should open to. 'accounts' is set when the
   // user picks "Manage Accounts" from an integration dialog; reset on close.
   @state() private profileManagerView: '' | 'accounts' = '';
+
+  // EXPLICIT navigation context for a provider/OIDC dialog opened FROM the
+  // profile manager's "Connect a new account" flow. Non-null ONLY while such a
+  // dialog is open: it drives the Back arrow, the "Adding to <name>" breadcrumb,
+  // and the deterministic return + attach-after-connect. Cleared on every
+  // standalone open (command palette/dashboard/toolbar) so those never show a
+  // back arrow or auto-attach. Replaces the old `showProfileManager` inference.
+  @state() private integrationContext: IntegrationOpenContext | null = null;
+  // When "Manage Accounts" is opened from a provider dialog, remember which
+  // provider so closing the Accounts view can return there — making that
+  // navigation reversible rather than a one-way teleport.
+  private manageAccountsReturnProvider: IntegrationType | null = null;
 
   // Migration dialog
   @state() private showMigrationDialog = false;
@@ -608,6 +626,7 @@ export class AppShell extends LitElement {
   @query('lv-create-branch-dialog') private createBranchDialog?: LvCreateBranchDialog;
   @query('lv-cherry-pick-dialog') private cherryPickDialog?: LvCherryPickDialog;
   @query('#app-rebase-dialog') private interactiveRebaseDialog?: LvInteractiveRebaseDialog;
+  @query('lv-profile-manager-dialog') private profileManagerDialog?: LvProfileManagerDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -963,18 +982,22 @@ export class AppShell extends LitElement {
   }
 
   private openIntegrationDialog(provider: string | null): void {
+    // Suggestion-driven open: standalone (no return target, no auto-attach).
     switch (provider) {
       case 'github':
-        this.showGitHub = true;
+        this.openIntegrationStandalone('github');
         break;
       case 'gitlab':
-        this.showGitLab = true;
+        this.openIntegrationStandalone('gitlab');
         break;
       case 'bitbucket':
-        this.showBitbucket = true;
+        this.openIntegrationStandalone('bitbucket');
         break;
       case 'ado':
-        this.showAzureDevOps = true;
+        this.openIntegrationStandalone('azure-devops');
+        break;
+      case 'oidc':
+        this.openIntegrationStandalone('oidc');
         break;
     }
   }
@@ -1355,11 +1378,87 @@ export class AppShell extends LitElement {
     this.showSettings = true;
   };
 
-  // True while any integration dialog is open. Used to demote the profile manager
-  // behind it (it stays open underneath), so closing the integration dialog reveals
-  // the account picker again exactly where the user left off.
+  // True while any integration dialog is open.
   private get integrationDialogOpen(): boolean {
-    return this.showGitHub || this.showGitLab || this.showBitbucket || this.showAzureDevOps;
+    return this.showGitHub || this.showGitLab || this.showBitbucket || this.showAzureDevOps || this.showOidc;
+  }
+
+  // True only while a provider/OIDC dialog is open ON TOP of the profile manager
+  // via the explicit "Connect a new account" flow. Drives the profile manager's
+  // `demoted` (render-behind) visual. Unlike the old inference, opening a provider
+  // dialog standalone (command palette) while the manager happens to be open does
+  // NOT demote it — because no return context was set.
+  private get profileManagerDemoted(): boolean {
+    return this.integrationDialogOpen && this.integrationContext?.returnTo === 'profile-manager';
+  }
+
+  /**
+   * Open a provider/OIDC dialog FROM the profile manager's connect flow. Captures
+   * the explicit return context (from the event detail) so the provider dialog
+   * shows a Back arrow + breadcrumb and, on close, returns here and (when the
+   * context carries attach intent) attaches the connected account.
+   */
+  private handleOpenIntegrationFromManager(
+    type: IntegrationType,
+    e: CustomEvent<IntegrationOpenContext | undefined>,
+  ): void {
+    // The profile manager always sends an explicit context. Fall back to a
+    // non-attaching context if somehow absent, so we never silently auto-attach.
+    this.integrationContext = e.detail ?? {
+      returnTo: 'profile-manager',
+      integrationType: type,
+      profileId: '',
+      profileName: '',
+      attach: false,
+    };
+    this.setIntegrationDialogOpen(type, true);
+  }
+
+  /**
+   * Open a provider/OIDC dialog STANDALONE (command palette, dashboard, toolbar).
+   * Clears any return context so the dialog shows no Back arrow and never
+   * auto-attaches to a profile.
+   */
+  private openIntegrationStandalone(type: IntegrationType): void {
+    this.integrationContext = null;
+    this.setIntegrationDialogOpen(type, true);
+  }
+
+  // Back arrow shows ONLY when the current provider dialog was opened with a
+  // return target — derived from explicit context, not global manager state.
+  private get integrationBackButton(): boolean {
+    return this.integrationContext?.returnTo === 'profile-manager';
+  }
+
+  // Breadcrumb name shows only when the open was an attach flow.
+  private get integrationAttachName(): string {
+    return this.integrationContext?.attach ? this.integrationContext.profileName : '';
+  }
+
+  private setIntegrationDialogOpen(type: IntegrationType, open: boolean): void {
+    switch (type) {
+      case 'github': this.showGitHub = open; break;
+      case 'gitlab': this.showGitLab = open; break;
+      case 'bitbucket': this.showBitbucket = open; break;
+      case 'azure-devops': this.showAzureDevOps = open; break;
+      case 'oidc': this.showOidc = open; break;
+    }
+  }
+
+  /**
+   * A provider/OIDC dialog closed (via Back or ×). When it was opened from the
+   * profile manager (explicit context present), deterministically return there
+   * and run the explicit attach-after-connect. Otherwise just close it.
+   */
+  private handleIntegrationDialogClose(type: IntegrationType): void {
+    this.setIntegrationDialogOpen(type, false);
+    const context = this.integrationContext;
+    this.integrationContext = null;
+    if (context?.returnTo === 'profile-manager') {
+      // The profile manager stayed mounted (demoted) underneath; reveal it and
+      // attach the just-connected account per the explicit context.
+      void this.profileManagerDialog?.revealAfterConnect(context);
+    }
   }
 
   private handleTriggerAbort = (): void => {
@@ -1744,24 +1843,62 @@ export class AppShell extends LitElement {
     }
   }
 
-  // "Manage Accounts" from an integration dialog: close the integration dialogs
-  // and open the Profile Manager directly on its account-management view.
-  private handleManageAccounts(): void {
+  // "Manage Accounts" from a provider dialog: close the provider dialog and open
+  // the Profiles & Accounts manager on its Accounts view. REVERSIBLE — we
+  // remember which provider we came from so closing the Accounts view returns
+  // there (see handleProfileManagerClose), instead of a one-way teleport.
+  private handleManageAccounts(e: CustomEvent<{ integrationType?: IntegrationType }>): void {
+    const from = e.detail?.integrationType ?? null;
     this.showGitHub = false;
     this.showGitLab = false;
     this.showBitbucket = false;
     this.showAzureDevOps = false;
+    this.showOidc = false;
+    // No stacked-overlay context here: the manager is shown ON TOP (not demoted),
+    // so the user clearly lands where they asked. The provider dialog is closed,
+    // but reachable again via the remembered return provider.
+    this.integrationContext = null;
+    this.manageAccountsReturnProvider = from;
     this.profileManagerView = 'accounts';
-    this.showProfileManager = true;
+    // If the manager is ALREADY open (the provider dialog was launched FROM it,
+    // so it's open & demoted), the `open` property won't transition false→true and
+    // the manager's willUpdate/open-transition logic that applies `initialView`
+    // never runs — it would reveal on its prior view (select-account/edit). Drive
+    // the Accounts view explicitly instead so the click isn't a no-op.
+    if (this.showProfileManager) {
+      this.profileManagerDialog?.showAccountsView();
+    } else {
+      this.showProfileManager = true;
+    }
+  }
+
+  // The profile manager closed. If it was opened via "Manage Accounts" from a
+  // provider dialog AND the user closed out OF the Accounts view (i.e. they backed
+  // out of account management rather than navigating off to edit profiles),
+  // reopen that provider dialog so the navigation is reversible. The view we
+  // closed from travels in the event detail (captured before the view reset).
+  private handleProfileManagerClose(e: CustomEvent<{ fromView?: string }>): void {
+    const returnProvider = this.manageAccountsReturnProvider;
+    const closedFromAccounts = e.detail?.fromView === 'accounts';
+    this.showProfileManager = false;
+    this.profileManagerView = '';
+    this.manageAccountsReturnProvider = null;
+    if (returnProvider && closedFromAccounts) {
+      this.openIntegrationStandalone(returnProvider);
+    }
   }
 
   private async handleRefreshAccount(e: CustomEvent<{ accountId: string }>): Promise<void> {
     const { accountId } = e.detail;
     try {
       const account = await unifiedProfileService.getGlobalAccount(accountId);
-      if (account) {
-        await unifiedProfileService.refreshAccountCachedUser(account);
+      // D3: Surface feedback instead of silently returning when the account
+      // can't be found (e.g. it was deleted between dispatch and handling).
+      if (!account) {
+        showToast('Account not found', 'error');
+        return;
       }
+      await unifiedProfileService.refreshAccountCachedUser(account);
     } catch (error) {
       log.error('Failed to refresh account', error);
       showToast('Failed to refresh account connection', 'error');
@@ -2056,32 +2193,40 @@ export class AppShell extends LitElement {
         label: 'GitHub Integration',
         category: 'action',
         icon: 'github',
-        action: this.requiresRepository(() => { this.showGitHub = true; }),
+        // Account connection is repo-independent; only PR/issue/pipeline tabs guard themselves.
+        action: () => this.openIntegrationStandalone('github'),
       },
       {
         id: 'gitlab',
         label: 'GitLab Integration',
         category: 'action',
         icon: 'gitlab',
-        action: this.requiresRepository(() => { this.showGitLab = true; }),
+        action: () => this.openIntegrationStandalone('gitlab'),
       },
       {
         id: 'bitbucket',
         label: 'Bitbucket Integration',
         category: 'action',
         icon: 'bitbucket',
-        action: this.requiresRepository(() => { this.showBitbucket = true; }),
+        action: () => this.openIntegrationStandalone('bitbucket'),
       },
       {
         id: 'azure-devops',
         label: 'Azure DevOps Integration',
         category: 'action',
         icon: 'azure',
-        action: this.requiresRepository(() => { this.showAzureDevOps = true; }),
+        action: () => this.openIntegrationStandalone('azure-devops'),
+      },
+      {
+        id: 'oidc',
+        label: 'Enterprise SSO (OIDC) Integration',
+        category: 'action',
+        icon: 'key',
+        action: () => this.openIntegrationStandalone('oidc'),
       },
       {
         id: 'profiles',
-        label: 'Git Profiles',
+        label: 'Profiles & Accounts',
         category: 'action',
         icon: 'user',
         action: () => { this.showProfileManager = true; },
@@ -2471,10 +2616,11 @@ export class AppShell extends LitElement {
         ? html`
             <lv-context-dashboard
               @open-profile-manager=${() => { this.showProfileManager = true; }}
-              @open-github=${() => { this.showGitHub = true; }}
-              @open-gitlab=${() => { this.showGitLab = true; }}
-              @open-bitbucket=${() => { this.showBitbucket = true; }}
-              @open-azure-devops=${() => { this.showAzureDevOps = true; }}
+              @open-github=${() => this.openIntegrationStandalone('github')}
+              @open-gitlab=${() => this.openIntegrationStandalone('gitlab')}
+              @open-bitbucket=${() => this.openIntegrationStandalone('bitbucket')}
+              @open-azure-devops=${() => this.openIntegrationStandalone('azure-devops')}
+              @open-oidc=${() => this.openIntegrationStandalone('oidc')}
               @refresh-account=${this.handleRefreshAccount}
               @repository-refresh=${() => this.handleRefresh()}
             ></lv-context-dashboard>
@@ -2641,6 +2787,7 @@ export class AppShell extends LitElement {
           `
         : html`<lv-welcome
             @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
+            @open-profile-manager=${() => { this.showProfileManager = true; }}
           ></lv-welcome>`}
 
       ${this.showSettings
@@ -2652,6 +2799,7 @@ export class AppShell extends LitElement {
             >
               <lv-settings-dialog
                 @close=${this.handleCloseSettings}
+                @open-profile-manager=${() => { this.showProfileManager = true; }}
               ></lv-settings-dialog>
             </lv-modal>
           `
@@ -2997,46 +3145,59 @@ export class AppShell extends LitElement {
 
       <lv-github-dialog
         ?open=${this.showGitHub}
-        ?backButton=${this.showProfileManager}
+        ?backButton=${this.integrationBackButton}
+        .attachToProfileName=${this.integrationAttachName}
         .repositoryPath=${this.activeRepository?.repository.path ?? ''}
-        @close=${() => { this.showGitHub = false; }}
+        @close=${() => this.handleIntegrationDialogClose('github')}
         @manage-accounts=${this.handleManageAccounts}
       ></lv-github-dialog>
 
       <lv-gitlab-dialog
         ?open=${this.showGitLab}
-        ?backButton=${this.showProfileManager}
+        ?backButton=${this.integrationBackButton}
+        .attachToProfileName=${this.integrationAttachName}
         .repositoryPath=${this.activeRepository?.repository.path ?? ''}
-        @close=${() => { this.showGitLab = false; }}
+        @close=${() => this.handleIntegrationDialogClose('gitlab')}
         @manage-accounts=${this.handleManageAccounts}
       ></lv-gitlab-dialog>
 
       <lv-bitbucket-dialog
         ?open=${this.showBitbucket}
-        ?backButton=${this.showProfileManager}
+        ?backButton=${this.integrationBackButton}
+        .attachToProfileName=${this.integrationAttachName}
         .repositoryPath=${this.activeRepository?.repository.path ?? ''}
-        @close=${() => { this.showBitbucket = false; }}
+        @close=${() => this.handleIntegrationDialogClose('bitbucket')}
         @manage-accounts=${this.handleManageAccounts}
       ></lv-bitbucket-dialog>
 
       <lv-azure-devops-dialog
         ?open=${this.showAzureDevOps}
-        ?backButton=${this.showProfileManager}
+        ?backButton=${this.integrationBackButton}
+        .attachToProfileName=${this.integrationAttachName}
         .repositoryPath=${this.activeRepository?.repository.path ?? ''}
-        @close=${() => { this.showAzureDevOps = false; }}
+        @close=${() => this.handleIntegrationDialogClose('azure-devops')}
         @manage-accounts=${this.handleManageAccounts}
       ></lv-azure-devops-dialog>
 
+      <lv-oidc-dialog
+        ?open=${this.showOidc}
+        ?backButton=${this.integrationBackButton}
+        .attachToProfileName=${this.integrationAttachName}
+        @close=${() => this.handleIntegrationDialogClose('oidc')}
+        @manage-accounts=${this.handleManageAccounts}
+      ></lv-oidc-dialog>
+
       <lv-profile-manager-dialog
         ?open=${this.showProfileManager}
-        ?demoted=${this.integrationDialogOpen}
+        ?demoted=${this.profileManagerDemoted}
         .repoPath=${this.activeRepository?.repository.path ?? ''}
         .initialView=${this.profileManagerView}
-        @close=${() => { this.showProfileManager = false; this.profileManagerView = ''; }}
-        @open-github=${() => { this.showGitHub = true; }}
-        @open-gitlab=${() => { this.showGitLab = true; }}
-        @open-bitbucket=${() => { this.showBitbucket = true; }}
-        @open-azure-devops=${() => { this.showAzureDevOps = true; }}
+        @close=${this.handleProfileManagerClose}
+        @open-github=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('github', e)}
+        @open-gitlab=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('gitlab', e)}
+        @open-bitbucket=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('bitbucket', e)}
+        @open-azure-devops=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('azure-devops', e)}
+        @open-oidc=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('oidc', e)}
         @migration-needed=${() => { this.showMigrationDialog = true; }}
       ></lv-profile-manager-dialog>
 

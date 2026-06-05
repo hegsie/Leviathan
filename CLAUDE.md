@@ -1,5 +1,17 @@
 # Claude Code Instructions
 
+## Default Review Process
+
+When I ask for a "review" (of the code, a change, a PR, the diff, a workflow, etc.), use this **recursive, multi-model, holistic** process by default — not a single-pass review:
+
+1. **Three independent reviewers, three different models.** Run three reviewers in parallel, each on a different model (e.g. Opus, Sonnet, Haiku).
+2. **No lenses.** Each reviewer reviews the ENTIRE changed surface holistically — correctness AND user experience AND completeness — NOT an assigned angle (do not split into "you do security / you do UX"). Each reads the full diff (`git diff <base>...HEAD`) and the full current files for context.
+3. **Bar.** Surface real problems a user or maintainer would actually hit: correctness bugs, incomplete/dead-end flows, FE/BE contract mismatches (snake_case↔camelCase), missing empty/loading/error states, cross-provider inconsistency, and any UX that is not **user-simplicity driven and complete**. Ground every finding in `file:line` with a concrete, minimal fix. No invented nitpicks — verify each claim against the code first. Each reviewer ends its report with exactly one line: `VERDICT: N issues found` or `VERDICT: NO ISSUES FOUND`.
+4. **Fix, then repeat.** Dedupe findings across the three reviewers, fix the real ones (with tests, and the full gate from "Before Committing" green), then re-run all three reviewers on the updated code.
+5. **Convergence.** Repeat rounds until ALL THREE reviewers return `NO ISSUES FOUND` in the same round. Only then is the review complete.
+
+Keep review artifacts out of the repo — reviewers return findings in their messages; do not commit review markdown files.
+
 ## Before Committing
 
 Run all checks in sequence:

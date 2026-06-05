@@ -167,6 +167,7 @@ export const AzureDevOpsCredentials = {
 // =============================================================================
 
 import type { IntegrationType } from '../types/integration-accounts.types.ts';
+import type { GitHubConnectionStatus } from './git.service.ts';
 
 /**
  * Generate a namespaced credential key for an account
@@ -204,11 +205,17 @@ export const AccountCredentials = {
   },
 
   /**
-   * Delete a token for a specific account
+   * Delete a token for a specific account.
+   *
+   * Removes BOTH the main credential key and the `${key}_oauth` companion blob
+   * written by storeAccountOAuthToken. Deleting only the main key would orphan
+   * the refresh-token blob in the keyring, accumulating stale secrets on every
+   * disconnect/delete for OAuth providers.
    */
   async deleteToken(integrationType: IntegrationType, accountId: string): Promise<void> {
     const key = getAccountCredentialKey(integrationType, accountId);
-    return keyringDelete(key);
+    await keyringDelete(key);
+    await keyringDelete(`${key}_oauth`);
   },
 
   /**
@@ -409,9 +416,13 @@ export async function configureGitHubApp(
   appId: number,
   privateKeyPem: string,
   installationId: number,
-): Promise<unknown> {
-  const result = await invokeCommand<unknown>('configure_github_app', { appId, privateKeyPem, installationId });
-  if (!result.success) {
+): Promise<GitHubConnectionStatus> {
+  const result = await invokeCommand<GitHubConnectionStatus>('configure_github_app', {
+    appId,
+    privateKeyPem,
+    installationId,
+  });
+  if (!result.success || !result.data) {
     throw new Error(result.error?.message ?? 'Failed to configure GitHub App');
   }
   return result.data;

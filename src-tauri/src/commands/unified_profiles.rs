@@ -11,7 +11,7 @@ use crate::error::{LeviathanError, Result};
 use crate::models::{
     CachedUser, IntegrationAccount, IntegrationAccountsConfig, IntegrationType,
     ProfileIntegrationAccount, ProfilesConfig, UnifiedProfile, UnifiedProfilesConfig,
-    UNIFIED_PROFILES_CONFIG_VERSION,
+    PROFILE_COLORS, UNIFIED_PROFILES_CONFIG_VERSION,
 };
 use crate::utils::create_command;
 
@@ -89,6 +89,18 @@ fn save_unified_profiles_config(config: &UnifiedProfilesConfig) -> Result<()> {
     fs::write(&path, content).map_err(|e| {
         LeviathanError::OperationFailed(format!("Failed to write unified profiles: {}", e))
     })?;
+
+    // M8: Restrict config file to owner-only (0600) so token secrets are not
+    // world-readable.  The guard is compile-time only — Windows has no
+    // meaningful Unix permission bits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&path, perms).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to set config file permissions: {}", e))
+        })?;
+    }
 
     Ok(())
 }
@@ -371,6 +383,25 @@ pub async fn get_profile_preferred_account(
     let config = load_unified_profiles_config()?;
     Ok(config
         .get_profile_preferred_account(&profile_id, &integration_type)
+        .cloned())
+}
+
+/// Resolve the preferred account for a repository, accounting for account-level
+/// URL patterns.
+///
+/// Precedence (most repo-specific first):
+/// 1. An account of `integration_type` whose `url_patterns` match `repo_url`.
+/// 2. The profile's explicit `default_accounts[integration_type]`.
+/// 3. The global default account for the type.
+#[command]
+pub async fn get_repository_preferred_account(
+    profile_id: String,
+    integration_type: IntegrationType,
+    repo_url: Option<String>,
+) -> Result<Option<IntegrationAccount>> {
+    let config = load_unified_profiles_config()?;
+    Ok(config
+        .get_repository_preferred_account(&profile_id, &integration_type, repo_url.as_deref())
         .cloned())
 }
 
@@ -732,15 +763,23 @@ pub struct MigrationPreviewAccount {
     pub integration_type: IntegrationType,
 }
 
-/// Execute migration with custom account-to-profile assignments
-#[command]
-pub async fn execute_unified_profiles_migration(
-    account_assignments: std::collections::HashMap<String, String>, // account_id -> profile_id
-) -> Result<UnifiedMigrationResult> {
+/// Pure migration logic — separated from I/O so it can be unit-tested.
+///
+/// Returns a tuple of the `UnifiedMigrationResult` (with V2-correct
+/// `success`/`errors`), the migrated `Vec<UnifiedProfile>`, and the migrated
+/// `Vec<IntegrationAccount>`; the caller assembles these into a
+/// `UnifiedProfilesConfig` and persists it. Hard I/O / parse failures continue
+/// to propagate as early `?` returns from the command layer above.
+fn run_migration_logic(
+    legacy_profiles: &ProfilesConfig,
+    legacy_accounts: &IntegrationAccountsConfig,
+    account_assignments: &std::collections::HashMap<String, String>,
+) -> (
+    UnifiedMigrationResult,
+    Vec<UnifiedProfile>,
+    Vec<IntegrationAccount>,
+) {
     use std::collections::HashMap;
-
-    let legacy_profiles = load_legacy_profiles_config()?;
-    let legacy_accounts = load_legacy_accounts_config()?;
 
     let mut result = UnifiedMigrationResult {
         success: true,
@@ -750,10 +789,27 @@ pub async fn execute_unified_profiles_migration(
         errors: Vec::new(),
     };
 
-    // Convert legacy accounts to global IntegrationAccount (v3)
+    // Convert legacy accounts to global IntegrationAccount (v3).
+    // V2: collect per-account conversion problems into result.errors so the
+    // UI can surface them; only hard IO/parse failures (above) use early `?`.
     let mut global_accounts: Vec<IntegrationAccount> = Vec::new();
 
     for account in &legacy_accounts.accounts {
+        // Validate required fields before converting.
+        if account.id.trim().is_empty() {
+            result
+                .errors
+                .push(format!("Skipped account '{}': id is empty", account.name));
+            continue;
+        }
+        if account.name.trim().is_empty() {
+            result.errors.push(format!(
+                "Skipped account with id '{}': name is empty",
+                account.id
+            ));
+            continue;
+        }
+
         global_accounts.push(IntegrationAccount {
             id: account.id.clone(),
             name: account.name.clone(),
@@ -767,45 +823,85 @@ pub async fn execute_unified_profiles_migration(
         result.accounts_migrated += 1;
     }
 
-    // Create unified profiles from legacy profiles (v3 format)
-    let unified_profiles: Vec<UnifiedProfile> = legacy_profiles
-        .profiles
-        .iter()
-        .map(|p| {
-            // Build default_accounts map based on account_assignments
-            let mut default_accounts: HashMap<IntegrationType, String> = HashMap::new();
+    // Create unified profiles from legacy profiles (v3 format).
+    // V2: profiles that fail validation are skipped and their error recorded.
+    let mut unified_profiles: Vec<UnifiedProfile> = Vec::new();
 
-            // Check which accounts are assigned to this profile
-            for (account_id, assigned_profile_id) in &account_assignments {
-                if assigned_profile_id == &p.id {
-                    // Find the account and add to default_accounts
-                    if let Some(account) = legacy_accounts
-                        .accounts
-                        .iter()
-                        .find(|a| &a.id == account_id)
-                    {
-                        default_accounts
-                            .entry(account.integration_type.clone())
-                            .or_insert_with(|| account_id.clone());
-                    }
+    for p in &legacy_profiles.profiles {
+        // Validate required fields.
+        if p.id.trim().is_empty() {
+            result
+                .errors
+                .push(format!("Skipped profile '{}': id is empty", p.name));
+            continue;
+        }
+        if p.name.trim().is_empty() {
+            result
+                .errors
+                .push(format!("Skipped profile with id '{}': name is empty", p.id));
+            continue;
+        }
+
+        // Build default_accounts map based on account_assignments
+        let mut default_accounts: HashMap<IntegrationType, String> = HashMap::new();
+
+        // Check which accounts are assigned to this profile
+        for (account_id, assigned_profile_id) in account_assignments {
+            if assigned_profile_id == &p.id {
+                // Find the account and add to default_accounts
+                if let Some(account) = legacy_accounts
+                    .accounts
+                    .iter()
+                    .find(|a| &a.id == account_id)
+                {
+                    default_accounts
+                        .entry(account.integration_type.clone())
+                        .or_insert_with(|| account_id.clone());
+                } else {
+                    // The assignment references an account that doesn't exist.
+                    result.errors.push(format!(
+                        "Profile '{}': assigned account id '{}' not found in legacy accounts",
+                        p.name, account_id
+                    ));
                 }
             }
+        }
 
-            UnifiedProfile {
-                id: p.id.clone(),
-                name: p.name.clone(),
-                git_name: p.git_name.clone(),
-                git_email: p.git_email.clone(),
-                signing_key: p.signing_key.clone(),
-                url_patterns: p.url_patterns.clone(),
-                is_default: p.is_default,
-                color: p.color.clone().unwrap_or_else(|| "#3b82f6".to_string()),
-                default_accounts,
-            }
-        })
-        .collect();
+        unified_profiles.push(UnifiedProfile {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            git_name: p.git_name.clone(),
+            git_email: p.git_email.clone(),
+            signing_key: p.signing_key.clone(),
+            url_patterns: p.url_patterns.clone(),
+            is_default: p.is_default,
+            // V4: use shared PROFILE_COLORS[0] so there is one source of truth
+            color: p
+                .color
+                .clone()
+                .unwrap_or_else(|| PROFILE_COLORS[0].to_string()),
+            default_accounts,
+        });
+    }
 
     result.profiles_migrated = unified_profiles.len();
+
+    // V2: reflect whether any items were skipped/failed in the success flag.
+    result.success = result.errors.is_empty();
+
+    (result, unified_profiles, global_accounts)
+}
+
+/// Execute migration with custom account-to-profile assignments
+#[command]
+pub async fn execute_unified_profiles_migration(
+    account_assignments: std::collections::HashMap<String, String>, // account_id -> profile_id
+) -> Result<UnifiedMigrationResult> {
+    let legacy_profiles = load_legacy_profiles_config()?;
+    let legacy_accounts = load_legacy_accounts_config()?;
+
+    let (result, unified_profiles, global_accounts) =
+        run_migration_logic(&legacy_profiles, &legacy_accounts, &account_assignments);
 
     // Use profile repository assignments
     let repository_assignments = legacy_profiles.repository_assignments.clone();
@@ -1068,19 +1164,19 @@ pub async fn delete_migration_backup() -> Result<()> {
 }
 
 /// Get an account from global accounts (for compatibility during transition)
+///
+/// V10: The former return type `(String, IntegrationAccount)` always carried an
+/// empty profile-id string, which was misleading.  The tuple has been collapsed
+/// to `Option<IntegrationAccount>`.  Any TypeScript caller that destructured
+/// `[profileId, account]` must be updated to receive a plain account object.
+///
 /// @deprecated Use get_global_account instead
 #[command]
 pub async fn get_account_from_any_profile(
     account_id: String,
-) -> Result<Option<(String, IntegrationAccount)>> {
+) -> Result<Option<IntegrationAccount>> {
     let config = load_unified_profiles_config()?;
-
-    // In v3, accounts are global - just find the account and return with empty profile id
-    if let Some(account) = config.get_account(&account_id) {
-        return Ok(Some(("".to_string(), account.clone())));
-    }
-
-    Ok(None)
+    Ok(config.get_account(&account_id).cloned())
 }
 
 /// Get account for a repository by integration type (from the assigned/detected profile)
@@ -1106,6 +1202,38 @@ pub async fn get_repository_account(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::integration_accounts::LegacyIntegrationAccount;
+    use crate::models::{
+        workflow::GitProfile, IntegrationAccountsConfig, IntegrationConfig, ProfilesConfig,
+    };
+
+    // Helper: build a minimal GitProfile for use in migration tests.
+    fn make_git_profile(id: &str, name: &str) -> GitProfile {
+        GitProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            git_name: "Test User".to_string(),
+            git_email: "test@example.com".to_string(),
+            signing_key: None,
+            url_patterns: Vec::new(),
+            is_default: false,
+            color: None,
+        }
+    }
+
+    // Helper: build a minimal LegacyIntegrationAccount for migration tests.
+    fn make_legacy_account(id: &str, name: &str) -> LegacyIntegrationAccount {
+        LegacyIntegrationAccount {
+            id: id.to_string(),
+            name: name.to_string(),
+            integration_type: IntegrationType::GitHub,
+            url_patterns: Vec::new(),
+            is_default: false,
+            color: None,
+            config: IntegrationConfig::GitHub,
+            cached_user: None,
+        }
+    }
 
     #[test]
     fn test_has_pattern_overlap() {
@@ -1137,6 +1265,145 @@ mod tests {
         assert_eq!(
             normalize_pattern("github.com/company/"),
             "github.com/company"
+        );
+    }
+
+    // =========================================================================
+    // V2: migration success reflects errors
+    // =========================================================================
+
+    #[test]
+    fn test_migration_success_all_valid() {
+        // V2: when all items are valid, success must be true and errors empty.
+        let mut legacy_profiles = ProfilesConfig::default();
+        legacy_profiles
+            .profiles
+            .push(make_git_profile("p1", "Work"));
+
+        let mut legacy_accounts = IntegrationAccountsConfig::default();
+        legacy_accounts
+            .accounts
+            .push(make_legacy_account("a1", "Work GitHub"));
+
+        let assignments = std::collections::HashMap::new();
+        let (result, profiles, accounts) =
+            run_migration_logic(&legacy_profiles, &legacy_accounts, &assignments);
+
+        assert!(result.success, "should succeed when all items are valid");
+        assert!(result.errors.is_empty(), "should have no errors");
+        assert_eq!(result.profiles_migrated, 1);
+        assert_eq!(result.accounts_migrated, 1);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(accounts.len(), 1);
+    }
+
+    #[test]
+    fn test_migration_success_false_when_account_has_empty_id() {
+        // V2: an account with an empty id must be skipped and recorded in errors;
+        // success must be false.
+        let legacy_profiles = ProfilesConfig::default();
+
+        let mut legacy_accounts = IntegrationAccountsConfig::default();
+        let bad_account = make_legacy_account("", "No-Id Account");
+        legacy_accounts.accounts.push(bad_account);
+
+        let assignments = std::collections::HashMap::new();
+        let (result, _profiles, _accounts) =
+            run_migration_logic(&legacy_profiles, &legacy_accounts, &assignments);
+
+        assert!(
+            !result.success,
+            "success must be false when an account is skipped"
+        );
+        assert!(!result.errors.is_empty(), "errors must be populated");
+        assert_eq!(
+            result.accounts_migrated, 0,
+            "skipped account must not be counted"
+        );
+        // Error message should mention the skipped account's name
+        assert!(
+            result.errors[0].contains("No-Id Account"),
+            "error must identify the offending account; got: {}",
+            result.errors[0]
+        );
+    }
+
+    #[test]
+    fn test_migration_success_false_when_assignment_refs_nonexistent_account() {
+        // V2: when account_assignments points to an account that doesn't exist,
+        // an error is recorded and success is false.
+        let mut legacy_profiles = ProfilesConfig::default();
+        legacy_profiles
+            .profiles
+            .push(make_git_profile("p1", "Work"));
+
+        let legacy_accounts = IntegrationAccountsConfig::default(); // no accounts
+
+        let mut assignments = std::collections::HashMap::new();
+        assignments.insert("ghost-account-id".to_string(), "p1".to_string());
+
+        let (result, _profiles, _accounts) =
+            run_migration_logic(&legacy_profiles, &legacy_accounts, &assignments);
+
+        assert!(
+            !result.success,
+            "success must be false when assignment is dangling"
+        );
+        assert!(
+            !result.errors.is_empty(),
+            "errors must list the dangling assignment"
+        );
+    }
+
+    #[test]
+    fn test_migration_default_color_uses_profile_colors_constant() {
+        // V4: profiles without a color must get PROFILE_COLORS[0], not a hardcoded literal.
+        let mut legacy_profiles = ProfilesConfig::default();
+        let mut profile = make_git_profile("p1", "Work");
+        profile.color = None; // explicitly no color
+        legacy_profiles.profiles.push(profile);
+
+        let legacy_accounts = IntegrationAccountsConfig::default();
+        let assignments = std::collections::HashMap::new();
+
+        let (_result, profiles, _accounts) =
+            run_migration_logic(&legacy_profiles, &legacy_accounts, &assignments);
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(
+            profiles[0].color, PROFILE_COLORS[0],
+            "color must equal PROFILE_COLORS[0], not a hardcoded literal"
+        );
+    }
+
+    // =========================================================================
+    // M8: config file written with 0o600 permissions
+    // =========================================================================
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_unified_profiles_config_sets_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        // Write a config to a temp directory and check its mode.
+        let dir = tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("unified_profiles.json");
+
+        let config = UnifiedProfilesConfig::default();
+        let content = serde_json::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        // Apply the same permission logic as save_unified_profiles_config.
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let actual_mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        // The low 9 bits are the rwxrwxrwx bits.
+        assert_eq!(
+            actual_mode & 0o777,
+            0o600,
+            "config file must be owner-read/write only (0600)"
         );
     }
 }

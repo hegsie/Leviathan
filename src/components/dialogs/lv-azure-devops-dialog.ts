@@ -21,15 +21,16 @@ import type {
   AdoWorkItem,
   AdoPipelineRun,
   CreateAdoPullRequestInput,
+  CreateAdoWorkItemInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, selectDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
 
-type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr';
+type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr' | 'create-work-item';
 
 @customElement('lv-azure-devops-dialog')
 export class LvAzureDevOpsDialog extends LitElement {
@@ -565,8 +566,13 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   @property({ type: Boolean }) open = false;
   @property({ type: String }) repositoryPath = '';
-  /** Show a back arrow instead of a close ×, e.g. when opened from the profile manager. */
+  /**
+   * Show a back arrow instead of a close ×. Set explicitly by the host ONLY when
+   * this dialog was opened with a return target (the profile manager).
+   */
   @property({ type: Boolean }) backButton = false;
+  /** Profile name for the "Adding to <name>" breadcrumb; empty when standalone. */
+  @property({ type: String }) attachToProfileName = '';
 
   @state() private activeTab: TabType = 'connection';
   @state() private connectionStatus: AdoConnectionStatus | null = null;
@@ -591,7 +597,12 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   private unsubscribeStore?: () => void;
   private _pendingOAuthHandler?: EventListener;
+  private oauthStateUnsubscribe?: () => void;
   private loadGeneration = 0;
+  // Set while the user is mid-"Add account" (selection intentionally cleared so
+  // the next save creates a NEW account). Guards the store subscription from
+  // re-selecting an existing account on a background emit.
+  private isAddingAccount = false;
 
   // Create PR form
   @state() private createPrTitle = '';
@@ -600,6 +611,11 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private createPrTarget = '';
   @state() private createPrDraft = false;
   @state() private generatingPrDescription = false;
+
+  // Create Work Item form
+  @state() private createWorkItemType = 'Task';
+  @state() private createWorkItemTitle = '';
+  @state() private createWorkItemDescription = '';
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -621,14 +637,44 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
       const activeProfileId = state.activeProfile?.id ?? null;
       if (activeProfileId !== lastActiveProfileId) {
-        applyAccount(getActiveProfilePreferredAccount('azure-devops') ?? this.accounts[0]);
+        // Track the id either way so this doesn't re-fire, but DON'T clobber a
+        // half-completed "Add account" flow (a background store emit must not
+        // re-select an existing account, or the next save overwrites it).
         lastActiveProfileId = activeProfileId;
-      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        if (!this.isAddingAccount) {
+          applyAccount(getActiveProfilePreferredAccount('azure-devops') ?? this.accounts[0]);
+        }
+      } else if (!this.isAddingAccount && !this.selectedAccountId && this.accounts.length > 0) {
         applyAccount(
           getActiveProfilePreferredAccount('azure-devops')
-          ?? getDefaultGlobalAccount('azure-devops')
+          ?? selectDefaultGlobalAccount('azure-devops')
           ?? this.accounts[0],
         );
+      }
+    });
+
+    // Subscribe to OAuth state so a FAILED/denied Entra sign-in is surfaced
+    // (Azure is deep-link only and the success-path `oauth-complete` event never
+    // fires on failure — without this the dialog would spin forever). Mirrors
+    // the other provider dialogs.
+    this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
+      if (state.provider !== 'azure') return;
+      if (state.status === 'error') {
+        this.oauthPending = false;
+        this.error = state.error ?? 'Microsoft sign-in failed';
+        showToast(this.error, 'error');
+        // Tear down the pending success-listener INLINE. Do NOT call
+        // handleCancelEntraOAuth() here: this callback can fire synchronously
+        // from inside oauthService (during startOAuth's own error dispatch),
+        // and handleCancelEntraOAuth() re-enters oauthService.cancelOAuth(),
+        // which re-emits state from within the in-flight dispatch — a re-entrant
+        // cascade. Cleaning up locally keeps this idempotent and loop-free.
+        if (this._pendingOAuthHandler) {
+          window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
+          this._pendingOAuthHandler = undefined;
+        }
+      } else if (state.status === 'idle') {
+        this.oauthPending = false;
       }
     });
 
@@ -637,7 +683,7 @@ export class LvAzureDevOpsDialog extends LitElement {
     if (this.accounts.length > 0 && !this.selectedAccountId) {
       applyAccount(
         getActiveProfilePreferredAccount('azure-devops')
-        ?? getDefaultGlobalAccount('azure-devops')
+        ?? selectDefaultGlobalAccount('azure-devops')
         ?? this.accounts[0],
       );
     }
@@ -650,6 +696,7 @@ export class LvAzureDevOpsDialog extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribeStore?.();
+    this.oauthStateUnsubscribe?.();
     // Clean up pending OAuth listener to prevent leak
     if (this._pendingOAuthHandler) {
       window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
@@ -692,7 +739,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       this.accounts = getAccountsByType('azure-devops');
       if (this.accounts.length > 0 && !this.selectedAccountId) {
         const preferred = getActiveProfilePreferredAccount('azure-devops')
-          ?? getDefaultGlobalAccount('azure-devops');
+          ?? selectDefaultGlobalAccount('azure-devops');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
         if (preferred?.config.type === 'azure-devops' && preferred.config.organization) {
           this.organizationInput = preferred.config.organization;
@@ -788,7 +835,7 @@ export class LvAzureDevOpsDialog extends LitElement {
           await gitService.storeGitCredentials(`https://${org}.visualstudio.com`, 'pat', token);
           log.debug(`Synced git credentials to keyring for dev.azure.com and ${org}.visualstudio.com`);
         } catch (err) {
-          console.warn('[AzureDevOps] Failed to sync git credentials to keyring:', err);
+          log.warn('Failed to sync git credentials to keyring:', err);
         }
       }
     } else if (!result.success) {
@@ -828,6 +875,9 @@ export class LvAzureDevOpsDialog extends LitElement {
    */
   private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
+    // The user explicitly selected an existing account — re-enable the
+    // subscription's auto-apply branch.
+    this.isAddingAccount = false;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
     this.error = null;
@@ -851,6 +901,7 @@ export class LvAzureDevOpsDialog extends LitElement {
   private handleAddAccount(): void {
     // Clear selection so the next token save creates a new account instead of
     // overwriting the previously-selected account's token.
+    this.isAddingAccount = true;
     this.activeTab = 'connection';
     this.connectionStatus = null;
     this.selectedAccountId = null;
@@ -967,12 +1018,27 @@ export class LvAzureDevOpsDialog extends LitElement {
   private async handleStartEntraOAuth(): Promise<void> {
     if (!this.organizationInput.trim() || !this.oauthClientId.trim()) return;
 
+    // Remove any existing listener from a prior sign-in attempt before
+    // registering a new one, to avoid orphaned 'oauth-complete' listeners.
+    if (this._pendingOAuthHandler) {
+      window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
+      this._pendingOAuthHandler = undefined;
+    }
+
     this.oauthPending = true;
     this.error = null;
 
     try {
       // Start OAuth flow with Entra ID
       await oauthService.startOAuth('azure', this.oauthClientId);
+
+      // If the flow already failed synchronously, the OAuth-state subscription
+      // above has cleared the spinner and surfaced the error. Don't register the
+      // success-path listener for a flow that never opened — that would leave an
+      // orphaned 'oauth-complete' listener after a failed start.
+      if (!this.oauthPending) {
+        return;
+      }
 
       // For Azure, deep link is used — wait for the oauth-complete event
       const handleComplete = async (e: Event) => {
@@ -990,20 +1056,65 @@ export class LvAzureDevOpsDialog extends LitElement {
         }
 
         if (detail.tokens?.accessToken) {
-          // Store the OAuth token
-          const accountId = this.selectedAccountId || `ado-oauth-${Date.now()}`;
+          const accessToken = detail.tokens.accessToken;
+          const organization = this.organizationInput.trim();
 
-          await credentialService.storeAccountToken('azure-devops', accountId, detail.tokens.accessToken);
-
-          // Verify connection
-          const result = await gitService.checkAdoConnectionWithToken(
-            this.organizationInput,
-            detail.tokens.accessToken,
-          );
+          // Verify connection BEFORE persisting anything
+          const result = await gitService.checkAdoConnectionWithToken(organization, accessToken);
 
           if (result.success && result.data?.connected) {
+            const user = result.data.user;
+            const cachedUser = user
+              ? {
+                  username: user.displayName,
+                  displayName: user.displayName,
+                  email: null, // ADO API doesn't return email in this context
+                  avatarUrl: user.imageUrl ?? null,
+                }
+              : null;
+
+            if (this.selectedAccountId) {
+              // Rotating credentials on an existing account
+              await credentialService.storeAccountToken(
+                'azure-devops',
+                this.selectedAccountId,
+                accessToken,
+              );
+              if (cachedUser) {
+                await unifiedProfileService.updateGlobalAccountCachedUser(
+                  this.selectedAccountId,
+                  cachedUser,
+                );
+              }
+            } else {
+              // No account selected - create and persist a new global account
+              // (mirror the PAT path) BEFORE storing the token so the keyring
+              // entry is never orphaned.
+              const { createEmptyIntegrationAccount, generateId } = await import(
+                '../../types/unified-profile.types.ts'
+              );
+              const newAccount: IntegrationAccount = {
+                ...createEmptyIntegrationAccount('azure-devops', organization),
+                id: generateId(),
+                name: user?.displayName
+                  ? `Azure DevOps (${user.displayName})`
+                  : `Azure DevOps (${organization})`,
+                isDefault: this.accounts.length === 0,
+                cachedUser,
+              };
+
+              const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
+              await credentialService.storeAccountToken('azure-devops', savedAccount.id, accessToken);
+              this.selectedAccountId = savedAccount.id;
+              // The new account now exists and is selected — add flow complete.
+              this.isAddingAccount = false;
+
+              // Refresh accounts list
+              await unifiedProfileService.loadUnifiedProfiles();
+              this.accounts = getAccountsByType('azure-devops');
+            }
+
             this.connectionStatus = result.data;
-            this.selectedAccountId = accountId;
             this.syncSharedConnectionStatus(true);
             showToast('Connected to Azure DevOps via Microsoft Entra ID', 'success');
           } else {
@@ -1020,6 +1131,23 @@ export class LvAzureDevOpsDialog extends LitElement {
       showToast(this.error, 'error');
       this.oauthPending = false;
     }
+  }
+
+  /**
+   * Cancel a pending Entra ID OAuth sign-in.
+   *
+   * Azure uses a deep-link callback, so simply clearing `oauthPending` would
+   * leave the 'oauth-complete' listener registered — if the browser sign-in
+   * later completed, the deep link would silently verify/persist/connect an
+   * account. Cancel the underlying flow AND remove the listener.
+   */
+  private handleCancelEntraOAuth(): void {
+    oauthService.cancelOAuth('azure');
+    if (this._pendingOAuthHandler) {
+      window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
+      this._pendingOAuthHandler = undefined;
+    }
+    this.oauthPending = false;
   }
 
   private async handleConnectWithStoredToken(): Promise<void> {
@@ -1118,6 +1246,16 @@ export class LvAzureDevOpsDialog extends LitElement {
       // If we have a selected account, save token to that account
       if (this.selectedAccountId) {
         await credentialService.storeAccountToken('azure-devops', this.selectedAccountId, tokenToSave);
+        // Refresh cachedUser so the profile manager shows the up-to-date
+        // avatar/username immediately instead of waiting for background validation.
+        if (user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+            username: user.displayName,
+            displayName: user.displayName,
+            email: null, // ADO API doesn't return email in this context
+            avatarUrl: user.imageUrl ?? null,
+          });
+        }
       } else {
         // No account selected - create a new global account
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
@@ -1137,6 +1275,8 @@ export class LvAzureDevOpsDialog extends LitElement {
         const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
         await credentialService.storeAccountToken('azure-devops', savedAccount.id, tokenToSave);
         this.selectedAccountId = savedAccount.id;
+        // The new account now exists and is selected — add flow complete.
+        this.isAddingAccount = false;
 
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();
@@ -1191,6 +1331,9 @@ export class LvAzureDevOpsDialog extends LitElement {
       this.pullRequests = [];
       this.workItems = [];
       this.pipelineRuns = [];
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to disconnect';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }
@@ -1210,18 +1353,14 @@ export class LvAzureDevOpsDialog extends LitElement {
 
     this.isLoading = true;
 
+    // Delete the account record (source of truth) FIRST, then best-effort token
+    // cleanup, matching GitHub/GitLab/OIDC. Deleting tokens first leaves a
+    // zombie account on a partial failure.
+    const accountId = this.selectedAccountId;
+    const organization = this.organizationInput;
     try {
-      // Delete the stored token
-      await credentialService.deleteAccountToken('azure-devops', this.selectedAccountId);
-
-      // Delete git credentials from keyring
-      await gitService.deleteGitCredentials('https://dev.azure.com');
-      if (this.organizationInput) {
-        await gitService.deleteGitCredentials(`https://${this.organizationInput}.visualstudio.com`);
-      }
-
       // Delete the account from unified profiles
-      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+      await unifiedProfileService.deleteGlobalAccount(accountId);
 
       // Refresh accounts list
       await unifiedProfileService.loadUnifiedProfiles();
@@ -1236,12 +1375,29 @@ export class LvAzureDevOpsDialog extends LitElement {
       this.pipelineRuns = [];
       this.organizationInput = '';
 
+      // Best-effort token/credential cleanup after the record is gone.
+      try {
+        await credentialService.deleteAccountToken('azure-devops', accountId);
+        await gitService.deleteGitCredentials('https://dev.azure.com');
+        if (organization) {
+          await gitService.deleteGitCredentials(`https://${organization}.visualstudio.com`);
+        }
+      } catch (tokenErr) {
+        const msg =
+          tokenErr instanceof Error
+            ? `Account deleted, but its stored token could not be removed: ${tokenErr.message}`
+            : 'Account deleted, but its stored token could not be removed.';
+        this.error = msg;
+        showToast(msg, 'error');
+      }
+
       // If there are remaining accounts, reload data for the first one
       if (this.selectedAccountId) {
         await this.loadInitialData();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to delete integration';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }
@@ -1309,6 +1465,44 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to create pull request';
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  private async handleCreateWorkItem(): Promise<void> {
+    if (!this.detectedRepo || !this.createWorkItemTitle.trim()) return;
+
+    this.isLoading = true;
+    this.error = null;
+
+    try {
+      const input: CreateAdoWorkItemInput = {
+        workItemType: this.createWorkItemType || 'Task',
+        title: this.createWorkItemTitle,
+        description: this.createWorkItemDescription || undefined,
+      };
+
+      const token = await this.getSelectedAccountToken();
+      const result = await gitService.createAzureDevOpsWorkItem(
+        this.detectedRepo.organization,
+        this.detectedRepo.project,
+        input,
+        token
+      );
+
+      if (result.success && result.data) {
+        this.createWorkItemType = 'Task';
+        this.createWorkItemTitle = '';
+        this.createWorkItemDescription = '';
+        this.activeTab = 'work-items';
+        await this.loadWorkItems();
+        showToast('Work item created successfully', 'success');
+      } else {
+        this.error = result.error?.message ?? 'Failed to create work item';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to create work item';
     } finally {
       this.isLoading = false;
     }
@@ -1419,7 +1613,7 @@ export class LvAzureDevOpsDialog extends LitElement {
             <div style="display:flex;align-items:center;gap:8px;padding:12px;color:var(--color-text-secondary)">
               <div style="width:16px;height:16px;border:2px solid var(--color-border);border-top-color:var(--color-accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
               Waiting for Microsoft sign-in...
-              <button class="btn" @click=${() => { this.oauthPending = false; }}>Cancel</button>
+              <button class="btn" @click=${this.handleCancelEntraOAuth}>Cancel</button>
             </div>
           ` : html`
             <div class="btn-row">
@@ -1589,6 +1783,11 @@ export class LvAzureDevOpsDialog extends LitElement {
 
     if (this.workItems.length === 0) {
       return html`
+        <div class="filter-row">
+          <button class="btn" @click=${() => this.activeTab = 'create-work-item'}>
+            + New Work Item
+          </button>
+        </div>
         <div class="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M9 11l3 3L22 4"></path>
@@ -1600,6 +1799,11 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
 
     return html`
+      <div class="filter-row">
+        <button class="btn" @click=${() => this.activeTab = 'create-work-item'}>
+          + New Work Item
+        </button>
+      </div>
       <div class="pr-list">
         ${this.workItems.map(item => html`
           <div class="work-item" @click=${() => this.openInBrowser(item.url)}>
@@ -1750,6 +1954,55 @@ export class LvAzureDevOpsDialog extends LitElement {
     `;
   }
 
+  private renderCreateWorkItemTab() {
+    return html`
+      <div class="token-form">
+        <div class="form-group">
+          <label>Type</label>
+          <select
+            class="filter-select"
+            @change=${(e: Event) => this.createWorkItemType = (e.target as HTMLSelectElement).value}
+          >
+            <option value="Task" ?selected=${this.createWorkItemType === 'Task'}>Task</option>
+            <option value="Bug" ?selected=${this.createWorkItemType === 'Bug'}>Bug</option>
+            <option value="User Story" ?selected=${this.createWorkItemType === 'User Story'}>User Story</option>
+            <option value="Feature" ?selected=${this.createWorkItemType === 'Feature'}>Feature</option>
+            <option value="Epic" ?selected=${this.createWorkItemType === 'Epic'}>Epic</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Title</label>
+          <input
+            type="text"
+            placeholder="Work item title"
+            .value=${this.createWorkItemTitle}
+            @input=${(e: Event) => this.createWorkItemTitle = (e.target as HTMLInputElement).value}
+          />
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea
+            placeholder="Describe the work item..."
+            .value=${this.createWorkItemDescription}
+            @input=${(e: Event) => this.createWorkItemDescription = (e.target as HTMLTextAreaElement).value}
+          ></textarea>
+        </div>
+        <div class="btn-row">
+          <button class="btn" @click=${() => this.activeTab = 'work-items'}>
+            Cancel
+          </button>
+          <button
+            class="btn btn-primary"
+            @click=${this.handleCreateWorkItem}
+            ?disabled=${this.isLoading || !this.createWorkItemTitle.trim()}
+          >
+            Create Work Item
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   private renderDetectedRepo() {
     if (!this.detectedRepo) return '';
 
@@ -1775,6 +2028,9 @@ export class LvAzureDevOpsDialog extends LitElement {
         @close=${this.handleClose}
       >
         <div class="content">
+          ${this.attachToProfileName
+            ? html`<div class="attach-breadcrumb" data-testid="attach-breadcrumb">Adding to <strong>${this.attachToProfileName}</strong></div>`
+            : nothing}
           ${this.renderDetectedRepo()}
 
           ${this.accounts.length > 0 || this.connectionStatus?.connected ? html`
@@ -1822,6 +2078,7 @@ export class LvAzureDevOpsDialog extends LitElement {
             ${this.activeTab === 'work-items' ? this.renderWorkItemsTab() : ''}
             ${this.activeTab === 'pipelines' ? this.renderPipelinesTab() : ''}
             ${this.activeTab === 'create-pr' ? this.renderCreatePrTab() : ''}
+            ${this.activeTab === 'create-work-item' ? this.renderCreateWorkItemTab() : ''}
           </div>
         </div>
       </lv-modal>

@@ -66,8 +66,12 @@ export const loggers = {
   keyboard: createLogger('Keyboard'),
   watcher: createLogger('Watcher'),
   integration: createLogger('Integration'),
+  oauth: createLogger('OAuth'),
   dialog: createLogger('Dialog'),
+  dashboard: createLogger('Dashboard'),
   app: createLogger('App'),
   azureDevOps: createLogger('AzureDevOps'),
+  github: createLogger('GitHub'),
+  gitlab: createLogger('GitLab'),
   graph: createLogger('Graph'),
 };

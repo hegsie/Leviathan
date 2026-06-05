@@ -7,7 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { openExternalUrl, handleExternalLink } from '../../utils/index.ts';
+import { loggers, openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import type {
   GitHubConnectionStatus,
   DetectedGitHubRepo,
@@ -20,7 +20,7 @@ import type {
   ReleaseSummary,
   CreateReleaseInput,
 } from '../../services/git.service.ts';
-import { unifiedProfileStore, getAccountsByType, getDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, getAccountsByType, selectDefaultGlobalAccount, getActiveProfilePreferredAccount } from '../../stores/unified-profile.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
 import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import * as credentialService from '../../services/credential.service.ts';
@@ -32,6 +32,8 @@ import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import './lv-modal.ts';
 import './lv-account-selector.ts';
+
+const log = loggers.github;
 
 type TabType = 'connection' | 'pull-requests' | 'issues' | 'releases' | 'actions' | 'create-pr' | 'create-issue' | 'create-release';
 
@@ -745,8 +747,19 @@ export class LvGitHubDialog extends LitElement {
 
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
-  /** Show a back arrow instead of a close ×, e.g. when opened from the profile manager. */
+  /**
+   * Show a back arrow instead of a close ×. Set explicitly by the host ONLY when
+   * this dialog was opened with a return target (the profile manager), so the
+   * arrow's presence reflects HOW the dialog was opened — not unrelated global
+   * state.
+   */
   @property({ type: Boolean }) backButton = false;
+  /**
+   * Name of the profile the connected account will be attached to, when opened
+   * from the profile manager's attach flow. Drives the "Adding to <name>"
+   * breadcrumb. Empty when opened standalone.
+   */
+  @property({ type: String }) attachToProfileName = '';
 
   @state() private activeTab: TabType = 'connection';
   @state() private connectionStatus: GitHubConnectionStatus | null = null;
@@ -770,6 +783,11 @@ export class LvGitHubDialog extends LitElement {
   @state() private loadingInstallations = false;
   @state() private oauthState: OAuthFlowState = { status: 'idle' };
   private oauthUnsubscribe?: () => void;
+  // Set while the user is mid-"Add account" (selection intentionally cleared so
+  // the next save creates a NEW account). Guards the store subscription from
+  // re-selecting an existing account on a background emit, which would route the
+  // token onto the wrong account.
+  private isAddingAccount = false;
   private boundOAuthComplete = this.handleOAuthComplete.bind(this);
 
   // Multi-account support (global accounts)
@@ -810,6 +828,12 @@ export class LvGitHubDialog extends LitElement {
     this.oauthUnsubscribe = oauthService.onOAuthStateChange((state) => {
       if (state.provider === 'github') {
         this.oauthState = state;
+        // A failed/denied sign-in clears the pending spinner — surface the error
+        // so the user isn't left staring at a silently reset form (dead-end).
+        if (state.status === 'error') {
+          this.error = state.error ?? 'GitHub sign-in failed';
+          showToast(this.error, 'error');
+        }
       }
     });
 
@@ -831,13 +855,19 @@ export class LvGitHubDialog extends LitElement {
       if (activeProfileId !== lastActiveProfileId) {
         // Active profile changed — re-derive the preferred account for the new
         // profile, even if the user had a selection from the previous profile.
-        const preferred = getActiveProfilePreferredAccount('github');
-        this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
+        // Track the id either way so this doesn't re-fire, but DON'T clobber a
+        // half-completed "Add account" flow (selectedAccountId is intentionally
+        // null then; a background store emit must not re-select an existing
+        // account, or the next save would overwrite it).
         lastActiveProfileId = activeProfileId;
-      } else if (!this.selectedAccountId && this.accounts.length > 0) {
+        if (!this.isAddingAccount) {
+          const preferred = getActiveProfilePreferredAccount('github');
+          this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
+        }
+      } else if (!this.isAddingAccount && !this.selectedAccountId && this.accounts.length > 0) {
         // First-time selection: prefer the active profile's default, falling
         // back to the global default.
-        const preferred = getActiveProfilePreferredAccount('github') ?? getDefaultGlobalAccount('github');
+        const preferred = getActiveProfilePreferredAccount('github') ?? selectDefaultGlobalAccount('github');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
       }
     });
@@ -845,7 +875,7 @@ export class LvGitHubDialog extends LitElement {
     // Initialize from current state
     this.accounts = getAccountsByType('github');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
-      const preferred = getActiveProfilePreferredAccount('github') ?? getDefaultGlobalAccount('github');
+      const preferred = getActiveProfilePreferredAccount('github') ?? selectDefaultGlobalAccount('github');
       this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
     }
 
@@ -881,7 +911,7 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
-      console.log('[GitHub Dialog] loadInitialData starting...');
+      log.debug('loadInitialData starting');
 
       // Ensure unified profiles are loaded
       await unifiedProfileService.loadUnifiedProfiles();
@@ -895,7 +925,7 @@ export class LvGitHubDialog extends LitElement {
 
       // Re-sync local state with store after loading
       const state = unifiedProfileStore.getState();
-      console.log('[GitHub Dialog] Store state:', {
+      log.debug('Store state', {
         hasActiveProfile: !!state.activeProfile,
         activeProfileId: state.activeProfile?.id,
         globalAccountsCount: state.accounts?.length ?? 0,
@@ -903,15 +933,15 @@ export class LvGitHubDialog extends LitElement {
       });
 
       this.accounts = getAccountsByType('github');
-      console.log('[GitHub Dialog] Loaded accounts:', this.accounts.map(a => ({ id: a.id, name: a.name })));
+      log.debug('Loaded accounts', this.accounts.map(a => ({ id: a.id, name: a.name })));
       // Only auto-derive if nothing is selected (fresh open clears it in
       // `updated()`). Manual switches set selectedAccountId before calling
       // loadInitialData(), and must not be overwritten.
       if (this.accounts.length > 0 && !this.selectedAccountId) {
         const preferred = getActiveProfilePreferredAccount('github')
-          ?? getDefaultGlobalAccount('github');
+          ?? selectDefaultGlobalAccount('github');
         this.selectedAccountId = preferred?.id ?? this.accounts[0]?.id ?? null;
-        console.log('[GitHub Dialog] Selected account:', this.selectedAccountId);
+        log.debug('Selected account', { accountId: this.selectedAccountId });
       }
 
       await this.checkConnection();
@@ -990,6 +1020,9 @@ export class LvGitHubDialog extends LitElement {
    */
   private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
+    // The user explicitly selected an existing account, so we're no longer
+    // adding a new one — re-enable the subscription's auto-apply branch.
+    this.isAddingAccount = false;
     this.selectedAccountId = account.id;
     this.connectionStatus = null;
     this.error = null;
@@ -1006,6 +1039,7 @@ export class LvGitHubDialog extends LitElement {
     // selectedAccountId is essential — without it handleSaveToken would write
     // the new token onto the previously-selected account instead of creating
     // a new one, leaving the user with no way to add additional accounts.
+    this.isAddingAccount = true;
     this.activeTab = 'connection';
     this.connectionStatus = null;
     this.selectedAccountId = null;
@@ -1174,11 +1208,10 @@ export class LvGitHubDialog extends LitElement {
 
   private async handleOAuthComplete(event: CustomEvent<{ provider: string; tokens: OAuthTokenResponse }>): Promise<void> {
     const { provider, tokens } = event.detail;
-    console.log('[GitHub Dialog] OAuth complete event received:', {
+    // Do not log token material (M5) — only presence, never any prefix/value.
+    log.debug('OAuth complete event received', {
       provider,
       hasTokens: !!tokens,
-      accessToken: tokens?.accessToken?.substring(0, 10) + '...',
-      tokenKeys: tokens ? Object.keys(tokens) : [],
     });
     if (provider !== 'github') return;
 
@@ -1200,9 +1233,9 @@ export class LvGitHubDialog extends LitElement {
       }
 
       // Verify the token works
-      console.log('[GitHub Dialog] Verifying token...');
+      log.debug('Verifying token');
       const verifyResult = await gitService.checkGitHubConnectionWithToken(tokens.accessToken);
-      console.log('[GitHub Dialog] Verify result:', verifyResult);
+      log.debug('Verify result', { success: verifyResult.success, connected: verifyResult.data?.connected });
       if (!verifyResult.success || !verifyResult.data?.connected) {
         this.error = verifyResult.error?.message ?? 'OAuth token verification failed';
         return;
@@ -1211,17 +1244,28 @@ export class LvGitHubDialog extends LitElement {
       const user = verifyResult.data.user;
 
       // Create or update global account with OAuth token
-      console.log('[GitHub Dialog] Creating/updating account:', {
+      log.debug('Creating/updating account', {
         hasSelectedAccountId: !!this.selectedAccountId,
         existingAccountsCount: this.accounts.length,
       });
 
       if (this.selectedAccountId) {
-        console.log('[GitHub Dialog] Storing token for existing account:', this.selectedAccountId);
+        log.debug('Storing token for existing account', { accountId: this.selectedAccountId });
         await credentialService.storeAccountToken('github', this.selectedAccountId, tokens.accessToken);
+        // Refresh cachedUser so the profile card shows the current avatar/username
+        // immediately rather than a stale one until the 5-min validation. Mirrors
+        // the PAT path's mapping; every other provider/path already does this.
+        if (user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+            username: user.login,
+            displayName: user.name ?? null,
+            email: user.email ?? null,
+            avatarUrl: user.avatarUrl ?? null,
+          });
+        }
       } else {
         // Create a new global account
-        console.log('[GitHub Dialog] Creating new global account');
+        log.debug('Creating new global account');
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
         const newAccount: IntegrationAccount = {
           ...createEmptyIntegrationAccount('github'),
@@ -1236,16 +1280,18 @@ export class LvGitHubDialog extends LitElement {
           } : null,
         };
 
-        console.log('[GitHub Dialog] New account:', newAccount);
+        log.debug('New account', { id: newAccount.id, name: newAccount.name });
         const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
-        console.log('[GitHub Dialog] Saved account:', savedAccount);
+        log.debug('Saved account', { id: savedAccount.id });
         await credentialService.storeAccountToken('github', savedAccount.id, tokens.accessToken);
         this.selectedAccountId = savedAccount.id;
+        // The new account now exists and is selected — the add flow is complete.
+        this.isAddingAccount = false;
 
         // Refresh accounts list from store after adding new account
         await unifiedProfileService.loadUnifiedProfiles();
         this.accounts = getAccountsByType('github');
-        console.log('[GitHub Dialog] Refreshed accounts list:', this.accounts.length, 'accounts');
+        log.debug('Refreshed accounts list', { count: this.accounts.length });
       }
 
       this.connectionStatus = verifyResult.data;
@@ -1298,6 +1344,16 @@ export class LvGitHubDialog extends LitElement {
       // If we have a selected account, save token to that account
       if (this.selectedAccountId) {
         await credentialService.storeAccountToken('github', this.selectedAccountId, tokenToSave);
+        // Refresh cachedUser so the profile manager shows the up-to-date
+        // avatar/username immediately instead of waiting for background validation.
+        if (user) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+            username: user.login,
+            displayName: user.name ?? null,
+            email: user.email ?? null,
+            avatarUrl: user.avatarUrl ?? null,
+          });
+        }
       } else {
         // No account selected - create a new global account
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
@@ -1317,6 +1373,8 @@ export class LvGitHubDialog extends LitElement {
         const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
         await credentialService.storeAccountToken('github', savedAccount.id, tokenToSave);
         this.selectedAccountId = savedAccount.id;
+        // The new account now exists and is selected — the add flow is complete.
+        this.isAddingAccount = false;
 
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();
@@ -1368,6 +1426,7 @@ export class LvGitHubDialog extends LitElement {
       this.releases = [];
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to disconnect';
+      showToast(this.error, 'error');
     } finally {
       this.isLoading = false;
     }
@@ -1388,9 +1447,13 @@ export class LvGitHubDialog extends LitElement {
     this.isLoading = true;
     this.error = null;
 
+    // M10: Delete the config/account record (the source of truth) FIRST so a
+    // failure leaves the token intact but no zombie account. The keyring token
+    // deletion is best-effort last; if it fails we surface a warning rather than
+    // leaving a half-deleted state.
+    const accountId = this.selectedAccountId;
     try {
-      await credentialService.deleteAccountToken('github', this.selectedAccountId);
-      await unifiedProfileService.deleteGlobalAccount(this.selectedAccountId);
+      await unifiedProfileService.deleteGlobalAccount(accountId);
 
       await unifiedProfileService.loadUnifiedProfiles();
       this.accounts = getAccountsByType('github');
@@ -1403,11 +1466,27 @@ export class LvGitHubDialog extends LitElement {
       this.releases = [];
       this.repoLabels = [];
 
+      // Best-effort token cleanup after the record is gone.
+      try {
+        await credentialService.deleteAccountToken('github', accountId);
+      } catch (tokenErr) {
+        // M10: surface partial failure instead of swallowing it.
+        const msg =
+          tokenErr instanceof Error
+            ? `Account deleted, but its stored token could not be removed: ${tokenErr.message}`
+            : 'Account deleted, but its stored token could not be removed.';
+        this.error = msg;
+        showToast(msg, 'error');
+      }
+
       if (this.accounts.length > 0) {
         await this.loadInitialData();
       }
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Failed to delete integration';
+      // M10: pair inline error with a toast for consistent feedback.
+      const msg = err instanceof Error ? err.message : 'Failed to delete integration';
+      this.error = msg;
+      showToast(msg, 'error');
     } finally {
       this.isLoading = false;
     }
@@ -1435,13 +1514,20 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
 
     try {
-      const result = await import('../../services/credential.service.ts').then(m =>
+      // The backend now validates the key, mints a JWT, and persists the app
+      // config to the keyring (M1). Honor the status it returns instead of
+      // assuming success — a non-connected result must not persist a fake account.
+      const status = await import('../../services/credential.service.ts').then(m =>
         m.configureGitHubApp(
           parseInt(this.appId, 10),
           this.appPrivateKey,
           parseInt(this.appInstallationId, 10),
         )
       );
+
+      if (!status.connected) {
+        throw new Error('GitHub App configuration was not accepted by the server');
+      }
 
       // Store the app config as the account token
       const accountId = this.selectedAccountId || `github-app-${this.appId}`;
@@ -1459,10 +1545,11 @@ export class LvGitHubDialog extends LitElement {
         isDefault: !this.selectedAccountId,
       } as import('../../types/unified-profile.types.ts').IntegrationAccount);
 
+      // Reflect the backend-reported status rather than a hardcoded value (M1).
       this.connectionStatus = {
-        connected: true,
-        user: null,
-        scopes: ['app-installation'],
+        connected: status.connected,
+        user: status.user ?? null,
+        scopes: status.scopes?.length ? status.scopes : ['app-installation'],
       };
       this.selectedAccountId = accountId;
       this.syncSharedConnectionStatus(true);
@@ -2425,6 +2512,9 @@ export class LvGitHubDialog extends LitElement {
         @close=${this.handleClose}
       >
         <div class="content">
+          ${this.attachToProfileName
+            ? html`<div class="attach-breadcrumb" data-testid="attach-breadcrumb">Adding to <strong>${this.attachToProfileName}</strong></div>`
+            : nothing}
           ${this.detectedRepo ? html`
             <div class="repo-info">
               <svg class="repo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

@@ -164,4 +164,25 @@ describe('lv-settings-dialog settings-changed events', () => {
 
     expect(eventFired).to.be.true;
   });
+
+  it('dispatches open-profile-manager and closes when opening Profiles & Accounts', () => {
+    let openFired = false;
+    let closeFired = false;
+    el.addEventListener('open-profile-manager', () => { openFired = true; });
+    el.addEventListener('close', () => { closeFired = true; });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).handleOpenProfileManager();
+
+    expect(openFired, 'open-profile-manager dispatched').to.be.true;
+    expect(closeFired, 'close dispatched').to.be.true;
+  });
+
+  it('renders a Profiles & Accounts section with an open button', async () => {
+    const text = el.shadowRoot?.textContent ?? '';
+    expect(text).to.contain('Profiles & Accounts');
+    const buttons = Array.from(el.shadowRoot?.querySelectorAll('button') ?? []);
+    const openBtn = buttons.find((b) => b.textContent?.includes('Open Profiles & Accounts'));
+    expect(openBtn, 'Open Profiles & Accounts button exists').to.exist;
+  });
 });

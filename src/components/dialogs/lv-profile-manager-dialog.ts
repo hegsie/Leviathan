@@ -9,7 +9,8 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatus } from '../../stores/unified-profile.store.ts';
 import { repositoryStore, type RecentRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import type { UnifiedProfile, IntegrationAccount, IntegrationType, IntegrationConfig, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
+import * as credentialService from '../../services/credential.service.ts';
+import type { UnifiedProfile, IntegrationAccount, IntegrationType, IntegrationConfig, IntegrationOpenContext, MigrationBackupInfo } from '../../types/unified-profile.types.ts';
 import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
@@ -69,10 +70,32 @@ export class LvProfileManagerDialog extends LitElement {
         gap: var(--spacing-sm);
       }
 
+      /* Breadcrumb shown in the attach picker so the user always knows which
+         profile a connected account will be attached to. */
+      .attach-breadcrumb {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        margin-bottom: var(--spacing-md);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-tertiary);
+        border-radius: var(--radius-sm);
+      }
+
+      .attach-breadcrumb strong {
+        color: var(--color-text-primary);
+      }
+
       .dialog-content {
         flex: 1;
         overflow-y: auto;
         padding: var(--spacing-md);
+      }
+
+      .view-explainer {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        margin: 0 0 var(--spacing-md) 0;
+        line-height: 1.4;
       }
 
       .dialog-footer {
@@ -314,6 +337,19 @@ export class LvProfileManagerDialog extends LitElement {
         font-size: var(--font-size-xs);
         color: var(--color-text-tertiary);
         margin-top: var(--spacing-xs);
+      }
+
+      .attach-hint {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-xs);
+        font-size: var(--font-size-xs);
+        color: var(--color-warning, var(--color-text-secondary));
+      }
+
+      .btn-emphasized {
+        box-shadow: 0 0 0 2px var(--color-primary);
       }
 
       .form-row {
@@ -632,6 +668,10 @@ export class LvProfileManagerDialog extends LitElement {
   // Tracks unsaved edits so we can warn before discarding them (back/close).
   @state() private profileFormDirty = false;
   @state() private accountFormDirty = false;
+  // Name of an account just connected+attached via revealAfterConnect. Drives an
+  // inline "Save Profile to keep <account> attached" hint so the user doesn't
+  // assume the freshly-connected account is already persisted on the profile.
+  @state() private justAttachedAccountName: string | null = null;
   // Where the account edit form should return to (it can be reached from the
   // profile form or from the standalone Accounts view).
   private accountReturnView: ViewMode = 'edit';
@@ -640,9 +680,8 @@ export class LvProfileManagerDialog extends LitElement {
   private unsubscribeRepoStore?: () => void;
 
   // When the user picks "Connect a new account" for a provider in the picker, we
-  // remember the provider and the account ids that existed beforehand, so that on
-  // return we can auto-attach the account they just connected to the profile.
-  private pendingConnectType: IntegrationType | null = null;
+  // snapshot the account ids that existed beforehand, so revealAfterConnect() can
+  // identify the one they just connected and attach it to the target profile.
   private accountIdsBeforeConnect: Set<string> = new Set();
 
   connectedCallback(): void {
@@ -709,13 +748,10 @@ export class LvProfileManagerDialog extends LitElement {
       // Fresh open: load data, then verify connection status for accurate dots.
       void this.loadProfiles().then(() => this.refreshConnectionStatuses());
     }
-    // When a dialog stacked on top of us closes (e.g. an integration dialog opened
-    // from the picker), refresh and auto-attach the account the user just connected.
-    // We do NOT re-check connection status here — the integration dialog already
-    // wrote it to the shared store, and re-checking would overwrite it.
-    if (changedProperties.has('demoted') && !this.demoted && this.open) {
-      void this.handleRevealAfterConnect();
-    }
+    // NOTE: revealing-after-connect is now driven EXPLICITLY by the host calling
+    // revealAfterConnect(context) when the stacked provider dialog closes — not by
+    // inferring intent from a `demoted` flip. The `demoted` property remains purely
+    // a visual signal (render behind the stacked dialog).
   }
 
   private async loadProfiles(): Promise<void> {
@@ -762,14 +798,16 @@ export class LvProfileManagerDialog extends LitElement {
         `Restored ${result.profilesCount ?? 0} profiles and ${result.accountsCount ?? 0} accounts from backup`,
         'success'
       );
-      this.handleClose();
-      // Dispatch event to trigger migration dialog
+      // D4: Dispatch `migration-needed` BEFORE closing so the parent can open
+      // the migration dialog as this one closes, avoiding a close-then-reopen
+      // flicker in the transition.
       this.dispatchEvent(
         new CustomEvent('migration-needed', {
           bubbles: true,
           composed: true,
         })
       );
+      this.handleClose();
     } catch (error) {
       showToast(
         `Failed to restore backup: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -829,17 +867,20 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private performClose(): void {
+    // Capture the view we are closing FROM before resetting, so the host can make
+    // reversible-navigation decisions (e.g. return to the provider dialog only
+    // when closing out of the Accounts view).
+    const fromView = this.viewMode;
     this.open = false;
     this.viewMode = 'list';
     this.editingProfile = null;
     this.editingAccount = null;
     this.profileFormDirty = false;
     this.accountFormDirty = false;
-    // Drop any in-flight "connect a new account" intent so it can't auto-attach
+    // Drop any in-flight "connect a new account" snapshot so it can't auto-attach
     // to an unrelated profile the next time the dialog is revealed.
-    this.pendingConnectType = null;
     this.accountIdsBeforeConnect = new Set();
-    this.dispatchEvent(new CustomEvent('close'));
+    this.dispatchEvent(new CustomEvent('close', { detail: { fromView } }));
   }
 
   private handleCreateNew(): void {
@@ -893,13 +934,22 @@ export class LvProfileManagerDialog extends LitElement {
         this.selectedReposForAssignment = new Set();
         break;
       case 'accounts':
-        this.viewMode = 'list';
+        // When the Accounts view was the landing view (e.g. opened via "Manage
+        // Accounts" from a provider dialog), Back closes the manager so the host
+        // can return to wherever it was opened from — keeping that navigation
+        // reversible. When reached from the profile list, Back returns there.
+        if (this.initialView === 'accounts') {
+          this.handleClose();
+        } else {
+          this.viewMode = 'list';
+        }
         break;
       default:
         // create / edit
         this.viewMode = 'list';
         this.editingProfile = null;
         this.profileFormDirty = false;
+        this.justAttachedAccountName = null;
     }
   }
 
@@ -924,7 +974,7 @@ export class LvProfileManagerDialog extends LitElement {
     this.isSaving = true;
     const profileId = this.editingProfile.id;
     let successCount = 0;
-    let errorCount = 0;
+    const failedRepos: string[] = [];
 
     try {
       for (const repoPath of this.selectedReposForAssignment) {
@@ -932,22 +982,30 @@ export class LvProfileManagerDialog extends LitElement {
           await unifiedProfileService.assignUnifiedProfileToRepository(repoPath, profileId);
           successCount++;
         } catch {
-          errorCount++;
+          failedRepos.push(repoPath);
         }
-      }
-
-      if (errorCount === 0) {
-        showToast(`Assigned ${successCount} repository${successCount !== 1 ? 'ies' : ''}`, 'success');
-      } else {
-        showToast(`Assigned ${successCount}, failed ${errorCount}`, 'warning');
       }
 
       // Reload profiles to update repositoryAssignments in the store
       await unifiedProfileService.loadUnifiedProfiles();
 
-      // Go back to edit view
-      this.selectedReposForAssignment = new Set();
-      this.viewMode = 'edit';
+      if (failedRepos.length === 0) {
+        showToast(`Assigned ${successCount} ${successCount === 1 ? 'repository' : 'repositories'}`, 'success');
+        // Only clear selection and leave the view on full success.
+        this.selectedReposForAssignment = new Set();
+        this.viewMode = 'edit';
+      } else {
+        // D11: On partial failure, keep the FAILED repos selected so the user can
+        // retry, and name them in the feedback instead of showing only a count.
+        const names = failedRepos
+          .map((p) => p.split(/[\\/]/).filter(Boolean).pop() ?? p)
+          .join(', ');
+        showToast(
+          `Assigned ${successCount}, failed ${failedRepos.length}: ${names}`,
+          'warning'
+        );
+        this.selectedReposForAssignment = new Set(failedRepos);
+      }
     } catch (error) {
       showToast(`Failed to assign repositories: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     } finally {
@@ -955,11 +1013,35 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
+  /**
+   * Unassign a single repository from the profile being edited. The global
+   * accounts and the profile itself are untouched — only the repo→profile
+   * assignment is removed. The store subscription re-renders the trimmed list.
+   *
+   * D5: No change event dispatched here by design — see handleSave. The store
+   * subscription is the single source of truth for UI sync.
+   */
+  private async handleUnassignRepository(repoPath: string): Promise<void> {
+    try {
+      await unifiedProfileService.unassignUnifiedProfileFromRepository(repoPath);
+      // Reload profiles to update repositoryAssignments in the store.
+      await unifiedProfileService.loadUnifiedProfiles();
+      showToast(`Unassigned ${this.formatRepoPath(repoPath)}`, 'success');
+    } catch (error) {
+      showToast(
+        `Failed to unassign repository: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'error'
+      );
+    }
+  }
+
+  // D5: No change event dispatched here by design — see handleSave. The store
+  // subscription is the single source of truth for UI sync.
   private async handleDelete(profile: UnifiedProfile, e: Event): Promise<void> {
     e.stopPropagation();
     const confirmed = await showConfirm(
       'Delete Profile',
-      `Delete profile "${profile.name}"? This will also remove all associated integration accounts.`,
+      `Delete profile "${profile.name}"? This removes the profile and its repository assignments. Your integration accounts remain available globally.`,
       'warning'
     );
     if (!confirmed) {
@@ -996,6 +1078,13 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
+  // D5: This and its sibling mutators (handleSaveAccount, handleDelete,
+  // handleDeleteGlobalAccount) intentionally dispatch NO change event. The
+  // Zustand unified-profile store subscription is the single source of truth for
+  // UI sync — these handlers call unifiedProfileService.* which updates the store,
+  // and subscribed components re-render. Do NOT add a CustomEvent here: there is
+  // no parent listener for it, so it would be an orphan event (CLAUDE.md
+  // "Event Dispatch Consistency").
   private async handleSave(): Promise<void> {
     if (!this.editingProfile) return;
 
@@ -1040,6 +1129,7 @@ export class LvProfileManagerDialog extends LitElement {
       // Changes are persisted — clear the dirty flag so navigating back doesn't
       // prompt to discard.
       this.profileFormDirty = false;
+      this.justAttachedAccountName = null;
       this.handleBack();
     } catch (error) {
       showToast(`Failed to save profile: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
@@ -1148,6 +1238,9 @@ export class LvProfileManagerDialog extends LitElement {
   /**
    * Delete a global account entirely (for all profiles). Reachable only from the
    * account's Edit screen because it is destructive and irreversible.
+   *
+   * D5: No change event dispatched here by design — see handleSave. The store
+   * subscription is the single source of truth for UI sync.
    */
   private async handleDeleteGlobalAccount(accountId: string): Promise<void> {
     const confirmed = await showConfirm(
@@ -1157,8 +1250,26 @@ export class LvProfileManagerDialog extends LitElement {
     );
     if (!confirmed) return;
 
+    // Resolve the integration type so we can clean up the keyring token too.
+    // Prefer the stored account record; fall back to the editing snapshot.
+    const integrationType =
+      this.getGlobalAccounts().find((a) => a.id === accountId)?.integrationType ??
+      (this.editingAccount?.id === accountId ? this.editingAccount.integrationType : undefined);
+
     try {
+      // Delete the record first (source of truth), then best-effort delete the
+      // keyring token (and its _oauth companion) so it isn't left orphaned.
       await unifiedProfileService.deleteGlobalAccount(accountId);
+      if (integrationType) {
+        // Best-effort: the record is already gone, so a keyring miss/failure
+        // must NOT surface as "Failed to delete account". Mirror the provider
+        // dialogs, which isolate token cleanup in its own try/catch.
+        try {
+          await credentialService.deleteAccountToken(integrationType, accountId);
+        } catch (tokenError) {
+          console.warn('Failed to delete account token (record already removed):', tokenError);
+        }
+      }
       // The editing profile is a local snapshot - drop the deleted account from it too.
       const attachedType = Object.entries(this.editingProfile?.defaultAccounts ?? {}).find(
         ([, id]) => id === accountId
@@ -1187,6 +1298,18 @@ export class LvProfileManagerDialog extends LitElement {
     }
   }
 
+  private handleAccountPatternsChange(e: Event): void {
+    const textarea = e.target as HTMLTextAreaElement;
+    const patterns = textarea.value
+      .split('\n')
+      .map((p) => p.trim())
+      .filter((p) => p);
+    this.updateEditingAccount('urlPatterns', patterns);
+  }
+
+  // D5: No change event dispatched here by design — see handleSave. The store
+  // subscription is the single source of truth for UI sync; adding a parent-less
+  // CustomEvent would be an orphan event.
   private async handleSaveAccount(): Promise<void> {
     if (!this.editingAccount) return;
 
@@ -1264,7 +1387,7 @@ export class LvProfileManagerDialog extends LitElement {
   private getDialogTitle(): string {
     switch (this.viewMode) {
       case 'list':
-        return 'Profiles';
+        return 'Profiles & Accounts';
       case 'create':
         return 'New Profile';
       case 'edit':
@@ -1276,9 +1399,9 @@ export class LvProfileManagerDialog extends LitElement {
       case 'assign-repos':
         return 'Assign Repositories';
       case 'accounts':
-        return 'Manage Accounts';
+        return 'Accounts';
       default:
-        return 'Profiles';
+        return 'Profiles & Accounts';
     }
   }
 
@@ -1332,7 +1455,16 @@ export class LvProfileManagerDialog extends LitElement {
       case 'edit':
         return html`
           <button class="btn btn-secondary" @click=${this.handleBack}>Cancel</button>
-          <button class="btn btn-primary" @click=${this.handleSave} ?disabled=${this.isSaving}>
+          ${this.justAttachedAccountName
+            ? html`<span class="attach-hint" data-testid="attach-keep-hint">
+                Save Profile to keep <strong>${this.justAttachedAccountName}</strong> attached
+              </span>`
+            : html`<div style="flex: 1;"></div>`}
+          <button
+            class="btn btn-primary ${this.justAttachedAccountName ? 'btn-emphasized' : ''}"
+            @click=${this.handleSave}
+            ?disabled=${this.isSaving}
+          >
             ${this.isSaving ? 'Saving...' : 'Save Profile'}
           </button>
         `;
@@ -1372,8 +1504,15 @@ export class LvProfileManagerDialog extends LitElement {
       return html`<div class="empty-state">Loading profiles...</div>`;
     }
 
+    const explainer = html`
+      <p class="view-explainer">
+        Profiles set your git identity per repository. Accounts are shared logins you assign to profiles.
+      </p>
+    `;
+
     if (this.profiles.length === 0) {
       return html`
+        ${explainer}
         <div class="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
@@ -1388,6 +1527,7 @@ export class LvProfileManagerDialog extends LitElement {
     }
 
     return html`
+      ${explainer}
       <div class="profile-list">
         ${this.profiles.map(
           (profile) => html`
@@ -1699,6 +1839,18 @@ export class LvProfileManagerDialog extends LitElement {
                         <div class="account-name">${this.formatRepoPath(repoPath)}</div>
                         <div class="account-detail">${repoPath}</div>
                       </div>
+                      <div class="account-actions">
+                        <button
+                          class="action-btn delete"
+                          @click=${() => this.handleUnassignRepository(repoPath)}
+                          title="Unassign repository from this profile"
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                          </svg>
+                        </button>
+                      </div>
                     </div>
                   `
                 )}
@@ -1848,6 +2000,9 @@ export class LvProfileManagerDialog extends LitElement {
     return html`
       <div class="form-content">
         <div class="form-section">
+          <div class="attach-breadcrumb" data-testid="attach-breadcrumb">
+            Adding to <strong>${this.editingProfile?.name || 'this profile'}</strong>
+          </div>
           ${accounts.length === 0
             ? html`
                 <div class="empty-accounts">
@@ -1879,7 +2034,7 @@ export class LvProfileManagerDialog extends LitElement {
    * the standalone Accounts view. Each opens the matching integration dialog.
    */
   private renderConnectButtons() {
-    const providers: IntegrationType[] = ['github', 'gitlab', 'bitbucket', 'azure-devops'];
+    const providers: IntegrationType[] = ['github', 'gitlab', 'bitbucket', 'azure-devops', 'oidc'];
     return html`
       <div class="form-section-title" style="margin-top: var(--spacing-lg);">
         Connect a new account
@@ -2074,8 +2229,25 @@ export class LvProfileManagerDialog extends LitElement {
           <option value="gitlab" ?selected=${this.editingAccount.integrationType === 'gitlab'}>GitLab</option>
           <option value="azure-devops" ?selected=${this.editingAccount.integrationType === 'azure-devops'}>Azure DevOps</option>
           <option value="bitbucket" ?selected=${this.editingAccount.integrationType === 'bitbucket'}>Bitbucket</option>
+          <option value="oidc" ?selected=${this.editingAccount.integrationType === 'oidc'}>Enterprise SSO (OIDC)</option>
         </select>
         <div class="form-hint">Integration type cannot be changed</div>
+      </div>
+
+      ${this.renderAccountConfigFields()}
+
+      <div class="form-group">
+        <label>URL Patterns (one per line)</label>
+        <textarea
+          placeholder="github.com/mycompany/*&#10;github.com/another-org/*"
+          .value=${(this.editingAccount.urlPatterns ?? []).join('\n')}
+          @input=${this.handleAccountPatternsChange}
+        ></textarea>
+        <div class="form-hint">
+          Auto-select this account for repositories whose remote URL matches. Supports wildcards
+          (*). Account patterns take precedence over the profile's default account, so use them when
+          one repo needs a specific account of this type.
+        </div>
       </div>
 
       <div class="form-group">
@@ -2113,15 +2285,31 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   private dispatchIntegrationOpen(type: IntegrationType): void {
-    // Remember which provider the user is connecting and the accounts that exist
-    // now, so that when the integration dialog closes we can auto-attach the
-    // account they just connected to the profile being edited.
-    this.pendingConnectType = type;
+    // Snapshot the accounts that exist now so revealAfterConnect() can identify
+    // the one the user just connected. This is captured at dispatch time (not
+    // inferred later) and travels with the explicit context below.
     this.accountIdsBeforeConnect = new Set(this.getGlobalAccounts().map((a) => a.id));
-    // Stay on the picker view: the host stacks the integration dialog on top and
-    // reveals this one again on close.
+
+    // EXPLICIT navigation intent: tell the host exactly how this dialog is being
+    // opened so the provider dialog can show a Back arrow that returns HERE, and
+    // (only when attaching) attach the just-connected account to this profile.
+    // Attach intent is true only when connecting from the per-profile attach
+    // picker — never from the standalone Accounts view, where there is no
+    // profile to attach to and an auto-attach would be a surprise.
+    const attach = this.viewMode === 'select-account' || this.viewMode === 'edit' || this.viewMode === 'create';
+    const context: IntegrationOpenContext = {
+      returnTo: 'profile-manager',
+      integrationType: type,
+      profileId: this.editingProfile?.id ?? '',
+      profileName: this.editingProfile?.name ?? '',
+      attach,
+    };
+
+    // Stay on the current view: the host stacks the integration dialog on top and
+    // reveals this one again on close (via revealAfterConnect with the context).
     this.dispatchEvent(
       new CustomEvent(`open-${type}`, {
+        detail: context,
         bubbles: true,
         composed: true,
       })
@@ -2129,20 +2317,66 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   /**
-   * After an integration dialog opened from the picker closes, attach the account
-   * the user just connected to the profile being edited, then return to the form
-   * so it shows as attached (ready to Save). Matches the user's intent: clicking
-   * "Connect <provider>" while attaching to a profile means "use this account".
+   * Switch directly to the standalone Accounts view. Public so the host can land
+   * an already-open manager on Accounts when the `open` property doesn't transition
+   * false→true (e.g. "Manage Accounts" clicked from a provider dialog that was
+   * itself launched from this manager — the manager is already open & demoted, so
+   * `willUpdate`'s open-transition logic never runs). Reloads accounts so the list
+   * is fresh.
    */
-  private async handleRevealAfterConnect(): Promise<void> {
+  public showAccountsView(): void {
+    // Landing here means Accounts IS the entry view for this open session, so
+    // Back must close the manager (returning to whatever opened it), exactly as
+    // the open-transition path does. Set initialView directly rather than relying
+    // on the host's `.initialView` property binding having flushed yet — otherwise
+    // the Back button (which reads initialView) could fall through to the profile
+    // list and break the reversible "Manage Accounts" → Back → provider flow.
+    this.initialView = 'accounts';
+    this.viewMode = 'accounts';
+    void this.loadProfiles().then(() => this.refreshConnectionStatuses());
+  }
+
+  /**
+   * Called by the host when a provider/OIDC dialog that was opened FROM this
+   * manager closes. Driven by the EXPLICIT context captured at open time — not by
+   * guessing global state. Reloads accounts and, when the context carried an
+   * attach intent, attaches the just-connected account to the target profile and
+   * returns to its form so it shows as attached (ready to Save).
+   *
+   * Public so app-shell can invoke it deterministically on dialog close. When
+   * `context.attach` is false (e.g. opened from the standalone Accounts view),
+   * we just refresh the list with no surprise attach.
+   */
+  public async revealAfterConnect(context: IntegrationOpenContext): Promise<void> {
     await this.loadProfiles();
-    const type = this.pendingConnectType;
-    this.pendingConnectType = null;
-    if (!type || !this.editingProfile) return;
+
+    if (!context.attach) {
+      // Standalone "connect a new account" — no profile to attach to. The store
+      // subscription already re-rendered the account list; nothing else to do.
+      this.accountIdsBeforeConnect = new Set();
+      return;
+    }
+
+    const type = context.integrationType;
+
+    // Re-resolve the editing profile from the freshly loaded store so the attach
+    // lands on the right profile even if the snapshot drifted. For an unsaved
+    // (create-mode) profile, profileId is '' and we keep the in-memory draft.
+    if (context.profileId) {
+      const fresh = this.profiles.find((p) => p.id === context.profileId);
+      if (fresh) {
+        this.editingProfile = { ...fresh, defaultAccounts: { ...fresh.defaultAccounts } };
+      }
+    }
+    if (!this.editingProfile) {
+      this.accountIdsBeforeConnect = new Set();
+      return;
+    }
 
     const accountsOfType = this.getGlobalAccounts().filter((a) => a.integrationType === type);
     const previous = this.editingProfile.defaultAccounts?.[type];
     const newlyConnected = accountsOfType.find((a) => !this.accountIdsBeforeConnect.has(a.id));
+    this.accountIdsBeforeConnect = new Set();
 
     if (newlyConnected) {
       // The user explicitly connected this account while attaching to the
@@ -2152,6 +2386,9 @@ export class LvProfileManagerDialog extends LitElement {
         showToast(`Replaced the previously attached ${INTEGRATION_TYPE_NAMES[type]} account`, 'info');
       }
       this.setEditingProfileAccount(type, newlyConnected.id);
+      // Surface a hint near Save: the account is attached to the in-memory draft
+      // only and is dropped if the user backs out without saving.
+      this.justAttachedAccountName = newlyConnected.name;
       this.viewMode = this.editingProfile.id ? 'edit' : 'create';
       return;
     }
@@ -2226,6 +2463,41 @@ export class LvProfileManagerDialog extends LitElement {
             })}
           />
           <div class="form-hint">Your Bitbucket workspace (usually your username or organization)</div>
+        </div>
+      `;
+    }
+
+    if (type === 'oidc') {
+      const issuerUrl = config?.type === 'oidc' ? config.issuerUrl : '';
+      const clientId = config?.type === 'oidc' ? config.clientId : '';
+      return html`
+        <div class="form-group">
+          <label>Issuer URL</label>
+          <input
+            type="url"
+            placeholder="https://auth.example.com"
+            .value=${issuerUrl ?? ''}
+            @input=${(e: Event) => this.updateEditingAccount('config', {
+              type: 'oidc',
+              issuerUrl: (e.target as HTMLInputElement).value || '',
+              clientId,
+            })}
+          />
+          <div class="form-hint">Your OpenID Connect issuer URL (Enterprise SSO).</div>
+        </div>
+        <div class="form-group">
+          <label>Client ID</label>
+          <input
+            type="text"
+            placeholder="your-client-id"
+            .value=${clientId ?? ''}
+            @input=${(e: Event) => this.updateEditingAccount('config', {
+              type: 'oidc',
+              issuerUrl,
+              clientId: (e.target as HTMLInputElement).value || '',
+            })}
+          />
+          <div class="form-hint">The OAuth client ID registered with your IdP.</div>
         </div>
       `;
     }

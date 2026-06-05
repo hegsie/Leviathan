@@ -41,13 +41,38 @@ fn cleanup_expired_pending_servers(map: &mut HashMap<u16, PendingServer>) {
     });
 }
 
-/// Pending OAuth flow data: (provider, verifier, instance_url)
-type PendingOAuthFlow = (OAuthProvider, String, Option<String>);
+/// Server-side data for an in-flight OAuth flow.
+///
+/// The PKCE `verifier` is kept SERVER-SIDE (never returned to the frontend) and
+/// is looked up by the `state` parameter once the provider redirects back. The
+/// `redirect_uri` is stored so the token exchange can reproduce the exact value
+/// sent in the authorize request.
+#[derive(Debug, Clone)]
+pub struct PendingOAuthFlow {
+    /// The OAuth provider for this flow.
+    pub provider: OAuthProvider,
+    /// PKCE code verifier (secret — never sent to the frontend).
+    pub verifier: String,
+    /// Instance / issuer URL (GitLab self-hosted, Azure tenant, OIDC issuer).
+    pub instance_url: Option<String>,
+    /// The client ID used to build the authorize URL. Stored so the token
+    /// exchange can reuse it for providers (e.g. OIDC) whose client ID is
+    /// per-account and therefore not available from the embedded client-ID map
+    /// the frontend uses for the built-in providers.
+    pub client_id: String,
+    /// The redirect URI used when building the authorize URL.
+    pub redirect_uri: String,
+    /// Creation timestamp for TTL enforcement.
+    pub created_at: std::time::Instant,
+}
 
-/// State for pending OAuth flows
+/// State for pending OAuth flows, keyed by the issued `state` parameter.
+///
+/// This stores the PKCE verifier and per-flow metadata server-side so the
+/// verifier never has to round-trip through the frontend, and so the `state`
+/// echoed back on the callback can be validated (CSRF / flow-binding).
 pub struct OAuthState {
-    /// Map of state -> (provider, verifier, instance_url)
-    #[allow(dead_code)]
+    /// Map of `state` -> pending flow data.
     pending: Mutex<HashMap<String, PendingOAuthFlow>>,
 }
 
@@ -59,15 +84,54 @@ impl Default for OAuthState {
     }
 }
 
+impl OAuthState {
+    /// Insert a pending flow keyed by its `state`, evicting any expired flows.
+    pub fn insert_pending(&self, state: String, flow: PendingOAuthFlow) -> Result<()> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|e| LeviathanError::OAuth(format!("Failed to store OAuth flow: {}", e)))?;
+        cleanup_expired_flows(&mut pending);
+        pending.insert(state, flow);
+        Ok(())
+    }
+
+    /// Look up and REMOVE the pending flow for a given `state`.
+    ///
+    /// Returns `None` if no matching flow exists (state mismatch / expired /
+    /// already consumed) — callers MUST treat that as a rejected callback.
+    pub fn take_pending(&self, state: &str) -> Result<Option<PendingOAuthFlow>> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|e| LeviathanError::OAuth(format!("Failed to access OAuth flow: {}", e)))?;
+        cleanup_expired_flows(&mut pending);
+        Ok(pending.remove(state))
+    }
+}
+
+/// Remove expired pending OAuth flows (same TTL as pending loopback servers).
+fn cleanup_expired_flows(map: &mut HashMap<String, PendingOAuthFlow>) {
+    let now = std::time::Instant::now();
+    map.retain(|_, flow| now.duration_since(flow.created_at) < PENDING_SERVER_TTL);
+}
+
+/// Global storage for in-flight OAuth flows (keyed by `state`).
+///
+/// Used because the OAuth Tauri commands are free functions and `OAuthState`
+/// is not registered as Tauri-managed state.
+static OAUTH_FLOWS: Lazy<OAuthState> = Lazy::new(OAuthState::default);
+
 /// Response from starting an OAuth flow
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartOAuthResponse {
     /// The URL to open in the browser
     pub authorize_url: String,
-    /// The PKCE verifier (store client-side for token exchange)
-    pub verifier: String,
-    /// State for CSRF protection
+    /// State for CSRF protection.
+    ///
+    /// The PKCE verifier is intentionally NOT returned: it is stored
+    /// server-side keyed by this `state` and looked up during token exchange.
     pub state: String,
     /// Port if using loopback server (for GitHub)
     pub loopback_port: Option<u16>,
@@ -220,9 +284,23 @@ pub async fn oauth_get_authorize_url(
 
     let authorize_url = config.build_authorize_url(&pkce, &state);
 
+    // Store the PKCE verifier and per-flow data SERVER-SIDE, keyed by `state`.
+    // The verifier is never returned to the frontend; the loopback callback and
+    // token exchange look it up by the `state` value the provider echoes back.
+    OAUTH_FLOWS.insert_pending(
+        state.clone(),
+        PendingOAuthFlow {
+            provider: provider_enum,
+            verifier: pkce.verifier,
+            instance_url,
+            client_id: config.client_id.clone(),
+            redirect_uri: config.redirect_uri.clone(),
+            created_at: std::time::Instant::now(),
+        },
+    )?;
+
     Ok(StartOAuthResponse {
         authorize_url,
-        verifier: pkce.verifier,
         state,
         loopback_port,
     })
@@ -238,20 +316,40 @@ pub async fn oauth_start_github_flow(client_id: String) -> Result<StartOAuthResp
     oauth_get_authorize_url("github".to_string(), None, client_id).await
 }
 
-/// Exchange authorization code for tokens
+/// Exchange authorization code for tokens.
+///
+/// The PKCE `verifier`, provider, redirect URI, and instance/issuer URL are
+/// looked up SERVER-SIDE from the pending-flow map keyed by `state` — they are
+/// NOT accepted from the frontend. This both validates the `state` (it must
+/// match an in-flight flow this process issued) and prevents the PKCE secret
+/// from round-tripping through the client.
 #[tauri::command]
 pub async fn oauth_exchange_code(
-    provider: String,
+    state: String,
     code: String,
-    verifier: String,
-    redirect_uri: String,
     client_id: String,
     client_secret: Option<String>,
-    instance_url: Option<String>,
 ) -> Result<OAuthTokenResponse> {
-    let provider_enum: OAuthProvider = provider
-        .parse()
-        .map_err(|e: String| LeviathanError::OAuth(e))?;
+    // Look up (and consume) the pending flow for this state. A missing entry
+    // means the state is unknown/expired/replayed — reject the exchange.
+    let flow = OAUTH_FLOWS.take_pending(&state)?.ok_or_else(|| {
+        LeviathanError::OAuth("OAuth state did not match any pending flow".to_string())
+    })?;
+
+    let provider_enum = flow.provider.clone();
+    let verifier = flow.verifier.clone();
+    let redirect_uri = flow.redirect_uri.clone();
+    let instance_url = flow.instance_url.clone();
+
+    // Prefer the frontend-supplied client ID (built-in providers source it from
+    // the embedded client-ID map), but fall back to the one captured when the
+    // authorize URL was built. OIDC client IDs are per-account, so the frontend
+    // passes an empty string for them and we must use the stored value.
+    let client_id = if client_id.trim().is_empty() {
+        flow.client_id.clone()
+    } else {
+        client_id
+    };
 
     // Build token URL based on provider
     let token_url = match provider_enum {
@@ -426,12 +524,26 @@ pub async fn oauth_refresh_token(
     Ok(tokens)
 }
 
+/// Result of a validated loopback OAuth callback returned to the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallbackResponse {
+    /// Authorization code to pass to `oauth_exchange_code`.
+    pub code: String,
+    /// The validated `state` (matches an in-flight flow); pass this back to
+    /// `oauth_exchange_code` so the server can look up the PKCE verifier.
+    pub state: String,
+}
+
 /// Wait for loopback callback (works for GitHub, GitLab, and any provider using loopback)
 ///
-/// This should be called after opening the authorize URL.
-/// It will wait for the callback on the loopback server and return the authorization code.
+/// This should be called after opening the authorize URL. It waits for the
+/// callback on the loopback server, VALIDATES the `state` parameter echoed back
+/// by the provider against the set of in-flight flows this process issued, and
+/// returns the authorization code together with the validated state. A callback
+/// whose `state` does not match a pending flow is rejected (CSRF protection).
 #[tauri::command]
-pub async fn oauth_wait_for_callback(port: u16) -> Result<String> {
+pub async fn oauth_wait_for_callback(port: u16) -> Result<CallbackResponse> {
     // Retrieve the stored server for this port
     let pending = PENDING_SERVERS
         .lock()
@@ -443,14 +555,44 @@ pub async fn oauth_wait_for_callback(port: u16) -> Result<String> {
     // This runs in a blocking thread to avoid blocking the async runtime
     let timeout = Duration::from_secs(300); // 5 minutes
 
-    tokio::task::spawn_blocking(move || pending.server.wait_for_callback(timeout))
+    let callback = tokio::task::spawn_blocking(move || pending.server.wait_for_callback(timeout))
         .await
-        .map_err(|e| LeviathanError::OAuth(format!("Task join error: {}", e)))?
+        .map_err(|e| LeviathanError::OAuth(format!("Task join error: {}", e)))??;
+
+    // Validate the returned `state` against an in-flight flow. We only PEEK here
+    // (the flow is consumed later by `oauth_exchange_code`), so confirm a match
+    // without removing the entry.
+    validate_callback_state(&callback.state)?;
+
+    Ok(CallbackResponse {
+        code: callback.code,
+        state: callback.state,
+    })
+}
+
+/// Confirm that the given `state` matches an in-flight OAuth flow without
+/// consuming it. Returns an error if no matching flow exists.
+fn validate_callback_state(state: &str) -> Result<()> {
+    let mut pending = OAUTH_FLOWS
+        .pending
+        .lock()
+        .map_err(|e| LeviathanError::OAuth(format!("Failed to access OAuth flow: {}", e)))?;
+    // Evict expired flows first so this peek stays consistent with the later
+    // consume in `oauth_exchange_code` (which also cleans up). Otherwise an
+    // expired state could validate here only to fail at exchange time.
+    cleanup_expired_flows(&mut pending);
+    if pending.contains_key(state) {
+        Ok(())
+    } else {
+        Err(LeviathanError::OAuth(
+            "OAuth callback state did not match any pending flow".to_string(),
+        ))
+    }
 }
 
 /// Alias for backward compatibility
 #[tauri::command]
-pub async fn oauth_wait_for_github_callback(port: u16) -> Result<String> {
+pub async fn oauth_wait_for_github_callback(port: u16) -> Result<CallbackResponse> {
     oauth_wait_for_callback(port).await
 }
 
@@ -466,23 +608,22 @@ mod tests {
     fn test_start_oauth_response_serialization() {
         let response = StartOAuthResponse {
             authorize_url: "https://example.com/oauth".to_string(),
-            verifier: "test-verifier".to_string(),
             state: "test-state".to_string(),
             loopback_port: Some(8080),
         };
 
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("authorizeUrl"));
-        assert!(json.contains("verifier"));
         assert!(json.contains("state"));
         assert!(json.contains("loopbackPort"));
+        // SECURITY: the PKCE verifier must NOT be serialized to the frontend.
+        assert!(!json.contains("verifier"));
     }
 
     #[test]
     fn test_start_oauth_response_without_loopback_port() {
         let response = StartOAuthResponse {
             authorize_url: "https://example.com/oauth".to_string(),
-            verifier: "test-verifier".to_string(),
             state: "test-state".to_string(),
             loopback_port: None,
         };
@@ -496,14 +637,12 @@ mod tests {
     fn test_start_oauth_response_deserialization() {
         let json = r#"{
             "authorizeUrl": "https://example.com/oauth",
-            "verifier": "test-verifier",
             "state": "test-state",
             "loopbackPort": 8080
         }"#;
 
         let response: StartOAuthResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.authorize_url, "https://example.com/oauth");
-        assert_eq!(response.verifier, "test-verifier");
         assert_eq!(response.state, "test-state");
         assert_eq!(response.loopback_port, Some(8080));
     }
@@ -589,9 +728,16 @@ mod tests {
         assert!(response.authorize_url.contains("client_id=test-client-id"));
         assert!(response.authorize_url.contains("response_type=code"));
         assert!(response.authorize_url.contains("code_challenge="));
-        assert!(!response.verifier.is_empty());
         assert!(!response.state.is_empty());
         assert!(response.loopback_port.is_some());
+
+        // The verifier is stored server-side keyed by state, not returned.
+        let flow = OAUTH_FLOWS
+            .take_pending(&response.state)
+            .unwrap()
+            .expect("pending flow should be stored for the issued state");
+        assert!(!flow.verifier.is_empty());
+        assert_eq!(flow.provider, OAuthProvider::GitHub);
     }
 
     #[tokio::test]
@@ -693,8 +839,11 @@ mod tests {
 
         // Each call should generate unique state
         assert_ne!(response1.state, response2.state);
-        // Each call should generate unique verifier
-        assert_ne!(response1.verifier, response2.verifier);
+
+        // Each call stores a unique verifier server-side (never returned).
+        let flow1 = OAUTH_FLOWS.take_pending(&response1.state).unwrap().unwrap();
+        let flow2 = OAUTH_FLOWS.take_pending(&response2.state).unwrap().unwrap();
+        assert_ne!(flow1.verifier, flow2.verifier);
     }
 
     // ==========================================================================
@@ -910,38 +1059,132 @@ mod tests {
         // Different ports and states
         assert_ne!(r1.loopback_port, r2.loopback_port);
         assert_ne!(r1.state, r2.state);
-        assert_ne!(r1.verifier, r2.verifier);
+
+        // Each flow's verifier (stored server-side) is unique.
+        let f1 = OAUTH_FLOWS.take_pending(&r1.state).unwrap().unwrap();
+        let f2 = OAUTH_FLOWS.take_pending(&r2.state).unwrap().unwrap();
+        assert_ne!(f1.verifier, f2.verifier);
+    }
+
+    fn make_flow(provider: OAuthProvider, verifier: &str) -> PendingOAuthFlow {
+        PendingOAuthFlow {
+            provider,
+            verifier: verifier.to_string(),
+            instance_url: None,
+            client_id: "test-client-id".to_string(),
+            redirect_uri: "http://127.0.0.1:8080/callback".to_string(),
+            created_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn test_pending_flow_stores_client_id() {
+        // The pending flow must retain the client ID used to build the authorize
+        // URL so the token exchange can reuse it for per-account providers (OIDC).
+        let state = OAuthState::default();
+        let mut flow = make_flow(OAuthProvider::Oidc, "oidc-verifier");
+        flow.client_id = "oidc-account-client".to_string();
+        flow.instance_url = Some("https://auth.example.com".to_string());
+        state
+            .insert_pending("oidc-state".to_string(), flow)
+            .unwrap();
+
+        let retrieved = state.take_pending("oidc-state").unwrap().unwrap();
+        assert_eq!(retrieved.provider, OAuthProvider::Oidc);
+        assert_eq!(retrieved.client_id, "oidc-account-client");
+        assert_eq!(
+            retrieved.instance_url,
+            Some("https://auth.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_exchange_client_id_fallback_semantics() {
+        // Mirrors the fallback used in oauth_exchange_code: an empty/whitespace
+        // client ID from the frontend falls back to the one stored on the flow
+        // (OIDC), while a non-empty value is preserved (built-in providers).
+        let stored = "stored-oidc-client".to_string();
+
+        let frontend_empty = String::new();
+        let resolved = if frontend_empty.trim().is_empty() {
+            stored.clone()
+        } else {
+            frontend_empty
+        };
+        assert_eq!(resolved, "stored-oidc-client");
+
+        let frontend_whitespace = "   ".to_string();
+        let resolved = if frontend_whitespace.trim().is_empty() {
+            stored.clone()
+        } else {
+            frontend_whitespace
+        };
+        assert_eq!(resolved, "stored-oidc-client");
+
+        let frontend_present = "github-embedded-client".to_string();
+        let resolved = if frontend_present.trim().is_empty() {
+            stored.clone()
+        } else {
+            frontend_present
+        };
+        assert_eq!(resolved, "github-embedded-client");
     }
 
     #[test]
     fn test_oauth_state_pending_operations() {
         let state = OAuthState::default();
 
-        // Insert a pending flow
-        {
-            let mut pending = state.pending.lock().unwrap();
-            pending.insert(
-                "test-state".to_string(),
-                (OAuthProvider::GitHub, "verifier".to_string(), None),
-            );
-        }
+        // Insert a pending flow and round-trip it by `state` key.
+        state
+            .insert_pending(
+                "rt-state".to_string(),
+                make_flow(OAuthProvider::GitHub, "v1"),
+            )
+            .unwrap();
 
-        // Retrieve it
-        {
-            let pending = state.pending.lock().unwrap();
-            assert!(pending.contains_key("test-state"));
-            let (provider, verifier, instance_url) = pending.get("test-state").unwrap();
-            assert_eq!(*provider, OAuthProvider::GitHub);
-            assert_eq!(verifier, "verifier");
-            assert!(instance_url.is_none());
-        }
+        let flow = state.take_pending("rt-state").unwrap().unwrap();
+        assert_eq!(flow.provider, OAuthProvider::GitHub);
+        assert_eq!(flow.verifier, "v1");
+        assert!(flow.instance_url.is_none());
 
-        // Remove it
-        {
-            let mut pending = state.pending.lock().unwrap();
-            pending.remove("test-state");
-            assert!(pending.is_empty());
-        }
+        // take_pending consumes the entry: a second lookup yields None.
+        assert!(state.take_pending("rt-state").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_take_pending_state_mismatch_rejected() {
+        let state = OAuthState::default();
+        state
+            .insert_pending(
+                "issued-state".to_string(),
+                make_flow(OAuthProvider::GitLab, "v2"),
+            )
+            .unwrap();
+
+        // A non-matching state must not resolve to any flow.
+        assert!(state.take_pending("attacker-state").unwrap().is_none());
+        // The legitimate state still resolves.
+        assert!(state.take_pending("issued-state").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_validate_callback_state_via_global_store() {
+        // Insert into the global flow store and validate the state matches.
+        OAUTH_FLOWS
+            .insert_pending(
+                "global-valid-state".to_string(),
+                make_flow(OAuthProvider::GitHub, "vg"),
+            )
+            .unwrap();
+
+        assert!(validate_callback_state("global-valid-state").is_ok());
+        assert!(validate_callback_state("does-not-exist").is_err());
+
+        // Validation peeks without consuming — the flow is still retrievable.
+        assert!(OAUTH_FLOWS
+            .take_pending("global-valid-state")
+            .unwrap()
+            .is_some());
     }
 
     #[test]

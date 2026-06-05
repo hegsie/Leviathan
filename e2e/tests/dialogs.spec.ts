@@ -83,7 +83,7 @@ test.describe('Profile Manager Dialog', () => {
 
   test('should open from command palette', async () => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // The dialog doesn't have role="dialog", so check for the New Profile button
@@ -93,7 +93,7 @@ test.describe('Profile Manager Dialog', () => {
 
   test('should display profile list or empty state', async ({ page }) => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     // Wait for dialog to open
@@ -107,7 +107,7 @@ test.describe('Profile Manager Dialog', () => {
 
   test('should have new profile button', async () => {
     await dialogs.commandPalette.open();
-    await dialogs.commandPalette.search('Git Profiles');
+    await dialogs.commandPalette.search('Profiles & Accounts');
     await dialogs.commandPalette.executeFirst();
 
     await expect(dialogs.profileManager.addProfileButton).toBeVisible();

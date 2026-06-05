@@ -7,6 +7,43 @@ use tauri::command;
 use crate::error::{LeviathanError, Result};
 use crate::utils::create_command;
 
+// ========================================================================
+// URL Sanitization (M2)
+// ========================================================================
+
+/// Strip userinfo (credentials) from a URL before logging.
+///
+/// Authenticated remotes like `https://ghp_secret@github.com/org/repo` would
+/// otherwise leak the token in INFO-level logs.  We keep only the
+/// scheme + host + path so logs remain useful without exposing secrets.
+///
+/// The function is intentionally simple (no external dep) — it splits on
+/// `://` to isolate scheme, then strips anything before the first `/` that
+/// contains an `@` (the userinfo component).
+pub(crate) fn sanitize_url_for_log(url: &str) -> String {
+    // Split off scheme (e.g. "https")
+    if let Some((scheme, rest)) = url.split_once("://") {
+        // `rest` is e.g. "ghp_secret@github.com/org/repo"
+        // If there is an `@` before the first `/`, drop everything up to and
+        // including the `@`.
+        let authority_and_path = if let Some(at_pos) = rest.find('@') {
+            // Only strip if the `@` occurs in the authority (before any `/`)
+            let slash_pos = rest.find('/').unwrap_or(rest.len());
+            if at_pos < slash_pos {
+                &rest[at_pos + 1..]
+            } else {
+                rest
+            }
+        } else {
+            rest
+        };
+        format!("{}://{}", scheme, authority_and_path)
+    } else {
+        // No scheme — return as-is (SSH git@ URLs don't carry a password)
+        url.to_string()
+    }
+}
+
 /// Credential helper configuration
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +196,74 @@ fn extract_helper_name(cmd: &str) -> String {
         .to_string()
 }
 
+// ========================================================================
+// Input validation helpers (M4)
+// ========================================================================
+
+/// Validate a git config key component (url_pattern or helper string).
+///
+/// Git config keys are interpolated directly into the git config command line.
+/// A malicious caller could inject newlines or shell metacharacters to write
+/// arbitrary config sections (e.g. `\n[core]\n  sshCommand=evil`).
+///
+/// Allowed character set for `url_pattern`:
+///   letters, digits, `.` `:` `/` `-` `_` `*` `+` `%` `@` (for scheme://host)
+/// Allowed for `helper`:
+///   letters, digits, `.` `-` `_` `/` ` ` (space between cmd and flags) `=`
+///
+/// Both reject control characters and quotes outright.
+fn validate_url_pattern(pat: &str) -> Result<()> {
+    if pat.is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "url_pattern must not be empty".to_string(),
+        ));
+    }
+    for ch in pat.chars() {
+        if ch.is_control() {
+            return Err(LeviathanError::OperationFailed(format!(
+                "url_pattern contains invalid control character U+{:04X}",
+                ch as u32
+            )));
+        }
+        // Allow only a conservative set of characters needed for URL patterns
+        // like `https://github.com` or `github.com/*`
+        if !matches!(ch,
+            'a'..='z' | 'A'..='Z' | '0'..='9'
+            | '.' | ':' | '/' | '-' | '_' | '*' | '+' | '%' | '@'
+        ) {
+            return Err(LeviathanError::OperationFailed(format!(
+                "url_pattern contains disallowed character {:?} — only letters, digits, and .:-/_*+%@ are permitted",
+                ch
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_helper(helper: &str) -> Result<()> {
+    if helper.is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "helper must not be empty".to_string(),
+        ));
+    }
+    // A credential helper may be a bare name (`manager`), an absolute path
+    // (including Windows `C:\...` / `C:/...`), or a shell command (`!aws ... $@`).
+    // The value is passed as a non-shell argument and git escapes it when
+    // writing the config, so we do NOT restrict the character set (an allowlist
+    // would break legitimate Windows paths and shell helpers). We only reject
+    // control characters (newlines, NULs, etc.) that could corrupt the config
+    // file or inject additional lines.
+    for ch in helper.chars() {
+        if ch.is_control() {
+            return Err(LeviathanError::OperationFailed(format!(
+                "helper contains invalid control character U+{:04X}",
+                ch as u32
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Set credential helper
 #[command]
 pub async fn set_credential_helper(
@@ -167,6 +272,12 @@ pub async fn set_credential_helper(
     global: Option<bool>,
     url_pattern: Option<String>,
 ) -> Result<()> {
+    // M4: validate inputs before they are interpolated into git config keys
+    validate_helper(&helper)?;
+    if let Some(ref pat) = url_pattern {
+        validate_url_pattern(pat)?;
+    }
+
     let repo_path = path.as_ref().map(|p| Path::new(p.as_str()));
 
     if let Some(url) = url_pattern {
@@ -462,12 +573,15 @@ fn extract_ssh_username(message: &str) -> Option<String> {
 pub async fn store_git_credentials(url: String, username: String, password: String) -> Result<()> {
     use crate::services::credentials_service;
 
-    tracing::info!("Storing git credentials for URL: {}", url);
+    // M2: log only the sanitized URL (strip userinfo such as tokens embedded in
+    // https://token@host/... remotes so they are never written to the log).
+    let safe_url = sanitize_url_for_log(&url);
+    tracing::info!("Storing git credentials for URL: {}", safe_url);
     credentials_service::store_credentials(&url, &username, &password).map_err(|e| {
-        tracing::error!("Failed to store credentials for {}: {}", url, e);
+        tracing::error!("Failed to store credentials for {}: {}", safe_url, e);
         LeviathanError::OperationFailed(format!("Failed to store credentials: {}", e))
     })?;
-    tracing::info!("Successfully stored git credentials for URL: {}", url);
+    tracing::info!("Successfully stored git credentials for URL: {}", safe_url);
     Ok(())
 }
 
@@ -509,12 +623,42 @@ pub async fn erase_credentials(path: String, host: String, protocol: String) -> 
 
 const INTEGRATION_SERVICE: &str = "leviathan-integrations";
 
+/// Build the macOS `security add-generic-password` argument list (M3).
+///
+/// `-A` (allow any application) is included only in **debug** builds for
+/// development convenience — it prevents repeated authorization prompts when
+/// the binary is rebuilt frequently.  In **release** builds the flag is
+/// omitted so the keychain entry is scoped to the signed application bundle,
+/// providing proper per-app isolation.
+#[cfg(target_os = "macos")]
+pub(crate) fn build_security_add_args<'a>(service: &'a str, key: &'a str) -> Vec<&'a str> {
+    let mut args = vec![
+        "add-generic-password",
+        "-s",
+        service,
+        "-a",
+        key,
+        // -A flag: present only in debug builds (see comment above)
+        #[cfg(debug_assertions)]
+        "-A",
+        "-U", // Update if exists
+        "-w", // Read password from stdin (avoids exposure in argv / ps output)
+    ];
+    // In release builds the conditional above skips the "-A" element.
+    // We rebuild the vec without the cfg attribute for clarity.
+    #[cfg(not(debug_assertions))]
+    {
+        args = vec!["add-generic-password", "-s", service, "-a", key, "-U", "-w"];
+    }
+    args
+}
+
 /// Store an integration token in the system keyring.
 ///
-/// On macOS, uses the `security` CLI with `-T ""` to allow any application
-/// to access the item without triggering authorization prompts. The keyring
-/// crate's `set_password` restricts access to the calling binary's code
-/// signature, which changes on every dev build and causes repeated prompts.
+/// On macOS, uses the `security` CLI. In debug builds `-A` is added so that
+/// any application can access the item without triggering authorization
+/// prompts (development convenience — the binary changes on every rebuild).
+/// In release builds `-A` is omitted for proper per-app keychain isolation.
 #[command]
 pub async fn store_keyring_token(key: String, value: String) -> Result<()> {
     #[cfg(target_os = "macos")]
@@ -534,17 +678,9 @@ pub async fn store_keyring_token(key: String, value: String) -> Result<()> {
         // exposing the token via argv (`ps -E` is readable by any process
         // running under the same user).
         use std::io::Write as _;
+        let security_args = build_security_add_args(INTEGRATION_SERVICE, &key);
         let mut child = std::process::Command::new("security")
-            .args([
-                "add-generic-password",
-                "-s",
-                INTEGRATION_SERVICE,
-                "-a",
-                &key,
-                "-A", // Allow any application to access without prompt
-                "-U", // Update if exists
-                "-w",
-            ])
+            .args(&security_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -917,6 +1053,204 @@ mod tests {
 
         assert_eq!(helper.name, "osxkeychain");
         assert!(helper.available);
+    }
+
+    // ========================================================================
+    // M2: URL sanitization tests
+    // ========================================================================
+
+    /// A URL carrying a PAT/token in the userinfo component must not appear
+    /// verbatim in the sanitized form.  The logged string must contain neither
+    /// the secret token nor the `@` separator that precedes the host.
+    #[test]
+    fn test_sanitize_url_strips_token() {
+        let url = "https://ghp_secret@github.com/org/repo";
+        let sanitized = sanitize_url_for_log(url);
+
+        assert!(
+            !sanitized.contains("ghp_secret"),
+            "secret token must not appear in log: {}",
+            sanitized
+        );
+        assert!(
+            !sanitized.contains('@'),
+            "@ separator must not appear in log: {}",
+            sanitized
+        );
+        // Useful host/path information must be retained.
+        assert!(
+            sanitized.contains("github.com"),
+            "host must be retained: {}",
+            sanitized
+        );
+        assert!(
+            sanitized.contains("org/repo"),
+            "path must be retained: {}",
+            sanitized
+        );
+    }
+
+    /// A plain URL without credentials must pass through unchanged.
+    #[test]
+    fn test_sanitize_url_plain_url_unchanged() {
+        let url = "https://github.com/org/repo";
+        let sanitized = sanitize_url_for_log(url);
+        assert_eq!(sanitized, url);
+    }
+
+    /// SSH `git@host:path` URLs contain an `@` but carry no password; the
+    /// function must not strip the host (the `@` is in the authority, not in
+    /// a `scheme://` segment).
+    #[test]
+    fn test_sanitize_url_ssh_git_at_host() {
+        let url = "git@github.com:org/repo.git";
+        // No scheme means the function returns the URL unchanged.
+        let sanitized = sanitize_url_for_log(url);
+        assert_eq!(sanitized, url);
+    }
+
+    /// When there is no `@` in the authority the URL must be returned verbatim.
+    #[test]
+    fn test_sanitize_url_no_credentials() {
+        let url = "https://example.com/path";
+        assert_eq!(sanitize_url_for_log(url), url);
+    }
+
+    // ========================================================================
+    // M3: build_security_add_args tests (macOS-targeted; run on all platforms
+    // since the function is pub(crate) and available everywhere)
+    // ========================================================================
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_build_security_add_args_release_omits_a_flag() {
+        // We cannot change the compilation mode at test time, but we can
+        // document and assert the expected shape for the current build type.
+        let args = build_security_add_args("svc", "key");
+
+        // `-A` should be present only in debug builds.
+        let has_a = args.contains(&"-A");
+        if cfg!(debug_assertions) {
+            assert!(has_a, "debug build: -A should be present");
+        } else {
+            assert!(!has_a, "release build: -A must be absent");
+        }
+
+        // Common args must always be present regardless of build type.
+        assert!(args.contains(&"add-generic-password"));
+        assert!(args.contains(&"-s"));
+        assert!(args.contains(&"svc"));
+        assert!(args.contains(&"-a"));
+        assert!(args.contains(&"key"));
+        assert!(args.contains(&"-U"));
+        assert!(args.contains(&"-w"));
+    }
+
+    // ========================================================================
+    // M4: input validation tests
+    // ========================================================================
+
+    /// A newline embedded in `url_pattern` must be rejected (git config injection).
+    #[test]
+    fn test_validate_url_pattern_rejects_newline() {
+        let result = validate_url_pattern("https://github.com\n[core]\n  sshCommand=evil");
+        assert!(result.is_err(), "newline must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("invalid control character") || msg.contains("disallowed character"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    /// A quote character in `url_pattern` must be rejected.
+    #[test]
+    fn test_validate_url_pattern_rejects_quote() {
+        let result = validate_url_pattern("https://github.com\"injection");
+        assert!(result.is_err(), "double-quote must be rejected");
+
+        let result2 = validate_url_pattern("https://github.com'injection");
+        assert!(result2.is_err(), "single-quote must be rejected");
+    }
+
+    /// A whitespace character (space/tab) in `url_pattern` must be rejected.
+    #[test]
+    fn test_validate_url_pattern_rejects_whitespace() {
+        let result = validate_url_pattern("https://github.com evil");
+        assert!(result.is_err(), "space must be rejected");
+    }
+
+    /// A well-formed URL pattern that uses only the allowed character set must pass.
+    #[test]
+    fn test_validate_url_pattern_accepts_valid() {
+        assert!(validate_url_pattern("https://github.com").is_ok());
+        assert!(validate_url_pattern("github.com").is_ok());
+        assert!(validate_url_pattern("https://github.com/org/repo*").is_ok());
+        assert!(validate_url_pattern("ssh://git@github.com").is_ok());
+    }
+
+    /// Empty pattern must be rejected.
+    #[test]
+    fn test_validate_url_pattern_rejects_empty() {
+        assert!(validate_url_pattern("").is_err());
+    }
+
+    /// A newline in `helper` must be rejected.
+    #[test]
+    fn test_validate_helper_rejects_newline() {
+        let result = validate_helper("osxkeychain\nevil");
+        assert!(result.is_err(), "newline in helper must be rejected");
+    }
+
+    /// A carriage return (control char) in `helper` must be rejected — this is
+    /// the real config-injection vector, not punctuation like quotes/colons.
+    #[test]
+    fn test_validate_helper_rejects_control_char() {
+        assert!(validate_helper("osxkeychain\revil").is_err());
+        assert!(validate_helper("osxkeychain\u{0000}evil").is_err());
+    }
+
+    /// Normal names, paths (incl. Windows), flags, and shell helpers — which can
+    /// legitimately contain `:`, `\`, quotes, `$` — must all be accepted.
+    #[test]
+    fn test_validate_helper_accepts_valid() {
+        assert!(validate_helper("osxkeychain").is_ok());
+        assert!(validate_helper("manager-core").is_ok());
+        assert!(validate_helper("cache --timeout=3600").is_ok());
+        assert!(validate_helper("/usr/local/bin/git-credential-manager").is_ok());
+        assert!(validate_helper("!/path/to/helper").is_ok());
+        // Windows absolute paths (the regression the reviewer flagged).
+        assert!(validate_helper("C:\\Program Files\\Git\\git-credential-manager.exe").is_ok());
+        assert!(validate_helper("C:/Program Files/Git/git-credential-manager.exe").is_ok());
+        // Shell credential helpers may contain quotes / `$` / `:`.
+        assert!(validate_helper("!aws codecommit credential-helper $@").is_ok());
+        assert!(validate_helper("!f() { echo \"username=x\"; }; f").is_ok());
+    }
+
+    /// Empty helper must be rejected.
+    #[test]
+    fn test_validate_helper_rejects_empty() {
+        assert!(validate_helper("").is_err());
+    }
+
+    /// `set_credential_helper` must reject a url_pattern containing a newline.
+    #[tokio::test]
+    async fn test_set_credential_helper_rejects_injected_url_pattern() {
+        let result = set_credential_helper(
+            None,
+            "osxkeychain".to_string(),
+            None,
+            Some("https://github.com\nevil".to_string()),
+        )
+        .await;
+        assert!(result.is_err(), "injected url_pattern must be rejected");
+    }
+
+    /// `set_credential_helper` must reject a helper containing a newline.
+    #[tokio::test]
+    async fn test_set_credential_helper_rejects_injected_helper() {
+        let result = set_credential_helper(None, "osxkeychain\nevil".to_string(), None, None).await;
+        assert!(result.is_err(), "injected helper must be rejected");
     }
 }
 

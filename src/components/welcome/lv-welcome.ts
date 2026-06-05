@@ -434,6 +434,13 @@ export class LvWelcome extends LitElement {
     }));
   }
 
+  private handleOpenProfileManager(): void {
+    this.dispatchEvent(new CustomEvent('open-profile-manager', {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   render() {
     return html`
       <lv-clone-dialog></lv-clone-dialog>
@@ -479,6 +486,18 @@ export class LvWelcome extends LitElement {
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
             <span>Init</span>
+          </button>
+
+          <button
+            class="action-btn"
+            @click=${this.handleOpenProfileManager}
+            ?disabled=${this.isLoading}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+              <circle cx="12" cy="7" r="4"></circle>
+            </svg>
+            <span>Profiles &amp; Accounts</span>
           </button>
         </div>
 

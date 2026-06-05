@@ -95,6 +95,15 @@ pub struct AdoWorkItem {
     pub url: String,
 }
 
+/// Create work item input
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAdoWorkItemInput {
+    pub work_item_type: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+}
+
 /// Pipeline run summary
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -885,6 +894,129 @@ pub async fn query_ado_work_items(
     get_ado_work_items(organization, project, ids, Some(token)).await
 }
 
+/// Build the JSON-Patch document Azure DevOps requires for work item creation.
+/// Each field is an add operation onto `/fields/<ref name>`.
+fn build_create_work_item_patch(input: &CreateAdoWorkItemInput) -> serde_json::Value {
+    let mut ops = vec![serde_json::json!({
+        "op": "add",
+        "path": "/fields/System.Title",
+        "value": input.title,
+    })];
+
+    if let Some(description) = &input.description {
+        if !description.is_empty() {
+            ops.push(serde_json::json!({
+                "op": "add",
+                "path": "/fields/System.Description",
+                "value": description,
+            }));
+        }
+    }
+
+    serde_json::Value::Array(ops)
+}
+
+/// Create a new work item
+#[command]
+pub async fn create_azure_devops_work_item(
+    organization: String,
+    project: String,
+    input: CreateAdoWorkItemInput,
+    token: Option<String>,
+) -> Result<AdoWorkItem> {
+    let token = resolve_ado_token(token)?;
+
+    let work_item_type = input
+        .work_item_type
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "Task".to_string());
+
+    // Path includes a $-prefixed type: wit/workitems/$Task. URL-encode the type
+    // so valid multi-word types (e.g. "User Story") produce a valid path.
+    let url = build_api_url(
+        &organization,
+        &project,
+        &format!("wit/workitems/${}", urlencoding::encode(&work_item_type)),
+    );
+
+    let patch = build_create_work_item_patch(&input);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Authorization", get_auth_header(&token))
+        .header("Content-Type", "application/json-patch+json")
+        .json(&patch)
+        .send()
+        .await
+        .map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to create work item: {}", e))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "Azure DevOps API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiWorkItem {
+        id: u32,
+        fields: ApiFields,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiFields {
+        #[serde(rename = "System.Title")]
+        title: String,
+        #[serde(rename = "System.WorkItemType")]
+        work_item_type: String,
+        #[serde(rename = "System.State")]
+        state: String,
+        #[serde(rename = "System.AssignedTo")]
+        assigned_to: Option<ApiIdentity>,
+        #[serde(rename = "System.CreatedDate")]
+        created_date: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiIdentity {
+        id: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+        #[serde(rename = "uniqueName")]
+        unique_name: String,
+        #[serde(rename = "imageUrl")]
+        image_url: Option<String>,
+    }
+
+    let wi: ApiWorkItem = response.json().await.map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to parse work item: {}", e))
+    })?;
+
+    Ok(AdoWorkItem {
+        id: wi.id,
+        title: wi.fields.title,
+        work_item_type: wi.fields.work_item_type,
+        state: wi.fields.state,
+        assigned_to: wi.fields.assigned_to.map(|u| AdoUser {
+            id: u.id,
+            display_name: u.display_name,
+            unique_name: u.unique_name,
+            image_url: u.image_url,
+        }),
+        created_date: wi.fields.created_date,
+        url: format!(
+            "https://dev.azure.com/{}/_workitems/edit/{}",
+            organization, wi.id
+        ),
+    })
+}
+
 // ============================================================================
 // Pipeline Commands
 // ============================================================================
@@ -1256,6 +1388,71 @@ mod tests {
         let json = serde_json::to_string(&work_item).unwrap();
         assert!(json.contains("workItemType"));
         assert!(json.contains("User Story"));
+    }
+
+    #[test]
+    fn test_create_ado_work_item_input_serialization() {
+        let input = CreateAdoWorkItemInput {
+            work_item_type: Some("Bug".to_string()),
+            title: "Fix the thing".to_string(),
+            description: Some("It is broken".to_string()),
+        };
+
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(json.contains("workItemType"));
+        assert!(json.contains("title"));
+        assert!(json.contains("Fix the thing"));
+    }
+
+    #[test]
+    fn test_build_create_work_item_patch_full() {
+        let input = CreateAdoWorkItemInput {
+            work_item_type: Some("Task".to_string()),
+            title: "My Task".to_string(),
+            description: Some("Do the work".to_string()),
+        };
+
+        let patch = build_create_work_item_patch(&input);
+        let ops = patch.as_array().expect("patch should be an array");
+        assert_eq!(ops.len(), 2);
+
+        // Title op
+        assert_eq!(ops[0]["op"], "add");
+        assert_eq!(ops[0]["path"], "/fields/System.Title");
+        assert_eq!(ops[0]["value"], "My Task");
+
+        // Description op
+        assert_eq!(ops[1]["op"], "add");
+        assert_eq!(ops[1]["path"], "/fields/System.Description");
+        assert_eq!(ops[1]["value"], "Do the work");
+    }
+
+    #[test]
+    fn test_build_create_work_item_patch_title_only() {
+        let input = CreateAdoWorkItemInput {
+            work_item_type: None,
+            title: "Title only".to_string(),
+            description: None,
+        };
+
+        let patch = build_create_work_item_patch(&input);
+        let ops = patch.as_array().expect("patch should be an array");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0]["path"], "/fields/System.Title");
+        assert_eq!(ops[0]["value"], "Title only");
+    }
+
+    #[test]
+    fn test_build_create_work_item_patch_skips_empty_description() {
+        let input = CreateAdoWorkItemInput {
+            work_item_type: Some("Task".to_string()),
+            title: "Title".to_string(),
+            description: Some(String::new()),
+        };
+
+        let patch = build_create_work_item_patch(&input);
+        let ops = patch.as_array().expect("patch should be an array");
+        assert_eq!(ops.len(), 1);
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub enum IntegrationType {
     AzureDevOps,
     #[serde(rename = "bitbucket")]
     Bitbucket,
+    #[serde(rename = "oidc")]
+    Oidc,
 }
 
 impl std::fmt::Display for IntegrationType {
@@ -26,6 +28,7 @@ impl std::fmt::Display for IntegrationType {
             IntegrationType::GitLab => write!(f, "gitlab"),
             IntegrationType::AzureDevOps => write!(f, "azure-devops"),
             IntegrationType::Bitbucket => write!(f, "bitbucket"),
+            IntegrationType::Oidc => write!(f, "oidc"),
         }
     }
 }
@@ -56,6 +59,14 @@ pub enum IntegrationConfig {
         /// Workspace (typically the username or organization)
         workspace: String,
     },
+    /// OIDC configuration with issuer URL and client ID
+    #[serde(rename = "oidc", rename_all = "camelCase")]
+    Oidc {
+        /// Issuer URL (the OIDC provider base URL used for discovery)
+        issuer_url: String,
+        /// OAuth client ID registered with the OIDC provider
+        client_id: String,
+    },
 }
 
 impl IntegrationConfig {
@@ -66,6 +77,7 @@ impl IntegrationConfig {
             IntegrationConfig::GitLab { .. } => IntegrationType::GitLab,
             IntegrationConfig::AzureDevOps { .. } => IntegrationType::AzureDevOps,
             IntegrationConfig::Bitbucket { .. } => IntegrationType::Bitbucket,
+            IntegrationConfig::Oidc { .. } => IntegrationType::Oidc,
         }
     }
 }
@@ -411,5 +423,89 @@ mod tests {
         assert_eq!(IntegrationType::GitLab.to_string(), "gitlab");
         assert_eq!(IntegrationType::AzureDevOps.to_string(), "azure-devops");
         assert_eq!(IntegrationType::Bitbucket.to_string(), "bitbucket");
+        assert_eq!(IntegrationType::Oidc.to_string(), "oidc");
+    }
+
+    #[test]
+    fn test_integration_type_oidc_serde_round_trip() {
+        // IntegrationType serializes to the "oidc" tag and back
+        let json = serde_json::to_string(&IntegrationType::Oidc).unwrap();
+        assert_eq!(json, "\"oidc\"");
+        let parsed: IntegrationType = serde_json::from_str("\"oidc\"").unwrap();
+        assert_eq!(parsed, IntegrationType::Oidc);
+    }
+
+    #[test]
+    fn test_integration_config_oidc_serde_round_trip() {
+        // IntegrationConfig::Oidc serializes with the camelCase fields the TS layer sends
+        let config = IntegrationConfig::Oidc {
+            issuer_url: "https://auth.example.com".to_string(),
+            client_id: "oidc-client-123".to_string(),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"type\":\"oidc\""), "json was: {}", json);
+        assert!(
+            json.contains("\"issuerUrl\":\"https://auth.example.com\""),
+            "json was: {}",
+            json
+        );
+        assert!(
+            json.contains("\"clientId\":\"oidc-client-123\""),
+            "json was: {}",
+            json
+        );
+
+        // Round-trips back from the camelCase JSON the frontend produces
+        let parsed: IntegrationConfig = serde_json::from_str(
+            r#"{"type":"oidc","issuerUrl":"https://auth.example.com","clientId":"oidc-client-123"}"#,
+        )
+        .unwrap();
+        match parsed {
+            IntegrationConfig::Oidc {
+                issuer_url,
+                client_id,
+            } => {
+                assert_eq!(issuer_url, "https://auth.example.com");
+                assert_eq!(client_id, "oidc-client-123");
+            }
+            other => panic!("expected Oidc, got {:?}", other),
+        }
+        assert_eq!(parsed_type(&config), IntegrationType::Oidc);
+    }
+
+    fn parsed_type(config: &IntegrationConfig) -> IntegrationType {
+        config.integration_type()
+    }
+
+    #[test]
+    fn test_oidc_account_serde_round_trip() {
+        // A full LegacyIntegrationAccount with an Oidc config survives a round-trip
+        let account = LegacyIntegrationAccount {
+            id: "id-1".to_string(),
+            name: "Work OIDC".to_string(),
+            integration_type: IntegrationType::Oidc,
+            url_patterns: vec![],
+            is_default: false,
+            color: None,
+            config: IntegrationConfig::Oidc {
+                issuer_url: "https://auth.example.com".to_string(),
+                client_id: "client-xyz".to_string(),
+            },
+            cached_user: None,
+        };
+
+        let json = serde_json::to_string(&account).unwrap();
+        assert!(
+            json.contains("\"integrationType\":\"oidc\""),
+            "json: {}",
+            json
+        );
+        assert!(json.contains("\"issuerUrl\""), "json: {}", json);
+        assert!(json.contains("\"clientId\""), "json: {}", json);
+
+        let parsed: LegacyIntegrationAccount = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.integration_type, IntegrationType::Oidc);
+        assert_eq!(parsed.config.integration_type(), IntegrationType::Oidc);
     }
 }

@@ -1,4 +1,4 @@
-import type { Page, Locator } from '@playwright/test';
+import { type Page, type Locator } from '@playwright/test';
 
 /**
  * Base dialog helper class
@@ -625,13 +625,24 @@ export class BitbucketDialogPage extends BaseDialog {
     return this.authMethodToggle.isVisible();
   }
 
+  /** Wait for the dialog's async open-load to settle (it sets `data-ready` when
+   * loadInitialData finishes), so interactions don't race its re-renders. */
+  async waitUntilReady(): Promise<void> {
+    await this.authMethodToggle
+      .page()
+      .locator('lv-bitbucket-dialog[data-ready]')
+      .waitFor({ state: 'attached', timeout: 10000 });
+  }
+
   async selectOAuthMethod(): Promise<void> {
+    await this.waitUntilReady();
     if (await this.authMethodToggle.isVisible()) {
       await this.oauthButton.click();
     }
   }
 
   async selectAppPasswordMethod(): Promise<void> {
+    await this.waitUntilReady();
     if (await this.authMethodToggle.isVisible()) {
       await this.appPasswordButton.click();
     }

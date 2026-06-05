@@ -33,9 +33,10 @@ if (typeof import.meta === 'object' && !import.meta.env) {
   };
 }
 
-// Mock Tauri API
+// Mock Tauri API. `mockInvoke` is reassignable so individual tests can install
+// their own handler; the closure below reads the live binding.
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
-const mockInvoke: MockInvoke = () => Promise.resolve(null);
+let mockInvoke: MockInvoke = () => Promise.resolve(null);
 
 // Set up mock before tests run
 (globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } }).__TAURI_INTERNALS__ = {
@@ -54,6 +55,7 @@ import {
   cancelOAuth,
   isPendingOAuth,
   getPendingProvider,
+  exchangeCode,
 } from '../oauth.service.ts';
 import type { OAuthFlowState } from '../../types/oauth.types.ts';
 
@@ -136,6 +138,76 @@ describe('oauth.service - State Listener Notifications', () => {
     unsub();
     // Any state change after unsubscribe should not trigger the callback
     expect(notified).to.be.false;
+  });
+});
+
+describe('oauth.service - exchangeCode server-side PKCE contract (M5/M11)', () => {
+  const defaultMock = mockInvoke;
+  afterEach(() => {
+    mockInvoke = defaultMock;
+  });
+
+  it('sends only {state, code, clientId, clientSecret} and never the verifier/redirectUri/provider', async () => {
+    let captured: Record<string, unknown> | undefined;
+    mockInvoke = (command, args) => {
+      if (command === 'oauth_exchange_code') {
+        captured = args as Record<string, unknown>;
+        return Promise.resolve({ accessToken: 'tok_abc', tokenType: 'bearer' });
+      }
+      return Promise.resolve(null);
+    };
+
+    const tokens = await exchangeCode('github', 'state-xyz', 'code-123');
+
+    expect(tokens.accessToken).to.equal('tok_abc');
+    expect(captured).to.exist;
+    // The new contract: state keys the server-side flow; code is exchanged.
+    expect(captured!.state).to.equal('state-xyz');
+    expect(captured!.code).to.equal('code-123');
+    expect(captured).to.have.property('clientId');
+    // The PKCE verifier and redirect/provider/instance are now server-derived
+    // and must NOT be sent from the frontend.
+    expect(captured).to.not.have.property('verifier');
+    expect(captured).to.not.have.property('redirectUri');
+    expect(captured).to.not.have.property('provider');
+    expect(captured).to.not.have.property('instanceUrl');
+  });
+
+  it('surfaces a server-rejected state as a thrown error', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_exchange_code') {
+        return Promise.resolve(null); // invokeCommand treats null data as failure
+      }
+      return Promise.resolve(null);
+    };
+    let threw = false;
+    try {
+      await exchangeCode('github', 'bad-state', 'code-123');
+    } catch {
+      threw = true;
+    }
+    expect(threw).to.be.true;
+  });
+
+  it('preserves the OIDC id token in the normalized result (camelCase and snake_case)', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_exchange_code') {
+        return Promise.resolve({ accessToken: 'a', idToken: 'h.p.s', tokenType: 'bearer' });
+      }
+      return Promise.resolve(null);
+    };
+    const camel = await exchangeCode('oidc', 'state', 'code');
+    expect(camel.idToken, 'idToken preserved (OIDC identity source)').to.equal('h.p.s');
+
+    mockInvoke = (command) => {
+      if (command === 'oauth_exchange_code') {
+        // eslint-disable-next-line camelcase
+        return Promise.resolve({ access_token: 'a', id_token: 'h2.p2.s2' });
+      }
+      return Promise.resolve(null);
+    };
+    const snake = await exchangeCode('oidc', 'state', 'code');
+    expect(snake.idToken).to.equal('h2.p2.s2');
   });
 });
 

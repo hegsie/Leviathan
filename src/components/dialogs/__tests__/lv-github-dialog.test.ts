@@ -22,6 +22,7 @@ const keyringStore = new Map<string, string>();
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import * as oauthService from '../../../services/oauth.service.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-github-dialog.ts';
@@ -189,6 +190,7 @@ const mockAccount = createTestAccount({
 
 let connectionResponse: unknown = mockDisconnectedStatus;
 let detectedRepoResponse: unknown = mockDetectedRepo;
+let appConfigResponse: unknown = { connected: true, user: null, scopes: ['app-installation'] };
 
 function setupMockInvoke(): void {
   keyringStore.clear();
@@ -226,6 +228,11 @@ function setupMockInvoke(): void {
     if (command === 'save_global_account') return params;
     if (command === 'update_global_account_cached_user') return null;
 
+    // GitHub App (M1)
+    if (command === 'configure_github_app') return appConfigResponse;
+    if (command === 'get_github_app_config') return null;
+    if (command === 'remove_github_app_config') return null;
+
     // GitHub-specific commands
     if (command === 'check_github_connection') return connectionResponse;
     if (command === 'check_github_connection_with_token') return connectionResponse;
@@ -251,8 +258,53 @@ describe('lv-github-dialog', () => {
     invokeHistory.length = 0;
     connectionResponse = mockDisconnectedStatus;
     detectedRepoResponse = mockDetectedRepo;
+    appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
     unifiedProfileStore.getState().reset();
     setupMockInvoke();
+  });
+
+  describe('GitHub App connection (M1)', () => {
+    it('reflects the backend-reported status and persists the account when connected', async () => {
+      appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      dialog.appId = '12345';
+      dialog.appPrivateKey = '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----';
+      dialog.appInstallationId = '67890';
+
+      await dialog.handleConnectGitHubApp();
+
+      expect(dialog.connectionStatus?.connected).to.be.true;
+      // The account was persisted (real connection, not a hardcoded UI flag).
+      expect(invokeHistory.some((c) => c.command === 'configure_github_app')).to.be.true;
+      expect(invokeHistory.some((c) => c.command === 'save_global_account')).to.be.true;
+    });
+
+    it('does NOT persist a fake account when the backend reports not connected', async () => {
+      appConfigResponse = { connected: false, user: null, scopes: [] };
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      dialog.appId = '12345';
+      dialog.appPrivateKey = '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----';
+      dialog.appInstallationId = '67890';
+
+      await dialog.handleConnectGitHubApp();
+
+      // Must surface an error and NOT flip the UI to connected or save an account.
+      expect(dialog.error).to.be.a('string').and.not.empty;
+      expect(dialog.connectionStatus?.connected ?? false).to.be.false;
+      expect(invokeHistory.some((c) => c.command === 'save_global_account')).to.be.false;
+    });
   });
 
   describe('Rendering & Modal', () => {
@@ -309,6 +361,49 @@ describe('lv-github-dialog', () => {
 
       const selector = el.shadowRoot!.querySelector('lv-account-selector');
       expect(selector).to.not.be.null;
+    });
+
+    // Wave 5b: the Back arrow is driven by the EXPLICIT backButton flag (set by
+    // the host only when opened with a return target), not by global state.
+    it('shows the Back arrow only when opened with a return target (backButton=true)', async () => {
+      const withBack = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true} ?backButton=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(withBack);
+      const backBtn = withBack.shadowRoot!
+        .querySelector('lv-modal')!
+        .shadowRoot!.querySelector('[aria-label="Back"]');
+      expect(backBtn).to.not.be.null;
+    });
+
+    it('shows NO Back arrow when opened standalone (backButton=false)', async () => {
+      const standalone = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(standalone);
+      const modal = standalone.shadowRoot!.querySelector('lv-modal')!;
+      expect(modal.shadowRoot!.querySelector('[aria-label="Back"]')).to.be.null;
+      // Standalone shows the close × instead.
+      expect(modal.shadowRoot!.querySelector('[aria-label="Close"]')).to.not.be.null;
+    });
+
+    // Wave 5b: "Adding to <name>" breadcrumb shows only during the attach flow.
+    it('shows the "Adding to <name>" breadcrumb when attachToProfileName is set', async () => {
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true} .attachToProfileName=${'Work'}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      const crumb = el.shadowRoot!.querySelector('[data-testid="attach-breadcrumb"]');
+      expect(crumb).to.not.be.null;
+      expect(crumb!.textContent).to.include('Work');
+    });
+
+    it('shows no breadcrumb when opened standalone', async () => {
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      expect(el.shadowRoot!.querySelector('[data-testid="attach-breadcrumb"]')).to.be.null;
     });
   });
 
@@ -653,6 +748,60 @@ describe('lv-github-dialog', () => {
     });
   });
 
+  describe('Delete Integration (M10)', () => {
+    async function openConnectedDialog(): Promise<LvGitHubDialog> {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gh-acc-1';
+      await el.updateComplete;
+      return el;
+    }
+
+    it('M10: deletes the account record BEFORE the keyring token (record is source of truth)', async () => {
+      const el = await openConnectedDialog();
+      invokeHistory.length = 0;
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      const deleteAccountIdx = invokeHistory.findIndex((h) => h.command === 'delete_global_account');
+      const deleteTokenIdx = invokeHistory.findIndex((h) => h.command === 'delete_keyring_token');
+      expect(deleteAccountIdx, 'account record deletion happened').to.be.greaterThan(-1);
+      expect(deleteTokenIdx, 'token deletion happened').to.be.greaterThan(-1);
+      expect(deleteAccountIdx).to.be.lessThan(deleteTokenIdx);
+    });
+
+    it('M10: surfaces an error (inline + toast) when account deletion fails', async () => {
+      const el = await openConnectedDialog();
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        if (command === 'delete_global_account') throw new Error('delete record boom');
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.include('delete record boom');
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /delete record boom/.test(t.message))).to.be.true;
+    });
+  });
+
   describe('OAuth completes after dialog closed', () => {
     it('persists the account and surfaces a toast instead of failing silently', async () => {
       connectionResponse = mockConnectedStatus;
@@ -683,6 +832,130 @@ describe('lv-github-dialog', () => {
       // And a success toast was shown since the inline status is invisible when closed.
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'success' && /Connected GitHub/.test(t.message))).to.be.true;
+    });
+  });
+
+  describe('OAuth failure is surfaced (not a silent dead-end)', () => {
+    it('shows an error and a toast when the OAuth flow errors', async () => {
+      // A failing authorize-url makes startOAuth emit OAuth state 'error'. The
+      // spinner only renders for pending/exchanging, so without surfacing the
+      // error the form would silently reset to the sign-in button (dead-end).
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_unified_profiles_config') {
+          return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+        }
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return null;
+      };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await oauthService.startOAuth('github', 'test-client-id');
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error, 'error surfaced').to.be.a(
+        'string'
+      ).and.not.empty;
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error'), 'error toast shown').to.be.true;
+    });
+  });
+
+  describe('Add account guard', () => {
+    it('does not re-select an existing account when a background store emit fires mid-add', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // User clicks "Add account": selection is intentionally cleared so the
+      // next token save creates a NEW account.
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+
+      // A background validation emit fires (e.g. periodic token validation).
+      unifiedProfileStore.getState().setAccountConnectionStatus('gh-acc-1', 'connected');
+      await el.updateComplete;
+
+      // Selection must stay null — re-selecting here would route the new token
+      // onto the existing account on the next save.
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+    });
+  });
+
+  describe('PAT rotation refreshes cachedUser', () => {
+    it('calls update_global_account_cached_user after storing the token on an existing account', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gh-acc-1';
+      (el as unknown as { tokenInput: string }).tokenInput = 'ghp_rotated_pat';
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleSaveToken: () => Promise<void> }).handleSaveToken();
+      await el.updateComplete;
+
+      const storeIdx = invokeHistory.findIndex((h) => h.command === 'store_keyring_token');
+      const cachedUserIdx = invokeHistory.findIndex(
+        (h) => h.command === 'update_global_account_cached_user'
+      );
+      expect(storeIdx, 'token stored').to.be.greaterThan(-1);
+      expect(cachedUserIdx, 'cachedUser refreshed').to.be.greaterThan(-1);
+      const args = invokeHistory[cachedUserIdx].args as Record<string, unknown>;
+      expect(args.accountId).to.equal('gh-acc-1');
+      expect(args.user).to.not.be.null;
+    });
+  });
+
+  describe('OAuth re-auth refreshes cachedUser', () => {
+    it('calls update_global_account_cached_user when OAuth completes for an existing account', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Existing account is selected — OAuth re-auth must refresh its avatar/
+      // username immediately (the GitHub OAuth path used to skip this).
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gh-acc-1';
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: { provider: 'github', tokens: { accessToken: 'ghp_oauth_reauth' } },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      const storeIdx = invokeHistory.findIndex((h) => h.command === 'store_keyring_token');
+      const cachedUserIdx = invokeHistory.findIndex(
+        (h) => h.command === 'update_global_account_cached_user'
+      );
+      expect(storeIdx, 'token stored').to.be.greaterThan(-1);
+      expect(cachedUserIdx, 'cachedUser refreshed on OAuth re-auth').to.be.greaterThan(-1);
+      const args = invokeHistory[cachedUserIdx].args as Record<string, unknown>;
+      expect(args.accountId).to.equal('gh-acc-1');
+      expect(args.user).to.not.be.null;
     });
   });
 });

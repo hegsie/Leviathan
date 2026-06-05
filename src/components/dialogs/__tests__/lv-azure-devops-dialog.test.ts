@@ -21,6 +21,7 @@ const keyringStore = new Map<string, string>();
 
 import { expect, fixture, html } from '@open-wc/testing';
 import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
 import type { IntegrationAccount } from '../../../types/unified-profile.types.ts';
 import '../lv-azure-devops-dialog.ts';
@@ -422,6 +423,147 @@ describe('lv-azure-devops-dialog', () => {
     });
   });
 
+  describe('Create Work Item', () => {
+    it('shows New Work Item button on the Work Items tab', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const newBtn = Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Work Item')
+      );
+      expect(newBtn).to.not.be.undefined;
+    });
+
+    it('renders the create-work-item form (type, title, description)', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Work Item')
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const form = el.shadowRoot!.querySelector('.token-form');
+      expect(form).to.not.be.null;
+      expect(form!.querySelector('select')).to.not.be.null;
+      expect(form!.querySelector('input[type="text"]')).to.not.be.null;
+      expect(form!.querySelector('textarea')).to.not.be.null;
+    });
+
+    it('submits create_azure_devops_work_item with the right args and refreshes', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const createdItem = {
+        id: 999,
+        title: 'New task',
+        workItemType: 'Task',
+        state: 'New',
+        assignedTo: null,
+        createdDate: '2025-02-01T10:00:00Z',
+        url: 'https://dev.azure.com/testorg/test-project/_workitems/edit/999',
+      };
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'create_azure_devops_work_item') return createdItem;
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Work Item')
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector('.token-form input[type="text"]') as HTMLInputElement;
+      titleInput.value = 'New task';
+      titleInput.dispatchEvent(new Event('input'));
+      const textarea = el.shadowRoot!.querySelector('.token-form textarea') as HTMLTextAreaElement;
+      textarea.value = 'Do it';
+      textarea.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim() === 'Create Work Item'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const createCall = invokeHistory.find((c) => c.command === 'create_azure_devops_work_item');
+      expect(createCall, 'create_azure_devops_work_item should be invoked').to.not.be.undefined;
+      const callArgs = createCall!.args as Record<string, unknown>;
+      expect(callArgs.organization).to.equal('testorg');
+      expect(callArgs.project).to.equal('test-project');
+      const input = callArgs.input as Record<string, unknown>;
+      expect(input.title).to.equal('New task');
+      expect(input.workItemType).to.equal('Task');
+      expect(input.description).to.equal('Do it');
+
+      // Refreshes work items list
+      expect(invokeHistory.some((c) => c.command === 'query_ado_work_items')).to.be.true;
+    });
+
+    it('shows an error when create_azure_devops_work_item fails (not silent)', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'create_azure_devops_work_item') throw new Error('Permission denied');
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim().includes('New Work Item')
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector('.token-form input[type="text"]') as HTMLInputElement;
+      titleInput.value = 'Will fail';
+      titleInput.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim() === 'Create Work Item'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const errorBanner = el.shadowRoot!.querySelector('.error');
+      expect(errorBanner).to.not.be.null;
+      expect(errorBanner!.textContent).to.include('Permission denied');
+    });
+  });
+
   describe('Pipelines Tab', () => {
     it('renders pipeline runs with status indicator, name, and branch', async () => {
       connectionResponse = mockConnectedStatus;
@@ -530,6 +672,304 @@ describe('lv-azure-devops-dialog', () => {
       await el.updateComplete;
 
       expect((el as unknown as { error: string | null }).error).to.include('ado detect boom');
+    });
+  });
+
+  describe('Delete', () => {
+    async function openConnectedDialog(): Promise<LvAzureDevOpsDialog> {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'ado-acc-1';
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      await el.updateComplete;
+      return el;
+    }
+
+    it('deletes the account record BEFORE the keyring token (record is source of truth)', async () => {
+      const el = await openConnectedDialog();
+      invokeHistory.length = 0;
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      const deleteAccountIdx = invokeHistory.findIndex((h) => h.command === 'delete_global_account');
+      const deleteTokenIdx = invokeHistory.findIndex((h) => h.command === 'delete_keyring_token');
+      expect(deleteAccountIdx, 'account record deletion happened').to.be.greaterThan(-1);
+      expect(deleteTokenIdx, 'token deletion happened').to.be.greaterThan(-1);
+      expect(deleteAccountIdx).to.be.lessThan(deleteTokenIdx);
+    });
+
+    it('surfaces an error (inline + toast) when account deletion fails', async () => {
+      const el = await openConnectedDialog();
+      uiStore.getState().toasts.length = 0;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        if (command === 'delete_global_account') throw new Error('delete record boom');
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.include('delete record boom');
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /delete record boom/.test(t.message))).to.be.true;
+    });
+  });
+
+  describe('Entra ID OAuth', () => {
+    it('persists a new IntegrationAccount via save_global_account (not just the token)', async () => {
+      connectionResponse = mockConnectedStatus;
+      // Start with no accounts so the OAuth path creates a brand-new one. The
+      // backend persists the saved account, so a stateful store mirrors that:
+      // get_unified_profiles_config must return what save_global_account wrote
+      // (otherwise the dialog's store subscription would drop the new selection).
+      const persistedAccounts: IntegrationAccount[] = [];
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [...persistedAccounts], repositoryAssignments: {} };
+          }
+          // startOAuth must succeed so the deep-link 'oauth-complete' listener is
+          // registered (Azure is deep-link only; no loopback port).
+          if (command === 'oauth_get_authorize_url') {
+            return {
+              authorizeUrl: 'https://login.microsoftonline.com/authorize',
+              state: 'azure-state-persist',
+              loopbackPort: null,
+            };
+          }
+          // Echo back the persisted account (with its generated id) like the backend does.
+          if (command === 'save_global_account') {
+            const account = (args as { account?: IntegrationAccount } | undefined)?.account;
+            if (account) persistedAccounts.push(account);
+            return account ?? null;
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { oauthClientId: string }).oauthClientId = 'client-abc';
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      // Registers the oauth-complete listener.
+      await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: { provider: 'azure', tokens: { accessToken: 'ado_oauth_token' } },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      const saveCall = invokeHistory.find((h) => h.command === 'save_global_account');
+      expect(saveCall, 'save_global_account should be invoked').to.not.be.undefined;
+      const storeCall = invokeHistory.find((h) => h.command === 'store_keyring_token');
+      expect(storeCall, 'token should be stored too').to.not.be.undefined;
+
+      // The account that was persisted carries the verified user as cachedUser.
+      const account = (saveCall!.args as Record<string, unknown>).account as Record<string, unknown>;
+      expect(account).to.not.be.undefined;
+      expect((account.config as Record<string, unknown>).type).to.equal('azure-devops');
+      expect((account.config as Record<string, unknown>).organization).to.equal('testorg');
+      expect(account.cachedUser).to.not.be.null;
+
+      // selectedAccountId now points at the persisted account (not a synthetic id).
+      const selected = (el as unknown as { selectedAccountId: string | null }).selectedAccountId;
+      expect(selected).to.equal((account as { id: string }).id);
+    });
+
+    it('Cancel during a pending sign-in tears down the flow so a late deep link does NOT connect', async () => {
+      connectionResponse = mockConnectedStatus;
+      // Start with no accounts: if the (cancelled) flow ever completed it would
+      // create a brand-new account via save_global_account.
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          // Make startOAuth register a real pending flow so cancelOAuth('azure')
+          // has something to tear down (deep-link provider, no loopback port).
+          if (command === 'oauth_get_authorize_url') {
+            return {
+              authorizeUrl: 'https://login.microsoftonline.com/authorize',
+              state: 'azure-state-xyz',
+              loopbackPort: null,
+            };
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { oauthClientId: string }).oauthClientId = 'client-abc';
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
+      await el.updateComplete;
+
+      // Start the flow — registers the oauth-complete listener and sets pending.
+      await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.true;
+      expect(
+        (el as unknown as { _pendingOAuthHandler?: EventListener })._pendingOAuthHandler,
+        'a listener is registered after start'
+      ).to.not.be.undefined;
+
+      // User clicks Cancel.
+      invokeHistory.length = 0;
+      await (el as unknown as { handleCancelEntraOAuth: () => void }).handleCancelEntraOAuth();
+      await el.updateComplete;
+
+      // The underlying flow is cancelled and the listener is removed.
+      expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.false;
+      expect(
+        (el as unknown as { _pendingOAuthHandler?: EventListener })._pendingOAuthHandler,
+        'listener removed after cancel'
+      ).to.be.undefined;
+
+      // A late deep-link completion fires AFTER cancel. With the listener gone,
+      // it must NOT verify/persist/connect anything.
+      window.dispatchEvent(
+        new CustomEvent('oauth-complete', {
+          detail: { provider: 'azure', tokens: { accessToken: 'ado_oauth_token' } },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      expect(
+        invokeHistory.some((h) => h.command === 'check_ado_connection_with_token'),
+        'no connection verification after cancel'
+      ).to.be.false;
+      expect(
+        invokeHistory.some((h) => h.command === 'save_global_account'),
+        'no account persisted after cancel'
+      ).to.be.false;
+      expect(
+        invokeHistory.some((h) => h.command === 'store_keyring_token'),
+        'no token stored after cancel'
+      ).to.be.false;
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.be.null;
+    });
+
+    it('surfaces an error and stops the spinner when Entra OAuth fails (not a stuck dead-end)', async () => {
+      // A failing authorize-url makes startOAuth emit OAuth state 'error' (it does
+      // NOT fire the success-only oauth-complete event). Without the OAuth state
+      // subscription this left the dialog spinning forever.
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          if (command === 'oauth_get_authorize_url') {
+            throw new Error('Entra discovery failed');
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { oauthClientId: string }).oauthClientId = 'client-abc';
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
+      await el.updateComplete;
+
+      await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      await el.updateComplete;
+
+      // The failure must clear the spinner, surface an error, and tear down the
+      // pending listener — not hang on "Waiting for Microsoft sign-in...".
+      expect((el as unknown as { oauthPending: boolean }).oauthPending, 'spinner cleared on failure').to.be.false;
+      expect((el as unknown as { error: string | null }).error, 'error surfaced').to.be.a('string').and.not.empty;
+      expect(
+        (el as unknown as { _pendingOAuthHandler?: EventListener })._pendingOAuthHandler,
+        'pending listener torn down'
+      ).to.be.undefined;
+    });
+  });
+
+  describe('Add account guard', () => {
+    it('does not re-select an existing account when a background store emit fires mid-add', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+
+      unifiedProfileStore.getState().setAccountConnectionStatus('ado-acc-1', 'connected');
+      await el.updateComplete;
+
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.equal(null);
+    });
+  });
+
+  describe('PAT rotation refreshes cachedUser', () => {
+    it('calls update_global_account_cached_user after storing the token on an existing account', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'ado-acc-1';
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { tokenInput: string }).tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleSaveToken: () => Promise<void> }).handleSaveToken();
+      await el.updateComplete;
+
+      const storeIdx = invokeHistory.findIndex((h) => h.command === 'store_keyring_token');
+      const cachedUserIdx = invokeHistory.findIndex(
+        (h) => h.command === 'update_global_account_cached_user'
+      );
+      expect(storeIdx, 'token stored').to.be.greaterThan(-1);
+      expect(cachedUserIdx, 'cachedUser refreshed').to.be.greaterThan(-1);
+      const cachedUserCall = invokeHistory[cachedUserIdx];
+      const args = cachedUserCall.args as Record<string, unknown>;
+      expect(args.accountId).to.equal('ado-acc-1');
+      expect(args.user).to.not.be.null;
     });
   });
 });

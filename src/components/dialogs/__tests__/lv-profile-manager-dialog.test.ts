@@ -1043,14 +1043,16 @@ describe('lv-profile-manager-dialog', () => {
       expect(title!.textContent).to.include('Attach Account');
     });
 
-    it('preserves the picker and refreshes when demoted then revealed', async () => {
+    it('preserves the picker visually while demoted behind a stacked dialog', async () => {
       const el = await renderDialog();
       (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
       await el.updateComplete;
       getAddButton(el).click();
       await el.updateComplete;
 
-      // Demote behind a stacked dialog (e.g. an integration dialog)
+      // Demote behind a stacked dialog (e.g. an integration dialog). `demoted` is
+      // now PURELY a visual signal (render-behind) — it no longer triggers any
+      // reveal/attach side effects; that is driven explicitly by revealAfterConnect.
       el.demoted = true;
       await el.updateComplete;
       expect(el.hasAttribute('demoted')).to.be.true;
@@ -1058,14 +1060,76 @@ describe('lv-profile-manager-dialog', () => {
       expect(el.shadowRoot!.querySelector('.dialog-overlay')).to.not.be.null;
       expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Attach Account');
 
-      // Revealing again refreshes the account list so a newly connected account shows
-      clearHistory();
       el.demoted = false;
       await el.updateComplete;
-      await new Promise((r) => setTimeout(r, 20));
       expect(el.hasAttribute('demoted')).to.be.false;
-      expect(findCommands('get_unified_profiles_config').length).to.be.greaterThan(0);
+      // No accidental reveal/attach from un-demoting alone.
       expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Attach Account');
+    });
+
+    it('refreshes the account list when the host calls revealAfterConnect', async () => {
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      // The host explicitly reveals us after a non-attaching connect (e.g. opened
+      // from the standalone Accounts view). The list is reloaded; nothing attaches.
+      clearHistory();
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: false,
+      });
+      await el.updateComplete;
+      expect(findCommands('get_unified_profiles_config').length).to.be.greaterThan(0);
+    });
+
+    // Every provider's connect button must carry the same explicit attach
+    // context — not just GitHub. The button label is INTEGRATION_TYPE_NAMES[type]
+    // and the event is `open-${type}`.
+    const providerCases: Array<{ type: string; label: string }> = [
+      { type: 'github', label: 'GitHub' },
+      { type: 'gitlab', label: 'GitLab' },
+      { type: 'bitbucket', label: 'Bitbucket' },
+      { type: 'azure-devops', label: 'Azure DevOps' },
+      { type: 'oidc', label: 'Enterprise SSO (OIDC)' },
+    ];
+
+    providerCases.forEach(({ type, label }) => {
+      it(`emits an explicit return-target context with attach intent from the picker (${type})`, async () => {
+        const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
+        useConfig([profile], []);
+        const el = await renderDialog();
+        (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+        await el.updateComplete;
+        getAddButton(el).click();
+        await el.updateComplete;
+
+        let detail: unknown = null;
+        el.addEventListener(`open-${type}`, (e) => {
+          detail = (e as CustomEvent).detail;
+        });
+        const providerBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+          (b) => b.textContent?.trim() === label
+        ) as HTMLButtonElement;
+        expect(providerBtn, `connect button for ${type}`).to.not.be.undefined;
+        providerBtn.click();
+        await el.updateComplete;
+
+        // Connecting from the attach picker carries an explicit context: return to
+        // the profile manager, target this profile, WITH attach intent.
+        expect(detail).to.deep.equal({
+          returnTo: 'profile-manager',
+          integrationType: type,
+          profileId: 'p1',
+          profileName: 'P1',
+          attach: true,
+        });
+      });
     });
 
     it('auto-attaches a newly connected account on return from the integration dialog', async () => {
@@ -1078,23 +1142,30 @@ describe('lv-profile-manager-dialog', () => {
       getAddButton(el).click();
       await el.updateComplete;
 
-      // Click the "Connect a new account → GitHub" button
+      // Click the "Connect a new account → GitHub" button — snapshots the
+      // pre-connect accounts and dispatches the explicit open context.
       const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
         (b) => b.textContent?.trim() === 'GitHub'
       ) as HTMLButtonElement;
       githubBtn.click();
       await el.updateComplete;
 
-      // Integration dialog opens (demoted); user connects an account
+      // Integration dialog opens (demoted); user connects a new account
       el.demoted = true;
       await el.updateComplete;
       const newGh = makeAccount({ id: 'gh-new', name: 'New GH', integrationType: 'github' });
       useConfig([profile], [newGh]);
 
-      // Closing the integration dialog reveals the picker and auto-attaches
+      // The host EXPLICITLY reveals and attaches via the captured context (the
+      // attach intent + target profile travel with the context — no guessing).
       el.demoted = false;
-      await el.updateComplete;
-      await new Promise((r) => setTimeout(r, 30));
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: true,
+      });
       await el.updateComplete;
 
       // Back on the edit form with the connected account attached
@@ -1102,6 +1173,50 @@ describe('lv-profile-manager-dialog', () => {
       const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
       expect(accountsSection!.querySelectorAll('.account-item').length).to.equal(1);
       expect(accountsSection!.textContent).to.include('New GH');
+    });
+
+    it('shows a "Save Profile to keep <account>" hint after attach-on-connect and emphasizes Save', async () => {
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
+      useConfig([profile], []);
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      getAddButton(el).click();
+      await el.updateComplete;
+
+      const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'GitHub'
+      ) as HTMLButtonElement;
+      githubBtn.click();
+      await el.updateComplete;
+
+      el.demoted = true;
+      await el.updateComplete;
+      const newGh = makeAccount({ id: 'gh-new', name: 'New GH', integrationType: 'github' });
+      useConfig([profile], [newGh]);
+
+      el.demoted = false;
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: true,
+      });
+      await el.updateComplete;
+
+      // Inline hint near Save reduces the surprise of a Cancel dropping the attach.
+      const hint = el.shadowRoot!.querySelector('[data-testid="attach-keep-hint"]');
+      expect(hint, 'attach-keep hint visible').to.not.be.null;
+      expect(hint!.textContent).to.include('New GH');
+
+      // Save button is visually emphasized while the hint is showing.
+      const saveBtn = Array.from(el.shadowRoot!.querySelectorAll('.dialog-footer .btn-primary')).find(
+        (b) => b.textContent?.trim().includes('Save Profile')
+      ) as HTMLButtonElement;
+      expect(saveBtn).to.not.be.undefined;
+      expect(saveBtn.classList.contains('btn-emphasized')).to.be.true;
     });
 
     it('auto-attaches the existing default account when re-connecting a provider', async () => {
@@ -1129,10 +1244,15 @@ describe('lv-profile-manager-dialog', () => {
 
       el.demoted = true;
       await el.updateComplete;
-      // No new account (same id re-authed)
+      // No new account (same id re-authed). Host reveals + attaches explicitly.
       el.demoted = false;
-      await el.updateComplete;
-      await new Promise((r) => setTimeout(r, 30));
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: true,
+      });
       await el.updateComplete;
 
       // The existing default account is attached
@@ -1614,7 +1734,7 @@ describe('lv-profile-manager-dialog', () => {
       await el.updateComplete;
 
       const title = el.shadowRoot!.querySelector('.dialog-title');
-      expect(title!.textContent).to.include('Manage Accounts');
+      expect(title!.textContent!.trim()).to.equal('Accounts');
       // Lists every global account (both test accounts) with edit/delete actions
       const rows = el.shadowRoot!.querySelectorAll('.accounts-list .account-item');
       expect(rows.length).to.equal(2);
@@ -1637,7 +1757,42 @@ describe('lv-profile-manager-dialog', () => {
       await el.updateComplete;
 
       const title = el.shadowRoot!.querySelector('.dialog-title');
-      expect(title!.textContent).to.include('Manage Accounts');
+      expect(title!.textContent!.trim()).to.equal('Accounts');
+    });
+
+    it('showAccountsView() lands an already-open (demoted) manager on the accounts view', async () => {
+      // Reproduces "Manage Accounts" clicked from a provider dialog that was
+      // itself launched FROM the manager: the manager is already open & demoted,
+      // so `open` never transitions false->true and willUpdate's view logic
+      // doesn't run. The host drives the accounts view explicitly instead.
+      const el = await renderDialog();
+      // Manager is sitting on a non-list sub-view (e.g. it was on select-account
+      // / edit when the provider dialog was launched on top of it).
+      const elState = el as unknown as { viewMode: string; demoted: boolean };
+      elState.viewMode = 'edit-account';
+      elState.demoted = true;
+      await el.updateComplete;
+
+      // Host calls the public method (what app-shell.handleManageAccounts does).
+      (el as unknown as { showAccountsView: () => void }).showAccountsView();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(elState.viewMode).to.equal('accounts');
+      const title = el.shadowRoot!.querySelector('.dialog-title');
+      expect(title!.textContent!.trim()).to.equal('Accounts');
+
+      // Accounts is the entry view for this session, so Back must CLOSE the
+      // manager (returning to the provider dialog that opened it) — not fall
+      // through to the profile list. This requires showAccountsView() to have
+      // set initialView itself, not rely on the host's property binding.
+      let closeFired = false;
+      el.addEventListener('close', () => { closeFired = true; });
+      const backBtn = el.shadowRoot!.querySelector('.back-btn') as HTMLButtonElement;
+      backBtn.click();
+      await el.updateComplete;
+      expect(closeFired, 'Back from showAccountsView-driven Accounts closes the manager').to.be.true;
     });
 
     it('offers connect-new buttons for every provider in the accounts view', async () => {
@@ -1652,6 +1807,23 @@ describe('lv-profile-manager-dialog', () => {
       expect(labels).to.include('GitLab');
       expect(labels).to.include('Bitbucket');
       expect(labels).to.include('Azure DevOps');
+      expect(labels).to.include('Enterprise SSO (OIDC)');
+    });
+
+    it('dispatches open-oidc when the Enterprise SSO connect button is clicked', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      let opened = false;
+      el.addEventListener('open-oidc', () => { opened = true; });
+      const oidcBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.form-section .btn.btn-sm')
+      ).find((b) => b.textContent?.trim() === 'Enterprise SSO (OIDC)') as HTMLButtonElement;
+      oidcBtn.click();
+      await el.updateComplete;
+
+      expect(opened).to.be.true;
     });
 
     it('dispatches open-<provider> when a connect button is clicked from the accounts view', async () => {
@@ -1686,7 +1858,7 @@ describe('lv-profile-manager-dialog', () => {
       backBtn.click();
       await el.updateComplete;
       // Returns to the accounts view, not the profile list
-      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Manage Accounts');
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent!.trim()).to.equal('Accounts');
     });
 
     it('deletes a global account from the accounts view and stays in the view', async () => {
@@ -1704,7 +1876,63 @@ describe('lv-profile-manager-dialog', () => {
 
       expect(findCommands('delete_global_account').length).to.equal(1);
       // Still on the accounts view after deleting
-      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Manage Accounts');
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent!.trim()).to.equal('Accounts');
+    });
+
+    it('also deletes the keyring token (record first, then token) when deleting a global account', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      clearHistory();
+      const deleteBtn = el.shadowRoot!.querySelector(
+        '.account-actions .action-btn.delete'
+      ) as HTMLButtonElement;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const deleteRecordIdx = invokeHistory.findIndex((h) => h.command === 'delete_global_account');
+      const deleteTokenIdx = invokeHistory.findIndex((h) => h.command === 'delete_keyring_token');
+      expect(deleteRecordIdx, 'account record deletion happened').to.be.greaterThan(-1);
+      expect(deleteTokenIdx, 'keyring token deletion happened').to.be.greaterThan(-1);
+      // Record is the source of truth — it must be deleted before the token.
+      expect(deleteRecordIdx).to.be.lessThan(deleteTokenIdx);
+      // The token deletion targets the deleted account's keyring key.
+      const tokenCall = invokeHistory[deleteTokenIdx];
+      expect((tokenCall.args as Record<string, string>).key).to.include('account-1');
+    });
+
+    it('still reports success when keyring token deletion fails (record already removed)', async () => {
+      const el = await renderDialog();
+      getAccountsButton(el).click();
+      await el.updateComplete;
+
+      // The account record deletes fine, but the keyring is unavailable. The
+      // record is the source of truth and is already gone, so the user must NOT
+      // see "Failed to delete account" — token cleanup is best-effort.
+      const prev = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'delete_keyring_token') {
+          throw new Error('keyring unavailable');
+        }
+        return prev(command, args);
+      };
+
+      clearHistory();
+      uiStore.getState().toasts.length = 0;
+      const deleteBtn = el.shadowRoot!.querySelector(
+        '.account-actions .action-btn.delete'
+      ) as HTMLButtonElement;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      // Record deletion still happened.
+      expect(findCommands('delete_global_account').length).to.equal(1);
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success' && /deleted/i.test(t.message)), 'success toast').to.be.true;
+      expect(toasts.some((t) => t.type === 'error'), 'no failure toast').to.be.false;
     });
   });
 
@@ -1788,15 +2016,41 @@ describe('lv-profile-manager-dialog', () => {
     });
   });
 
-  // ── Pending connect intent cleanup ─────────────────────────────────────────
-  describe('connect intent cleanup', () => {
-    it('clears a pending connect intent when the dialog is closed', async () => {
+  // ── Explicit reveal-after-connect (no intent-guessing) ─────────────────────
+  describe('reveal after connect (explicit context)', () => {
+    it('does NOT auto-attach when revealed with no attach intent (standalone)', async () => {
+      const profile = makeProfile({ id: 'p1', name: 'P1', defaultAccounts: {} });
+      useConfig([profile], []);
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+      (Array.from(
+        el.shadowRoot!.querySelector('.accounts-section')!.querySelectorAll('button')
+      ).find((b) => b.textContent?.trim() === 'Add') as HTMLButtonElement).click();
+      await el.updateComplete;
+
+      // A brand-new account materialises while the (standalone) connect dialog is up.
+      const newGh = makeAccount({ id: 'gh-new', name: 'New GH', integrationType: 'github' });
+      useConfig([profile], [newGh]);
+
+      // Reveal with attach:false — the manager must NOT attach the account; it
+      // stays on the picker view and only refreshes the list.
+      await el.revealAfterConnect({
+        returnTo: 'profile-manager',
+        integrationType: 'github',
+        profileId: 'p1',
+        profileName: 'P1',
+        attach: false,
+      });
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Attach Account');
+    });
+
+    it('clears the pre-connect snapshot when the dialog is closed', async () => {
       const el = await renderDialog();
       (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
       await el.updateComplete;
 
-      // Open the picker and click a "Connect a new account" provider button,
-      // which records a pending connect intent.
       const addBtn = Array.from(
         el.shadowRoot!.querySelector('.accounts-section')!.querySelectorAll('button')
       ).find((b) => b.textContent?.trim() === 'Add') as HTMLButtonElement;
@@ -1809,13 +2063,385 @@ describe('lv-profile-manager-dialog', () => {
       githubConnect.click();
       await el.updateComplete;
 
-      const withPrivate = el as unknown as { pendingConnectType: string | null };
-      expect(withPrivate.pendingConnectType).to.equal('github');
-
-      // Closing the dialog must drop the pending intent so it can't auto-attach later.
+      const withPrivate = el as unknown as { accountIdsBeforeConnect: Set<string> };
+      // Closing the dialog drops the snapshot so it can't influence a later reveal.
       (el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement).click();
       await el.updateComplete;
-      expect(withPrivate.pendingConnectType).to.equal(null);
+      expect(withPrivate.accountIdsBeforeConnect.size).to.equal(0);
+    });
+  });
+
+  // D4: restore-backup must dispatch `migration-needed` BEFORE closing so the
+  // parent can swap dialogs without a close-then-reopen flicker.
+  describe('restore backup ordering (D4)', () => {
+    it('dispatches migration-needed before the dialog closes', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: testProfiles, accounts: testAccounts, repositoryAssignments: {} };
+          case 'get_migration_backup_info':
+            return { hasBackup: true, backupDate: '2026-01-01', profilesCount: 2, accountsCount: 2 };
+          case 'restore_migration_backup':
+            return { hasBackup: true, backupDate: '2026-01-01', profilesCount: 2, accountsCount: 2 };
+          case 'needs_unified_profiles_migration':
+            return true;
+          case 'plugin:dialog|message':
+            return 'Ok';
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+
+      const order: string[] = [];
+      el.addEventListener('migration-needed', () => order.push('migration-needed'));
+      el.addEventListener('close', () => order.push('close'));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRestoreBackup();
+      await el.updateComplete;
+
+      expect(order).to.deep.equal(['migration-needed', 'close']);
+      // Dialog actually closed.
+      expect((el as unknown as { open: boolean }).open).to.be.false;
+    });
+  });
+
+  // D11: bulk-assign partial failure must keep the FAILED repos selected (so the
+  // user can retry) and name them in the feedback.
+  describe('bulk assign partial failure (D11)', () => {
+    it('keeps failed repos selected and names them in the toast', async () => {
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: testProfiles, accounts: testAccounts, repositoryAssignments: {} };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'assign_unified_profile_to_repository': {
+            const path = (args as { path?: string } | undefined)?.path;
+            // Fail only for the "personal" repo.
+            if (path === '/repo/personal') throw new Error('locked');
+            return null;
+          }
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      uiStore.getState().toasts.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingProfile = makeProfile({ id: 'profile-1' });
+      shell.selectedReposForAssignment = new Set(['/repo/work', '/repo/personal']);
+      shell.viewMode = 'assign-repos';
+
+      await shell.handleBulkAssign();
+      await el.updateComplete;
+
+      // Failed repo stays selected; succeeded repo is dropped.
+      const remaining = shell.selectedReposForAssignment as Set<string>;
+      expect(Array.from(remaining)).to.deep.equal(['/repo/personal']);
+
+      // Feedback names the failed repo, not just a count.
+      const toasts = uiStore.getState().toasts;
+      const warn = toasts.find((t) => t.type === 'warning');
+      expect(warn, 'a warning toast was shown').to.not.be.undefined;
+      expect(warn!.message).to.match(/failed 1/);
+      expect(warn!.message).to.match(/personal/);
+    });
+
+    it('clears the selection and leaves the view on full success', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: testProfiles, accounts: testAccounts, repositoryAssignments: {} };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'assign_unified_profile_to_repository':
+            return null;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      uiStore.getState().toasts.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingProfile = makeProfile({ id: 'profile-1' });
+      shell.selectedReposForAssignment = new Set(['/repo/work', '/repo/personal']);
+      shell.viewMode = 'assign-repos';
+
+      await shell.handleBulkAssign();
+      await el.updateComplete;
+
+      expect((shell.selectedReposForAssignment as Set<string>).size).to.equal(0);
+      expect(shell.viewMode).to.equal('edit');
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success')).to.be.true;
+    });
+  });
+
+  // ── Account config fields in the edit-account view (Wave 1, item 1) ────────
+  describe('account config fields', () => {
+    it('renders the GitLab instance URL field when editing a GitLab account', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = { ...gitlabAccount };
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('.form-group label')).map(
+        (l) => l.textContent?.trim()
+      );
+      expect(labels.some((l) => l?.includes('GitLab Instance URL'))).to.be.true;
+
+      // The field is pre-filled from the account's existing config.
+      const urlInput = el.shadowRoot!.querySelector(
+        'input[type="url"]'
+      ) as HTMLInputElement;
+      expect(urlInput).to.not.be.null;
+      expect(urlInput.value).to.equal('https://gitlab.com');
+    });
+
+    it('persists an edited GitLab instanceUrl on save', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = { ...gitlabAccount };
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const urlInput = el.shadowRoot!.querySelector(
+        'input[type="url"]'
+      ) as HTMLInputElement;
+      urlInput.value = 'https://gitlab.mycompany.com';
+      urlInput.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      clearHistory();
+      await shell.handleSaveAccount();
+      await el.updateComplete;
+
+      const saves = findCommands('save_global_account');
+      expect(saves.length).to.equal(1);
+      const saved = (saves[0].args as { account?: IntegrationAccount }).account!;
+      expect(saved.config).to.deep.include({
+        type: 'gitlab',
+        instanceUrl: 'https://gitlab.mycompany.com',
+      });
+    });
+
+    it('renders the Azure DevOps organization field when editing an Azure account', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = makeAccount({
+        id: 'acc-azure',
+        name: 'Work Azure',
+        integrationType: 'azure-devops',
+        config: { type: 'azure-devops', organization: 'myorg' },
+      });
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('.form-group label')).map(
+        (l) => l.textContent?.trim()
+      );
+      expect(labels.some((l) => l === 'Organization')).to.be.true;
+    });
+  });
+
+  // ── Account URL patterns ─────────────────────────────────────────
+  describe('account URL patterns', () => {
+    it('renders a URL patterns textarea in the account edit form', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = { ...githubAccount };
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('.form-group label')).map((l) =>
+        l.textContent?.trim()
+      );
+      expect(labels.some((l) => l === 'URL Patterns (one per line)')).to.be.true;
+
+      // There should be a textarea in the account form.
+      const textarea = el.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+      expect(textarea).to.not.be.null;
+    });
+
+    it("round-trips an existing account's url patterns into the textarea", async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = makeAccount({
+        id: 'acc-patterns',
+        name: 'Work GitHub',
+        urlPatterns: ['github.com/work-org/*', 'github.com/another-org/*'],
+      });
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+      expect(textarea).to.not.be.null;
+      expect(textarea.value).to.equal('github.com/work-org/*\ngithub.com/another-org/*');
+    });
+
+    it('persists edited url patterns in save_global_account', async () => {
+      const el = await renderDialog();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingAccount = { ...githubAccount, urlPatterns: [] };
+      shell.viewMode = 'edit-account';
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+      textarea.value = 'github.com/work-org/*\n  github.com/team/*  \n';
+      textarea.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      clearHistory();
+      await shell.handleSaveAccount();
+      await el.updateComplete;
+
+      const saves = findCommands('save_global_account');
+      expect(saves.length).to.equal(1);
+      const saved = (saves[0].args as { account?: IntegrationAccount }).account!;
+      // Trimmed and blank-filtered, one pattern per line.
+      expect(saved.urlPatterns).to.deep.equal(['github.com/work-org/*', 'github.com/team/*']);
+    });
+  });
+
+  // ── Delete-confirm copy (Wave 1, item 3) ───────────────────────────────────
+  describe('delete profile confirmation copy', () => {
+    it('explains accounts remain global and does NOT claim they are removed', async () => {
+      let confirmMessage = '';
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return {
+              version: 3,
+              profiles: testProfiles,
+              accounts: testAccounts,
+              repositoryAssignments: {},
+            };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'plugin:dialog|message':
+            confirmMessage = (args as { message?: string } | undefined)?.message ?? '';
+            return 'Ok';
+          case 'delete_unified_profile':
+            return null;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      const deleteBtn = el.shadowRoot!.querySelector(
+        '.profile-item .action-btn.delete'
+      ) as HTMLButtonElement;
+      expect(deleteBtn).to.not.be.null;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(confirmMessage).to.include('repository assignments');
+      expect(confirmMessage).to.include('remain available globally');
+      expect(confirmMessage).to.not.include('remove all associated integration accounts');
+      expect(findCommands('delete_unified_profile').length).to.equal(1);
+    });
+  });
+
+  // ── Single-repo unassign (Wave 1, item 4) ──────────────────────────────────
+  describe('unassign a single repository', () => {
+    it('shows an unassign button per assigned repo and unassigns on click', async () => {
+      let unassignedPath: string | undefined;
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return {
+              version: 3,
+              profiles: testProfiles,
+              accounts: testAccounts,
+              repositoryAssignments: { '/repo/work': 'profile-1' },
+            };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'unassign_unified_profile_from_repository':
+            unassignedPath = (args as { path?: string } | undefined)?.path;
+            return null;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      // Edit the Work profile (it has /repo/work assigned).
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      // The assigned-repositories list shows the one assigned repo with an unassign button.
+      const unassignBtn = el.shadowRoot!.querySelector(
+        '.accounts-section .account-item .action-btn.delete'
+      ) as HTMLButtonElement;
+      expect(unassignBtn, 'an unassign button is rendered for the assigned repo').to.not.be.null;
+      expect(unassignBtn.getAttribute('title')).to.include('Unassign');
+
+      uiStore.getState().toasts.length = 0;
+      clearHistory();
+      unassignBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(findCommands('unassign_unified_profile_from_repository').length).to.equal(1);
+      expect(unassignedPath).to.equal('/repo/work');
+
+      // User-visible feedback on success.
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success')).to.be.true;
+    });
+
+    it('surfaces an error toast when unassign fails', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return {
+              version: 3,
+              profiles: testProfiles,
+              accounts: testAccounts,
+              repositoryAssignments: { '/repo/work': 'profile-1' },
+            };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'unassign_unified_profile_from_repository':
+            throw new Error('locked');
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog();
+      (el.shadowRoot!.querySelectorAll('.profile-item')[0] as HTMLElement).click();
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      const unassignBtn = el.shadowRoot!.querySelector(
+        '.accounts-section .account-item .action-btn.delete'
+      ) as HTMLButtonElement;
+      unassignBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error')).to.be.true;
     });
   });
 });

@@ -46,6 +46,8 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
 
 import {
   getAccountCredentialKey,
+  storeAccountOAuthToken,
+  deleteAccountToken,
 } from '../credential.service.ts';
 
 describe('credential.service - Multi-Account Key Format and Isolation', () => {
@@ -173,6 +175,23 @@ describe('credential.service - Multi-Account Key Format and Isolation', () => {
 
       expect(credentialStorage.get(githubKey)).to.equal('github-token');
       expect(credentialStorage.get(gitlabKey)).to.equal('gitlab-token');
+    });
+
+    it('deleteAccountToken removes BOTH the main key and the _oauth companion blob', async () => {
+      // Simulate an OAuth provider account: storeAccountOAuthToken writes the
+      // main credential AND a `${key}_oauth` blob holding the refresh token.
+      await storeAccountOAuthToken('oidc', 'acc-oauth-1', 'access-tok', 'refresh-tok', 3600);
+
+      const mainKey = getAccountCredentialKey('oidc', 'acc-oauth-1');
+      const oauthKey = `${mainKey}_oauth`;
+      expect(credentialStorage.has(mainKey)).to.be.true;
+      expect(credentialStorage.has(oauthKey)).to.be.true;
+
+      await deleteAccountToken('oidc', 'acc-oauth-1');
+
+      // Both must be gone — otherwise the refresh-token blob orphans in the keyring.
+      expect(credentialStorage.has(mainKey)).to.be.false;
+      expect(credentialStorage.has(oauthKey)).to.be.false;
     });
 
     it('all four integration types produce isolated keys for same account ID', () => {

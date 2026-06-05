@@ -20,10 +20,34 @@ const invokeHistory: Array<{ command: string; args: unknown }> = [];
   },
 };
 
-import { saveGlobalAccount, loadUnifiedProfiles } from '../unified-profile.service.ts';
+import {
+  saveGlobalAccount,
+  saveUnifiedProfile,
+  loadUnifiedProfiles,
+  updateGlobalAccountCachedUser,
+} from '../unified-profile.service.ts';
 import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
-import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
-import { createEmptyIntegrationAccount, generateId } from '../../types/unified-profile.types.ts';
+import type { IntegrationAccount, UnifiedProfile } from '../../types/unified-profile.types.ts';
+import {
+  createEmptyIntegrationAccount,
+  generateId,
+  PROFILE_COLORS,
+} from '../../types/unified-profile.types.ts';
+
+// Helper: create a full UnifiedProfile with the given id
+function makeTestProfile(id: string, overrides: Partial<UnifiedProfile> = {}): UnifiedProfile {
+  return {
+    id,
+    name: overrides.name ?? `Profile ${id}`,
+    gitName: overrides.gitName ?? 'Test User',
+    gitEmail: overrides.gitEmail ?? 'test@example.com',
+    signingKey: overrides.signingKey ?? null,
+    urlPatterns: overrides.urlPatterns ?? [],
+    isDefault: overrides.isDefault ?? false,
+    color: overrides.color ?? PROFILE_COLORS[0],
+    defaultAccounts: overrides.defaultAccounts ?? {},
+  };
+}
 
 // Helper: create a full IntegrationAccount with the given id
 function makeTestAccount(
@@ -193,6 +217,92 @@ describe('unified-profile.service - saveGlobalAccount', () => {
     const storeAccounts = unifiedProfileStore.getState().accounts;
     expect(storeAccounts).to.have.lengthOf(1);
   });
+
+  it('clears isDefault on other same-type accounts when saving a new default', async () => {
+    // Two existing GitHub accounts: A is currently default.
+    const accA = makeTestAccount('gh-a', { name: 'A', integrationType: 'github', isDefault: true });
+    const accB = makeTestAccount('gh-b', { name: 'B', integrationType: 'github', isDefault: false });
+    // A GitLab account that is also default — must NOT be touched (different type).
+    const accGl = makeTestAccount('gl-a', {
+      name: 'GL',
+      integrationType: 'gitlab',
+      isDefault: true,
+      config: { type: 'gitlab', instanceUrl: 'https://gitlab.com' },
+    });
+    unifiedProfileStore.getState().setAccounts([accA, accB, accGl]);
+
+    // Save B as the new default.
+    await saveGlobalAccount({ ...accB, isDefault: true });
+
+    const accounts = unifiedProfileStore.getState().accounts;
+    const a = accounts.find((x) => x.id === 'gh-a')!;
+    const b = accounts.find((x) => x.id === 'gh-b')!;
+    const gl = accounts.find((x) => x.id === 'gl-a')!;
+
+    // The backend clears other defaults; the store mirror should too — immediately.
+    expect(b.isDefault).to.be.true;
+    expect(a.isDefault).to.be.false;
+    // Different integration type is untouched.
+    expect(gl.isDefault).to.be.true;
+  });
+
+  it('does not clear other defaults when the saved account is not default', async () => {
+    const accA = makeTestAccount('gh-a', { name: 'A', integrationType: 'github', isDefault: true });
+    const accB = makeTestAccount('gh-b', { name: 'B', integrationType: 'github', isDefault: false });
+    unifiedProfileStore.getState().setAccounts([accA, accB]);
+
+    await saveGlobalAccount({ ...accB, name: 'B renamed' });
+
+    const accounts = unifiedProfileStore.getState().accounts;
+    expect(accounts.find((x) => x.id === 'gh-a')!.isDefault).to.be.true;
+  });
+});
+
+describe('unified-profile.service - saveUnifiedProfile default-badge sync', () => {
+  beforeEach(() => {
+    unifiedProfileStore.getState().reset();
+    invokeHistory.length = 0;
+    mockInvoke = async (command: string, args?: unknown) => {
+      const params = args as Record<string, unknown> | undefined;
+      if (command === 'save_unified_profile') {
+        return params?.profile;
+      }
+      return null;
+    };
+  });
+
+  it('clears isDefault on other profiles when saving a new default profile', async () => {
+    const pA = makeTestProfile('p-a', { name: 'A', isDefault: true });
+    const pB = makeTestProfile('p-b', { name: 'B', isDefault: false });
+    unifiedProfileStore.getState().setConfig({
+      version: 3,
+      profiles: [pA, pB],
+      accounts: [],
+      repositoryAssignments: {},
+    });
+
+    await saveUnifiedProfile({ ...pB, isDefault: true });
+
+    const profiles = unifiedProfileStore.getState().profiles;
+    expect(profiles.find((p) => p.id === 'p-b')!.isDefault).to.be.true;
+    expect(profiles.find((p) => p.id === 'p-a')!.isDefault).to.be.false;
+  });
+
+  it('does not clear other defaults when the saved profile is not default', async () => {
+    const pA = makeTestProfile('p-a', { name: 'A', isDefault: true });
+    const pB = makeTestProfile('p-b', { name: 'B', isDefault: false });
+    unifiedProfileStore.getState().setConfig({
+      version: 3,
+      profiles: [pA, pB],
+      accounts: [],
+      repositoryAssignments: {},
+    });
+
+    await saveUnifiedProfile({ ...pB, name: 'B renamed' });
+
+    const profiles = unifiedProfileStore.getState().profiles;
+    expect(profiles.find((p) => p.id === 'p-a')!.isDefault).to.be.true;
+  });
 });
 
 describe('unified-profile.service - loadUnifiedProfiles', () => {
@@ -238,5 +348,79 @@ describe('unified-profile.service - loadUnifiedProfiles', () => {
     const state = unifiedProfileStore.getState();
     expect(state.error).to.not.be.null;
     expect(state.isLoading).to.be.false;
+  });
+});
+
+// V7: updateGlobalAccountCachedUser must update only the single account in the
+// store and must NOT trigger a full config reload (which would be O(N) when
+// looping over every account in refreshAll/validateAll).
+describe('unified-profile.service - updateGlobalAccountCachedUser (V7)', () => {
+  beforeEach(() => {
+    unifiedProfileStore.getState().reset();
+    invokeHistory.length = 0;
+
+    mockInvoke = async (command: string, args?: unknown) => {
+      const params = args as Record<string, unknown> | undefined;
+      if (command === 'update_global_account_cached_user') {
+        return null;
+      }
+      if (command === 'get_unified_profiles_config') {
+        return {
+          version: 3,
+          profiles: [],
+          accounts: unifiedProfileStore.getState().accounts,
+          repositoryAssignments: {},
+        };
+      }
+      void params;
+      return null;
+    };
+  });
+
+  it('updates only the single account in the store without a full config reload', async () => {
+    const account = makeTestAccount('acc-cached', { name: 'Cached Acc' });
+    unifiedProfileStore.getState().setAccounts([account]);
+
+    const cachedUser = {
+      username: 'octocat',
+      displayName: 'The Octocat',
+      avatarUrl: 'https://example.com/a.png',
+      email: 'octo@example.com',
+    };
+
+    await updateGlobalAccountCachedUser('acc-cached', cachedUser);
+
+    // The single account's cachedUser is updated in the store.
+    const stored = unifiedProfileStore.getState().accounts.find((a) => a.id === 'acc-cached');
+    expect(stored?.cachedUser?.username).to.equal('octocat');
+
+    // It must NOT have re-fetched the entire config.
+    const configReloads = invokeHistory.filter(
+      (h) => h.command === 'get_unified_profiles_config'
+    );
+    expect(configReloads).to.have.lengthOf(0);
+
+    // The backend cached-user command was invoked exactly once.
+    const updateCalls = invokeHistory.filter(
+      (h) => h.command === 'update_global_account_cached_user'
+    );
+    expect(updateCalls).to.have.lengthOf(1);
+  });
+
+  it('is a no-op on the store when the account is not present', async () => {
+    unifiedProfileStore.getState().setAccounts([]);
+
+    await updateGlobalAccountCachedUser('missing', {
+      username: 'x',
+      displayName: null,
+      avatarUrl: null,
+      email: null,
+    });
+
+    expect(unifiedProfileStore.getState().accounts).to.have.lengthOf(0);
+    const configReloads = invokeHistory.filter(
+      (h) => h.command === 'get_unified_profiles_config'
+    );
+    expect(configReloads).to.have.lengthOf(0);
   });
 });

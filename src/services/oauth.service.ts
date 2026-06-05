@@ -10,9 +10,11 @@ import { onOpenUrl, getCurrent } from '@tauri-apps/plugin-deep-link';
 import { open } from '@tauri-apps/plugin-shell';
 import { listen } from '@tauri-apps/api/event';
 import { invokeCommand } from './tauri-api.ts';
+import { loggers } from '../utils/logger.ts';
 import type {
   OAuthProvider,
   StartOAuthResponse,
+  CallbackResponse,
   OAuthTokenResponse,
   PendingOAuth,
   OAuthFlowState,
@@ -55,6 +57,8 @@ const OAUTH_CLIENT_SECRETS: Partial<Record<OAuthProvider, string>> = {
   bitbucket: 'HAqqaX24y8QSexmnvfbQkEPShUjskmUm',
 };
 
+const log = loggers.oauth;
+
 /** Currently pending OAuth authentications, keyed by provider to prevent race conditions */
 const pendingAuthByProvider = new Map<OAuthProvider, PendingOAuth>();
 
@@ -89,7 +93,7 @@ export async function initOAuthListener(): Promise<void> {
     }
   } catch (e) {
     // Deep link plugin may not be available in dev mode
-    console.debug('Deep link getCurrent not available:', e);
+    log.debug('Deep link getCurrent not available:', e);
   }
 
   // Listen for deep links while app is running
@@ -100,7 +104,7 @@ export async function initOAuthListener(): Promise<void> {
       }
     });
   } catch (e) {
-    console.debug('Deep link onOpenUrl not available:', e);
+    log.debug('Deep link onOpenUrl not available:', e);
   }
 
   // Also listen for deep links via single-instance plugin (Windows/Linux)
@@ -109,7 +113,7 @@ export async function initOAuthListener(): Promise<void> {
       handleDeepLink(event.payload);
     });
   } catch (e) {
-    console.debug('Deep link event listener not available:', e);
+    log.debug('Deep link event listener not available:', e);
   }
 }
 
@@ -117,18 +121,19 @@ export async function initOAuthListener(): Promise<void> {
  * Handle incoming deep link
  */
 async function handleDeepLink(url: string): Promise<void> {
-  console.log('Received deep link:', url);
-
   if (!url.startsWith('leviathan://oauth/')) {
+    // Don't log the raw URL — it may carry sensitive query params (code/state).
+    log.debug('Ignoring non-OAuth deep link');
     return;
   }
+  log.debug('Received OAuth deep link');
 
   // Extract provider from URL path: leviathan://oauth/{provider}/callback?...
   const providerSegment = url.slice('leviathan://oauth/'.length).split('/')[0] as OAuthProvider;
   const pending = pendingAuthByProvider.get(providerSegment);
 
   if (!pending) {
-    console.warn('Received OAuth callback but no pending auth for provider:', providerSegment);
+    log.warn('Received OAuth callback but no pending auth for provider:', providerSegment);
     return;
   }
 
@@ -171,20 +176,14 @@ async function handleDeepLink(url: string): Promise<void> {
       return;
     }
 
-    // Exchange code for tokens
+    // Exchange code for tokens. The server holds the PKCE verifier and the
+    // redirect/instance details, keyed by `state` — we only pass state + code.
     notifyStateChange({
       status: 'exchanging',
       provider: pending.provider,
     });
 
-    const redirectUri = `leviathan://oauth/${pending.provider}/callback`;
-    const tokens = await exchangeCode(
-      pending.provider,
-      code,
-      pending.verifier,
-      redirectUri,
-      pending.instanceUrl
-    );
+    const tokens = await exchangeCode(pending.provider, state, code);
 
     notifyStateChange({
       status: 'success',
@@ -204,7 +203,7 @@ async function handleDeepLink(url: string): Promise<void> {
 
     pendingAuthByProvider.delete(pending.provider);
   } catch (e) {
-    console.error('OAuth callback error:', e);
+    log.error('OAuth callback error:', e);
     notifyStateChange({
       status: 'error',
       error: e instanceof Error ? e.message : 'Unknown error',
@@ -236,7 +235,6 @@ export async function startOAuth(
     const response = cmdResult.data;
 
     pendingAuthByProvider.set(provider, {
-      verifier: response.verifier,
       provider,
       state: response.state,
       instanceUrl,
@@ -250,7 +248,7 @@ export async function startOAuth(
     // For providers using loopback server, poll for the callback
     if (response.loopbackPort) {
       pollLoopbackCallback(provider, response.loopbackPort).catch((e) => {
-        console.error(`OAuth polling error for ${provider}:`, e);
+        log.error(`OAuth polling error for ${provider}:`, e);
         pendingAuthByProvider.delete(provider);
         notifyStateChange({
           status: 'error',
@@ -260,7 +258,7 @@ export async function startOAuth(
       });
     }
   } catch (e) {
-    console.error('Failed to start OAuth:', e);
+    log.error('Failed to start OAuth:', e);
     notifyStateChange({
       status: 'error',
       error: e instanceof Error ? e.message : 'Failed to start OAuth',
@@ -279,16 +277,15 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
   }
 
   try {
-    // Wait for the callback on the loopback server
-    const codeResult = await invokeCommand<string>('oauth_wait_for_callback', {
+    // Wait for the callback on the loopback server. The backend validates the
+    // provider-echoed `state` against the pending flow before returning (M11).
+    const callbackResult = await invokeCommand<CallbackResponse>('oauth_wait_for_callback', {
       port,
     });
-    if (!codeResult.success || !codeResult.data) {
-      throw new Error(codeResult.error?.message ?? 'Failed to receive OAuth callback');
+    if (!callbackResult.success || !callbackResult.data) {
+      throw new Error(callbackResult.error?.message ?? 'Failed to receive OAuth callback');
     }
-    const code = codeResult.data;
-
-    console.log(`[OAuth ${provider}] Received callback code:`, code?.substring(0, 10) + '...');
+    const { code, state } = callbackResult.data;
 
     // Re-check in case user cancelled while waiting for callback
     const current = pendingAuthByProvider.get(provider);
@@ -296,20 +293,26 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
       return; // User cancelled or timeout
     }
 
+    // Guard against stale/overlapping flows: the callback's state must match the
+    // flow we started for this provider. The backend validates state too, but
+    // checking here avoids exchanging the wrong flow when callbacks interleave.
+    if (state !== current.state) {
+      pendingAuthByProvider.delete(provider);
+      notifyStateChange({
+        status: 'error',
+        error: 'OAuth state mismatch — ignoring a stale or unexpected callback',
+        provider,
+      });
+      return;
+    }
+
     notifyStateChange({
       status: 'exchanging',
       provider,
     });
 
-    const redirectUri = `http://127.0.0.1:${port}/callback`;
-    console.log(`[OAuth ${provider}] Exchanging code for tokens...`);
-    const tokens = await exchangeCode(provider, code, current.verifier, redirectUri, current.instanceUrl);
-    console.log(`[OAuth ${provider}] Token exchange result:`, {
-      hasAccessToken: !!tokens?.accessToken,
-      accessTokenLength: tokens?.accessToken?.length,
-      hasRefreshToken: !!tokens?.refreshToken,
-      tokenType: tokens?.tokenType,
-    });
+    // Server derives verifier/redirect/instance from the stored flow keyed by state.
+    const tokens = await exchangeCode(provider, state, code);
 
     notifyStateChange({
       status: 'success',
@@ -328,7 +331,7 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
 
     pendingAuthByProvider.delete(provider);
   } catch (e) {
-    console.error(`${provider} OAuth error:`, e);
+    log.error(`${provider} OAuth error:`, e);
     notifyStateChange({
       status: 'error',
       error: e instanceof Error ? e.message : `${provider} OAuth failed`,
@@ -339,36 +342,33 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
 }
 
 /**
- * Exchange authorization code for tokens
+ * Exchange authorization code for tokens.
+ *
+ * The PKCE verifier, redirect URI, provider and instance URL are all held
+ * server-side in the pending flow keyed by `state` (M5/M11), so the frontend
+ * only supplies `state`, `code`, and the embedded client credentials. The
+ * `provider` argument is used solely to look up those client credentials.
  */
 export async function exchangeCode(
   provider: OAuthProvider,
-  code: string,
-  verifier: string,
-  redirectUri: string,
-  instanceUrl?: string
+  state: string,
+  code: string
 ): Promise<OAuthTokenResponse> {
   // Get client ID and secret from config
   const clientId = getClientId(provider);
   const clientSecret = getClientSecret(provider);
 
-  console.log('[OAuth] exchangeCode params:', { provider, redirectUri, hasClientId: !!clientId, hasClientSecret: !!clientSecret });
-
   const cmdResult = await invokeCommand<OAuthTokenResponse>('oauth_exchange_code', {
-    provider,
+    state,
     code,
-    verifier,
-    redirectUri,
     clientId,
     clientSecret,
-    instanceUrl,
   });
   if (!cmdResult.success || !cmdResult.data) {
     throw new Error(cmdResult.error?.message ?? 'Failed to exchange OAuth code');
   }
 
   const result = cmdResult.data;
-  console.log('[OAuth] exchangeCode result keys:', result ? Object.keys(result) : 'null');
 
   // Handle both camelCase and snake_case field names (Rust serde serialization edge case)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -379,10 +379,10 @@ export async function exchangeCode(
     expiresIn: rawResult.expiresIn || rawResult.expires_in,
     tokenType: rawResult.tokenType || rawResult.token_type,
     scope: rawResult.scope,
+    // Preserve the OIDC ID token — it's the only source of user identity for
+    // Enterprise SSO accounts (decoded in the OIDC dialog for the cached user).
+    idToken: rawResult.idToken || rawResult.id_token,
   };
-
-  console.log('[OAuth] exchangeCode normalized: has accessToken=%s, has refreshToken=%s',
-    !!normalizedResult.accessToken, !!normalizedResult.refreshToken);
 
   return normalizedResult;
 }

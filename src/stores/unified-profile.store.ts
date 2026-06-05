@@ -117,9 +117,11 @@ export const unifiedProfileStore = createStore<UnifiedProfileState>()((set) => (
         return { error: null };
       }
       const profiles = [...state.profiles, profile];
-      const config = state.config
-        ? { ...state.config, profiles }
-        : { version: 3, profiles, accounts: state.accounts, repositoryAssignments: {} };
+      // V9: Consistent with sibling mutators (updateProfile, removeProfile,
+      // addAccount, etc.) — leave config null when there is no config yet rather
+      // than fabricating one. When bootstrapping is genuinely needed elsewhere,
+      // use the UNIFIED_PROFILES_CONFIG_VERSION constant, never a literal.
+      const config = state.config ? { ...state.config, profiles } : null;
       return { profiles, config, error: null };
     }),
 
@@ -280,18 +282,23 @@ export function getAccountsByType(integrationType: IntegrationType): Integration
 }
 
 /**
- * Get the default global account for a type
+ * V5: Store selector (scope: "select" — reads from the live store state).
+ * Get the default global account for a type.
+ * Renamed from getDefaultGlobalAccount to disambiguate from the pure helper.
  */
-export function getDefaultGlobalAccount(integrationType: IntegrationType): IntegrationAccount | undefined {
+export function selectDefaultGlobalAccount(integrationType: IntegrationType): IntegrationAccount | undefined {
   const accounts = getAccountsByType(integrationType);
   return accounts.find((a) => a.isDefault) || accounts[0];
 }
 
 /**
- * Get the profile's preferred account for a specific type
- * Falls back to global default if profile has no preference
+ * V5: Store selector (scope: "select" — reads from the live store state).
+ * Get the profile's preferred account for a specific type.
+ * Fallback semantics (must match pure helper resolveProfilePreferredAccount):
+ * profile defaultAccounts map first, then global default.
+ * Renamed from getProfilePreferredAccount to disambiguate from the pure helper.
  */
-export function getProfilePreferredAccount(
+export function selectProfilePreferredAccount(
   profileId: string,
   integrationType: IntegrationType
 ): IntegrationAccount | undefined {
@@ -307,7 +314,7 @@ export function getProfilePreferredAccount(
   }
 
   // Fall back to global default
-  return getDefaultGlobalAccount(integrationType);
+  return selectDefaultGlobalAccount(integrationType);
 }
 
 /**
@@ -318,8 +325,8 @@ export function getActiveProfilePreferredAccount(
   integrationType: IntegrationType
 ): IntegrationAccount | undefined {
   const { activeProfile } = unifiedProfileStore.getState();
-  if (!activeProfile) return getDefaultGlobalAccount(integrationType);
-  return getProfilePreferredAccount(activeProfile.id, integrationType);
+  if (!activeProfile) return selectDefaultGlobalAccount(integrationType);
+  return selectProfilePreferredAccount(activeProfile.id, integrationType);
 }
 
 /**

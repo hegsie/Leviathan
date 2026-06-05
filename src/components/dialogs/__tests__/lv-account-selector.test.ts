@@ -329,6 +329,98 @@ describe('lv-account-selector', () => {
     expect((eventDetail as { integrationType: string }).integrationType).to.equal('github');
   });
 
+  // D7: clicking add/manage must give immediate inline feedback (not be silent).
+  it('shows a busy "Opening…" label and disables actions after clicking Add Account', async () => {
+    const el = await fixture<LvAccountSelector>(html`
+      <lv-account-selector
+        integrationType="github"
+        .selectedAccountId=${'acc-1'}
+      ></lv-account-selector>
+    `);
+    await el.updateComplete;
+
+    const selectorBtn = el.shadowRoot!.querySelector('.selector-btn') as HTMLButtonElement;
+    selectorBtn.click();
+    await el.updateComplete;
+
+    const actionButtons = el.shadowRoot!.querySelectorAll('.dropdown-action');
+    const addButton = Array.from(actionButtons).find((btn) =>
+      btn.textContent?.includes('Add Account')
+    ) as HTMLButtonElement;
+    addButton.click();
+    await el.updateComplete;
+
+    // Inline busy feedback is visible (dropdown stays open).
+    const addAfter = Array.from(el.shadowRoot!.querySelectorAll('.dropdown-action')).find((b) =>
+      b.textContent?.includes('Opening')
+    );
+    expect(addAfter, 'busy label shown').to.not.be.undefined;
+    // Both actions are disabled while pending.
+    el.shadowRoot!.querySelectorAll('.dropdown-action').forEach((b) => {
+      expect((b as HTMLButtonElement).disabled).to.be.true;
+    });
+  });
+
+  it('shows a busy "Opening…" label after clicking Manage Accounts', async () => {
+    const el = await fixture<LvAccountSelector>(html`
+      <lv-account-selector
+        integrationType="github"
+        .selectedAccountId=${'acc-1'}
+      ></lv-account-selector>
+    `);
+    await el.updateComplete;
+
+    const selectorBtn = el.shadowRoot!.querySelector('.selector-btn') as HTMLButtonElement;
+    selectorBtn.click();
+    await el.updateComplete;
+
+    const actionButtons = el.shadowRoot!.querySelectorAll('.dropdown-action');
+    const manageButton = Array.from(actionButtons).find((btn) =>
+      btn.textContent?.includes('Manage Accounts')
+    ) as HTMLButtonElement;
+    manageButton.click();
+    await el.updateComplete;
+
+    const manageAfter = Array.from(el.shadowRoot!.querySelectorAll('.dropdown-action')).find((b) =>
+      b.textContent?.includes('Opening')
+    );
+    expect(manageAfter, 'busy label shown').to.not.be.undefined;
+    expect((el as unknown as { pendingAction: string | null }).pendingAction).to.equal('manage');
+  });
+
+  // Review fix: the busy state must not get stuck if the parent never navigates.
+  it('clears the pending busy state when the dropdown is reopened', async () => {
+    const el = await fixture<LvAccountSelector>(html`
+      <lv-account-selector
+        integrationType="github"
+        .selectedAccountId=${'acc-1'}
+      ></lv-account-selector>
+    `);
+    await el.updateComplete;
+
+    const selectorBtn = el.shadowRoot!.querySelector('.selector-btn') as HTMLButtonElement;
+    selectorBtn.click();
+    await el.updateComplete;
+
+    const addButton = Array.from(el.shadowRoot!.querySelectorAll('.dropdown-action')).find((btn) =>
+      btn.textContent?.includes('Add Account')
+    ) as HTMLButtonElement;
+    addButton.click();
+    await el.updateComplete;
+    expect((el as unknown as { pendingAction: string | null }).pendingAction).to.equal('add');
+
+    // Parent didn't navigate; user closes and reopens the selector.
+    selectorBtn.click(); // close
+    await el.updateComplete;
+    selectorBtn.click(); // reopen
+    await el.updateComplete;
+
+    expect((el as unknown as { pendingAction: string | null }).pendingAction).to.be.null;
+    el.shadowRoot!.querySelectorAll('.dropdown-action').forEach((b) => {
+      expect((b as HTMLButtonElement).disabled).to.be.false;
+    });
+  });
+
   it('dropdown closes after selecting an account', async () => {
     const el = await fixture<LvAccountSelector>(html`
       <lv-account-selector

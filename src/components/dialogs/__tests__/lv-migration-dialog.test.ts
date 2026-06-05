@@ -77,6 +77,20 @@ const PREVIEW_NO_UNMATCHED: MigrationPreview = {
   unmatchedAccounts: [],
 };
 
+// A user who only ever configured accounts (never profiles): there are
+// unmatched accounts but zero profiles to assign them to.
+const PREVIEW_NO_PROFILES_WITH_UNMATCHED: MigrationPreview = {
+  profiles: [],
+  unmatchedAccounts: [
+    {
+      accountId: 'acc-9',
+      accountName: 'Solo GitHub',
+      integrationType: 'github',
+      suggestedProfileId: null,
+    },
+  ],
+};
+
 const MIGRATION_SUCCESS = {
   success: true,
   profilesMigrated: 2,
@@ -264,6 +278,44 @@ describe('lv-migration-dialog', () => {
       expect(noAccounts[0].textContent).to.include('No accounts matched');
     });
 
+    it('shows an explanatory note (not empty selects) when there are unmatched accounts but no profiles', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_NO_PROFILES_WITH_UNMATCHED;
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDialog(true);
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      // The unmatched section still lists the account…
+      const unmatchedNames = el.shadowRoot!.querySelectorAll('.unmatched-account-name');
+      expect(unmatchedNames.length).to.equal(1);
+      expect(unmatchedNames[0].textContent).to.include('Solo GitHub');
+
+      // …but there are NO empty profile <select> dropdowns (the dead-end).
+      const selects = el.shadowRoot!.querySelectorAll('.profile-select');
+      expect(selects.length).to.equal(0);
+
+      // Instead an explanatory note about shared global accounts is shown.
+      const description = el.shadowRoot!.querySelector('.unmatched-section .section-description');
+      expect(description).to.not.be.null;
+      expect(description!.textContent).to.include('shared global accounts');
+
+      // And the "Open Profile Manager" affordance is offered in this case.
+      const buttons = Array.from(el.shadowRoot!.querySelectorAll('.unmatched-section button'));
+      const openMgrBtn = buttons.find((b) => b.textContent?.trim() === 'Open Profile Manager');
+      expect(openMgrBtn, 'Open Profile Manager button should exist').to.not.be.undefined;
+    });
+
     it('transitions from preview to migrating when Start Migration is clicked', async () => {
       let resolveExecution: ((value: unknown) => void) | null = null;
       mockInvoke = async (command: string) => {
@@ -343,6 +395,90 @@ describe('lv-migration-dialog', () => {
       expect(statValues.length).to.equal(2);
       expect(statValues[0].textContent).to.equal('2'); // profilesMigrated
       expect(statValues[1].textContent).to.equal('3'); // accountsMigrated
+    });
+  });
+
+  // ======================================================================
+  // Complete view: failure / partial-success path (real success boolean)
+  // ======================================================================
+
+  describe('Complete view with errors', () => {
+    const MIGRATION_FAILURE = {
+      success: false,
+      profilesMigrated: 1,
+      accountsMigrated: 2,
+      unmatchedAccounts: [],
+      errors: ['Account "Side Project GitHub" could not be migrated', 'Profile "Old" was skipped'],
+    };
+
+    beforeEach(() => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'preview_unified_profiles_migration':
+            return PREVIEW_WITH_PROFILES;
+          case 'execute_unified_profiles_migration':
+            return MIGRATION_FAILURE;
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          case 'plugin:notification|is_permission_granted':
+            return false;
+          default:
+            return null;
+        }
+      };
+    });
+
+    it('renders a warning icon instead of the success icon on failure', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      expect(el.shadowRoot!.querySelector('.warning-icon')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.success-icon')).to.be.null;
+      const title = el.shadowRoot!.querySelector('.intro-title');
+      expect(title!.textContent).to.include('Completed With Issues');
+    });
+
+    it('renders the count of skipped items and the error list', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      const desc = el.shadowRoot!.querySelector('.intro-description');
+      expect(desc!.textContent).to.include('2 items');
+
+      const errorItems = el.shadowRoot!.querySelectorAll('.error-item');
+      expect(errorItems.length).to.equal(2);
+      expect(errorItems[0].textContent).to.include('Side Project GitHub');
+      expect(errorItems[1].textContent).to.include('was skipped');
+    });
+
+    it('shows a "Review in Profile Manager" action that dispatches open-profile-manager', async () => {
+      const el = await renderDialog(true);
+
+      clickButton(el, 'Continue');
+      await waitForUpdate(el, 100);
+
+      clickButton(el, 'Start Migration');
+      await waitForUpdate(el, 200);
+
+      let opened = false;
+      el.addEventListener('open-profile-manager', () => {
+        opened = true;
+      });
+
+      clickButton(el, 'Review in Profile Manager');
+      await waitForUpdate(el, 50);
+
+      expect(opened).to.be.true;
     });
   });
 
@@ -860,6 +996,26 @@ describe('lv-migration-dialog', () => {
         (resolveExecution as (value: unknown) => void)(MIGRATION_SUCCESS);
         await waitForUpdate(el, 100);
       }
+    });
+  });
+
+  // D6: opening the profile manager from the migration dialog must also close
+  // the migration dialog so it isn't left stacked behind.
+  describe('Open Profile Manager (D6)', () => {
+    it('dispatches open-profile-manager and then closes the migration dialog', async () => {
+      const el = await renderDialog(true);
+      await waitForUpdate(el);
+
+      const order: string[] = [];
+      el.addEventListener('open-profile-manager', () => order.push('open-profile-manager'));
+      el.addEventListener('close', () => order.push('close'));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleOpenProfileManager();
+      await el.updateComplete;
+
+      expect(order).to.deep.equal(['open-profile-manager', 'close']);
+      expect((el as unknown as { open: boolean }).open).to.be.false;
     });
   });
 });

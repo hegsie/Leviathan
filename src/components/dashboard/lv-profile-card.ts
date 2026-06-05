@@ -163,6 +163,12 @@ export class LvProfileCard extends LitElement {
         height: 12px;
       }
 
+      /* Fallback (no rule matched) is even softer — italic to read as an
+         explanation rather than an assignment rule. */
+      .assignment-source.fallback {
+        font-style: italic;
+      }
+
       /* Empty state */
       .empty-state {
         display: flex;
@@ -331,7 +337,11 @@ export class LvProfileCard extends LitElement {
                 <span>${this.getAssignmentSourceLabel()}</span>
               </div>
             `
-          : nothing}
+          : html`
+              <div class="assignment-source fallback">
+                <span>Active — no rule matched (first available)</span>
+              </div>
+            `}
       </div>
     `;
   }

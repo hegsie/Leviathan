@@ -904,7 +904,7 @@ async function getRepoToken(
 ): Promise<string | undefined> {
   try {
     // --- Multi-account system (preferred) ---
-    const { getDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
+    const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
     const { AccountCredentials } = await import("./credential.service.ts");
 
     // GitHub
@@ -914,7 +914,7 @@ async function getRepoToken(
       ghRepoResult.data &&
       (!remoteName || ghRepoResult.data.remoteName === remoteName)
     ) {
-      const account = getDefaultGlobalAccount("github");
+      const account = selectDefaultGlobalAccount("github");
       if (account) {
         const token = await AccountCredentials.getToken("github", account.id);
         if (token) return token;
@@ -933,7 +933,7 @@ async function getRepoToken(
       adoRepoResult.data &&
       (!remoteName || adoRepoResult.data.remoteName === remoteName)
     ) {
-      const account = getDefaultGlobalAccount("azure-devops");
+      const account = selectDefaultGlobalAccount("azure-devops");
       if (account) {
         const token = await AccountCredentials.getToken("azure-devops", account.id);
         if (token) return token;
@@ -952,7 +952,7 @@ async function getRepoToken(
       gitlabRepoResult.data &&
       (!remoteName || gitlabRepoResult.data.remoteName === remoteName)
     ) {
-      const account = getDefaultGlobalAccount("gitlab");
+      const account = selectDefaultGlobalAccount("gitlab");
       if (account) {
         const token = await AccountCredentials.getToken("gitlab", account.id);
         if (token) return token;
@@ -2765,9 +2765,9 @@ export async function storeGitHubToken(
 export async function getGitHubToken(): Promise<CommandResult<string | null>> {
   try {
     // Try account-based keyring credentials first (new system)
-    const { getDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
+    const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
     const { AccountCredentials } = await import("./credential.service.ts");
-    const account = getDefaultGlobalAccount("github");
+    const account = selectDefaultGlobalAccount("github");
     if (account) {
       const token = await AccountCredentials.getToken("github", account.id);
       if (token) return { success: true, data: token };
@@ -3337,9 +3337,9 @@ export async function storeAdoToken(
 export async function getAdoToken(): Promise<CommandResult<string | null>> {
   try {
     // Try account-based keyring credentials first (new system)
-    const { getDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
+    const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
     const { AccountCredentials } = await import("./credential.service.ts");
-    const account = getDefaultGlobalAccount("azure-devops");
+    const account = selectDefaultGlobalAccount("azure-devops");
     if (account) {
       const token = await AccountCredentials.getToken("azure-devops", account.id);
       if (token) return { success: true, data: token };
@@ -3483,6 +3483,26 @@ export async function queryAdoWorkItems(
   });
 }
 
+export interface CreateAdoWorkItemInput {
+  workItemType?: string;
+  title: string;
+  description?: string;
+}
+
+export async function createAzureDevOpsWorkItem(
+  organization: string,
+  project: string,
+  input: CreateAdoWorkItemInput,
+  token?: string | null,
+): Promise<CommandResult<AdoWorkItem>> {
+  return invokeCommand<AdoWorkItem>("create_azure_devops_work_item", {
+    organization,
+    project,
+    input,
+    token,
+  });
+}
+
 // Azure DevOps Pipelines
 
 export async function listAdoPipelineRuns(
@@ -3594,9 +3614,9 @@ export async function storeGitLabToken(
 export async function getGitLabToken(): Promise<CommandResult<string | null>> {
   try {
     // Try account-based keyring credentials first (new system)
-    const { getDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
+    const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
     const { AccountCredentials } = await import("./credential.service.ts");
-    const account = getDefaultGlobalAccount("gitlab");
+    const account = selectDefaultGlobalAccount("gitlab");
     if (account) {
       const token = await AccountCredentials.getToken("gitlab", account.id);
       if (token) return { success: true, data: token };
@@ -3992,6 +4012,27 @@ export async function listBitbucketIssues(
     workspace,
     repoSlug,
     state,
+    token,
+  });
+}
+
+export interface CreateBitbucketIssueInput {
+  title: string;
+  content?: string;
+  kind?: string;
+  priority?: string;
+}
+
+export async function createBitbucketIssue(
+  workspace: string,
+  repoSlug: string,
+  input: CreateBitbucketIssueInput,
+  token?: string | null,
+): Promise<CommandResult<BitbucketIssue>> {
+  return invokeCommand<BitbucketIssue>("create_bitbucket_issue", {
+    workspace,
+    repoSlug,
+    input,
     token,
   });
 }

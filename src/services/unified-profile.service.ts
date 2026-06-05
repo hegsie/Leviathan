@@ -75,14 +75,28 @@ export async function saveUnifiedProfile(profile: UnifiedProfile): Promise<Unifi
   }
 
   // Update store
-  const existingProfile = unifiedProfileStore.getState().profiles.find((p) => p.id === profile.id);
+  const saved = result.data!;
+  const store = unifiedProfileStore.getState();
+  const existingProfile = store.profiles.find((p) => p.id === saved.id);
   if (existingProfile) {
-    unifiedProfileStore.getState().updateProfile(result.data!);
+    store.updateProfile(saved);
   } else {
-    unifiedProfileStore.getState().addProfile(result.data!);
+    store.addProfile(saved);
   }
 
-  return result.data!;
+  // The Rust backend clears isDefault on all OTHER profiles when one is saved as
+  // default, but the store only knows about the single saved entry. Mirror the
+  // backend so stale "Default" badges disappear immediately without a full
+  // loadUnifiedProfiles() reload.
+  if (saved.isDefault) {
+    for (const p of unifiedProfileStore.getState().profiles) {
+      if (p.id !== saved.id && p.isDefault) {
+        unifiedProfileStore.getState().updateProfile({ ...p, isDefault: false });
+      }
+    }
+  }
+
+  return saved;
 }
 
 /**
@@ -169,14 +183,28 @@ export async function saveGlobalAccount(account: IntegrationAccount): Promise<In
   }
 
   // Update store
-  const existingAccount = unifiedProfileStore.getState().accounts.find((a) => a.id === account.id);
+  const saved = result.data!;
+  const store = unifiedProfileStore.getState();
+  const existingAccount = store.accounts.find((a) => a.id === saved.id);
   if (existingAccount) {
-    unifiedProfileStore.getState().updateAccount(result.data!);
+    store.updateAccount(saved);
   } else {
-    unifiedProfileStore.getState().addAccount(result.data!);
+    store.addAccount(saved);
   }
 
-  return result.data!;
+  // The Rust backend clears isDefault on all OTHER accounts of the same
+  // integration type when one is saved as default. The store only updated the
+  // single saved entry, so mirror the backend here to keep "Default" badges in
+  // sync without a full loadUnifiedProfiles() reload.
+  if (saved.isDefault) {
+    for (const a of unifiedProfileStore.getState().accounts) {
+      if (a.id !== saved.id && a.integrationType === saved.integrationType && a.isDefault) {
+        unifiedProfileStore.getState().updateAccount({ ...a, isDefault: false });
+      }
+    }
+  }
+
+  return saved;
 }
 
 /**
@@ -279,14 +307,24 @@ export async function updateGlobalAccountCachedUser(
     throw new Error(result.error?.message || 'Failed to update cached user');
   }
 
-  // Refresh accounts in store
-  await loadUnifiedProfiles();
+  // V7: Update only the single account in the store instead of reloading the
+  // entire config. Callers like validateAllAccountTokens loop over every
+  // account, so a full reload here was O(N) full config reloads.
+  const { accounts, updateAccount } = unifiedProfileStore.getState();
+  const existing = accounts.find((a) => a.id === accountId);
+  if (existing) {
+    updateAccount({ ...existing, cachedUser: user });
+  }
 }
 
 /**
- * Get the profile's preferred account for an integration type
+ * V5: Tauri wrapper (scope: "fetch" — round-trips to the backend).
+ * Get the profile's preferred account for an integration type.
+ * Renamed from getProfilePreferredAccount to disambiguate from the store
+ * selector (selectProfilePreferredAccount) and pure helper
+ * (resolveProfilePreferredAccount).
  */
-export async function getProfilePreferredAccount(
+export async function fetchProfilePreferredAccount(
   profileId: string,
   integrationType: IntegrationType
 ): Promise<IntegrationAccount | null> {
@@ -296,6 +334,35 @@ export async function getProfilePreferredAccount(
   });
   if (!result.success) {
     throw new Error(result.error?.message || 'Failed to get preferred account');
+  }
+  return result.data!;
+}
+
+/**
+ * V5: Tauri wrapper (scope: "fetch" — round-trips to the backend).
+ * Resolve the preferred account for a repository, accounting for account-level
+ * URL patterns.
+ *
+ * Precedence (most repo-specific first):
+ * 1. An account of `integrationType` whose `urlPatterns` match `repoUrl`.
+ * 2. The profile's explicit default account for the type.
+ * 3. The global default account for the type.
+ */
+export async function fetchRepositoryPreferredAccount(
+  profileId: string,
+  integrationType: IntegrationType,
+  repoUrl: string | null
+): Promise<IntegrationAccount | null> {
+  const result = await invokeCommand<IntegrationAccount | null>(
+    'get_repository_preferred_account',
+    {
+      profileId,
+      integrationType,
+      repoUrl,
+    }
+  );
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Failed to get repository preferred account');
   }
   return result.data!;
 }
@@ -504,12 +571,16 @@ export async function loadUnifiedProfiles(): Promise<void> {
   const store = unifiedProfileStore.getState();
   store.setLoading(true);
 
+  // V6: Always clear loading via finally so a rejected getUnifiedProfilesConfig()
+  // can never leave the store stuck in the loading state. On error we still set
+  // the error message (consistent with sibling loaders).
   try {
     const config = await getUnifiedProfilesConfig();
     store.setConfig(config);
-    store.setLoading(false);
   } catch (error) {
     store.setError(error instanceof Error ? error.message : 'Failed to load profiles');
+  } finally {
+    store.setLoading(false);
   }
 }
 
@@ -675,6 +746,16 @@ export async function refreshAccountCachedUser(
         }
         break;
       }
+      case 'oidc': {
+        // OIDC has no cheap server-side identity ping (the id_token is decoded
+        // once at sign-in and cached). Treat the presence of a stored token as
+        // "connected" and keep the existing cachedUser rather than wiping it.
+        // We already early-returned 'disconnected' above when no token exists,
+        // so reaching here means a token is present.
+        isConnected = true;
+        cachedUser = account.cachedUser;
+        break;
+      }
     }
 
     // Update connection status
@@ -692,25 +773,6 @@ export async function refreshAccountCachedUser(
     store.setAccountConnectionStatus(account.id, 'disconnected');
     return null;
   }
-}
-
-/**
- * Refresh cached user info for all global accounts
- * This runs in the background and doesn't block the UI
- */
-export async function refreshAllAccountsCachedUser(): Promise<void> {
-  const accounts = unifiedProfileStore.getState().accounts;
-
-  log.debug(` Refreshing cached user info for ${accounts.length} accounts`);
-
-  for (const account of accounts) {
-    // Only refresh if cachedUser is missing
-    if (!account.cachedUser) {
-      await refreshAccountCachedUser(account);
-    }
-  }
-
-  log.debug('Finished refreshing cached user info');
 }
 
 // =============================================================================
@@ -739,8 +801,14 @@ export async function validateAllAccountTokens(): Promise<{
   log.debug('Validating all account tokens');
 
   for (const account of accounts) {
-    const cachedUser = await refreshAccountCachedUser(account);
-    if (cachedUser) {
+    await refreshAccountCachedUser(account);
+    // Tally on the authoritative connection status that refreshAccountCachedUser
+    // just wrote, NOT on the returned cachedUser. An OIDC account with a stored
+    // token but no cachedUser is marked 'connected' (there's no cheap identity
+    // ping for OIDC) yet returns null — counting that as invalid was a false
+    // negative. Using the status keeps the tally consistent across all providers.
+    const status = unifiedProfileStore.getState().accountConnectionStatus[account.id]?.status;
+    if (status === 'connected') {
       result.valid++;
     } else {
       result.invalid++;
