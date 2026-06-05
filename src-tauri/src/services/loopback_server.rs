@@ -379,6 +379,12 @@ fn parse_callback_query(query: &str) -> Result<CallbackResult, String> {
         Some(code) => url_decode_component(code),
         None => return Err("No authorization code received".to_string()),
     };
+    // An empty code (e.g. `?code=&state=...`) is unusable — treat it the same as
+    // a missing code so the browser gets a failure page and no token exchange is
+    // attempted with an empty code.
+    if code.is_empty() {
+        return Err("No authorization code received".to_string());
+    }
 
     let state = params
         .get("state")
@@ -477,6 +483,14 @@ mod tests {
     fn test_parse_callback_query_rejects_missing_code() {
         let err = parse_callback_query("state=xyz789").unwrap_err();
         assert!(err.contains("code"), "missing code must be rejected: {err}");
+    }
+
+    #[test]
+    fn test_parse_callback_query_rejects_empty_code() {
+        // `?code=&state=...` is unusable and must be rejected like a missing code,
+        // so the browser gets a failure page and no token exchange is attempted.
+        let err = parse_callback_query("code=&state=xyz789").unwrap_err();
+        assert!(err.contains("code"), "empty code must be rejected: {err}");
     }
 
     #[test]

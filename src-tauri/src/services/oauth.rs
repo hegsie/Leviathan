@@ -257,6 +257,17 @@ pub fn validate_issuer_url(issuer_url: &str) -> Result<(), String> {
         ));
     }
 
+    // An OIDC issuer identifier must be a canonical https origin + path. Reject
+    // userinfo (`user:pass@host`) — it risks embedding secrets in config/logs —
+    // and any query string or fragment, which would corrupt the discovery URL
+    // once `/.well-known/openid-configuration` is appended.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Issuer URL must not contain userinfo (user:pass@…)".to_string());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Issuer URL must not contain a query string or fragment".to_string());
+    }
+
     let host = parsed
         .host_str()
         .ok_or_else(|| "Issuer URL has no host".to_string())?;
@@ -981,6 +992,22 @@ mod tests {
     fn test_validate_issuer_url_rejects_garbage() {
         assert!(validate_issuer_url("not a url").is_err());
         assert!(validate_issuer_url("https://").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_userinfo() {
+        // userinfo risks embedding secrets in config/logs and isn't a valid
+        // OIDC issuer identifier.
+        assert!(validate_issuer_url("https://user:pass@auth.example.com").is_err());
+        assert!(validate_issuer_url("https://user@auth.example.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_query_and_fragment() {
+        // A query/fragment would corrupt the discovery URL once
+        // `/.well-known/openid-configuration` is appended.
+        assert!(validate_issuer_url("https://auth.example.com/?foo=bar").is_err());
+        assert!(validate_issuer_url("https://auth.example.com/#frag").is_err());
     }
 
     #[test]
