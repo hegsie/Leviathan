@@ -31,7 +31,7 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "@vaadin/router": "^2.0.1",
-    "lit": "^3.3.2",
+    "lit": "^3.3.3",
     "shiki": "^4.0.2",
     "zustand": "^5.0.13"
   },
