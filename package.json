@@ -32,7 +32,7 @@
     "@tauri-apps/plugin-updater": "^2.10.1",
     "@vaadin/router": "^2.0.1",
     "lit": "^3.3.3",
-    "shiki": "^4.0.2",
+    "shiki": "^4.2.0",
     "zustand": "^5.0.13"
   },
   "devDependencies": {
