@@ -1219,7 +1219,7 @@ describe('lv-profile-manager-dialog', () => {
       expect(saveBtn.classList.contains('btn-emphasized')).to.be.true;
     });
 
-    it('auto-attaches the existing default account when re-connecting a provider', async () => {
+    it('does NOT auto-attach an existing account when the user backs out of re-connecting', async () => {
       const gh = makeAccount({
         id: 'gh1',
         name: 'Existing GH',
@@ -1235,7 +1235,8 @@ describe('lv-profile-manager-dialog', () => {
       getAddButton(el).click();
       await el.updateComplete;
 
-      // Re-authenticate the existing (disconnected) account via the connect button
+      // Open the connect flow for GitHub, then back out without connecting a
+      // new account (same accounts as before).
       const githubBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
         (b) => b.textContent?.trim() === 'GitHub'
       ) as HTMLButtonElement;
@@ -1244,7 +1245,7 @@ describe('lv-profile-manager-dialog', () => {
 
       el.demoted = true;
       await el.updateComplete;
-      // No new account (same id re-authed). Host reveals + attaches explicitly.
+      // No new account was connected — backing out must be a no-op (no auto-fill).
       el.demoted = false;
       await el.revealAfterConnect({
         returnTo: 'profile-manager',
@@ -1255,10 +1256,11 @@ describe('lv-profile-manager-dialog', () => {
       });
       await el.updateComplete;
 
-      // The existing default account is attached
-      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Edit Profile');
+      // The existing account is NOT auto-attached: we stay on the attach view and
+      // the profile draft gains no account.
+      expect(el.shadowRoot!.querySelector('.dialog-title')!.textContent).to.include('Attach Account');
       const accountsSection = el.shadowRoot!.querySelector('.accounts-section');
-      expect(accountsSection!.textContent).to.include('Existing GH');
+      expect(accountsSection).to.be.null;
     });
 
     it('deletes a global account from the account edit screen', async () => {

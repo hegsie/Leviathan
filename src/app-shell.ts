@@ -1854,10 +1854,11 @@ export class AppShell extends LitElement {
     this.showBitbucket = false;
     this.showAzureDevOps = false;
     this.showOidc = false;
-    // No stacked-overlay context here: the manager is shown ON TOP (not demoted),
-    // so the user clearly lands where they asked. The provider dialog is closed,
-    // but reachable again via the remembered return provider.
-    this.integrationContext = null;
+    // If we're pivoting from a provider dialog that was stacked on top of the manager,
+    // preserve the integrationContext so we can restore the stacked state later.
+    if (!this.showProfileManager) {
+      this.integrationContext = null;
+    }
     this.manageAccountsReturnProvider = from;
     this.profileManagerView = 'accounts';
     // If the manager is ALREADY open (the provider dialog was launched FROM it,
@@ -1866,7 +1867,7 @@ export class AppShell extends LitElement {
     // never runs — it would reveal on its prior view (select-account/edit). Drive
     // the Accounts view explicitly instead so the click isn't a no-op.
     if (this.showProfileManager) {
-      this.profileManagerDialog?.showAccountsView();
+      this.profileManagerDialog?.showAccountsView(true);
     } else {
       this.showProfileManager = true;
     }
@@ -1885,6 +1886,14 @@ export class AppShell extends LitElement {
     this.manageAccountsReturnProvider = null;
     if (returnProvider && closedFromAccounts) {
       this.openIntegrationStandalone(returnProvider);
+    }
+  }
+
+  private handleRestoreProvider(): void {
+    const returnProvider = this.manageAccountsReturnProvider;
+    this.manageAccountsReturnProvider = null;
+    if (returnProvider) {
+      this.setIntegrationDialogOpen(returnProvider, true);
     }
   }
 
@@ -3199,6 +3208,7 @@ export class AppShell extends LitElement {
         @open-azure-devops=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('azure-devops', e)}
         @open-oidc=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('oidc', e)}
         @migration-needed=${() => { this.showMigrationDialog = true; }}
+        @request-restore-provider=${this.handleRestoreProvider}
       ></lv-profile-manager-dialog>
 
       <lv-migration-dialog

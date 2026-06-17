@@ -675,6 +675,7 @@ export class LvProfileManagerDialog extends LitElement {
   // Where the account edit form should return to (it can be reached from the
   // profile form or from the standalone Accounts view).
   private accountReturnView: ViewMode = 'edit';
+  private accountsReturnView: ViewMode | null = null;
 
   private unsubscribeStore?: () => void;
   private unsubscribeRepoStore?: () => void;
@@ -934,11 +935,11 @@ export class LvProfileManagerDialog extends LitElement {
         this.selectedReposForAssignment = new Set();
         break;
       case 'accounts':
-        // When the Accounts view was the landing view (e.g. opened via "Manage
-        // Accounts" from a provider dialog), Back closes the manager so the host
-        // can return to wherever it was opened from — keeping that navigation
-        // reversible. When reached from the profile list, Back returns there.
-        if (this.initialView === 'accounts') {
+        if (this.accountsReturnView) {
+          this.viewMode = this.accountsReturnView;
+          this.accountsReturnView = null;
+          this.dispatchEvent(new CustomEvent('request-restore-provider', { bubbles: true, composed: true }));
+        } else if (this.initialView === 'accounts') {
           this.handleClose();
         } else {
           this.viewMode = 'list';
@@ -2324,14 +2325,13 @@ export class LvProfileManagerDialog extends LitElement {
    * `willUpdate`'s open-transition logic never runs). Reloads accounts so the list
    * is fresh.
    */
-  public showAccountsView(): void {
-    // Landing here means Accounts IS the entry view for this open session, so
-    // Back must close the manager (returning to whatever opened it), exactly as
-    // the open-transition path does. Set initialView directly rather than relying
-    // on the host's `.initialView` property binding having flushed yet — otherwise
-    // the Back button (which reads initialView) could fall through to the profile
-    // list and break the reversible "Manage Accounts" → Back → provider flow.
-    this.initialView = 'accounts';
+  public showAccountsView(preserveState = false): void {
+    if (preserveState) {
+      this.accountsReturnView = this.viewMode;
+    } else {
+      this.initialView = 'accounts';
+      this.accountsReturnView = null;
+    }
     this.viewMode = 'accounts';
     void this.loadProfiles().then(() => this.refreshConnectionStatuses());
   }
@@ -2393,17 +2393,9 @@ export class LvProfileManagerDialog extends LitElement {
       return;
     }
 
-    // No new account was connected (e.g. the user backed out). Only auto-fill
-    // when nothing is attached yet — never override an existing choice.
-    if (previous) return;
-    const toAttach =
-      accountsOfType.find((a) => a.isDefault) ?? // the default for this provider
-      (accountsOfType.length === 1 ? accountsOfType[0] : undefined); // the only one
-
-    if (toAttach) {
-      this.setEditingProfileAccount(type, toAttach.id);
-      this.viewMode = this.editingProfile.id ? 'edit' : 'create';
-    }
+    // No new account was connected (e.g. the user backed out).
+    // We shouldn't auto-fill an existing account here, as backing out should be a no-op.
+    return;
   }
 
   private renderAccountConfigFields() {
