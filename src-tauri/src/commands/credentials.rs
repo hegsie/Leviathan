@@ -632,25 +632,23 @@ const INTEGRATION_SERVICE: &str = "leviathan-integrations";
 /// providing proper per-app isolation.
 #[cfg(target_os = "macos")]
 pub(crate) fn build_security_add_args<'a>(service: &'a str, key: &'a str) -> Vec<&'a str> {
-    let mut args = vec![
-        "add-generic-password",
-        "-s",
-        service,
-        "-a",
-        key,
-        // -A flag: present only in debug builds (see comment above)
-        #[cfg(debug_assertions)]
-        "-A",
-        "-U", // Update if exists
-        "-w", // Read password from stdin (avoids exposure in argv / ps output)
-    ];
-    // In release builds the conditional above skips the "-A" element.
-    // We rebuild the vec without the cfg attribute for clarity.
+    #[cfg(debug_assertions)]
+    {
+        vec![
+            "add-generic-password",
+            "-s",
+            service,
+            "-a",
+            key,
+            "-A", // allow any application (debug only)
+            "-U", // Update if exists
+            "-w", // Read password from stdin (avoids exposure in argv / ps output)
+        ]
+    }
     #[cfg(not(debug_assertions))]
     {
-        args = vec!["add-generic-password", "-s", service, "-a", key, "-U", "-w"];
+        vec!["add-generic-password", "-s", service, "-a", key, "-U", "-w"]
     }
-    args
 }
 
 /// Store an integration token in the system keyring.

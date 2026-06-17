@@ -96,6 +96,7 @@ jobs:
         with:
           workspaces: src-tauri
           cache-on-failure: true
+          env-vars: ImageOS
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
