@@ -266,6 +266,34 @@ describe('lv-gitlab-dialog', () => {
       const selector = el.shadowRoot!.querySelector('lv-account-selector');
       expect(selector).to.not.be.null;
     });
+
+    // Regression: the account-selector dispatches a bubbling/composed
+    // `manage-accounts` event. The dialog must CONSUME it and re-emit its own,
+    // so the host receives EXACTLY ONE event — not the selector's plus the
+    // re-dispatch. The double-fire corrupted the manager's reversible-Back state.
+    it('forwards manage-accounts to the host exactly once', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const events: CustomEvent[] = [];
+      el.addEventListener('manage-accounts', (e) => events.push(e as CustomEvent));
+
+      const selector = el.shadowRoot!.querySelector('lv-account-selector')!;
+      selector.dispatchEvent(
+        new CustomEvent('manage-accounts', {
+          detail: { integrationType: 'gitlab' },
+          bubbles: true,
+          composed: true,
+        })
+      );
+
+      expect(events).to.have.lengthOf(1);
+      expect(events[0].detail.integrationType).to.equal('gitlab');
+    });
   });
 
   describe('Connection Tab', () => {

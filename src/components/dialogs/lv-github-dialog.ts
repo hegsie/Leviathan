@@ -1049,8 +1049,12 @@ export class LvGitHubDialog extends LitElement {
   /**
    * Handle manage accounts request
    */
-  private handleManageAccounts(): void {
-    // Dispatch event to open accounts management
+  private handleManageAccounts(e: Event): void {
+    // Consume the account-selector's bubbling/composed event so it can't ALSO
+    // reach the host — otherwise the host would receive both it and our re-dispatch
+    // below, firing its handler twice (the second pass corrupts reversible-Back state).
+    e.stopPropagation();
+    // Re-dispatch with this provider's canonical type for the host to open accounts.
     this.dispatchEvent(
       new CustomEvent('manage-accounts', {
         detail: { integrationType: 'github' },
