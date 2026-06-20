@@ -96,8 +96,19 @@ test.describe('Bitbucket Dialog - Connection Flow', () => {
     await app.executeCommand('Bitbucket');
     await expect(dialogs.bitbucket.dialog).toBeVisible();
 
-    // Inject mocks after dialog opens. Bitbucket handleSaveCredentials stores credentials
-    // then calls checkConnection() which uses check_bitbucket_connection.
+    // Fill the credential form FIRST, against the default (not-connected) mock so
+    // the inputs are reliably rendered. Injecting the connected mock before the
+    // dialog's initial loadInitialData()/checkConnection() settles would race it:
+    // if the injected mock won, the initial check would return connected and the
+    // dialog would render the connected view (no inputs), timing out the fill.
+    await dialogs.bitbucket.selectAppPasswordMethod();
+    await dialogs.bitbucket.usernameInput.fill('testuser');
+    await dialogs.bitbucket.appPasswordInput.fill('app-password-123');
+
+    // Now inject the connected mock for the connect action. Bitbucket
+    // handleSaveCredentials stores credentials then calls checkConnection() which
+    // uses check_bitbucket_connection. (This also resets the command capture, so
+    // the assertion below sees only commands from the connect click onward.)
     await startCommandCaptureWithMocks(page, {
       check_bitbucket_connection: {
         connected: true,
@@ -108,10 +119,6 @@ test.describe('Bitbucket Dialog - Connection Flow', () => {
       delete_keyring_token: null,
     });
 
-    // Switch to App Password mode and fill in credentials
-    await dialogs.bitbucket.selectAppPasswordMethod();
-    await dialogs.bitbucket.usernameInput.fill('testuser');
-    await dialogs.bitbucket.appPasswordInput.fill('app-password-123');
     await dialogs.bitbucket.connectButton.click();
 
     // Verify the connection command was called (actual command is check_bitbucket_connection)
