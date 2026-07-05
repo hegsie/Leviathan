@@ -834,15 +834,32 @@ pub async fn checkout_with_autostash(
                     retry_checkout.safe();
                     retry_opts.checkout_options(retry_checkout);
 
-                    if repo.stash_apply(0, Some(&mut retry_opts)).is_ok()
-                        && repo.index()?.has_conflicts()
-                    {
+                    if repo.stash_apply(0, Some(&mut retry_opts)).is_ok() {
+                        if repo.index()?.has_conflicts() {
+                            return Ok(CheckoutWithStashResult {
+                                success: true,
+                                stashed: true,
+                                stash_applied: false,
+                                stash_conflict: true,
+                                message: conflict_message,
+                            });
+                        }
+                        // The retry applied cleanly (no conflicts). The stashed
+                        // changes ARE now in the working tree, so the stash must be
+                        // dropped — otherwise it lingers and a later apply/pop would
+                        // duplicate or conflict with the already-applied changes.
+                        // The staged status could not be reinstated on this path, so
+                        // note that in the message.
+                        repo.stash_drop(0)?;
                         return Ok(CheckoutWithStashResult {
                             success: true,
                             stashed: true,
-                            stash_applied: false,
-                            stash_conflict: true,
-                            message: conflict_message,
+                            stash_applied: true,
+                            stash_conflict: false,
+                            message: format!(
+                                "Switched to {} and re-applied stashed changes (staged status was not preserved)",
+                                ref_name
+                            ),
                         });
                     }
                 }
@@ -1761,6 +1778,81 @@ mod tests {
             stash_count(&repo),
             1,
             "stash must be preserved so the user's changes aren't lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_autostash_retry_clean_apply_drops_stash() {
+        // Exercises the retry branch where the reinstate-index apply FAILS but the
+        // plain retry applies CLEANLY. To reach it we need the STAGED (index)
+        // content to conflict with the target while the WORKING content does not:
+        //   - staged change edits line 1 (the same line the feature edits) → the
+        //     reinstate-index merge conflicts → stash_apply(reinstate) errors.
+        //   - a further UNSTAGED edit puts line 1 back to its base value and instead
+        //     edits line 10 → the retry's 3-way working merge is CLEAN.
+        // The stashed changes are now in the working tree, so the stash MUST be
+        // dropped. Before the fix this fell through to the generic failure return
+        // (stash kept, stash_applied:false) even though the changes WERE applied,
+        // so a later apply would duplicate/conflict.
+        let base = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+        let feature_ver = "FEATURE\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+        // Staged: edits line 1 (overlaps feature → reinstate-index conflict).
+        let staged_ver = "STAGED\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+        // Working (further unstaged edit): line 1 back to base, line 10 changed
+        // (non-overlapping with feature → clean working merge).
+        let working_ver = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nWORKING\n";
+
+        let repo = TestRepo::with_initial_commit();
+        let main = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", base)]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", feature_ver)]);
+        repo.checkout_branch(&main);
+        // Stage the line-1 change, then further modify the working tree (line 10)
+        // without staging so index and working trees differ.
+        repo.create_file("shared.txt", staged_ver);
+        repo.stage_file("shared.txt");
+        repo.create_file("shared.txt", working_ver);
+
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string())
+            .await
+            .expect("checkout_with_autostash should not hard-error");
+
+        assert!(result.success);
+        assert!(result.stashed);
+        assert!(
+            result.stash_applied,
+            "a clean retry apply must report the changes as applied: {}",
+            result.message
+        );
+        assert!(
+            !result.stash_conflict,
+            "a clean retry apply must not report a conflict: {}",
+            result.message
+        );
+        // Confirm we took the RETRY branch (reinstate failed, retry clean), not the
+        // first clean apply — that path notes the staged status was not preserved.
+        assert!(
+            result.message.contains("staged status was not preserved"),
+            "expected the retry-clean branch message, got: {}",
+            result.message
+        );
+
+        // Index must be conflict-free and the merged content present in the tree.
+        assert!(!repo.repo().index().unwrap().has_conflicts());
+        let merged = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(
+            merged.contains("FEATURE"),
+            "feature edit preserved: {merged}"
+        );
+        assert!(merged.contains("WORKING"), "stashed edit applied: {merged}");
+
+        // The stash must have been dropped now that the changes are in the tree.
+        assert_eq!(
+            stash_count(&repo),
+            0,
+            "stash must be dropped after a clean retry apply"
         );
     }
 

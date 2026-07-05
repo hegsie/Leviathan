@@ -1032,4 +1032,249 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(el.open).to.be.false;
     });
   });
+
+  // ── Git-flow finish completion after conflict resolution ────────────────────
+  describe('gitflow finish completion', () => {
+    beforeEach(() => clearToasts());
+
+    async function openWithFinish(
+      finish: import('../lv-conflict-resolution-dialog.ts').GitflowFinishContext,
+      squash = false,
+    ): Promise<LvConflictResolutionDialog> {
+      const el = await renderDialog('merge');
+      el.squashMerge = squash;
+      el.gitflowFinish = finish;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      return el;
+    }
+
+    it('re-invokes gitflow_finish_release after commit_merge for a release finish', async () => {
+      const el = await openWithFinish({
+        kind: 'release',
+        name: '1.0.0',
+        branchName: 'release/1.0.0',
+        deleteBranch: true,
+        tagMessage: 'Release 1.0.0',
+      });
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      const mergeIdx = invokeHistory.findIndex(h => h.command === 'commit_merge');
+      const finishIdx = invokeHistory.findIndex(h => h.command === 'gitflow_finish_release');
+      expect(mergeIdx, 'commit_merge called').to.be.greaterThan(-1);
+      expect(finishIdx, 'gitflow_finish_release called').to.be.greaterThan(-1);
+      expect(finishIdx, 'finish re-invoked AFTER commit_merge').to.be.greaterThan(mergeIdx);
+
+      const finishCall = invokeHistory[finishIdx];
+      const args = finishCall.args as Record<string, unknown>;
+      expect(args.version).to.equal('1.0.0');
+      expect(args.tagMessage).to.equal('Release 1.0.0');
+      expect(args.deleteBranch).to.equal(true);
+
+      expect(completedFired).to.be.true;
+      expect(el.open).to.be.false;
+    });
+
+    it('re-invokes gitflow_finish_hotfix after commit_merge for a hotfix finish', async () => {
+      const el = await openWithFinish({
+        kind: 'hotfix',
+        name: '1.0.1',
+        branchName: 'hotfix/1.0.1',
+        deleteBranch: true,
+        tagMessage: 'Hotfix 1.0.1',
+      });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'gitflow_finish_hotfix'), 'gitflow_finish_hotfix called').to.be.true;
+      expect(el.open).to.be.false;
+    });
+
+    it('deletes the feature branch (not re-finish) for a squash feature finish', async () => {
+      const el = await openWithFinish(
+        { kind: 'feature', name: 'x', branchName: 'feature/x', deleteBranch: true },
+        true, // squashMerge
+      );
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      // Squash completes as a single-parent commit via commit_merge, then the
+      // feature branch is deleted directly — re-invoking finish would loop forever.
+      expect(invokeHistory.some(h => h.command === 'commit_merge'), 'commit_merge called').to.be.true;
+      const delCall = invokeHistory.find(h => h.command === 'delete_branch');
+      expect(delCall, 'delete_branch called').to.exist;
+      expect((delCall!.args as Record<string, unknown>).name).to.equal('feature/x');
+      expect((delCall!.args as Record<string, unknown>).force).to.equal(true);
+      expect(invokeHistory.some(h => h.command === 'gitflow_finish_feature'), 'finish NOT re-invoked for squash').to.be.false;
+      expect(completedFired).to.be.true;
+      expect(el.open).to.be.false;
+    });
+
+    it('re-invokes gitflow_finish_feature (not delete) for a NON-squash feature finish', async () => {
+      const el = await openWithFinish(
+        { kind: 'feature', name: 'y', branchName: 'feature/y', deleteBranch: true },
+        false,
+      );
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'gitflow_finish_feature'), 'gitflow_finish_feature called').to.be.true;
+      expect(el.open).to.be.false;
+    });
+
+    it('stays open and reloads conflicts when the finish re-run hits a develop-side conflict', async () => {
+      const el = await openWithFinish({
+        kind: 'release',
+        name: '2.0.0',
+        branchName: 'release/2.0.0',
+        deleteBranch: true,
+      });
+
+      // commit_merge succeeds; the finish re-run conflicts on the develop side and
+      // get_conflicts then returns fresh conflicts to resolve.
+      mockInvoke = async (command: string) => {
+        if (command === 'commit_merge') return null;
+        if (command === 'gitflow_finish_release') throw { code: 'MERGE_CONFLICT', message: 'develop conflict' };
+        if (command === 'get_conflicts') return [makeConflict('src/develop.ts')];
+        return null;
+      };
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(completedFired, 'must NOT complete while develop conflict pending').to.be.false;
+      expect(el.open, 'dialog stays open for the develop-side conflict').to.be.true;
+      const internal = el as unknown as { conflicts: ConflictFile[]; resolvedFiles: Set<string> };
+      expect(internal.conflicts.map(c => c.path)).to.deep.equal(['src/develop.ts']);
+      expect(internal.resolvedFiles.size, 'resolution reset for new conflict').to.equal(0);
+    });
+
+    it('surfaces an error toast and stays open when the finish re-run fails non-conflict', async () => {
+      const el = await openWithFinish({
+        kind: 'release',
+        name: '3.0.0',
+        branchName: 'release/3.0.0',
+        deleteBranch: true,
+      });
+
+      mockInvoke = async (command: string) => {
+        if (command === 'commit_merge') return null;
+        if (command === 'gitflow_finish_release') throw { code: 'COMMAND_ERROR', message: 'tag failed' };
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        return null;
+      };
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(completedFired).to.be.false;
+      expect(el.open).to.be.true;
+      const errorToast = uiStore.getState().toasts.find(t => t.type === 'error');
+      expect(errorToast, 'error toast shown').to.not.be.undefined;
+      expect(errorToast!.message).to.contain('tag failed');
+    });
+  });
+
+  // ── Failed conflict load keeps dialog open with retry (Fix 3) ───────────────
+  describe('failed conflict load', () => {
+    beforeEach(() => clearToasts());
+
+    it('keeps a stash dialog OPEN with a Retry when the initial load FAILS', async () => {
+      // The backend opened this dialog because it reported a conflict. A failed
+      // load must NOT trigger the "stash not applied" auto-exit — the index IS
+      // conflicted, we just could not read it.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') throw { code: 'COMMAND_ERROR', message: 'read failed' };
+        return null;
+      };
+      const el = await renderDialog('stash');
+      let abortedFired = false;
+      el.addEventListener('operation-aborted', () => { abortedFired = true; });
+
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(abortedFired, 'must NOT auto-exit on a failed load').to.be.false;
+      expect(el.open, 'dialog stays open').to.be.true;
+      const internal = el as unknown as { loadFailed: boolean };
+      expect(internal.loadFailed).to.be.true;
+
+      // A Retry affordance is offered.
+      const retryBtn = Array.from(el.shadowRoot!.querySelectorAll('button'))
+        .find(b => b.textContent!.trim() === 'Retry');
+      expect(retryBtn, 'Retry button rendered').to.exist;
+
+      // Complete stays disabled while the load is failed.
+      const continueBtn = el.shadowRoot!.querySelector('.footer-actions .btn-primary') as HTMLButtonElement;
+      expect(continueBtn.disabled).to.be.true;
+    });
+
+    it('Retry re-loads conflicts and recovers when the backend succeeds', async () => {
+      let calls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') {
+          calls++;
+          if (calls === 1) throw { code: 'COMMAND_ERROR', message: 'read failed' };
+          return TEST_CONFLICTS;
+        }
+        return null;
+      };
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as { loadFailed: boolean; conflicts: ConflictFile[] };
+      expect(internal.loadFailed).to.be.true;
+
+      const retryBtn = Array.from(el.shadowRoot!.querySelectorAll('button'))
+        .find(b => b.textContent!.trim() === 'Retry') as HTMLButtonElement;
+      retryBtn.click();
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(internal.loadFailed).to.be.false;
+      expect(internal.conflicts.length).to.equal(3);
+    });
+
+    it('a SUCCESSFUL empty load still auto-exits a stash dialog', async () => {
+      // Regression guard for the Fix 3 distinction: a genuine zero-conflict load
+      // (not a failure) must still run the safe auto-exit.
+      setupDefaultMocks([]);
+      const el = await renderDialog('stash');
+      let abortedFired = false;
+      el.addEventListener('operation-aborted', () => { abortedFired = true; });
+
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(abortedFired, 'auto-exit on successful empty load').to.be.true;
+      expect(el.open).to.be.false;
+      const internal = el as unknown as { loadFailed: boolean };
+      expect(internal.loadFailed).to.be.false;
+    });
+  });
 });

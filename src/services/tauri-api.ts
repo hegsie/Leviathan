@@ -15,12 +15,17 @@ export async function invokeCommand<T, A = unknown>(
   command: string,
   args?: A
 ): Promise<CommandResult<T>> {
-  // Repo git commands carry the repository path as `path` — record it so the
-  // output panel can scope entries per repository in multi-repo sessions.
+  // Repo git commands carry the repository path so the output panel can scope
+  // entries per repository in multi-repo sessions. Most commands pass it as
+  // `path`, but a few (stage_hunk/unstage_hunk) pass it as `repoPath` — check
+  // both so their entries are scoped to the right repo and survive a scoped Clear.
+  const argsRecord = args as Record<string, unknown> | undefined;
   const repoPath =
-    typeof (args as Record<string, unknown> | undefined)?.path === 'string'
-      ? ((args as Record<string, unknown>).path as string)
-      : undefined;
+    typeof argsRecord?.path === 'string'
+      ? (argsRecord.path as string)
+      : typeof argsRecord?.repoPath === 'string'
+        ? (argsRecord.repoPath as string)
+        : undefined;
 
   try {
     const data = await invoke<T>(command, args as Record<string, unknown>);

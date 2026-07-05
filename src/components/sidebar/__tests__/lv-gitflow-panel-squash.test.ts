@@ -26,9 +26,25 @@ const invokeCalls: Array<{ command: string; args?: unknown }> = [];
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvGitflowPanel } from '../lv-gitflow-panel.ts';
 import '../lv-gitflow-panel.ts';
+// Import prompt dialog so showPrompt (used by release/hotfix finish) finds it.
+import '../../dialogs/lv-prompt-dialog.ts';
+import type { LvPromptDialog } from '../../dialogs/lv-prompt-dialog.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
+
+function setupMockPrompt(value: string | null): void {
+  let dialog = document.querySelector<LvPromptDialog>('lv-prompt-dialog');
+  if (!dialog) {
+    dialog = document.createElement('lv-prompt-dialog') as LvPromptDialog;
+    document.body.appendChild(dialog);
+  }
+  dialog.open = async () => value;
+}
+
+function cleanupMockPrompt(): void {
+  document.querySelector('lv-prompt-dialog')?.remove();
+}
 
 function defaultMockInvoke(command: string): Promise<unknown> {
   if (command === 'get_gitflow_config') {
@@ -57,9 +73,18 @@ async function createComponent(): Promise<LvGitflowPanel> {
   return el;
 }
 
+interface GitflowFinishDetail {
+  kind: 'feature' | 'release' | 'hotfix';
+  name: string;
+  branchName: string;
+  deleteBranch: boolean;
+  tagMessage?: string;
+}
+
 interface ConflictDetail {
   operationType: string;
   squash: boolean;
+  gitflowFinish?: GitflowFinishDetail;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -96,6 +121,14 @@ describe('lv-gitflow-panel squash finish conflict (Fix 6)', () => {
     expect(detail, 'open-conflict-dialog dispatched').to.not.be.null;
     expect(detail!.operationType).to.equal('merge');
     expect(detail!.squash).to.be.true;
+
+    // The finish context is threaded so the dialog can complete the finish
+    // (delete the feature branch) after the conflict is resolved.
+    expect(detail!.gitflowFinish, 'gitflowFinish present').to.exist;
+    expect(detail!.gitflowFinish!.kind).to.equal('feature');
+    expect(detail!.gitflowFinish!.name).to.equal('x');
+    expect(detail!.gitflowFinish!.branchName).to.equal('feature/x');
+    expect(detail!.gitflowFinish!.deleteBranch).to.be.true;
   });
 
   it('renders a Squash button on feature items that finishes with squash=true', async () => {
@@ -147,5 +180,75 @@ describe('lv-gitflow-panel squash finish conflict (Fix 6)', () => {
     expect(detail, 'open-conflict-dialog dispatched').to.not.be.null;
     expect(detail!.operationType).to.equal('merge');
     expect(detail!.squash).to.be.false;
+
+    // Non-squash feature finish still threads a feature finish context.
+    expect(detail!.gitflowFinish, 'gitflowFinish present').to.exist;
+    expect(detail!.gitflowFinish!.kind).to.equal('feature');
+    expect(detail!.gitflowFinish!.name).to.equal('y');
+    expect(detail!.gitflowFinish!.branchName).to.equal('feature/y');
+  });
+
+  it('threads a release finish context when a release finish conflicts', async () => {
+    const el = await createComponent();
+    setupMockPrompt('Release 1.0.0');
+
+    let detail: ConflictDetail | null = null;
+    el.addEventListener('open-conflict-dialog', (e) => {
+      detail = (e as CustomEvent<ConflictDetail>).detail;
+    });
+
+    mockInvoke = (command: string) => {
+      if (command === 'gitflow_finish_release') {
+        return Promise.reject({ code: 'MERGE_CONFLICT', message: 'conflict' });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    await (el as unknown as {
+      handleFinishRelease: (item: { name: string; branch: string }) => Promise<void>;
+    }).handleFinishRelease({ name: '1.0.0', branch: 'release/1.0.0' });
+
+    expect(detail, 'open-conflict-dialog dispatched').to.not.be.null;
+    expect(detail!.operationType).to.equal('merge');
+    expect(detail!.squash).to.be.false;
+    expect(detail!.gitflowFinish, 'gitflowFinish present').to.exist;
+    expect(detail!.gitflowFinish!.kind).to.equal('release');
+    expect(detail!.gitflowFinish!.name).to.equal('1.0.0');
+    expect(detail!.gitflowFinish!.branchName).to.equal('release/1.0.0');
+    expect(detail!.gitflowFinish!.deleteBranch).to.be.true;
+    expect(detail!.gitflowFinish!.tagMessage).to.equal('Release 1.0.0');
+
+    cleanupMockPrompt();
+  });
+
+  it('threads a hotfix finish context when a hotfix finish conflicts', async () => {
+    const el = await createComponent();
+    setupMockPrompt('Hotfix 1.0.1');
+
+    let detail: ConflictDetail | null = null;
+    el.addEventListener('open-conflict-dialog', (e) => {
+      detail = (e as CustomEvent<ConflictDetail>).detail;
+    });
+
+    mockInvoke = (command: string) => {
+      if (command === 'gitflow_finish_hotfix') {
+        return Promise.reject({ code: 'MERGE_CONFLICT', message: 'conflict' });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    await (el as unknown as {
+      handleFinishHotfix: (item: { name: string; branch: string }) => Promise<void>;
+    }).handleFinishHotfix({ name: '1.0.1', branch: 'hotfix/1.0.1' });
+
+    expect(detail, 'open-conflict-dialog dispatched').to.not.be.null;
+    expect(detail!.gitflowFinish, 'gitflowFinish present').to.exist;
+    expect(detail!.gitflowFinish!.kind).to.equal('hotfix');
+    expect(detail!.gitflowFinish!.name).to.equal('1.0.1');
+    expect(detail!.gitflowFinish!.branchName).to.equal('hotfix/1.0.1');
+    expect(detail!.gitflowFinish!.deleteBranch).to.be.true;
+    expect(detail!.gitflowFinish!.tagMessage).to.equal('Hotfix 1.0.1');
+
+    cleanupMockPrompt();
   });
 });

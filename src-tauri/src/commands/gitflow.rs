@@ -225,25 +225,33 @@ pub async fn gitflow_finish_feature(
         // Squash merge: the changes must actually be committed (single
         // parent, no merge commit). Conflicts abort BEFORE any branch
         // deletion so the user can resolve them.
-        repo.merge(&[&annotated_commit], None, None)?;
-        if repo.index()?.has_conflicts() {
-            return Err(LeviathanError::MergeConflict);
+        //
+        // Idempotency guard: if develop already contains the feature, skip the
+        // merge+commit so a re-run (e.g. after the squash was completed externally
+        // via the conflict-resolution flow) doesn't re-merge the same divergence
+        // and mint a duplicate commit. It then falls through to branch deletion.
+        let (analysis, _) = repo.merge_analysis(&[&annotated_commit])?;
+        if !analysis.is_up_to_date() {
+            repo.merge(&[&annotated_commit], None, None)?;
+            if repo.index()?.has_conflicts() {
+                return Err(LeviathanError::MergeConflict);
+            }
+            let mut index = repo.index()?;
+            let tree_oid = index.write_tree()?;
+            let tree = repo.find_tree(tree_oid)?;
+            let sig = repo.signature()?;
+            let develop_commit = develop_branch.get().peel_to_commit()?;
+            let message = format!("Squashed branch '{}' into {}", branch_name, develop);
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                &message,
+                &tree,
+                &[&develop_commit],
+            )?;
+            repo.cleanup_state()?;
         }
-        let mut index = repo.index()?;
-        let tree_oid = index.write_tree()?;
-        let tree = repo.find_tree(tree_oid)?;
-        let sig = repo.signature()?;
-        let develop_commit = develop_branch.get().peel_to_commit()?;
-        let message = format!("Squashed branch '{}' into {}", branch_name, develop);
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            &message,
-            &tree,
-            &[&develop_commit],
-        )?;
-        repo.cleanup_state()?;
     } else {
         // Regular merge (no-ff)
         let (analysis, _) = repo.merge_analysis(&[&annotated_commit])?;
@@ -812,6 +820,48 @@ mod tests {
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(head.parent_count(), 1);
         assert!(repo.path.join("squash.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_squash_up_to_date_skips_merge() {
+        // The squash block now guards on merge_analysis: when develop already
+        // contains the feature (here the feature has no commits beyond develop, so
+        // the merge is up-to-date), the squash finish must SKIP the merge+commit —
+        // minting no duplicate commit — and still delete the branch. This prevents
+        // a re-run (after the squash was completed externally) from re-merging.
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "noop".to_string())
+            .await
+            .unwrap();
+        // No commits on the feature — it points at develop's tip (up-to-date).
+
+        let develop_tip_before = repo.repo().refname_to_id("refs/heads/develop").unwrap();
+
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "noop".to_string(),
+            Some(true),
+            Some(true), // squash
+        )
+        .await;
+        assert!(result.is_ok(), "squash finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        // Develop tip unchanged — no junk squash commit was created.
+        let develop_tip_after = git_repo.refname_to_id("refs/heads/develop").unwrap();
+        assert_eq!(
+            develop_tip_before, develop_tip_after,
+            "up-to-date squash finish must not mint a commit"
+        );
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        // Branch still deleted.
+        assert!(git_repo
+            .find_branch("feature/noop", git2::BranchType::Local)
+            .is_err());
     }
 
     #[tokio::test]

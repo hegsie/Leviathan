@@ -131,6 +131,18 @@ describe('output-log.service', () => {
       expect(entries[0].repoPath).to.equal('/repo');
     });
 
+    it('scopes commands that pass the repo path as repoPath (e.g. stage_hunk)', async () => {
+      // stage_hunk/unstage_hunk pass the repository path as `repoPath`, not `path`.
+      // The entry must still be scoped to that repo so it shows only in that repo's
+      // panel and is not destroyed by an unrelated repo's scoped Clear.
+      await invokeCommand('stage_hunk', { repoPath: '/repoA', patch: 'diff' });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].command).to.equal('stage_hunk');
+      expect(entries[0].repoPath).to.equal('/repoA');
+    });
+
     it('leaves repoPath unset for repo-independent commands', async () => {
       await invokeCommand('store_github_token', { token: 'secret' });
 

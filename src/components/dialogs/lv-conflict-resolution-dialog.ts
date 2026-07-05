@@ -13,6 +13,22 @@ import type { CommandResult } from '../../types/api.types.ts';
 import type { LvMergeEditor } from '../panels/lv-merge-editor.ts';
 import '../panels/lv-merge-editor.ts';
 
+/**
+ * Context threaded through a conflicted git-flow finish so the dialog can COMPLETE
+ * the finish after the merge conflict is resolved (tag, merge into develop, delete
+ * the branch) instead of leaving it half-done.
+ */
+export interface GitflowFinishContext {
+  kind: 'feature' | 'release' | 'hotfix';
+  /** Name/version WITHOUT the branch prefix — what the backend finish expects. */
+  name: string;
+  /** Full prefixed branch name — used to delete the branch directly (squash case). */
+  branchName: string;
+  deleteBranch: boolean;
+  /** Tag message for release/hotfix finish re-invocation. */
+  tagMessage?: string;
+}
+
 @customElement('lv-conflict-resolution-dialog')
 export class LvConflictResolutionDialog extends LitElement {
   static styles = [
@@ -319,11 +335,25 @@ export class LvConflictResolutionDialog extends LitElement {
    * opened this dialog was a squash (e.g. a git-flow squash finish).
    */
   @property({ type: Boolean }) squashMerge = false;
+  /**
+   * When set, the conflicted merge that opened this dialog was one side of a
+   * git-flow finish. After the merge is completed, the finish must be COMPLETED
+   * (tag / merge develop / delete branch) rather than left half-done.
+   */
+  @property({ attribute: false }) gitflowFinish: GitflowFinishContext | null = null;
 
   @state() private conflicts: ConflictFile[] = [];
   @state() private resolvedFiles: Set<string> = new Set();
   @state() private selectedIndex = 0;
   @state() private loading = false;
+  /**
+   * Whether the last conflict load FAILED (as opposed to succeeding with zero
+   * conflicts). The backend opened this dialog because it reported a conflict, so
+   * a failed load means the index IS conflicted but we couldn't read it — we must
+   * keep the dialog open with a Retry rather than auto-exiting or falsely treating
+   * it as "nothing to resolve".
+   */
+  @state() private loadFailed = false;
   @state() private aborting = false;
   @state() private showAbortConfirm = false;
   @state() private hasMergeTool = false;
@@ -385,6 +415,13 @@ export class LvConflictResolutionDialog extends LitElement {
     this.showAbortConfirm = false;
   }
 
+  /** Re-run the conflict load after a failure, resetting resolution progress. */
+  private handleRetryLoad = (): void => {
+    this.resolvedFiles = new Set();
+    this.selectedIndex = 0;
+    void this.loadConflicts();
+  };
+
   private async loadConflicts(): Promise<void> {
     if (!this.repositoryPath) return;
 
@@ -393,24 +430,37 @@ export class LvConflictResolutionDialog extends LitElement {
       const result = await gitService.getConflicts(this.repositoryPath);
       if (result.success && result.data) {
         this.conflicts = result.data;
+        this.loadFailed = false;
       } else {
         console.error('Failed to load conflicts:', result.error);
         showToast('Failed to load conflicts', 'error');
+        this.conflicts = [];
+        this.loadFailed = true;
       }
     } catch (err) {
       console.error('Failed to load conflicts:', err);
       showToast('Failed to load conflicts', 'error');
+      this.conflicts = [];
+      this.loadFailed = true;
     } finally {
       this.loading = false;
     }
 
     await this.checkMergeToolAvailability();
 
-    // A 'stash' dialog that finished loading with zero conflicts is an
+    // A 'stash' dialog that SUCCESSFULLY loaded with zero conflicts is an
     // inescapable trap: Complete is disabled and Escape is suppressed, leaving
     // only the destructive Abort. The stash was never applied, so auto-run the
     // safe non-destructive exit (keeps the stash, discards nothing).
-    if (this.open && this.operationType === 'stash' && this.conflicts.length === 0) {
+    // A FAILED load must NOT trigger this: the backend reported a conflict, so the
+    // index IS conflicted — we just couldn't read it. Keep the dialog open with a
+    // Retry instead of abandoning the user.
+    if (
+      this.open &&
+      this.operationType === 'stash' &&
+      !this.loadFailed &&
+      this.conflicts.length === 0
+    ) {
       this.handleStashNotApplied();
     }
   }
@@ -598,10 +648,18 @@ export class LvConflictResolutionDialog extends LitElement {
   private async handleContinue(): Promise<void> {
     if (!this.repositoryPath) return;
 
-    // A 'stash' operation with NO conflicts means the backend reported a conflict
-    // but nothing was actually applied — the changes are still safe in the stash.
-    // Dropping it here would permanently destroy never-applied changes, so refuse
-    // to drop and close without touching the stash.
+    // A failed load leaves us with no conflict data even though the index IS
+    // conflicted. Never proceed (or drop the stash) in that state — keep the
+    // dialog open so the user can Retry.
+    if (this.loadFailed) {
+      showToast('Could not load conflicts. Please retry.', 'error');
+      return;
+    }
+
+    // A 'stash' operation with NO conflicts (that LOADED successfully) means the
+    // backend reported a conflict but nothing was actually applied — the changes
+    // are still safe in the stash. Dropping it here would permanently destroy
+    // never-applied changes, so refuse to drop and close without touching the stash.
     if (this.operationType === 'stash' && this.conflicts.length === 0) {
       this.handleStashNotApplied();
       return;
@@ -686,6 +744,13 @@ export class LvConflictResolutionDialog extends LitElement {
             showToast(result.error?.message ?? 'Failed to complete merge', 'error');
             return;
           }
+          // If this merge was one side of a git-flow finish, the finish is only
+          // PARTIALLY done (no tag, develop not merged, branch not deleted).
+          // Complete it now; if it can't finish (routed back into the conflict
+          // flow, or errored) stay open.
+          if (this.gitflowFinish && !(await this.completeGitflowFinish(this.gitflowFinish))) {
+            return;
+          }
           break;
         case 'stash':
           // All conflicts resolved. Drop the stash only for pop semantics
@@ -712,6 +777,78 @@ export class LvConflictResolutionDialog extends LitElement {
       console.error('Failed to continue:', err);
       showToast('Failed to continue', 'error');
     }
+  }
+
+  /**
+   * Complete a git-flow finish whose merge just conflicted and was resolved.
+   * Returns true when the finish is fully done (caller may close), false when the
+   * dialog must stay open (a further conflict was routed back in, or an error was
+   * surfaced via toast).
+   */
+  private async completeGitflowFinish(ctx: GitflowFinishContext): Promise<boolean> {
+    // Squash feature: commitMerge already made the single-parent squash commit on
+    // develop. The backend finish is NOT idempotent for squash — a squash commit
+    // never makes the feature an ancestor of develop, so re-invoking it would
+    // re-merge the same divergence forever. Just delete the feature branch here.
+    if (ctx.kind === 'feature' && this.squashMerge) {
+      if (ctx.deleteBranch) {
+        const del = await gitService.deleteBranch(this.repositoryPath, ctx.branchName, true);
+        if (!del.success) {
+          showToast(del.error?.message ?? 'Failed to delete feature branch', 'error');
+          return false;
+        }
+      }
+      return true;
+    }
+
+    // Feature (non-squash), release, hotfix: the resolved merge is committed, so
+    // re-invoking the (now idempotent) backend finish skips the up-to-date
+    // master/develop merges, creates the version tag (release/hotfix), and deletes
+    // the branch.
+    let result: CommandResult<void>;
+    switch (ctx.kind) {
+      case 'feature':
+        result = await gitService.gitFlowFinishFeature(
+          this.repositoryPath,
+          ctx.name,
+          ctx.deleteBranch,
+          false,
+        );
+        break;
+      case 'release':
+        result = await gitService.gitFlowFinishRelease(
+          this.repositoryPath,
+          ctx.name,
+          ctx.tagMessage,
+          ctx.deleteBranch,
+        );
+        break;
+      case 'hotfix':
+        result = await gitService.gitFlowFinishHotfix(
+          this.repositoryPath,
+          ctx.name,
+          ctx.tagMessage,
+          ctx.deleteBranch,
+        );
+        break;
+    }
+
+    if (!result.success) {
+      // A develop-side conflict on the re-run (e.g. release/hotfix master side was
+      // just resolved) reopens the conflict flow for the develop side. The next
+      // Complete will re-invoke finish again (still idempotent on master) and
+      // complete the develop side.
+      if (result.error?.code === 'MERGE_CONFLICT') {
+        await this.loadConflicts();
+        if (this.conflicts.length > 0) {
+          this.resolvedFiles = new Set();
+          return false;
+        }
+      }
+      showToast(result.error?.message ?? 'Failed to complete Git Flow finish', 'error');
+      return false;
+    }
+    return true;
   }
 
   private get selectedConflict(): ConflictFile | null {
@@ -835,9 +972,20 @@ export class LvConflictResolutionDialog extends LitElement {
                   <div class="empty-state">
                     ${this.loading
                       ? 'Loading conflicts...'
-                      : this.conflicts.length === 0
-                        ? 'No conflicts to resolve'
-                        : 'Select a file to resolve'}
+                      : this.loadFailed
+                        ? html`
+                            <div>Failed to load conflicts.</div>
+                            <button
+                              class="btn btn-primary"
+                              style="margin-top: var(--spacing-md);"
+                              @click=${this.handleRetryLoad}
+                            >
+                              Retry
+                            </button>
+                          `
+                        : this.conflicts.length === 0
+                          ? 'No conflicts to resolve'
+                          : 'Select a file to resolve'}
                   </div>
                 `}
           </div>
@@ -856,7 +1004,8 @@ export class LvConflictResolutionDialog extends LitElement {
             <button
               class="btn btn-primary"
               @click=${this.handleContinue}
-              ?disabled=${this.resolvedCount < this.totalCount ||
+              ?disabled=${this.loadFailed ||
+                this.resolvedCount < this.totalCount ||
                 (this.operationType === 'stash' && this.conflicts.length === 0)}
             >
               ${this.operationType === 'merge'

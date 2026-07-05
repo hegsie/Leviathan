@@ -18,6 +18,7 @@ import './components/sidebar/lv-right-panel.ts';
 import './components/dialogs/lv-settings-dialog.ts';
 import './components/dialogs/lv-modal.ts';
 import './components/dialogs/lv-conflict-resolution-dialog.ts';
+import type { GitflowFinishContext } from './components/dialogs/lv-conflict-resolution-dialog.ts';
 import './components/dialogs/lv-command-palette.ts';
 import './components/dialogs/lv-reflog-dialog.ts';
 import './components/dialogs/lv-keyboard-shortcuts-dialog.ts';
@@ -534,6 +535,9 @@ export class AppShell extends LitElement {
   @state() private conflictDropStashOnComplete = true;
   // Whether a conflicted merge should complete as a squash (single-parent) commit.
   @state() private conflictSquashMerge = false;
+  // When a git-flow finish conflicts, the finish context so the dialog can COMPLETE
+  // the finish (tag / merge develop / delete branch) after the conflict is resolved.
+  @state() private conflictGitflowFinish: GitflowFinishContext | null = null;
 
   // Command palette
   @state() private showCommandPalette = false;
@@ -708,6 +712,7 @@ export class AppShell extends LitElement {
       stashIndex?: number;
       dropStashOnComplete?: boolean;
       squash?: boolean;
+      gitflowFinish?: GitflowFinishContext;
     }>;
     if (customEvent.detail?.operationType) {
       this.conflictOperationType = customEvent.detail.operationType;
@@ -718,6 +723,8 @@ export class AppShell extends LitElement {
     this.conflictDropStashOnComplete = customEvent.detail?.dropStashOnComplete ?? true;
     // A squash finish that conflicted must complete as a squash, not a merge commit.
     this.conflictSquashMerge = customEvent.detail?.squash ?? false;
+    // A conflicted git-flow finish carries the context to complete the finish.
+    this.conflictGitflowFinish = customEvent.detail?.gitflowFinish ?? null;
     this.showConflictDialog = true;
     this.handleRefresh();
   };
@@ -737,6 +744,7 @@ export class AppShell extends LitElement {
     this.conflictStashIndex = 0;
     this.conflictDropStashOnComplete = true;
     this.conflictSquashMerge = false;
+    this.conflictGitflowFinish = null;
   }
 
   // Handle gitflow events (init, feature/release/hotfix operations) to trigger refresh
@@ -2931,6 +2939,7 @@ export class AppShell extends LitElement {
               .stashIndex=${this.conflictStashIndex}
               .dropStashOnComplete=${this.conflictDropStashOnComplete}
               .squashMerge=${this.conflictSquashMerge}
+              .gitflowFinish=${this.conflictGitflowFinish}
               @operation-completed=${this.handleConflictResolved}
               @operation-aborted=${this.handleConflictAborted}
             ></lv-conflict-resolution-dialog>

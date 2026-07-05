@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showPrompt } from '../../services/dialog.service.ts';
 import type { GitFlowConfig } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
+import type { GitflowFinishContext } from '../dialogs/lv-conflict-resolution-dialog.ts';
 
 type GitFlowCategory = 'feature' | 'release' | 'hotfix';
 
@@ -416,8 +417,15 @@ export class LvGitflowPanel extends LitElement {
       } else if (result.error?.code === 'MERGE_CONFLICT') {
         await this.loadActiveItems();
         // Preserve squash intent: a squash finish that conflicted must complete as
-        // a single-parent squash commit, not a two-parent merge commit.
-        this.openConflictDialog(squash);
+        // a single-parent squash commit, not a two-parent merge commit. The finish
+        // context lets the dialog complete the finish (delete branch / re-invoke)
+        // once the conflict is resolved.
+        this.openConflictDialog(squash, {
+          kind: 'feature',
+          name: item.name,
+          branchName: item.branch,
+          deleteBranch: true,
+        });
       } else {
         this.error = result.error?.message || 'Failed to finish feature';
       }
@@ -479,7 +487,13 @@ export class LvGitflowPanel extends LitElement {
         }));
       } else if (result.error?.code === 'MERGE_CONFLICT') {
         await this.loadActiveItems();
-        this.openConflictDialog();
+        this.openConflictDialog(false, {
+          kind: 'release',
+          name: item.name,
+          branchName: item.branch,
+          deleteBranch: true,
+          tagMessage: tagMessage || undefined,
+        });
       } else {
         this.error = result.error?.message || 'Failed to finish release';
       }
@@ -541,7 +555,13 @@ export class LvGitflowPanel extends LitElement {
         }));
       } else if (result.error?.code === 'MERGE_CONFLICT') {
         await this.loadActiveItems();
-        this.openConflictDialog();
+        this.openConflictDialog(false, {
+          kind: 'hotfix',
+          name: item.name,
+          branchName: item.branch,
+          deleteBranch: true,
+          tagMessage: tagMessage || undefined,
+        });
       } else {
         this.error = result.error?.message || 'Failed to finish hotfix';
       }
@@ -559,13 +579,15 @@ export class LvGitflowPanel extends LitElement {
 
   /**
    * A gitflow finish that hit a merge conflict — open the app-level conflict
-   * resolution dialog so the user can resolve it.
+   * resolution dialog so the user can resolve it. The `gitflowFinish` context lets
+   * the dialog COMPLETE the finish (tag / merge develop / delete branch) after the
+   * conflict is resolved, instead of leaving it half-done.
    */
-  private openConflictDialog(squash = false): void {
+  private openConflictDialog(squash: boolean, gitflowFinish: GitflowFinishContext): void {
     this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
       bubbles: true,
       composed: true,
-      detail: { operationType: 'merge', squash },
+      detail: { operationType: 'merge', squash, gitflowFinish },
     }));
   }
 
