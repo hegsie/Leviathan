@@ -6,6 +6,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { CommandResult } from '../types/api.types.ts';
+import { logGitCommand, shouldLogToOutput } from './output-log.service.ts';
 
 /**
  * Invoke a Tauri command with type safety
@@ -14,8 +15,19 @@ export async function invokeCommand<T, A = unknown>(
   command: string,
   args?: A
 ): Promise<CommandResult<T>> {
+  // Repo git commands carry the repository path as `path` — record it so the
+  // output panel can scope entries per repository in multi-repo sessions.
+  const repoPath =
+    typeof (args as Record<string, unknown> | undefined)?.path === 'string'
+      ? ((args as Record<string, unknown>).path as string)
+      : undefined;
+
   try {
     const data = await invoke<T>(command, args as Record<string, unknown>);
+    // Args are intentionally never logged — they can carry credentials
+    if (shouldLogToOutput(command)) {
+      logGitCommand(command, '', true, repoPath);
+    }
     return { success: true, data };
   } catch (error) {
     // Tauri errors from Rust are serialized as objects with code, message, details
@@ -31,6 +43,10 @@ export async function invokeCommand<T, A = unknown>(
       code = errObj.code ?? 'COMMAND_ERROR';
     } else {
       message = String(error);
+    }
+
+    if (shouldLogToOutput(command)) {
+      logGitCommand(command, message, false, repoPath);
     }
 
     return {

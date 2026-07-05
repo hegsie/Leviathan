@@ -13,16 +13,20 @@ import { setupOpenRepository } from '../fixtures/tauri-mock';
  * - Expandable entries with status dot, timestamp, and command text
  * - An empty state message when no commands have been logged
  *
- * NOTE: This component is not yet integrated into the app shell layout.
- * It uses direct DOM injection because there is no parent component that
- * renders it. The module-level singleton pattern (logGitCommand) also
- * requires direct access. When the component is integrated into the app
- * layout (e.g., as a collapsible bottom panel), these tests should be
- * updated to use the real app flow instead of injection.
+ * The component is integrated into the app shell as a toggleable bottom
+ * panel ("Toggle Output Panel" in the command palette), fed by the IPC layer
+ * (state-changing commands are logged automatically). The describes below
+ * still exercise the component surface via direct DOM injection for
+ * fine-grained control of entries; the "In-app integration" describe at the
+ * bottom covers the real app flow.
  */
 
 /** Inject lv-output-panel into the page */
 async function injectOutputPanel(page: import('@playwright/test').Page): Promise<void> {
+  // The IPC layer now logs real commands into the singleton store; reset it
+  // so these injection tests keep deterministic entry counts.
+  await clearEntries(page);
+
   await page.evaluate(() => {
     const existing = document.querySelector('lv-output-panel');
     if (existing) existing.remove();
@@ -345,5 +349,37 @@ test.describe('Output Panel - Error Entry Display', () => {
     await expect(
       page.locator('lv-output-panel .entry').first().locator('.expand-icon.expanded')
     ).toBeVisible();
+  });
+});
+
+// --------------------------------------------------------------------------
+// In-app integration (real flow: palette toggle + IPC-fed entries)
+// --------------------------------------------------------------------------
+test.describe('Output Panel - In-app integration', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('palette toggle shows the panel, git commands appear, close hides it', async ({ page }) => {
+    const { AppPage } = await import('../pages/app.page');
+    const app = new AppPage(page);
+
+    // Panel hidden by default
+    const appPanel = page.locator('lv-app-shell lv-output-panel');
+    await expect(appPanel).toHaveCount(0);
+
+    await app.executeCommand('Toggle Output Panel');
+    await expect(appPanel).toBeVisible();
+
+    // Run a state-changing git command through the real palette flow — the
+    // IPC layer logs it into the panel
+    await app.executeCommand('Create stash');
+    await expect(
+      appPanel.locator('.entry-command', { hasText: 'create_stash' }).first()
+    ).toBeVisible();
+
+    // Close button hides the panel again
+    await appPanel.locator('.close-btn').click();
+    await expect(appPanel).toHaveCount(0);
   });
 });

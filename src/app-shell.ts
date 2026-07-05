@@ -12,6 +12,7 @@ import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
 import './components/panels/lv-diff-view.ts';
 import './components/panels/lv-blame-view.ts';
+import './components/panels/lv-output-panel.ts';
 import './components/sidebar/lv-left-panel.ts';
 import './components/sidebar/lv-right-panel.ts';
 import './components/dialogs/lv-settings-dialog.ts';
@@ -159,6 +160,22 @@ export class AppShell extends LitElement {
         overflow: hidden;
         min-width: 400px;
         position: relative;
+      }
+
+      .output-panel-container {
+        height: 240px;
+        flex-shrink: 0;
+        border-top: 1px solid var(--color-border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .output-panel-container lv-output-panel {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
       }
 
       .graph-area {
@@ -514,6 +531,7 @@ export class AppShell extends LitElement {
 
   // Command palette
   @state() private showCommandPalette = false;
+  @state() private showOutputPanel = false;
   @state() private branches: Branch[] = [];
   @state() private trackedFiles: string[] = [];
 
@@ -2027,6 +2045,13 @@ export class AppShell extends LitElement {
         action: () => this.handleRefresh(),
       },
       {
+        id: 'toggle-output-panel',
+        label: 'Toggle Output Panel',
+        category: 'action',
+        icon: 'terminal',
+        action: () => { this.showOutputPanel = !this.showOutputPanel; },
+      },
+      {
         id: 'stash',
         label: 'Create stash',
         category: 'action',
@@ -2780,6 +2805,17 @@ export class AppShell extends LitElement {
                           </div>
                         `
                       : ''}
+                ${this.showOutputPanel
+                  ? html`
+                      <div class="output-panel-container">
+                        <lv-output-panel
+                          closable
+                          .repositoryPath=${this.activeRepository.repository.path}
+                          @close=${() => { this.showOutputPanel = false; }}
+                        ></lv-output-panel>
+                      </div>
+                    `
+                  : ''}
               </main>
 
               ${this.rightPanelVisible ? html`
