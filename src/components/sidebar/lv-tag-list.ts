@@ -520,6 +520,13 @@ export class LvTagList extends LitElement {
         const data = result.data;
         if (data.stashed && data.stashConflict) {
           showToast(`Switched to ${tag.name} — stash conflicts need resolution`, 'warning');
+          // Open the conflict resolution dialog so the user can resolve the failed
+          // auto-stash pop (pop semantics: entry at index 0, drop it once resolved).
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
+          }));
         } else if (data.stashed && data.stashApplied) {
           showToast(`Switched to ${tag.name} (changes re-applied)`, 'info');
         } else if (data.stashed && !data.stashApplied) {

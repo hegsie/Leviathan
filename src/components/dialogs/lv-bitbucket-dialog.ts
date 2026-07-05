@@ -801,13 +801,13 @@ export class LvBitbucketDialog extends LitElement {
     if (token) {
       // Use OAuth token to check connection
       const result = await gitService.checkBitbucketConnectionWithToken(token);
-      if (result.success && result.data) {
+      if (result.success && result.data?.connected) {
         this.connectionStatus = result.data;
         this.syncSharedConnectionStatus(result.data.connected);
         this.oauthToken = token;
 
         // Update cached user in global account if connected
-        if (this.selectedAccountId && result.data.connected && result.data.user) {
+        if (this.selectedAccountId && result.data.user) {
           await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
             username: result.data.user.username,
             displayName: result.data.user.displayName ?? null,
@@ -815,6 +815,8 @@ export class LvBitbucketDialog extends LitElement {
             avatarUrl: result.data.user.avatarUrl ?? null,
           });
         }
+      } else if (await this.tryMigrateLegacyAppPassword(token)) {
+        // Migration succeeded — connection state was set inside the helper.
       } else {
         // Failed check must mark the account as disconnected so dependent UI
         // surfaces (toolbar, selector dot) don't keep a stale connected state.
@@ -831,6 +833,54 @@ export class LvBitbucketDialog extends LitElement {
         this.syncSharedConnectionStatus(false);
       }
     }
+  }
+
+  /**
+   * Migrate a legacy Bitbucket app-password credential that was stored as a RAW
+   * app password (before the `bbapp:` prefix fix). The backend now sends
+   * unprefixed tokens as Bearer, so those accounts fail the with_token check and
+   * appear permanently disconnected. When the raw token fails, retry the check
+   * with the properly-prefixed `bbapp:<username>:<token>` form; on success,
+   * re-store the prefixed credential and adopt it so future calls use Basic auth.
+   *
+   * OAuth access tokens legitimately use Bearer, so this only ever runs AFTER a
+   * failed check and never rewrites a token that already connected.
+   *
+   * @returns true if migration succeeded and connection state was set.
+   */
+  private async tryMigrateLegacyAppPassword(token: string): Promise<boolean> {
+    // Already prefixed (or OAuth) tokens don't need migration.
+    if (token.startsWith(credentialService.BITBUCKET_APP_PASSWORD_PREFIX)) {
+      return false;
+    }
+    if (!this.selectedAccountId) return false;
+
+    const account = getAccountById(this.selectedAccountId);
+    const username = account?.cachedUser?.username;
+    if (!username) return false;
+
+    const prefixed = credentialService.formatBitbucketAppPasswordCredential(username, token);
+    const retry = await gitService.checkBitbucketConnectionWithToken(prefixed);
+    if (!retry.success || !retry.data?.connected) {
+      return false;
+    }
+
+    // Persist the migrated credential and adopt it for this session.
+    await credentialService.storeAccountToken('bitbucket', this.selectedAccountId, prefixed);
+    this.oauthToken = prefixed;
+    this.connectionStatus = retry.data;
+    this.syncSharedConnectionStatus(true);
+
+    if (retry.data.user) {
+      await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+        username: retry.data.user.username,
+        displayName: retry.data.user.displayName ?? null,
+        email: null,
+        avatarUrl: retry.data.user.avatarUrl ?? null,
+      });
+    }
+
+    return true;
   }
 
   /**

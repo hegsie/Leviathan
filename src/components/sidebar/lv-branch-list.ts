@@ -1043,7 +1043,8 @@ export class LvBranchList extends LitElement {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
-            detail: { operationType: 'stash' },
+            // Auto-stash is pop semantics: entry at index 0, drop it once resolved.
+            detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
           }));
         } else if (data.stashed && data.stashApplied) {
           showToast(`Switched to ${branch.shorthand} (changes re-applied)`, 'info');
@@ -1625,8 +1626,13 @@ export class LvBranchList extends LitElement {
         this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
           bubbles: true,
           composed: true,
-          detail: { operationType: 'stash' },
+          // Auto-stash is pop semantics: entry at index 0, drop it once resolved.
+          detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
         }));
+        // The working tree is conflicted from the failed stash pop; do NOT fall
+        // through into merge/rebase on a conflicted tree — the user must resolve
+        // the stash conflicts first.
+        return;
       } else if (checkoutResult.data.stashed && checkoutResult.data.stashApplied) {
         showToast(`Switched to ${targetBranch.shorthand} (changes re-applied)`, 'info');
       } else if (checkoutResult.data.stashed && !checkoutResult.data.stashApplied) {

@@ -911,6 +911,129 @@ describe('lv-bitbucket-dialog', () => {
     });
   });
 
+  describe('Legacy app-password migration (raw -> bbapp:)', () => {
+    // Regression: accounts saved BEFORE the bbapp: prefix fix stored the RAW app
+    // password as the token. The backend now sends unprefixed tokens as Bearer, so
+    // those accounts fail the connection check and look permanently disconnected.
+    // On a FAILED check, retry with `bbapp:<username>:<token>` and, on success,
+    // re-store the prefixed credential.
+
+    it('reconnects a legacy raw-token account by retrying with the prefixed credential', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      keyringStore.clear();
+      keyringStore.set('bitbucket_token_bb-acc-1', 'raw-legacy-pass');
+
+      // Raw token fails; only the prefixed credential connects.
+      mockInvoke = async (command: string, args?: unknown) => {
+        const params = args as Record<string, string> | undefined;
+        if (command === 'get_keyring_token') return keyringStore.get(params!.key) ?? null;
+        if (command === 'store_keyring_token') {
+          keyringStore.set(params!.key, params!.value);
+          return null;
+        }
+        if (command === 'delete_keyring_token') { keyringStore.delete(params!.key); return null; }
+        if (command === 'get_unified_profiles_config') {
+          return { version: 3, profiles: [], accounts: [mockAccount], repositoryAssignments: {} };
+        }
+        if (command === 'load_unified_profile_for_repository') return null;
+        if (command === 'update_global_account_cached_user') return null;
+        if (command === 'check_bitbucket_connection_with_token') {
+          return params!.token === 'bbapp:bbuser:raw-legacy-pass'
+            ? mockConnectedStatus
+            : mockDisconnectedStatus;
+        }
+        if (command === 'check_bitbucket_connection') return mockDisconnectedStatus;
+        return null;
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Now reports connected via the migrated credential.
+      expect((el as unknown as { connectionStatus: { connected: boolean } | null }).connectionStatus?.connected)
+        .to.be.true;
+      // The prefixed credential is adopted for subsequent API calls.
+      expect((el as unknown as { oauthToken: string | null }).oauthToken)
+        .to.equal('bbapp:bbuser:raw-legacy-pass');
+      // And it was persisted back to the account token slot.
+      expect(keyringStore.get('bitbucket_token_bb-acc-1')).to.equal('bbapp:bbuser:raw-legacy-pass');
+    });
+
+    it('does NOT rewrite an OAuth (Bearer) token that connects on the first check', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      keyringStore.clear();
+      keyringStore.set('bitbucket_token_bb-acc-1', 'oauth-bearer-token');
+
+      // Any token connects (simulates a valid OAuth bearer) — no migration needed.
+      mockInvoke = async (command: string, args?: unknown) => {
+        const params = args as Record<string, string> | undefined;
+        if (command === 'get_keyring_token') return keyringStore.get(params!.key) ?? null;
+        if (command === 'store_keyring_token') { keyringStore.set(params!.key, params!.value); return null; }
+        if (command === 'delete_keyring_token') { keyringStore.delete(params!.key); return null; }
+        if (command === 'get_unified_profiles_config') {
+          return { version: 3, profiles: [], accounts: [mockAccount], repositoryAssignments: {} };
+        }
+        if (command === 'load_unified_profile_for_repository') return null;
+        if (command === 'update_global_account_cached_user') return null;
+        if (command === 'check_bitbucket_connection_with_token') return mockConnectedStatus;
+        if (command === 'check_bitbucket_connection') return mockConnectedStatus;
+        return null;
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      expect((el as unknown as { connectionStatus: { connected: boolean } | null }).connectionStatus?.connected)
+        .to.be.true;
+      // The OAuth token is untouched — never rewritten to a bbapp: credential.
+      expect((el as unknown as { oauthToken: string | null }).oauthToken).to.equal('oauth-bearer-token');
+      expect(keyringStore.get('bitbucket_token_bb-acc-1')).to.equal('oauth-bearer-token');
+      // No re-store to a prefixed credential happened.
+      const bbappWrite = invokeHistory.find(
+        (h) => h.command === 'store_keyring_token' &&
+          typeof (h.args as Record<string, string>).value === 'string' &&
+          (h.args as Record<string, string>).value.startsWith('bbapp:')
+      );
+      expect(bbappWrite, 'no bbapp re-store for OAuth token').to.be.undefined;
+    });
+
+    it('leaves the account disconnected when the prefixed retry also fails', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      keyringStore.clear();
+      keyringStore.set('bitbucket_token_bb-acc-1', 'raw-legacy-pass');
+
+      // Both raw and prefixed fail (e.g. genuinely revoked credential).
+      mockInvoke = async (command: string, args?: unknown) => {
+        const params = args as Record<string, string> | undefined;
+        if (command === 'get_keyring_token') return keyringStore.get(params!.key) ?? null;
+        if (command === 'store_keyring_token') { keyringStore.set(params!.key, params!.value); return null; }
+        if (command === 'delete_keyring_token') { keyringStore.delete(params!.key); return null; }
+        if (command === 'get_unified_profiles_config') {
+          return { version: 3, profiles: [], accounts: [mockAccount], repositoryAssignments: {} };
+        }
+        if (command === 'load_unified_profile_for_repository') return null;
+        if (command === 'update_global_account_cached_user') return null;
+        if (command === 'check_bitbucket_connection_with_token') return mockDisconnectedStatus;
+        if (command === 'check_bitbucket_connection') return mockDisconnectedStatus;
+        return null;
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      expect((el as unknown as { connectionStatus: { connected: boolean } | null }).connectionStatus?.connected)
+        .to.be.false;
+      // The raw token is NOT overwritten when the retry fails.
+      expect(keyringStore.get('bitbucket_token_bb-acc-1')).to.equal('raw-legacy-pass');
+    });
+  });
+
   describe('Create PR feedback', () => {
     it('shows a success toast after creating a pull request', async () => {
       unifiedProfileStore.getState().setAccounts([mockAccount]);

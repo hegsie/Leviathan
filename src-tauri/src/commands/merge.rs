@@ -128,10 +128,21 @@ pub async fn abort_merge(path: String) -> Result<()> {
 }
 
 /// Complete an in-progress merge after all conflicts have been resolved.
-/// Creates the merge commit with HEAD + MERGE_HEAD as parents and clears
-/// the MERGING state.
+///
+/// Normally creates the merge commit with HEAD + MERGE_HEAD as parents and
+/// clears the MERGING state. When `squash` is true, creates a SINGLE-parent
+/// commit instead (HEAD only) so a conflicted gitflow *squash* finish completes
+/// as the squash the user asked for, not a merge commit.
+///
+/// Signed commits are routed through the git CLI so the user's GPG/SSH signing
+/// configuration is honoured (git2 cannot sign).
 #[command]
-pub async fn commit_merge(path: String, message: Option<String>) -> Result<()> {
+pub async fn commit_merge(
+    path: String,
+    message: Option<String>,
+    squash: Option<bool>,
+) -> Result<()> {
+    let is_squash = squash.unwrap_or(false);
     let mut repo = git2::Repository::open(Path::new(&path))?;
 
     if repo.state() != git2::RepositoryState::Merge {
@@ -153,21 +164,9 @@ pub async fn commit_merge(path: String, message: Option<String>) -> Result<()> {
     }
     let repo = repo;
 
-    let mut index = repo.index()?;
-    if index.has_conflicts() {
+    if repo.index()?.has_conflicts() {
         return Err(LeviathanError::MergeConflict);
     }
-
-    let head_commit = repo.head()?.peel_to_commit()?;
-    let mut parents: Vec<git2::Commit> = vec![head_commit];
-    for oid in merge_oids {
-        parents.push(repo.find_commit(oid)?);
-    }
-    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-
-    let tree_oid = index.write_tree()?;
-    let tree = repo.find_tree(tree_oid)?;
-    let signature = repo.signature()?;
 
     // Default to git's own MERGE_MSG (what `git commit` would use mid-merge)
     let commit_message = message
@@ -179,15 +178,74 @@ pub async fn commit_merge(path: String, message: Option<String>) -> Result<()> {
         })
         .unwrap_or_else(|| "Merge".to_string());
 
-    repo.commit(
-        Some("HEAD"),
-        &signature,
-        &signature,
-        &commit_message,
-        &tree,
-        &parent_refs,
-    )?;
+    // Route signed commits through the git CLI (git2 cannot sign).
+    if crate::commands::commit::should_sign_commit(&path, None)? {
+        return commit_merge_signed(&path, &commit_message, is_squash).await;
+    }
+
+    let mut index = repo.index()?;
+    let tree_oid = index.write_tree()?;
+    let tree = repo.find_tree(tree_oid)?;
+    let signature = repo.signature()?;
+    let head_commit = repo.head()?.peel_to_commit()?;
+
+    if is_squash {
+        // Squash: a SINGLE parent (HEAD only). The resolved index already holds
+        // the full merged tree, so this commits it as an ordinary commit.
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            &commit_message,
+            &tree,
+            &[&head_commit],
+        )?;
+    } else {
+        let mut parents: Vec<git2::Commit> = vec![head_commit];
+        for oid in merge_oids {
+            parents.push(repo.find_commit(oid)?);
+        }
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            &commit_message,
+            &tree,
+            &parent_refs,
+        )?;
+    }
     repo.cleanup_state()?;
+    Ok(())
+}
+
+/// Complete an in-progress merge with a SIGNED commit via the git CLI.
+///
+/// For a normal merge, `git commit` mid-merge creates the 2-parent merge commit
+/// and clears the merge state itself. For a squash, that would wrongly produce
+/// a 2-parent merge commit, so we clear the merge metadata first (which leaves
+/// the resolved index staged) and then commit the staged tree as an ordinary
+/// single-parent signed commit.
+async fn commit_merge_signed(path: &str, message: &str, is_squash: bool) -> Result<()> {
+    if is_squash {
+        let repo = git2::Repository::open(Path::new(path))?;
+        repo.cleanup_state()?;
+    }
+
+    let output = create_command("git")
+        .current_dir(path)
+        .args(["commit", "-S", "-m", message])
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git commit: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LeviathanError::OperationFailed(format!(
+            "Git commit failed: {}",
+            stderr
+        )));
+    }
+
     Ok(())
 }
 
@@ -1425,7 +1483,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = commit_merge(repo.path_str(), Some("Merge feature".to_string())).await;
+        let result = commit_merge(repo.path_str(), Some("Merge feature".to_string()), None).await;
         assert!(result.is_ok(), "commit_merge failed: {:?}", result.err());
 
         let git_repo = repo.repo();
@@ -1437,6 +1495,51 @@ mod tests {
             "merge commit must have both parents"
         );
         assert_eq!(head.summary(), Some("Merge feature"));
+    }
+
+    #[tokio::test]
+    async fn test_commit_merge_squash_produces_single_parent() {
+        // A conflicted merge resolved and completed with squash:true must yield
+        // a SINGLE-parent commit (the squash the user asked for), not a merge
+        // commit, and clear the merge state.
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+
+        let result = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = commit_merge(repo.path_str(), Some("Squashed".to_string()), Some(true)).await;
+        assert!(
+            result.is_ok(),
+            "squash commit_merge failed: {:?}",
+            result.err()
+        );
+
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            1,
+            "squash merge commit must have a single parent"
+        );
+        assert_eq!(head.summary(), Some("Squashed"));
     }
 
     #[tokio::test]
@@ -1452,7 +1555,7 @@ mod tests {
         )
         .await;
 
-        let result = commit_merge(repo.path_str(), None).await;
+        let result = commit_merge(repo.path_str(), None, None).await;
         assert!(matches!(result, Err(LeviathanError::MergeConflict)));
         // Still mid-merge so the user can keep resolving
         assert_eq!(repo.repo().state(), git2::RepositoryState::Merge);
@@ -1461,7 +1564,7 @@ mod tests {
     #[tokio::test]
     async fn test_commit_merge_without_merge_in_progress() {
         let repo = TestRepo::with_initial_commit();
-        let result = commit_merge(repo.path_str(), None).await;
+        let result = commit_merge(repo.path_str(), None, None).await;
         assert!(result.is_err());
     }
 

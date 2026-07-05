@@ -763,7 +763,7 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      expect(conflictDetail).to.deep.equal({ operationType: 'merge' });
+      expect(conflictDetail).to.deep.equal({ operationType: 'merge', squash: false });
       // No inline error banner when routing to the conflict dialog.
       expect(el.shadowRoot!.querySelector('.error-banner')).to.be.null;
     });
@@ -796,7 +796,7 @@ describe('lv-gitflow-panel', () => {
         await new Promise((r) => setTimeout(r, 150));
         await el.updateComplete;
 
-        expect(conflictDetail).to.deep.equal({ operationType: 'merge' });
+        expect(conflictDetail).to.deep.equal({ operationType: 'merge', squash: false });
       } finally {
         cleanupMockPrompt();
       }

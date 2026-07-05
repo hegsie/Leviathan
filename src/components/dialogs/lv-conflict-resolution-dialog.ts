@@ -305,6 +305,19 @@ export class LvConflictResolutionDialog extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
   @property({ type: String }) operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
+  /** For 'stash' completion: which stash entry to drop once conflicts are resolved. */
+  @property({ type: Number }) stashIndex = 0;
+  /**
+   * For 'stash' completion: whether to drop stash@{stashIndex} on Complete. Pop
+   * semantics (auto-stash, explicit pop) drop it; a plain apply keeps it.
+   */
+  @property({ type: Boolean }) dropStashOnComplete = true;
+  /**
+   * For 'merge' completion: complete as a squash merge (single-parent commit)
+   * rather than a two-parent merge commit. Set when the failed operation that
+   * opened this dialog was a squash (e.g. a git-flow squash finish).
+   */
+  @property({ type: Boolean }) squashMerge = false;
 
   @state() private conflicts: ConflictFile[] = [];
   @state() private resolvedFiles: Set<string> = new Set();
@@ -542,6 +555,25 @@ export class LvConflictResolutionDialog extends LitElement {
   private async handleContinue(): Promise<void> {
     if (!this.repositoryPath) return;
 
+    // A 'stash' operation with NO conflicts means the backend reported a conflict
+    // but nothing was actually applied — the changes are still safe in the stash.
+    // Dropping it here would permanently destroy never-applied changes, so refuse
+    // to drop and close without touching the stash.
+    if (this.operationType === 'stash' && this.conflicts.length === 0) {
+      showToast(
+        'The stash was not applied — your changes are still in the stash',
+        'warning'
+      );
+      this.dispatchEvent(
+        new CustomEvent('operation-aborted', {
+          bubbles: true,
+          composed: true,
+        })
+      );
+      this.close();
+      return;
+    }
+
     // Check all conflicts are resolved
     const unresolvedCount = this.conflicts.filter(
       (c) => !this.resolvedFiles.has(c.path)
@@ -605,8 +637,10 @@ export class LvConflictResolutionDialog extends LitElement {
           }
           break;
         case 'merge':
-          // Commit the in-progress merge (HEAD + MERGE_HEAD parents).
-          result = await gitService.commitMerge(this.repositoryPath);
+          // Commit the in-progress merge. When the failed operation was a squash
+          // (e.g. a git-flow squash finish), complete it as a single-parent squash
+          // commit rather than a two-parent merge commit.
+          result = await gitService.commitMerge(this.repositoryPath, undefined, this.squashMerge);
           if (!result.success) {
             console.error('Failed to complete merge:', result.error);
             if (result.error?.code === 'MERGE_CONFLICT') {
@@ -621,13 +655,15 @@ export class LvConflictResolutionDialog extends LitElement {
           }
           break;
         case 'stash':
-          // All conflicts resolved — the failed pop left the auto-stash at index 0;
-          // drop it now that its changes have been applied and resolved.
-          result = await gitService.dropStash({ path: this.repositoryPath, index: 0 });
-          if (!result.success) {
-            console.error('Failed to drop stash:', result.error);
-            showToast(result.error?.message ?? 'Failed to drop stash', 'error');
-            return;
+          // All conflicts resolved. Drop the stash only for pop semantics
+          // (dropAfter/pop/auto-stash) — a plain apply must keep the stash entry.
+          if (this.dropStashOnComplete) {
+            result = await gitService.dropStash({ path: this.repositoryPath, index: this.stashIndex });
+            if (!result.success) {
+              console.error('Failed to drop stash:', result.error);
+              showToast(result.error?.message ?? 'Failed to drop stash', 'error');
+              return;
+            }
           }
           break;
       }
@@ -787,7 +823,8 @@ export class LvConflictResolutionDialog extends LitElement {
             <button
               class="btn btn-primary"
               @click=${this.handleContinue}
-              ?disabled=${this.resolvedCount < this.totalCount}
+              ?disabled=${this.resolvedCount < this.totalCount ||
+                (this.operationType === 'stash' && this.conflicts.length === 0)}
             >
               ${this.operationType === 'merge'
                 ? 'Complete Merge'

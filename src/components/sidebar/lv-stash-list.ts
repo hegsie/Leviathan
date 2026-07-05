@@ -313,10 +313,29 @@ export class LvStashList extends LitElement {
       } else {
         console.error('Failed to apply stash:', result.error);
         showToast(result.error?.message ?? 'Failed to apply stash', 'error');
+        // A conflicting apply left the changes in the working tree; open the
+        // conflict resolution dialog. The stash was NOT dropped (apply, not pop),
+        // so completion must keep it.
+        if (this.isConflictError(result.error?.message)) {
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: {
+              operationType: 'stash',
+              stashIndex: stash.index,
+              dropStashOnComplete: false,
+            },
+          }));
+        }
       }
     } finally {
       this.operationInProgress = false;
     }
+  }
+
+  /** True when a stash apply/pop error message indicates a merge conflict. */
+  private isConflictError(message: string | undefined): boolean {
+    return !!message && message.toLowerCase().includes('conflict');
   }
 
   private async handlePopStash(): Promise<void> {
@@ -349,6 +368,20 @@ export class LvStashList extends LitElement {
       } else {
         console.error('Failed to pop stash:', result.error);
         showToast(result.error?.message ?? 'Failed to pop stash', 'error');
+        // A conflicting pop left the changes in the working tree AND left the
+        // stash entry in place. Open the conflict resolution dialog; completion
+        // must drop the stash (pop semantics) once conflicts are resolved.
+        if (this.isConflictError(result.error?.message)) {
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: {
+              operationType: 'stash',
+              stashIndex: stash.index,
+              dropStashOnComplete: true,
+            },
+          }));
+        }
       }
     } finally {
       this.operationInProgress = false;

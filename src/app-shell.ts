@@ -528,6 +528,12 @@ export class AppShell extends LitElement {
   // Conflict resolution dialog
   @state() private showConflictDialog = false;
   @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
+  // Stash-completion semantics for the conflict dialog (which entry to drop and
+  // whether to drop it at all — pop drops, plain apply keeps).
+  @state() private conflictStashIndex = 0;
+  @state() private conflictDropStashOnComplete = true;
+  // Whether a conflicted merge should complete as a squash (single-parent) commit.
+  @state() private conflictSquashMerge = false;
 
   // Command palette
   @state() private showCommandPalette = false;
@@ -697,10 +703,21 @@ export class AppShell extends LitElement {
 
   // Handle open-conflict-dialog events from child components (e.g., interactive rebase)
   private handleOpenConflictDialogEvent = (e: Event): void => {
-    const customEvent = e as CustomEvent<{ operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' }>;
+    const customEvent = e as CustomEvent<{
+      operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash';
+      stashIndex?: number;
+      dropStashOnComplete?: boolean;
+      squash?: boolean;
+    }>;
     if (customEvent.detail?.operationType) {
       this.conflictOperationType = customEvent.detail.operationType;
     }
+    // Thread stash-completion semantics so the dialog drops the correct entry
+    // (and only when the failed operation had pop semantics).
+    this.conflictStashIndex = customEvent.detail?.stashIndex ?? 0;
+    this.conflictDropStashOnComplete = customEvent.detail?.dropStashOnComplete ?? true;
+    // A squash finish that conflicted must complete as a squash, not a merge commit.
+    this.conflictSquashMerge = customEvent.detail?.squash ?? false;
     this.showConflictDialog = true;
     this.handleRefresh();
   };
@@ -708,9 +725,19 @@ export class AppShell extends LitElement {
   // Handle merge-conflict events from branch list (e.g., sidebar merge resulting in conflicts)
   private handleMergeConflictEvent = (): void => {
     this.conflictOperationType = 'merge';
+    this.resetConflictDetailState();
     this.showConflictDialog = true;
     this.handleRefresh();
   };
+
+  // Reset the conflict-dialog completion semantics to defaults so a value set by a
+  // prior operation (e.g. squash=true from a git-flow squash finish, or a non-zero
+  // stash index) can't leak into an unrelated conflict resolution.
+  private resetConflictDetailState(): void {
+    this.conflictStashIndex = 0;
+    this.conflictDropStashOnComplete = true;
+    this.conflictSquashMerge = false;
+  }
 
   // Handle gitflow events (init, feature/release/hotfix operations) to trigger refresh
   private handleGitflowEvent = (): void => {
@@ -1120,7 +1147,12 @@ export class AppShell extends LitElement {
     if (data.stashed && data.stashConflict) {
       showToast(`Switched to ${refName} — stash conflicts need resolution`, 'warning');
       // Open the conflict dialog so the user can resolve the failed stash pop.
+      // Auto-stash is pop semantics: the conflicted auto-stash sits at index 0 and
+      // must be dropped once its changes are applied and resolved.
       this.conflictOperationType = 'stash';
+      this.conflictStashIndex = 0;
+      this.conflictDropStashOnComplete = true;
+      this.conflictSquashMerge = false;
       this.showConflictDialog = true;
       this.handleRefresh();
     } else if (data.stashed && data.stashApplied) {
@@ -1146,6 +1178,7 @@ export class AppShell extends LitElement {
       showToast(`Merged ${refName}`, 'success');
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       this.conflictOperationType = 'merge';
+      this.resetConflictDetailState();
       this.showConflictDialog = true;
       notifyWarning(
         'Merge Conflict',
@@ -1174,6 +1207,7 @@ export class AppShell extends LitElement {
       showToast(`Rebased onto ${refName}`, 'success');
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       this.conflictOperationType = 'rebase';
+      this.resetConflictDetailState();
       this.showConflictDialog = true;
       notifyWarning(
         'Rebase Conflict',
@@ -1271,6 +1305,7 @@ export class AppShell extends LitElement {
   private handleCherryPickConflict(): void {
     // Show conflict resolution dialog
     this.conflictOperationType = 'cherry-pick';
+    this.resetConflictDetailState();
     this.showConflictDialog = true;
     notifyWarning(
       'Cherry-pick Conflict',
@@ -1299,6 +1334,7 @@ export class AppShell extends LitElement {
       this.conflictOperationType = 'revert';
     }
 
+    this.resetConflictDetailState();
     this.showConflictDialog = true;
   }
 
@@ -1328,6 +1364,7 @@ export class AppShell extends LitElement {
     } else if (result.error?.code === 'REVERT_CONFLICT') {
       // Show conflict resolution dialog
       this.conflictOperationType = 'revert';
+      this.resetConflictDetailState();
       this.showConflictDialog = true;
       notifyWarning(
         'Revert Conflict',
@@ -2475,13 +2512,17 @@ export class AppShell extends LitElement {
   private async handleFetch(): Promise<void> {
     if (!this.activeRepository) return;
     const opId = progressService.startOperation('fetch', 'Fetching from remote...');
-    try {
-      await gitService.fetch({ path: this.activeRepository.repository.path });
+    // gitService.fetch returns a CommandResult (invokeCommand never throws), so we
+    // must inspect result.success — a catch-only path always reported success and
+    // the backend emits remote-operation-completed only on success, so failures
+    // were fully silent.
+    const result = await gitService.fetch({ path: this.activeRepository.repository.path });
+    if (result.success) {
       progressService.completeOperation(opId);
       this.handleRefresh();
-    } catch {
+    } else {
       progressService.failOperation(opId);
-      // Error is logged; toast notification is shown via remote-operation-completed event
+      showToast(result.error?.message ?? 'Fetch failed', 'error');
     }
   }
 
@@ -2497,11 +2538,13 @@ export class AppShell extends LitElement {
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       progressService.failOperation(opId);
       this.conflictOperationType = 'merge';
+      this.resetConflictDetailState();
       this.showConflictDialog = true;
       this.handleRefresh();
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       progressService.failOperation(opId);
       this.conflictOperationType = 'rebase';
+      this.resetConflictDetailState();
       this.showConflictDialog = true;
       this.handleRefresh();
     } else {
@@ -2513,13 +2556,17 @@ export class AppShell extends LitElement {
   private async handlePush(): Promise<void> {
     if (!this.activeRepository) return;
     const opId = progressService.startOperation('push', 'Pushing to remote...');
-    try {
-      await gitService.push({ path: this.activeRepository.repository.path });
+    // gitService.push returns a CommandResult (invokeCommand never throws), so we
+    // must inspect result.success — a catch-only path always reported success and
+    // the backend emits remote-operation-completed only on success, so failures
+    // were fully silent.
+    const result = await gitService.push({ path: this.activeRepository.repository.path });
+    if (result.success) {
       progressService.completeOperation(opId);
       this.handleRefresh();
-    } catch {
+    } else {
       progressService.failOperation(opId);
-      // Error is logged; toast notification is shown via remote-operation-completed event
+      showToast(result.error?.message ?? 'Push failed', 'error');
     }
   }
 
@@ -2881,6 +2928,9 @@ export class AppShell extends LitElement {
               open
               repositoryPath=${this.activeRepository.repository.path}
               operationType=${this.conflictOperationType}
+              .stashIndex=${this.conflictStashIndex}
+              .dropStashOnComplete=${this.conflictDropStashOnComplete}
+              .squashMerge=${this.conflictSquashMerge}
               @operation-completed=${this.handleConflictResolved}
               @operation-aborted=${this.handleConflictAborted}
             ></lv-conflict-resolution-dialog>

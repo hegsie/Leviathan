@@ -165,6 +165,62 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
     });
   });
 
+  describe('handleFetch', () => {
+    it('completes and refreshes on success', async () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleFetch();
+
+      expect(findCommands('fetch').length).to.equal(1);
+      expect(findCommands('open_repository').length).to.be.greaterThan(0);
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error')).to.be.false;
+    });
+
+    it('shows an error toast and does not refresh on failure', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'fetch') throw { code: 'NETWORK', message: 'Could not reach remote' };
+        return null;
+      };
+
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleFetch();
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /Could not reach remote/.test(t.message))).to.be.true;
+      expect(findCommands('open_repository').length).to.equal(0);
+    });
+  });
+
+  describe('handlePush', () => {
+    it('completes and refreshes on success', async () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handlePush();
+
+      expect(findCommands('push').length).to.equal(1);
+      expect(findCommands('open_repository').length).to.be.greaterThan(0);
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error')).to.be.false;
+    });
+
+    it('shows an error toast and does not refresh on failure', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'push') throw { code: 'REJECTED', message: 'Updates were rejected' };
+        return null;
+      };
+
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handlePush();
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /Updates were rejected/.test(t.message))).to.be.true;
+      expect(findCommands('open_repository').length).to.equal(0);
+    });
+  });
+
   describe('handleCreateStash', () => {
     it('shows a success toast and refreshes on success', async () => {
       const el = createAppShell();
@@ -271,6 +327,64 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
       expect((el as any).showConflictDialog).to.be.true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).conflictOperationType).to.equal('stash');
+    });
+
+    it('threads stashIndex / dropStashOnComplete from the event detail', async () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleOpenConflictDialogEvent(
+        new CustomEvent('open-conflict-dialog', {
+          detail: { operationType: 'stash', stashIndex: 4, dropStashOnComplete: false },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 0));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      expect(shell.conflictStashIndex).to.equal(4);
+      expect(shell.conflictDropStashOnComplete).to.be.false;
+      expect(shell.conflictSquashMerge).to.be.false;
+    });
+
+    it('threads squash from the event detail (git-flow squash finish)', async () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleOpenConflictDialogEvent(
+        new CustomEvent('open-conflict-dialog', {
+          detail: { operationType: 'merge', squash: true },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 0));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).conflictSquashMerge).to.be.true;
+    });
+
+    it('defaults stash/squash detail to index 0, drop true, squash false', async () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleOpenConflictDialogEvent(
+        new CustomEvent('open-conflict-dialog', { detail: { operationType: 'rebase' } })
+      );
+      await new Promise((r) => setTimeout(r, 0));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      expect(shell.conflictStashIndex).to.equal(0);
+      expect(shell.conflictDropStashOnComplete).to.be.true;
+      expect(shell.conflictSquashMerge).to.be.false;
+    });
+
+    it('resets a stale squash flag when a plain merge conflict opens the dialog', async () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      // Simulate a prior git-flow squash finish having set the flag.
+      shell.conflictSquashMerge = true;
+      shell.handleMergeConflictEvent();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(shell.conflictSquashMerge).to.be.false;
     });
   });
 

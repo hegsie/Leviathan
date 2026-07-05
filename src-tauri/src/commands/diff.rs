@@ -465,21 +465,23 @@ fn maybe_truncate_diff(mut file: DiffFile, max_lines: Option<u32>) -> DiffFile {
     if total <= max_lines {
         return file;
     }
+    // Truncate at HUNK boundaries only. A hunk is all-or-nothing: including a
+    // partial hunk would leave its `@@ -a,b +c,d @@` header describing more
+    // lines than the body actually contains, which git rejects as a "corrupt
+    // patch" when the user tries to stage that hunk. Include only hunks that
+    // fit completely; stop at the first hunk that doesn't. (If even the first
+    // hunk exceeds the cap, we keep zero hunks and flag truncated — the UI
+    // offers a "Load full diff" affordance for that case.)
     let mut remaining = max_lines;
-    let mut truncated_hunks = Vec::new();
-    for mut hunk in file.hunks.drain(..) {
-        if remaining == 0 {
+    let mut kept_hunks = Vec::new();
+    for hunk in file.hunks.drain(..) {
+        if hunk.lines.len() > remaining {
             break;
         }
-        if hunk.lines.len() > remaining {
-            hunk.lines.truncate(remaining);
-            remaining = 0;
-        } else {
-            remaining -= hunk.lines.len();
-        }
-        truncated_hunks.push(hunk);
+        remaining -= hunk.lines.len();
+        kept_hunks.push(hunk);
     }
-    file.hunks = truncated_hunks;
+    file.hunks = kept_hunks;
     file.truncated = Some(true);
     file.total_lines = Some(total);
     file
@@ -1959,5 +1961,111 @@ mod tests {
         let files = result.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "combo.txt");
+    }
+
+    /// Build a hunk whose `@@` header is consistent with its `line_count`-line
+    /// body (all additions), so we can assert header/body consistency after
+    /// truncation.
+    fn make_hunk(new_start: u32, line_count: u32) -> DiffHunk {
+        let lines: Vec<DiffLine> = (0..line_count)
+            .map(|i| DiffLine {
+                content: format!("line {}\n", i),
+                origin: DiffLineOrigin::Addition,
+                old_line_no: None,
+                new_line_no: Some(new_start + i),
+            })
+            .collect();
+        DiffHunk {
+            header: format!("@@ -0,0 +{},{} @@", new_start, line_count),
+            old_start: 0,
+            old_lines: 0,
+            new_start,
+            new_lines: line_count,
+            lines,
+        }
+    }
+
+    fn file_with_hunks(hunks: Vec<DiffHunk>) -> DiffFile {
+        DiffFile {
+            path: "big.txt".to_string(),
+            old_path: None,
+            status: FileStatus::Modified,
+            hunks,
+            is_binary: false,
+            is_image: false,
+            image_type: None,
+            additions: 0,
+            deletions: 0,
+            truncated: None,
+            total_lines: None,
+        }
+    }
+
+    /// Every kept hunk's header must describe exactly as many new lines as its
+    /// body contains — a partially-truncated hunk would violate this and git
+    /// would reject the patch as corrupt.
+    fn assert_header_body_consistent(file: &DiffFile) {
+        for hunk in &file.hunks {
+            assert_eq!(
+                hunk.new_lines as usize,
+                hunk.lines.len(),
+                "hunk header claims {} new lines but body has {}",
+                hunk.new_lines,
+                hunk.lines.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_truncate_diff_no_cap_returns_unchanged() {
+        let file = file_with_hunks(vec![make_hunk(1, 5), make_hunk(10, 5)]);
+        let out = maybe_truncate_diff(file, None);
+        assert_eq!(out.hunks.len(), 2);
+        assert!(out.truncated.is_none());
+    }
+
+    #[test]
+    fn test_truncate_diff_under_cap_returns_unchanged() {
+        let file = file_with_hunks(vec![make_hunk(1, 5), make_hunk(10, 5)]);
+        let out = maybe_truncate_diff(file, Some(20));
+        assert_eq!(out.hunks.len(), 2);
+        assert!(out.truncated.is_none());
+    }
+
+    #[test]
+    fn test_truncate_diff_keeps_only_whole_hunks() {
+        // Cap of 12 fits the first (5) and second (5) hunk = 10 lines, but not
+        // the third (5) which would push to 15. The third must be dropped
+        // whole, never partially truncated.
+        let file = file_with_hunks(vec![make_hunk(1, 5), make_hunk(10, 5), make_hunk(20, 5)]);
+        let total = 15;
+        let out = maybe_truncate_diff(file, Some(12));
+        assert_eq!(out.hunks.len(), 2, "only whole hunks that fit are kept");
+        assert_eq!(out.truncated, Some(true));
+        assert_eq!(out.total_lines, Some(total));
+        assert_header_body_consistent(&out);
+    }
+
+    #[test]
+    fn test_truncate_diff_boundary_between_hunks() {
+        // Cap exactly equals the first hunk's size: keep just that hunk, drop
+        // the rest, no partial inclusion.
+        let file = file_with_hunks(vec![make_hunk(1, 5), make_hunk(10, 5)]);
+        let out = maybe_truncate_diff(file, Some(5));
+        assert_eq!(out.hunks.len(), 1);
+        assert_eq!(out.hunks[0].lines.len(), 5);
+        assert_eq!(out.truncated, Some(true));
+        assert_header_body_consistent(&out);
+    }
+
+    #[test]
+    fn test_truncate_diff_first_hunk_exceeds_cap_yields_zero_hunks() {
+        // A single hunk larger than the cap is dropped entirely (never
+        // partially included), leaving zero hunks with the truncated flag set.
+        let file = file_with_hunks(vec![make_hunk(1, 100)]);
+        let out = maybe_truncate_diff(file, Some(10));
+        assert!(out.hunks.is_empty(), "partial hunk must never be included");
+        assert_eq!(out.truncated, Some(true));
+        assert_eq!(out.total_lines, Some(100));
     }
 }

@@ -765,19 +765,47 @@ pub async fn checkout_with_autostash(
         repo.set_head_detached(target_oid)?;
     }
 
-    // If we stashed, try to apply the stash
+    // If we stashed, try to re-apply the stash.
     if stashed {
-        // Try to apply the stash. Reinstate the index so files the user had
-        // staged before the checkout come back staged instead of silently
-        // becoming unstaged.
+        // Use stash_APPLY (not stash_pop): the stash must survive until we KNOW
+        // the changes landed cleanly. git2's stash_pop is unsafe here in two
+        // empirically-verified ways:
+        //   - an UNSTAGED conflicting change makes apply return Ok while leaving
+        //     a conflicted index; stash_pop would then DROP the stash, destroying
+        //     the user's only copy of their work.
+        //   - a STAGED conflicting change makes apply fail with ECONFLICT.
+        // So we apply, then inspect the index ourselves and only drop the stash
+        // when it is genuinely clean.
+        //
+        // Reinstate the index so files the user had staged before the checkout
+        // come back staged instead of silently becoming unstaged.
         let mut stash_apply_opts = git2::StashApplyOptions::new();
         stash_apply_opts.reinstantiate_index();
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.safe();
         stash_apply_opts.checkout_options(checkout_opts);
 
-        match repo.stash_pop(0, Some(&mut stash_apply_opts)) {
+        let conflict_message = format!(
+            "Switched to {} but re-applying your stashed changes produced conflicts. \
+             Resolve them, then the stash will be dropped.",
+            ref_name
+        );
+
+        match repo.stash_apply(0, Some(&mut stash_apply_opts)) {
             Ok(()) => {
+                // Apply reported success, but an unstaged conflicting change can
+                // land conflicts in the index while still returning Ok. Only drop
+                // the stash when the index is truly conflict-free.
+                if repo.index()?.has_conflicts() {
+                    return Ok(CheckoutWithStashResult {
+                        success: true,
+                        stashed: true,
+                        stash_applied: false,
+                        stash_conflict: true,
+                        message: conflict_message,
+                    });
+                }
+                repo.stash_drop(0)?;
                 return Ok(CheckoutWithStashResult {
                     success: true,
                     stashed: true,
@@ -787,37 +815,50 @@ pub async fn checkout_with_autostash(
                 });
             }
             Err(e) => {
-                // Stash apply failed - might be conflicts
+                // git2 signals a stash-apply conflict as either MergeConflict
+                // (index-level) or Conflict (checkout-level, often with an empty
+                // message), so match both.
                 let has_conflicts = e.code() == git2::ErrorCode::MergeConflict
+                    || e.code() == git2::ErrorCode::Conflict
                     || e.message().contains("conflict")
                     || e.message().contains("CONFLICT");
 
                 if has_conflicts {
-                    // The stash is still in the stash list since pop failed
-                    return Ok(CheckoutWithStashResult {
-                        success: true,
-                        stashed: true,
-                        stash_applied: false,
-                        stash_conflict: true,
-                        message: format!(
-                            "Switched to {} but stash apply had conflicts. Stash saved as {}",
-                            ref_name,
-                            stash_oid.map(|o| o.to_string()).unwrap_or_default()
-                        ),
-                    });
-                } else {
-                    return Ok(CheckoutWithStashResult {
-                        success: true,
-                        stashed: true,
-                        stash_applied: false,
-                        stash_conflict: false,
-                        message: format!(
-                            "Switched to {} but failed to re-apply stash: {}",
-                            ref_name,
-                            e.message()
-                        ),
-                    });
+                    // A staged conflicting change fails the reinstate-index apply.
+                    // Retry WITHOUT reinstating the index: applied unstaged-style,
+                    // the conflict lands in the index (mirroring `git stash apply`)
+                    // where the conflict-resolution flow can pick it up. The stash
+                    // is kept for that flow to drop after resolution.
+                    let mut retry_opts = git2::StashApplyOptions::new();
+                    let mut retry_checkout = git2::build::CheckoutBuilder::new();
+                    retry_checkout.safe();
+                    retry_opts.checkout_options(retry_checkout);
+
+                    if repo.stash_apply(0, Some(&mut retry_opts)).is_ok()
+                        && repo.index()?.has_conflicts()
+                    {
+                        return Ok(CheckoutWithStashResult {
+                            success: true,
+                            stashed: true,
+                            stash_applied: false,
+                            stash_conflict: true,
+                            message: conflict_message,
+                        });
+                    }
                 }
+
+                // Could not re-apply — the stash remains in the list untouched.
+                return Ok(CheckoutWithStashResult {
+                    success: true,
+                    stashed: true,
+                    stash_applied: false,
+                    stash_conflict: false,
+                    message: format!(
+                        "Switched to {} but failed to re-apply stash: {}. Your changes remain stashed.",
+                        ref_name,
+                        e.message()
+                    ),
+                });
             }
         }
     }
@@ -1658,6 +1699,100 @@ mod tests {
             readme.status().contains(git2::Status::INDEX_MODIFIED),
             "staged change became unstaged across auto-stash checkout (status: {:?})",
             readme.status()
+        );
+    }
+
+    /// Build a main/feature divergence on shared.txt and leave an UNCOMMITTED
+    /// local change to shared.txt (staged when `stage` is true) that conflicts
+    /// with feature's version. Ends checked out on the initial branch with the
+    /// dirty change present. Returns the initial branch name.
+    fn setup_autostash_conflict(repo: &TestRepo, stage: bool) -> String {
+        let main = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", "base\n")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature version\n")]);
+        repo.checkout_branch(&main);
+        // Uncommitted local change that conflicts with feature's version
+        repo.create_file("shared.txt", "local edit\n");
+        if stage {
+            repo.stage_file("shared.txt");
+        }
+        main
+    }
+
+    fn stash_count(repo: &TestRepo) -> usize {
+        let mut git_repo = repo.repo();
+        let mut count = 0;
+        git_repo
+            .stash_foreach(|_, _, _| {
+                count += 1;
+                true
+            })
+            .unwrap();
+        count
+    }
+
+    #[tokio::test]
+    async fn test_checkout_autostash_unstaged_conflict_keeps_stash() {
+        // Empirical scenario (a): an UNSTAGED conflicting change makes the
+        // re-apply land conflicts in the index while git2 returns Ok. The stash
+        // must be REPORTED as conflicting and PRESERVED (not silently dropped).
+        let repo = TestRepo::with_initial_commit();
+        setup_autostash_conflict(&repo, false);
+
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string())
+            .await
+            .expect("checkout_with_autostash should not hard-error");
+
+        assert!(result.success);
+        assert!(result.stashed);
+        assert!(!result.stash_applied);
+        assert!(
+            result.stash_conflict,
+            "unstaged conflicting re-apply must report a conflict"
+        );
+
+        assert!(
+            repo.repo().index().unwrap().has_conflicts(),
+            "conflict must land in the index for the resolution flow"
+        );
+        assert_eq!(
+            stash_count(&repo),
+            1,
+            "stash must be preserved so the user's changes aren't lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_autostash_staged_conflict_keeps_stash() {
+        // Empirical scenario (b): a STAGED conflicting change makes the
+        // reinstate-index apply fail with ECONFLICT. The retry without
+        // reinstating the index lands the conflict in the index; the stash is
+        // kept and the conflict is reported.
+        let repo = TestRepo::with_initial_commit();
+        setup_autostash_conflict(&repo, true);
+
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string())
+            .await
+            .expect("checkout_with_autostash should not hard-error");
+
+        assert!(result.success);
+        assert!(result.stashed);
+        assert!(!result.stash_applied);
+        assert!(
+            result.stash_conflict,
+            "staged conflicting re-apply must report a conflict"
+        );
+
+        assert!(
+            repo.repo().index().unwrap().has_conflicts(),
+            "conflict must land in the index for the resolution flow"
+        );
+        assert_eq!(
+            stash_count(&repo),
+            1,
+            "stash must be preserved so the user's changes aren't lost"
         );
     }
 }

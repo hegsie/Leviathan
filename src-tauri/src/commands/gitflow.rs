@@ -388,15 +388,24 @@ async fn finish_release_like(
     })?)?;
 
     let annotated = repo.find_annotated_commit(release_commit.id())?;
-    repo.merge(&[&annotated], None, None)?;
+    let (master_analysis, _) = repo.merge_analysis(&[&annotated])?;
 
-    // Conflicts must abort the finish here — proceeding would tag nothing,
-    // check out develop over a conflicted tree, and delete the branch.
-    if repo.index()?.has_conflicts() {
-        return Err(LeviathanError::MergeConflict);
-    }
+    // Idempotency: on a re-run after resolving a develop-side conflict, master
+    // already contains the release, so the analysis is up-to-date. Skip the
+    // merge+commit entirely — re-merging would create a junk merge commit and
+    // the subsequent re-tag would fail with "tag already exists", stranding the
+    // branch. We still need a tag target for the (already-existing) tag below.
+    let master_merge_oid = if master_analysis.is_up_to_date() {
+        None
+    } else {
+        repo.merge(&[&annotated], None, None)?;
 
-    {
+        // Conflicts must abort the finish here — proceeding would tag nothing,
+        // check out develop over a conflicted tree, and delete the branch.
+        if repo.index()?.has_conflicts() {
+            return Err(LeviathanError::MergeConflict);
+        }
+
         let mut index = repo.index()?;
         let tree_oid = index.write_tree()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -406,11 +415,23 @@ async fn finish_release_like(
         let message = format!("Merge branch '{}' into {}", branch_name, master);
         let merge_oid = repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
         repo.cleanup_state()?;
+        Some(merge_oid)
+    };
 
-        // Create tag on master
-        let merge_commit = repo.find_commit(merge_oid)?;
-        let tag_msg = tag_message.unwrap_or_else(|| format!("Release {}", version));
-        repo.tag(&tag_name, merge_commit.as_object(), &sig, &tag_msg, false)?;
+    // Create the tag on master. Skip when it already exists (re-run after a
+    // conflict) so we don't fail with "tag already exists". Only tag a freshly
+    // created merge commit — when the master merge was skipped the tag
+    // necessarily already exists from the first run.
+    if repo
+        .find_reference(&format!("refs/tags/{}", tag_name))
+        .is_err()
+    {
+        if let Some(merge_oid) = master_merge_oid {
+            let sig = repo.signature()?;
+            let merge_commit = repo.find_commit(merge_oid)?;
+            let tag_msg = tag_message.unwrap_or_else(|| format!("Release {}", version));
+            repo.tag(&tag_name, merge_commit.as_object(), &sig, &tag_msg, false)?;
+        }
     }
 
     // Merge into develop
@@ -429,15 +450,20 @@ async fn finish_release_like(
         .map_err(|_| LeviathanError::BranchNotFound(branch_name.clone()))?;
     let release_commit2 = release_branch2.get().peel_to_commit()?;
     let annotated2 = repo.find_annotated_commit(release_commit2.id())?;
-    repo.merge(&[&annotated2], None, None)?;
+    let (develop_analysis, _) = repo.merge_analysis(&[&annotated2])?;
 
-    // Same as above: a conflicted develop merge must be surfaced (and the
-    // branch NOT deleted) so the user can resolve it.
-    if repo.index()?.has_conflicts() {
-        return Err(LeviathanError::MergeConflict);
-    }
+    // Idempotency: on a re-run after the develop conflict was resolved via
+    // commit_merge, develop already contains the release, so skip the merge to
+    // avoid a duplicate merge commit and let branch deletion proceed.
+    if !develop_analysis.is_up_to_date() {
+        repo.merge(&[&annotated2], None, None)?;
 
-    {
+        // Same as the master merge: a conflicted develop merge must be surfaced
+        // (and the branch NOT deleted) so the user can resolve it.
+        if repo.index()?.has_conflicts() {
+            return Err(LeviathanError::MergeConflict);
+        }
+
         let mut index = repo.index()?;
         let tree_oid = index.write_tree()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -836,5 +862,95 @@ mod tests {
             .is_ok());
         assert!(git_repo.find_reference("refs/tags/v2.0.0").is_err());
         assert_eq!(git_repo.state(), git2::RepositoryState::Merge);
+    }
+
+    fn count_reachable_commits(repo: &TestRepo, branch: &str) -> usize {
+        let git_repo = repo.repo();
+        let reference = git_repo
+            .find_branch(branch, git2::BranchType::Local)
+            .expect("branch should exist");
+        let oid = reference.get().target().expect("branch should have a tip");
+        let mut revwalk = git_repo.revwalk().unwrap();
+        revwalk.push(oid).unwrap();
+        revwalk.count()
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_idempotent_after_develop_conflict() {
+        // The master merge succeeds and the tag is created, but the develop
+        // merge conflicts. After resolving that conflict and completing the
+        // develop merge, re-running finish must be a clean no-op on master (no
+        // duplicate merge commit, no duplicate/failed tag) and must still
+        // delete the branch.
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        // Give develop a base version of shared.txt, branch the release off it,
+        // change it on the release, then make a DIVERGENT change on develop so
+        // the develop-side merge conflicts (master has no shared.txt so its
+        // merge stays clean).
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop base", &[("shared.txt", "develop base")]);
+        gitflow_start_release(repo.path_str(), "3.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("shared.txt", "release content")]);
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop divergent", &[("shared.txt", "develop divergent")]);
+
+        // First finish: master merges + tags cleanly, develop merge conflicts.
+        let result =
+            gitflow_finish_release(repo.path_str(), "3.0.0".to_string(), None, Some(true)).await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        {
+            let git_repo = repo.repo();
+            assert_eq!(git_repo.state(), git2::RepositoryState::Merge);
+            assert!(
+                git_repo.find_reference("refs/tags/v3.0.0").is_ok(),
+                "tag should have been created during the clean master merge"
+            );
+        }
+
+        let master_commits_before = count_reachable_commits(&repo, &master);
+
+        // Resolve the develop conflict and complete the merge.
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::commands::merge::commit_merge(repo.path_str(), None, None)
+            .await
+            .unwrap();
+
+        // Re-run finish: must succeed and be idempotent.
+        let result =
+            gitflow_finish_release(repo.path_str(), "3.0.0".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "re-run finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+
+        // No duplicate merge commit added to master.
+        let master_commits_after = count_reachable_commits(&repo, &master);
+        assert_eq!(
+            master_commits_before, master_commits_after,
+            "re-run must not add a junk master merge commit"
+        );
+
+        // Tag still exists (exactly once — creating it twice would have errored).
+        assert!(git_repo.find_reference("refs/tags/v3.0.0").is_ok());
+
+        // Branch was deleted.
+        assert!(git_repo
+            .find_branch("release/3.0.0", git2::BranchType::Local)
+            .is_err());
     }
 }

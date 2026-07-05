@@ -902,4 +902,123 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(infoToast, 'info toast shown').to.not.be.undefined;
     });
   });
+
+  // ── Stash: empty conflict list must NOT drop (never-applied changes) ────────
+  describe('stash with empty conflict list', () => {
+    beforeEach(() => clearToasts());
+
+    it('disables the Complete button when a stash conflict applied nothing', async () => {
+      setupDefaultMocks([]);
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const continueBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      expect(continueBtn.disabled, 'Complete disabled with 0 conflicts').to.be.true;
+    });
+
+    it('refuses to drop the stash and warns when continuing with no conflicts', async () => {
+      setupDefaultMocks([]);
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      let abortedFired = false;
+      let completedFired = false;
+      el.addEventListener('operation-aborted', () => { abortedFired = true; });
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      // Must NOT drop the stash — the changes were never applied.
+      expect(invokeHistory.some(h => h.command === 'drop_stash'), 'drop_stash NOT called').to.be.false;
+      expect(completedFired, 'not completed').to.be.false;
+      expect(abortedFired, 'operation-aborted dispatched').to.be.true;
+      expect(el.open, 'dialog closed').to.be.false;
+      const warnToast = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warnToast, 'warning toast shown').to.not.be.undefined;
+      expect(warnToast!.message).to.contain('still in the stash');
+    });
+  });
+
+  // ── Stash: index + drop semantics ───────────────────────────────────────────
+  describe('stash index / drop-on-complete semantics', () => {
+    beforeEach(() => clearToasts());
+
+    it('drops stash@{stashIndex} when dropStashOnComplete is true', async () => {
+      const el = await renderDialog('stash');
+      el.stashIndex = 3;
+      el.dropStashOnComplete = true;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      const dropCall = invokeHistory.find(h => h.command === 'drop_stash');
+      expect(dropCall, 'drop_stash called').to.exist;
+      expect((dropCall!.args as Record<string, unknown>).index).to.equal(3);
+      expect(completedFired).to.be.true;
+      expect(el.open).to.be.false;
+    });
+
+    it('does NOT drop the stash when dropStashOnComplete is false (apply semantics)', async () => {
+      const el = await renderDialog('stash');
+      el.stashIndex = 2;
+      el.dropStashOnComplete = false;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'drop_stash'), 'drop_stash NOT called').to.be.false;
+      expect(completedFired, 'still completes').to.be.true;
+      expect(el.open).to.be.false;
+    });
+  });
+
+  // ── Squash merge completion ─────────────────────────────────────────────────
+  describe('squash merge completion', () => {
+    beforeEach(() => clearToasts());
+
+    it('completes a squash merge via commit_merge when squashMerge is set', async () => {
+      const el = await renderDialog('merge');
+      el.squashMerge = true;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'commit_merge'), 'commit_merge called').to.be.true;
+      expect(completedFired).to.be.true;
+      expect(el.open).to.be.false;
+    });
+  });
 });

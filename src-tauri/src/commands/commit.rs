@@ -237,7 +237,20 @@ pub async fn create_commit(
     // as a parent, otherwise the merged branch is silently dropped and the
     // repository stays stuck in MERGING state. Collect the merge heads up
     // front (mergehead_foreach needs a unique borrow of the repo).
-    let merging = repo.state() == git2::RepositoryState::Merge;
+    //
+    // Cherry-pick and revert also leave sequencer state (CHERRY_PICK_HEAD /
+    // REVERT_HEAD) that must be cleared after committing, or the app stays
+    // stuck showing the operation "in progress". Unlike a merge, though, the
+    // resulting commit keeps a SINGLE parent (HEAD only) — the picked/reverted
+    // commit is NOT an extra parent.
+    let state = repo.state();
+    let merging = state == git2::RepositoryState::Merge;
+    let needs_cleanup = matches!(
+        state,
+        git2::RepositoryState::Merge
+            | git2::RepositoryState::CherryPick
+            | git2::RepositoryState::Revert
+    );
     let mut merge_oids: Vec<git2::Oid> = Vec::new();
     if merging {
         repo.mergehead_foreach(|oid| {
@@ -313,7 +326,7 @@ pub async fn create_commit(
             &tree,
             &parent_refs,
         )?;
-        if merging {
+        if needs_cleanup {
             repo.cleanup_state()?;
         }
         commit_oid
@@ -324,7 +337,7 @@ pub async fn create_commit(
 }
 
 /// Check if a commit should be signed based on explicit parameter or repo config
-fn should_sign_commit(path: &str, sign_commit: Option<bool>) -> Result<bool> {
+pub(crate) fn should_sign_commit(path: &str, sign_commit: Option<bool>) -> Result<bool> {
     match sign_commit {
         Some(sign) => Ok(sign),
         None => {
@@ -2000,5 +2013,107 @@ mod tests {
         assert!(!is_leap_year(1900));
         assert!(!is_leap_year(2023));
         assert!(is_leap_year(2400));
+    }
+
+    #[tokio::test]
+    async fn test_create_commit_mid_cherrypick_clears_state() {
+        // A cherry-pick that conflicts leaves CHERRY_PICK_HEAD set. Resolving
+        // and committing via the normal commit panel must produce a SINGLE
+        // parent commit AND clear the sequencer state, otherwise the app stays
+        // stuck showing "cherry-pick in progress".
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let pick_oid = repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+
+        // Divergent change on the base branch so the cherry-pick conflicts.
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+
+        {
+            let git_repo = repo.repo();
+            let commit = git_repo.find_commit(pick_oid).unwrap();
+            // A conflicting cherry-pick still sets CHERRY_PICK_HEAD.
+            let _ = git_repo.cherrypick(&commit, None);
+            assert_eq!(git_repo.state(), git2::RepositoryState::CherryPick);
+        }
+
+        // Resolve by staging the file.
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = create_commit(
+            repo.path_str(),
+            "Cherry-picked change".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Clean,
+            "cherry-pick state must be cleared after committing"
+        );
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            1,
+            "a cherry-pick commit keeps a single parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_commit_mid_revert_clears_state() {
+        // A revert leaves REVERT_HEAD set; committing must clear it and keep a
+        // single parent.
+        let repo = TestRepo::with_initial_commit();
+        let target = repo.create_commit("Add file", &[("revert_me.txt", "content")]);
+
+        {
+            let git_repo = repo.repo();
+            let commit = git_repo.find_commit(target).unwrap();
+            git_repo.revert(&commit, None).unwrap();
+            assert_eq!(git_repo.state(), git2::RepositoryState::Revert);
+        }
+
+        let result = create_commit(
+            repo.path_str(),
+            "Revert add file".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Clean,
+            "revert state must be cleared after committing"
+        );
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            1,
+            "a revert commit keeps a single parent"
+        );
     }
 }

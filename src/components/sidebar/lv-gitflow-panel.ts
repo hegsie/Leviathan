@@ -391,7 +391,7 @@ export class LvGitflowPanel extends LitElement {
     }
   }
 
-  private async handleFinishFeature(item: ActiveItem): Promise<void> {
+  private async handleFinishFeature(item: ActiveItem, squash = false): Promise<void> {
     this.error = null;
     this.operationInProgress = true;
 
@@ -400,7 +400,7 @@ export class LvGitflowPanel extends LitElement {
         this.repositoryPath,
         item.name,
         true,
-        false,
+        squash,
       );
       if (result.success) {
         await this.loadActiveItems();
@@ -411,7 +411,9 @@ export class LvGitflowPanel extends LitElement {
         }));
       } else if (result.error?.code === 'MERGE_CONFLICT') {
         await this.loadActiveItems();
-        this.openConflictDialog();
+        // Preserve squash intent: a squash finish that conflicted must complete as
+        // a single-parent squash commit, not a two-parent merge commit.
+        this.openConflictDialog(squash);
       } else {
         this.error = result.error?.message || 'Failed to finish feature';
       }
@@ -555,11 +557,11 @@ export class LvGitflowPanel extends LitElement {
    * A gitflow finish that hit a merge conflict — open the app-level conflict
    * resolution dialog so the user can resolve it.
    */
-  private openConflictDialog(): void {
+  private openConflictDialog(squash = false): void {
     this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
       bubbles: true,
       composed: true,
-      detail: { operationType: 'merge' },
+      detail: { operationType: 'merge', squash },
     }));
   }
 

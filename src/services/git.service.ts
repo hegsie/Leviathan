@@ -988,12 +988,15 @@ export async function abortMerge(
 /**
  * Complete an in-progress merge after all conflicts are resolved: creates
  * the merge commit (HEAD + MERGE_HEAD parents) and clears the MERGING state.
+ * When `squash` is true, a single-parent commit is created instead so a
+ * conflicted gitflow squash finish completes as a squash rather than a merge.
  */
 export async function commitMerge(
   path: string,
   message?: string,
+  squash?: boolean,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>("commit_merge", { path, message });
+  return invokeCommand<void>("commit_merge", { path, message, squash });
 }
 
 /**
