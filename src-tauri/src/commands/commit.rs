@@ -238,8 +238,8 @@ pub async fn create_commit(
     // Build author and committer signatures, optionally with custom dates
     let author_sig = if has_custom_dates {
         signature_with_date(
-            default_signature.name().unwrap_or("Unknown"),
-            default_signature.email().unwrap_or(""),
+            default_signature.name().ok().unwrap_or("Unknown"),
+            default_signature.email().ok().unwrap_or(""),
             author_date.as_deref(),
         )?
     } else {
@@ -248,8 +248,8 @@ pub async fn create_commit(
 
     let committer_sig = if has_custom_dates {
         signature_with_date(
-            default_signature.name().unwrap_or("Unknown"),
-            default_signature.email().unwrap_or(""),
+            default_signature.name().ok().unwrap_or("Unknown"),
+            default_signature.email().ok().unwrap_or(""),
             committer_date.as_deref(),
         )?
     } else {
@@ -440,7 +440,8 @@ pub async fn amend_commit(
     let signature = repo.signature()?;
 
     // Use the new message or keep the original
-    let commit_message = message.unwrap_or_else(|| head_commit.message().unwrap_or("").to_string());
+    let commit_message =
+        message.unwrap_or_else(|| head_commit.message().ok().unwrap_or("").to_string());
 
     // Use new author if reset_author is true, otherwise keep original
     let author = if reset_author.unwrap_or(false) {
@@ -472,7 +473,7 @@ pub async fn amend_commit(
     if head_ref.is_branch() {
         let branch_name = head_ref
             .name()
-            .ok_or_else(|| LeviathanError::OperationFailed("Invalid HEAD ref".to_string()))?;
+            .map_err(|_| LeviathanError::OperationFailed("Invalid HEAD ref".to_string()))?;
         repo.reference(
             branch_name,
             new_oid,
@@ -550,7 +551,7 @@ pub async fn get_commit_message(path: String, oid: String) -> Result<String> {
         .find_commit(oid)
         .map_err(|_| LeviathanError::CommitNotFound(oid.to_string()))?;
 
-    Ok(commit.message().unwrap_or("").to_string())
+    Ok(commit.message().ok().unwrap_or("").to_string())
 }
 
 /// Edit the author and/or committer date of an existing commit
@@ -606,16 +607,28 @@ pub async fn edit_commit_date(
         let author_name = target_commit
             .author()
             .name()
+            .ok()
             .unwrap_or("Unknown")
             .to_string();
-        let author_email = target_commit.author().email().unwrap_or("").to_string();
+        let author_email = target_commit
+            .author()
+            .email()
+            .ok()
+            .unwrap_or("")
+            .to_string();
         let committer_name = target_commit
             .committer()
             .name()
+            .ok()
             .unwrap_or("Unknown")
             .to_string();
-        let committer_email = target_commit.committer().email().unwrap_or("").to_string();
-        let message = target_commit.message().unwrap_or("").to_string();
+        let committer_email = target_commit
+            .committer()
+            .email()
+            .ok()
+            .unwrap_or("")
+            .to_string();
+        let message = target_commit.message().ok().unwrap_or("").to_string();
         let parent_ids = target_commit.parent_ids().collect();
 
         Ok(CommitDateInfo {
@@ -680,7 +693,7 @@ pub async fn edit_commit_date(
             // HEAD points to a branch - update the branch target
             let branch_name = head_ref
                 .name()
-                .ok_or_else(|| LeviathanError::OperationFailed("Invalid HEAD ref".to_string()))?;
+                .map_err(|_| LeviathanError::OperationFailed("Invalid HEAD ref".to_string()))?;
             repo.reference(
                 branch_name,
                 new_oid,
@@ -1005,7 +1018,7 @@ pub async fn reword_commit(path: String, oid: String, message: String) -> Result
     for rev_oid in revwalk.flatten() {
         let commit = repo.find_commit(rev_oid)?;
         // The reworded commit will have our new message
-        if commit.message().unwrap_or("") == message {
+        if commit.message().ok().unwrap_or("") == message {
             new_commit_oid = rev_oid.to_string();
             break;
         }
@@ -1076,7 +1089,7 @@ pub async fn search_commits(
 
         // Check query filter (message, SHA)
         if let Some(ref q) = query_lower {
-            let message = commit.message().unwrap_or("").to_lowercase();
+            let message = commit.message().ok().unwrap_or("").to_lowercase();
             let sha = commit.id().to_string().to_lowercase();
             if !message.contains(q) && !sha.starts_with(q) {
                 continue;
@@ -1085,8 +1098,8 @@ pub async fn search_commits(
 
         // Check author filter
         if let Some(ref a) = author_lower {
-            let author_name = commit.author().name().unwrap_or("").to_lowercase();
-            let author_email = commit.author().email().unwrap_or("").to_lowercase();
+            let author_name = commit.author().name().ok().unwrap_or("").to_lowercase();
+            let author_email = commit.author().email().ok().unwrap_or("").to_lowercase();
             if !author_name.contains(a) && !author_email.contains(a) {
                 continue;
             }

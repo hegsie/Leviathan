@@ -165,7 +165,7 @@ pub async fn gitflow_start_feature(path: String, name: String) -> Result<Branch>
     // Checkout the new branch
     let obj = reference.peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&obj, None)?;
-    repo.set_head(reference.name().ok_or_else(|| {
+    repo.set_head(reference.name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
 
@@ -214,7 +214,7 @@ pub async fn gitflow_finish_feature(
         .map_err(|_| LeviathanError::BranchNotFound(develop.clone()))?;
     let develop_obj = develop_branch.get().peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&develop_obj, None)?;
-    repo.set_head(develop_branch.get().name().ok_or_else(|| {
+    repo.set_head(develop_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
 
@@ -281,7 +281,7 @@ pub async fn gitflow_start_release(path: String, version: String) -> Result<Bran
 
     let obj = reference.peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&obj, None)?;
-    repo.set_head(reference.name().ok_or_else(|| {
+    repo.set_head(reference.name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
 
@@ -336,7 +336,7 @@ pub async fn gitflow_finish_release(
         .map_err(|_| LeviathanError::BranchNotFound(master.clone()))?;
     let master_obj = master_branch.get().peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&master_obj, None)?;
-    repo.set_head(master_branch.get().name().ok_or_else(|| {
+    repo.set_head(master_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
 
@@ -366,7 +366,7 @@ pub async fn gitflow_finish_release(
         .map_err(|_| LeviathanError::BranchNotFound(develop.clone()))?;
     let develop_obj = develop_branch.get().peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&develop_obj, None)?;
-    repo.set_head(develop_branch.get().name().ok_or_else(|| {
+    repo.set_head(develop_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
 
@@ -426,7 +426,7 @@ pub async fn gitflow_start_hotfix(path: String, version: String) -> Result<Branc
 
     let obj = reference.peel(git2::ObjectType::Commit)?;
     repo.checkout_tree(&obj, None)?;
-    repo.set_head(reference.name().ok_or_else(|| {
+    repo.set_head(reference.name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
 

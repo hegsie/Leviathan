@@ -390,7 +390,7 @@ mod tests {
         // Verify we have the new commit
         let binding = repo.repo();
         let new_head = binding.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(new_head.summary().unwrap(), "Squashed commit");
+        assert_eq!(new_head.summary().unwrap(), Some("Squashed commit"));
 
         // Verify the parent is the initial commit
         assert_eq!(new_head.parent(0).unwrap().id(), initial_oid);

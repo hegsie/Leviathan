@@ -60,11 +60,13 @@ fn build_refs_map(repo: &git2::Repository) -> HashMap<String, Vec<GraphRef>> {
     let mut refs_map: HashMap<String, Vec<GraphRef>> = HashMap::new();
 
     let head = repo.head().ok();
-    let head_name = head.as_ref().and_then(|h| h.name().map(|s| s.to_string()));
+    let head_name = head
+        .as_ref()
+        .and_then(|h| h.name().ok().map(|s| s.to_string()));
 
     if let Ok(references) = repo.references() {
         for reference in references.flatten() {
-            let name = match reference.name() {
+            let name = match reference.name().ok() {
                 Some(n) => n.to_string(),
                 None => continue,
             };
@@ -355,10 +357,10 @@ pub async fn get_commit_graph(
         // Get refs for this commit
         let commit_refs = refs_map.get(&oid_str).cloned().unwrap_or_default();
 
-        let message = commit.message().unwrap_or("").to_string();
+        let message = commit.message().ok().unwrap_or("").to_string();
         let author = commit.author();
-        let author_name = author.name().unwrap_or("").to_string();
-        let author_email = author.email().unwrap_or("").to_string();
+        let author_name = author.name().ok().unwrap_or("").to_string();
+        let author_email = author.email().ok().unwrap_or("").to_string();
         let author_date = commit.time().seconds();
 
         nodes.push(GraphNode {

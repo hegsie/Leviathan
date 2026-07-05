@@ -39,7 +39,9 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
     let mut refs_map: HashMap<String, Vec<RefInfo>> = HashMap::new();
 
     let head = repo.head().ok();
-    let head_name = head.as_ref().and_then(|h| h.name().map(|s| s.to_string()));
+    let head_name = head
+        .as_ref()
+        .and_then(|h| h.name().ok().map(|s| s.to_string()));
 
     // Get all references
     for reference in repo.references()? {
@@ -49,8 +51,8 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
         };
 
         let name = match reference.name() {
-            Some(n) => n.to_string(),
-            None => continue,
+            Ok(n) => n.to_string(),
+            Err(_) => continue,
         };
 
         // Skip HEAD and other special refs
@@ -65,7 +67,7 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
             let is_annotated = tag_obj.is_some();
             let tag_message = tag_obj
                 .as_ref()
-                .and_then(|t| t.message().map(|m| m.to_string()));
+                .and_then(|t| t.message().ok().flatten().map(|m| m.to_string()));
 
             // For annotated tags, peel to the commit
             let oid = reference.peel_to_commit().ok().map(|c| c.id().to_string());
