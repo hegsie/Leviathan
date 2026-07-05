@@ -870,6 +870,9 @@ export class LvBitbucketDialog extends LitElement {
     this.activeTab = 'connection';
     this.connectionStatus = null;
     this.selectedAccountId = null;
+    // Clear any token from the previously-selected account so a verification of
+    // the new account can't succeed against the old identity's credentials.
+    this.oauthToken = null;
     this.appPasswordInput = '';
   }
 
@@ -993,6 +996,17 @@ export class LvBitbucketDialog extends LitElement {
         return;
       }
 
+      // App passwords authenticate via HTTP Basic auth, not Bearer. Build the
+      // prefixed credential and use it as the active token so the connection
+      // check AND every subsequent API call (PRs/issues/pipelines/create) route
+      // through Basic auth — both this session and on every reopen (where the
+      // stored per-account token is what drives checkConnection).
+      const appPasswordCredential = credentialService.formatBitbucketAppPasswordCredential(
+        this.usernameInput,
+        this.appPasswordInput
+      );
+      this.oauthToken = appPasswordCredential;
+
       await this.checkConnection();
 
       if (this.connectionStatus?.connected) {
@@ -1001,7 +1015,7 @@ export class LvBitbucketDialog extends LitElement {
 
         // Create or update a global account for app-password connections
         if (this.selectedAccountId) {
-          await credentialService.storeAccountToken('bitbucket', this.selectedAccountId, this.appPasswordInput);
+          await credentialService.storeAccountToken('bitbucket', this.selectedAccountId, appPasswordCredential);
           // Refresh cachedUser so the profile manager shows the up-to-date
           // avatar/username immediately instead of waiting for background validation.
           if (user) {
@@ -1028,7 +1042,7 @@ export class LvBitbucketDialog extends LitElement {
           };
 
           const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
-          await credentialService.storeAccountToken('bitbucket', savedAccount.id, this.appPasswordInput);
+          await credentialService.storeAccountToken('bitbucket', savedAccount.id, appPasswordCredential);
           this.selectedAccountId = savedAccount.id;
           // The new account now exists and is selected — the add flow is complete.
           this.isAddingAccount = false;
@@ -1056,6 +1070,7 @@ export class LvBitbucketDialog extends LitElement {
 
   private async handleDisconnect(): Promise<void> {
     this.isLoading = true;
+    this.error = null;
 
     try {
       // Delete account-specific token if available
@@ -1091,6 +1106,7 @@ export class LvBitbucketDialog extends LitElement {
     if (!confirmed) return;
 
     this.isLoading = true;
+    this.error = null;
 
     // Delete the account record (source of truth) FIRST, then best-effort token
     // cleanup, matching GitHub/GitLab/OIDC. Deleting the token first leaves a
@@ -1104,6 +1120,9 @@ export class LvBitbucketDialog extends LitElement {
 
       this.selectedAccountId = this.accounts.length > 0 ? this.accounts[0].id : null;
       this.connectionStatus = null;
+      // Drop the deleted account's token so a stale identity can't leak into a
+      // verification of the next selected account.
+      this.oauthToken = null;
       this.pullRequests = [];
       this.issues = [];
       this.pipelines = [];
@@ -1319,6 +1338,7 @@ export class LvBitbucketDialog extends LitElement {
         this.createPrCloseSource = false;
         this.activeTab = 'pull-requests';
         await this.loadPullRequests();
+        showToast('Pull request created successfully', 'success');
       } else {
         this.error = result.error?.message ?? 'Failed to create pull request';
       }

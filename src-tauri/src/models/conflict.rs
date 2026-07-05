@@ -14,6 +14,11 @@ pub struct ConflictFile {
     pub ours: Option<ConflictEntry>,
     /// Their (incoming) version
     pub theirs: Option<ConflictEntry>,
+    /// Whether any side of the conflict is binary content. Binary conflicts
+    /// must not go through the text merge editor — resolving them writes
+    /// whole blobs (see resolve_conflict_take_side).
+    #[serde(default)]
+    pub is_binary: bool,
 }
 
 /// Represents one side of a conflict

@@ -1076,6 +1076,7 @@ export class LvGitLabDialog extends LitElement {
 
   private async handleDisconnect(): Promise<void> {
     this.isLoading = true;
+    this.error = null;
 
     try {
       // Delete token for selected account or legacy token
@@ -1298,6 +1299,10 @@ export class LvGitLabDialog extends LitElement {
       this.requestUpdate();
 
       this.connectionStatus = verifyResult.data;
+      // Mirror the verified status into the shared store so the profile
+      // manager's status dots update immediately (matches checkConnection and
+      // the GitHub/OIDC dialogs) instead of staying stale until restart.
+      this.syncSharedConnectionStatus(true);
       this.oauthState = { status: 'idle' };
 
       // If the dialog was closed before OAuth completed, surface a toast so the
@@ -1381,6 +1386,7 @@ export class LvGitLabDialog extends LitElement {
         this.createMrDraft = false;
         this.activeTab = 'merge-requests';
         await this.loadMergeRequests();
+        showToast('Merge request created successfully', 'success');
       } else {
         this.error = result.error?.message ?? 'Failed to create merge request';
       }
@@ -1418,6 +1424,7 @@ export class LvGitLabDialog extends LitElement {
         this.createIssueLabels = [];
         this.activeTab = 'issues';
         await this.loadIssues();
+        showToast('Issue created successfully', 'success');
       } else {
         this.error = result.error?.message ?? 'Failed to create issue';
       }

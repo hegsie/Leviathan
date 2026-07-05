@@ -164,6 +164,9 @@ describe('lv-branch-list', () => {
   beforeEach(() => {
     clearHistory();
     setupDefaultMocks();
+    // Hidden branches persist to localStorage keyed by repo path — clear so
+    // one test's hide action can't leak into the next test
+    window.localStorage.clear();
   });
 
   // ── 1. Rendering ──────────────────────────────────────────────────────

@@ -231,6 +231,19 @@ describe('git.service - Conflict resolution operations', () => {
         path: '/test/repo',
         filePath: 'src/index.ts',
         content: 'resolved content',
+        deleteFile: undefined,
+      });
+      expect(result.success).to.be.true;
+    });
+
+    it('passes deleteFile when resolving as a deletion', async () => {
+      const result = await resolveConflict('/test/repo', 'src/index.ts', '', true);
+      expect(lastInvokedCommand).to.equal('resolve_conflict');
+      expect(lastInvokedArgs).to.deep.equal({
+        path: '/test/repo',
+        filePath: 'src/index.ts',
+        content: '',
+        deleteFile: true,
       });
       expect(result.success).to.be.true;
     });

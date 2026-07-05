@@ -531,7 +531,7 @@ export class LvTagList extends LitElement {
           composed: true,
         }));
       } else {
-        const errorMsg = result.data?.message || result.error || 'Unknown error';
+        const errorMsg = result.data?.message || result.error?.message || 'Unknown error';
         console.error('Failed to checkout tag:', errorMsg);
         showToast(`Failed to checkout tag: ${errorMsg}`, 'error');
       }
@@ -619,6 +619,7 @@ export class LvTagList extends LitElement {
 
       if (result.success) {
         await this.loadTags();
+        showToast(`Pushed tag ${tag.name} to remote`, 'success');
         this.dispatchEvent(new CustomEvent('tags-changed', {
           bubbles: true,
           composed: true,

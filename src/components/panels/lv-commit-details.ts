@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { parseIssueReferences, isClosingKeyword } from '../../services/git.service.ts';
 import type { IssueReference } from '../../services/git.service.ts';
 import type { Commit, RefInfo, CommitFileEntry, FileStatus } from '../../types/git.types.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { loggers, openExternalUrl } from '../../utils/index.ts';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { join } from '@tauri-apps/api/path';
@@ -438,6 +439,7 @@ export class LvCommitDetails extends LitElement {
 
   @state() private files: CommitFileEntry[] = [];
   @state() private loadingFiles = false;
+  @state() private filesError: string | null = null;
   @state() private selectedFilePath: string | null = null;
   @state() private issueReferences: IssueReference[] = [];
   @state() private contextMenu: FileContextMenuState = { visible: false, x: 0, y: 0, file: null };
@@ -510,6 +512,7 @@ export class LvCommitDetails extends LitElement {
     log.debug('loadFiles: loading files for commit', this.commit.oid);
     this.loadingFiles = true;
     this.files = [];
+    this.filesError = null;
 
     try {
       const result = await gitService.getCommitFiles(this.repositoryPath, this.commit.oid);
@@ -519,9 +522,11 @@ export class LvCommitDetails extends LitElement {
         log.debug('loadFiles: loaded', this.files.length, 'files');
       } else {
         console.error('loadFiles: failed', result.error);
+        this.filesError = result.error?.message ?? 'Failed to load changed files';
       }
     } catch (err) {
       console.error('Failed to load commit files:', err);
+      this.filesError = err instanceof Error ? err.message : 'Failed to load changed files';
     } finally {
       this.loadingFiles = false;
     }
@@ -636,6 +641,7 @@ export class LvCommitDetails extends LitElement {
       );
     } catch (err) {
       console.error('Failed to copy SHA:', err);
+      showToast('Failed to copy SHA to clipboard', 'error');
     }
   }
 
@@ -684,6 +690,7 @@ export class LvCommitDetails extends LitElement {
       await shellOpen(fullPath);
     } catch (err) {
       console.error('Failed to open file:', err);
+      showToast('Failed to open file in editor', 'error');
     }
   }
 
@@ -695,6 +702,7 @@ export class LvCommitDetails extends LitElement {
       await navigator.clipboard.writeText(file.path);
     } catch (err) {
       console.error('Failed to copy path:', err);
+      showToast('Failed to copy path to clipboard', 'error');
     }
   }
 
@@ -912,13 +920,15 @@ export class LvCommitDetails extends LitElement {
           <div class="section-title">Files Changed (${this.files.length})</div>
           ${this.loadingFiles
             ? html`<div class="loading-files">Loading files...</div>`
-            : this.files.length > 0
-              ? html`
-                  <ul class="file-list">
-                    ${this.files.map((f) => this.renderFileItem(f))}
-                  </ul>
-                `
-              : html`<div class="loading-files">No files changed</div>`}
+            : this.filesError
+              ? html`<div class="loading-files files-error">${this.filesError}</div>`
+              : this.files.length > 0
+                ? html`
+                    <ul class="file-list">
+                      ${this.files.map((f) => this.renderFileItem(f))}
+                    </ul>
+                  `
+                : html`<div class="loading-files">No files changed</div>`}
         </div>
 
         <div class="section">

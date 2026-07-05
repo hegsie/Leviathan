@@ -127,6 +127,70 @@ pub async fn abort_merge(path: String) -> Result<()> {
     Ok(())
 }
 
+/// Complete an in-progress merge after all conflicts have been resolved.
+/// Creates the merge commit with HEAD + MERGE_HEAD as parents and clears
+/// the MERGING state.
+#[command]
+pub async fn commit_merge(path: String, message: Option<String>) -> Result<()> {
+    let mut repo = git2::Repository::open(Path::new(&path))?;
+
+    if repo.state() != git2::RepositoryState::Merge {
+        return Err(LeviathanError::OperationFailed(
+            "No merge in progress".to_string(),
+        ));
+    }
+
+    // Collect merge heads first: mergehead_foreach needs a unique borrow
+    let mut merge_oids: Vec<git2::Oid> = Vec::new();
+    repo.mergehead_foreach(|oid| {
+        merge_oids.push(*oid);
+        true
+    })?;
+    if merge_oids.is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "MERGE_HEAD not found".to_string(),
+        ));
+    }
+    let repo = repo;
+
+    let mut index = repo.index()?;
+    if index.has_conflicts() {
+        return Err(LeviathanError::MergeConflict);
+    }
+
+    let head_commit = repo.head()?.peel_to_commit()?;
+    let mut parents: Vec<git2::Commit> = vec![head_commit];
+    for oid in merge_oids {
+        parents.push(repo.find_commit(oid)?);
+    }
+    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+
+    let tree_oid = index.write_tree()?;
+    let tree = repo.find_tree(tree_oid)?;
+    let signature = repo.signature()?;
+
+    // Default to git's own MERGE_MSG (what `git commit` would use mid-merge)
+    let commit_message = message
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| {
+            std::fs::read_to_string(repo.path().join("MERGE_MSG"))
+                .ok()
+                .filter(|m| !m.trim().is_empty())
+        })
+        .unwrap_or_else(|| "Merge".to_string());
+
+    repo.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        &commit_message,
+        &tree,
+        &parent_refs,
+    )?;
+    repo.cleanup_state()?;
+    Ok(())
+}
+
 /// Rebase current branch onto another
 #[command]
 pub async fn rebase(path: String, onto: String) -> Result<()> {
@@ -309,11 +373,22 @@ pub async fn preview_rebase(
 pub async fn continue_rebase(path: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    let mut rebase = repo.open_rebase(None)?;
-    let signature = repo.signature()?;
+    // Interactive rebases are driven by the git CLI (`git rebase -i`, see
+    // execute_interactive_rebase) and leave a git-rebase-todo file. Those
+    // must be continued by the CLI too — its todo lists can contain
+    // exec/squash/fixup operations that libgit2's Rebase loop cannot replay.
+    // Rebases started through libgit2 (the `rebase` command) have no todo
+    // file and are continued through libgit2 below.
+    if repo.path().join("rebase-merge/git-rebase-todo").exists() {
+        return continue_rebase_cli(&path);
+    }
 
-    // Commit the current operation
-    rebase.commit(None, &signature, None)?;
+    let signature = repo.signature()?;
+    let mut rebase = repo.open_rebase(None)?;
+
+    // Commit the current (just-resolved) operation; a patch that became
+    // empty after resolution is skipped like `git rebase --skip` would.
+    commit_or_skip_empty(&mut rebase, &signature)?;
 
     // Continue with remaining operations
     while let Some(op) = rebase.next() {
@@ -323,12 +398,65 @@ pub async fn continue_rebase(path: String) -> Result<()> {
             return Err(LeviathanError::RebaseConflict);
         }
 
-        rebase.commit(None, &signature, None)?;
+        commit_or_skip_empty(&mut rebase, &signature)?;
     }
 
     rebase.finish(Some(&signature))?;
 
     Ok(())
+}
+
+/// Commit the current rebase operation, treating an empty patch
+/// (GIT_EAPPLIED) as a skip rather than a failure.
+fn commit_or_skip_empty(rebase: &mut git2::Rebase, signature: &git2::Signature) -> Result<()> {
+    match rebase.commit(None, signature, None) {
+        Ok(_) => Ok(()),
+        Err(e) if e.code() == git2::ErrorCode::Applied => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Continue a CLI-initiated (interactive) rebase via `git rebase --continue`,
+/// advancing past patches that became empty with `git rebase --skip`.
+fn continue_rebase_cli(path: &str) -> Result<()> {
+    let mut args: Vec<&str> = vec!["rebase", "--continue"];
+    loop {
+        let output = create_command("git")
+            .current_dir(path)
+            // Accept recorded commit messages non-interactively (reword etc.)
+            .env("GIT_EDITOR", "true")
+            .args(&args)
+            .output()
+            .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("{stdout}\n{stderr}");
+
+        // Patch became empty after resolution: advance past it the way git
+        // itself suggests, then keep going.
+        if combined.contains("git rebase --skip")
+            && (combined.contains("No changes") || combined.contains("nothing to commit"))
+        {
+            args = vec!["rebase", "--skip"];
+            continue;
+        }
+
+        if combined.contains("CONFLICT") || combined.contains("conflict") {
+            return Err(LeviathanError::RebaseConflict);
+        }
+        return Err(LeviathanError::OperationFailed(
+            if stderr.trim().is_empty() {
+                stdout.to_string()
+            } else {
+                stderr.to_string()
+            },
+        ));
+    }
 }
 
 /// Abort an in-progress rebase
@@ -465,11 +593,18 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             .map(|e| String::from_utf8_lossy(&e.path).to_string())
             .unwrap_or_default();
 
+        // Binary conflicts must not be routed through the text merge editor
+        let is_binary = [&conflict.our, &conflict.their, &conflict.ancestor]
+            .iter()
+            .filter_map(|e| e.as_ref())
+            .any(|e| repo.find_blob(e.id).map(|b| b.is_binary()).unwrap_or(false));
+
         conflicts.push(ConflictFile {
             path: file_path,
             ancestor: get_entry(conflict.ancestor),
             ours: get_entry(conflict.our),
             theirs: get_entry(conflict.their),
+            is_binary,
         });
     }
 
@@ -493,18 +628,98 @@ pub async fn get_blob_content(path: String, oid: String) -> Result<String> {
     Ok(String::from_utf8_lossy(blob.content()).to_string())
 }
 
-/// Mark a file as resolved with the given content
+/// Mark a file as resolved with the given content.
+/// When `delete_file` is true the resolution is the file's REMOVAL (e.g. the
+/// deleted side of a modify/delete conflict): the working file is deleted and
+/// the deletion is staged, instead of writing+staging an empty file.
 #[command]
-pub async fn resolve_conflict(path: String, file_path: String, content: String) -> Result<()> {
+pub async fn resolve_conflict(
+    path: String,
+    file_path: String,
+    content: String,
+    delete_file: Option<bool>,
+) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
-
-    // Write the resolved content to the working directory
     let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
-    std::fs::write(&full_path, &content)?;
-
-    // Stage the resolved file
     let mut index = repo.index()?;
-    index.add_path(Path::new(&file_path))?;
+
+    if delete_file.unwrap_or(false) {
+        if full_path.exists() {
+            std::fs::remove_file(&full_path)?;
+        }
+        index.remove_path(Path::new(&file_path))?;
+    } else {
+        // Write the resolved content to the working directory
+        std::fs::write(&full_path, &content)?;
+        index.add_path(Path::new(&file_path))?;
+    }
+    index.write()?;
+
+    Ok(())
+}
+
+/// Resolve a conflict by taking one side's blob verbatim (binary-safe).
+/// `side` is "ours" or "theirs". If the chosen side has no entry (the file
+/// was deleted on that side), the resolution is the file's removal.
+#[command]
+pub async fn resolve_conflict_take_side(
+    path: String,
+    file_path: String,
+    side: String,
+) -> Result<()> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
+
+    let mut index = repo.index()?;
+    let conflict = index
+        .conflicts()?
+        .filter_map(|c| c.ok())
+        .find(|c| {
+            c.our
+                .as_ref()
+                .or(c.their.as_ref())
+                .or(c.ancestor.as_ref())
+                .map(|e| String::from_utf8_lossy(&e.path) == file_path.as_str())
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            LeviathanError::OperationFailed(format!("No conflict found for '{}'", file_path))
+        })?;
+
+    let entry = match side.as_str() {
+        "ours" => conflict.our,
+        "theirs" => conflict.their,
+        other => {
+            return Err(LeviathanError::OperationFailed(format!(
+                "Invalid side '{}': expected 'ours' or 'theirs'",
+                other
+            )));
+        }
+    };
+
+    match entry {
+        Some(e) => {
+            // Write the chosen side's raw blob bytes (works for binary files)
+            let blob = repo.find_blob(e.id)?;
+            std::fs::write(&full_path, blob.content())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // Preserve the executable bit recorded in the index entry
+                if e.mode == 0o100755 {
+                    std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(0o755))?;
+                }
+            }
+            index.add_path(Path::new(&file_path))?;
+        }
+        None => {
+            // The chosen side deleted the file — the resolution is removal
+            if full_path.exists() {
+                std::fs::remove_file(&full_path)?;
+            }
+            index.remove_path(Path::new(&file_path))?;
+        }
+    }
     index.write()?;
 
     Ok(())
@@ -1102,6 +1317,7 @@ mod tests {
             repo.path_str(),
             "conflict.txt".to_string(),
             resolved_content.to_string(),
+            None,
         )
         .await;
 
@@ -1171,6 +1387,284 @@ mod tests {
         // Should fail without an active rebase
         let result = continue_rebase(repo.path_str()).await;
         assert!(result.is_err());
+    }
+
+    /// Set up a merge conflict on shared.txt between the initial branch and
+    /// "feature", ending checked out on the initial branch (merge not run).
+    fn setup_conflicting_branches(repo: &TestRepo) {
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+    }
+
+    #[tokio::test]
+    async fn test_commit_merge_completes_conflicted_merge() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+
+        let result = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = commit_merge(repo.path_str(), Some("Merge feature".to_string())).await;
+        assert!(result.is_ok(), "commit_merge failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            2,
+            "merge commit must have both parents"
+        );
+        assert_eq!(head.summary(), Some("Merge feature"));
+    }
+
+    #[tokio::test]
+    async fn test_commit_merge_refuses_unresolved_conflicts() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let result = commit_merge(repo.path_str(), None).await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+        // Still mid-merge so the user can keep resolving
+        assert_eq!(repo.repo().state(), git2::RepositoryState::Merge);
+    }
+
+    #[tokio::test]
+    async fn test_commit_merge_without_merge_in_progress() {
+        let repo = TestRepo::with_initial_commit();
+        let result = commit_merge(repo.path_str(), None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_conflict_delete_file_stages_removal() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add doomed file", &[("doomed.txt", "contents")]);
+
+        let result = resolve_conflict(
+            repo.path_str(),
+            "doomed.txt".to_string(),
+            String::new(),
+            Some(true),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "delete resolution failed: {:?}",
+            result.err()
+        );
+
+        assert!(!repo.path.join("doomed.txt").exists());
+        let git_repo = repo.repo();
+        let statuses = git_repo.statuses(None).unwrap();
+        let entry = statuses
+            .iter()
+            .find(|s| s.path() == Some("doomed.txt"))
+            .expect("deletion should be staged");
+        assert!(entry.status().contains(git2::Status::INDEX_DELETED));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_conflict_take_side_theirs() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let result = resolve_conflict_take_side(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "theirs".to_string(),
+        )
+        .await;
+        assert!(result.is_ok(), "take side failed: {:?}", result.err());
+
+        let content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert_eq!(content, "feature content");
+        assert!(!repo.repo().index().unwrap().has_conflicts());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_conflict_take_deleted_side_removes_file() {
+        // modify/delete conflict: feature deletes the file, main modifies it
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::remove_file(repo.path.join("shared.txt")).unwrap();
+        {
+            let git_repo = repo.repo();
+            let mut index = git_repo.index().unwrap();
+            index
+                .remove_path(std::path::Path::new("shared.txt"))
+                .unwrap();
+            index.write().unwrap();
+            let tree_oid = index.write_tree().unwrap();
+            let tree = git_repo.find_tree(tree_oid).unwrap();
+            let sig = git_repo.signature().unwrap();
+            let parent = git_repo.head().unwrap().peel_to_commit().unwrap();
+            git_repo
+                .commit(Some("HEAD"), &sig, &sig, "Delete shared", &tree, &[&parent])
+                .unwrap();
+        }
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Modify shared", &[("shared.txt", "modified")]);
+
+        let result = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        let result = resolve_conflict_take_side(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "theirs".to_string(),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "take deleted side failed: {:?}",
+            result.err()
+        );
+        assert!(!repo.path.join("shared.txt").exists());
+        assert!(!repo.repo().index().unwrap().has_conflicts());
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_flags_binary() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        std::fs::write(repo.path.join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+        repo.stage_file("blob.bin");
+        repo.create_commit("Add binary", &[]);
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::write(repo.path.join("blob.bin"), [0u8, 9, 9, 9]).unwrap();
+        repo.stage_file("blob.bin");
+        repo.create_commit("Feature binary", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        std::fs::write(repo.path.join("blob.bin"), [0u8, 7, 7, 7]).unwrap();
+        repo.stage_file("blob.bin");
+        repo.create_commit("Main binary", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let bin = conflicts
+            .iter()
+            .find(|c| c.path == "blob.bin")
+            .expect("binary conflict should be listed");
+        assert!(bin.is_binary, "binary conflict must be flagged");
+    }
+
+    #[tokio::test]
+    async fn test_continue_rebase_after_resolution() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        setup_conflicting_branches(&repo);
+
+        repo.checkout_branch("feature");
+        let result = rebase(repo.path_str(), initial_branch.clone()).await;
+        assert!(matches!(result, Err(LeviathanError::RebaseConflict)));
+
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = continue_rebase(repo.path_str()).await;
+        assert!(result.is_ok(), "continue_rebase failed: {:?}", result.err());
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert_eq!(content, "resolved");
+    }
+
+    #[tokio::test]
+    async fn test_continue_rebase_skips_empty_commit() {
+        // Resolving to exactly the onto side's content leaves an empty patch;
+        // continuing must skip it (like `git rebase --skip`), not fail.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        setup_conflicting_branches(&repo);
+
+        repo.checkout_branch("feature");
+        let result = rebase(repo.path_str(), initial_branch.clone()).await;
+        assert!(matches!(result, Err(LeviathanError::RebaseConflict)));
+
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "main content".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = continue_rebase(repo.path_str()).await;
+        assert!(
+            result.is_ok(),
+            "continue_rebase should skip the empty commit: {:?}",
+            result.err()
+        );
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert_eq!(content, "main content");
     }
 
     #[test]

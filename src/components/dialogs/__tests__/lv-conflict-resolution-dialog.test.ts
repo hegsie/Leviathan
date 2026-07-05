@@ -25,6 +25,7 @@ import { expect, fixture, html } from '@open-wc/testing';
 import '../lv-conflict-resolution-dialog.ts';
 import type { LvConflictResolutionDialog } from '../lv-conflict-resolution-dialog.ts';
 import type { ConflictFile } from '../../../types/git.types.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -35,7 +36,13 @@ function makeConflict(path: string): ConflictFile {
     ancestor: { oid: 'base123', path, mode: 0o100644 },
     ours: { oid: 'ours123', path, mode: 0o100644 },
     theirs: { oid: 'theirs123', path, mode: 0o100644 },
+    isBinary: false,
   };
+}
+
+function clearToasts(): void {
+  const state = uiStore.getState();
+  state.toasts.forEach((t) => state.removeToast(t.id));
 }
 
 const TEST_CONFLICTS: ConflictFile[] = [
@@ -70,7 +77,7 @@ function setupDefaultMocks(conflicts: ConflictFile[] = TEST_CONFLICTS): void {
 }
 
 async function renderDialog(
-  operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' = 'merge'
+  operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge'
 ): Promise<LvConflictResolutionDialog> {
   const el = await fixture<LvConflictResolutionDialog>(html`
     <lv-conflict-resolution-dialog
@@ -669,6 +676,230 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(el.open).to.be.false;
       const internal = el as unknown as { conflicts: ConflictFile[] };
       expect(internal.conflicts.length).to.equal(0);
+    });
+  });
+
+  // ── Merge completion ─────────────────────────────────────────────────────
+  describe('merge completion', () => {
+    beforeEach(() => clearToasts());
+
+    it('calls commit_merge and completes only on success', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'commit_merge')).to.be.true;
+      expect(completedFired).to.be.true;
+      expect(el.open).to.be.false;
+    });
+
+    it('stays open and shows error when commit_merge fails without new conflicts', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      // commit_merge fails with a non-conflict error; reload finds no conflicts.
+      mockInvoke = async (command: string) => {
+        if (command === 'commit_merge') throw { code: 'COMMAND_ERROR', message: 'index locked' };
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        return null;
+      };
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(completedFired).to.be.false;
+      expect(el.open).to.be.true;
+      const errorToast = uiStore.getState().toasts.find(t => t.type === 'error');
+      expect(errorToast, 'error toast shown').to.not.be.undefined;
+      expect(errorToast!.message).to.contain('index locked');
+    });
+  });
+
+  // ── Failed continue with no new conflicts ──────────────────────────────────
+  describe('failed continue keeps dialog open', () => {
+    beforeEach(() => clearToasts());
+
+    it('rebase: failed continue with no new conflicts stays open + error toast', async () => {
+      const el = await renderDialog('rebase');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      mockInvoke = async (command: string) => {
+        if (command === 'continue_rebase') throw { code: 'COMMAND_ERROR', message: 'patch failed' };
+        if (command === 'get_conflicts') return []; // no new conflicts
+        return null;
+      };
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(completedFired).to.be.false;
+      expect(el.open).to.be.true;
+      const errorToast = uiStore.getState().toasts.find(t => t.type === 'error');
+      expect(errorToast, 'error toast shown').to.not.be.undefined;
+      expect(errorToast!.message).to.contain('patch failed');
+    });
+  });
+
+  // ── Abort failure feedback ─────────────────────────────────────────────────
+  describe('abort failure feedback', () => {
+    beforeEach(() => clearToasts());
+
+    it('shows an error toast and allows retry when abort fails', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      mockInvoke = async (command: string) => {
+        if (command === 'abort_merge') throw { code: 'COMMAND_ERROR', message: 'cannot abort' };
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        return null;
+      };
+
+      let abortedFired = false;
+      el.addEventListener('operation-aborted', () => { abortedFired = true; });
+
+      await (el as unknown as { handleAbortConfirm: () => Promise<void> }).handleAbortConfirm.bind(el)();
+
+      expect(abortedFired).to.be.false;
+      const internal = el as unknown as { aborting: boolean };
+      expect(internal.aborting).to.be.false; // retry allowed
+      const errorToast = uiStore.getState().toasts.find(t => t.type === 'error');
+      expect(errorToast, 'error toast shown').to.not.be.undefined;
+    });
+  });
+
+  // ── External merge tool verification ───────────────────────────────────────
+  describe('external tool resolution verification', () => {
+    beforeEach(() => clearToasts());
+
+    it('does not mark resolved when tool exits 0 but file still conflicted', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      mockInvoke = async (command: string) => {
+        if (command === 'launch_merge_tool') return { success: true };
+        if (command === 'get_conflicts') return TEST_CONFLICTS; // still conflicted
+        return null;
+      };
+
+      await (el as unknown as {
+        handleOpenExternalTool: (p: string) => Promise<void>;
+      }).handleOpenExternalTool.bind(el)('src/main.ts');
+
+      const internal = el as unknown as { resolvedFiles: Set<string> };
+      expect(internal.resolvedFiles.has('src/main.ts')).to.be.false;
+      const warnToast = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warnToast, 'warning toast shown').to.not.be.undefined;
+    });
+
+    it('marks resolved when tool exits 0 and file no longer conflicted', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      mockInvoke = async (command: string) => {
+        if (command === 'launch_merge_tool') return { success: true };
+        // main.ts no longer in the conflict list
+        if (command === 'get_conflicts') return [makeConflict('src/utils.ts')];
+        return null;
+      };
+
+      await (el as unknown as {
+        handleOpenExternalTool: (p: string) => Promise<void>;
+      }).handleOpenExternalTool.bind(el)('src/main.ts');
+
+      const internal = el as unknown as { resolvedFiles: Set<string> };
+      expect(internal.resolvedFiles.has('src/main.ts')).to.be.true;
+    });
+  });
+
+  // ── Stash pop conflict flow ────────────────────────────────────────────────
+  describe('stash pop conflict flow', () => {
+    beforeEach(() => clearToasts());
+
+    it('shows "Complete" button label for stash', async () => {
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const continueBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      expect(continueBtn.textContent!.trim()).to.equal('Complete');
+    });
+
+    it('drops the stash and completes on continue', async () => {
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      const dropCall = invokeHistory.find(h => h.command === 'drop_stash');
+      expect(dropCall, 'drop_stash called').to.exist;
+      expect((dropCall!.args as Record<string, unknown>).index).to.equal(0);
+      expect(completedFired).to.be.true;
+      expect(el.open).to.be.false;
+    });
+
+    it('aborts a stash conflict via hard reset (keeping the stash) with info toast', async () => {
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      let abortedFired = false;
+      el.addEventListener('operation-aborted', () => { abortedFired = true; });
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleAbortConfirm: () => Promise<void> }).handleAbortConfirm.bind(el)();
+
+      const resetCall = invokeHistory.find(h => h.command === 'reset');
+      expect(resetCall, 'reset called for stash abort').to.exist;
+      const args = resetCall!.args as Record<string, unknown>;
+      expect(args.mode).to.equal('hard');
+      expect(args.targetRef).to.equal('HEAD');
+      // Must NOT drop the stash on abort.
+      expect(invokeHistory.some(h => h.command === 'drop_stash')).to.be.false;
+      expect(abortedFired).to.be.true;
+      const infoToast = uiStore.getState().toasts.find(t => t.type === 'info');
+      expect(infoToast, 'info toast shown').to.not.be.undefined;
     });
   });
 });

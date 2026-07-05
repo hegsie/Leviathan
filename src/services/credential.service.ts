@@ -22,6 +22,29 @@ export const CredentialKeys = {
 
 export type CredentialKey = (typeof CredentialKeys)[keyof typeof CredentialKeys];
 
+/**
+ * Sentinel prefix for a per-account token slot that stores a Bitbucket
+ * app-password credential (as opposed to an OAuth access token). The stored
+ * value has the form `bbapp:<username>:<appPassword>`. App passwords must be
+ * sent to Bitbucket via HTTP Basic auth, not as a Bearer token, so the backend
+ * detects this prefix and switches auth schemes accordingly.
+ *
+ * Must stay in sync with `APP_PASSWORD_PREFIX` in
+ * `src-tauri/src/commands/bitbucket.rs`.
+ */
+export const BITBUCKET_APP_PASSWORD_PREFIX = 'bbapp:';
+
+/**
+ * Format a Bitbucket username + app password into the prefixed credential
+ * stored in a per-account token slot. See {@link BITBUCKET_APP_PASSWORD_PREFIX}.
+ */
+export function formatBitbucketAppPasswordCredential(
+  username: string,
+  appPassword: string
+): string {
+  return `${BITBUCKET_APP_PASSWORD_PREFIX}${username}:${appPassword}`;
+}
+
 // =============================================================================
 // Core keyring operations (via Tauri backend)
 // =============================================================================

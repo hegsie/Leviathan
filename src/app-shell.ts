@@ -510,7 +510,7 @@ export class AppShell extends LitElement {
 
   // Conflict resolution dialog
   @state() private showConflictDialog = false;
-  @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' = 'merge';
+  @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
 
   // Command palette
   @state() private showCommandPalette = false;
@@ -679,11 +679,12 @@ export class AppShell extends LitElement {
 
   // Handle open-conflict-dialog events from child components (e.g., interactive rebase)
   private handleOpenConflictDialogEvent = (e: Event): void => {
-    const customEvent = e as CustomEvent<{ operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' }>;
+    const customEvent = e as CustomEvent<{ operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' }>;
     if (customEvent.detail?.operationType) {
       this.conflictOperationType = customEvent.detail.operationType;
     }
     this.showConflictDialog = true;
+    this.handleRefresh();
   };
 
   // Handle merge-conflict events from branch list (e.g., sidebar merge resulting in conflicts)
@@ -1100,6 +1101,10 @@ export class AppShell extends LitElement {
   private handleAutoStashToast(data: gitService.CheckoutWithStashResult, refName: string): void {
     if (data.stashed && data.stashConflict) {
       showToast(`Switched to ${refName} — stash conflicts need resolution`, 'warning');
+      // Open the conflict dialog so the user can resolve the failed stash pop.
+      this.conflictOperationType = 'stash';
+      this.showConflictDialog = true;
+      this.handleRefresh();
     } else if (data.stashed && data.stashApplied) {
       showToast(`Switched to ${refName} (changes re-applied)`, 'info');
     } else if (data.stashed && !data.stashApplied) {
@@ -1719,7 +1724,7 @@ export class AppShell extends LitElement {
 
   private handleCopySha(e: CustomEvent<{ sha: string }>): void {
     // Show brief feedback that SHA was copied
-    log.debug(`Copied ${e.detail.sha} to clipboard`);
+    showToast(`Copied SHA ${e.detail.sha} to clipboard`, 'success');
   }
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry; isPartiallyStaged?: boolean }>): void {
@@ -2458,13 +2463,25 @@ export class AppShell extends LitElement {
   private async handlePull(): Promise<void> {
     if (!this.activeRepository) return;
     const opId = progressService.startOperation('pull', 'Pulling from remote...');
-    try {
-      await gitService.pull({ path: this.activeRepository.repository.path });
+    // gitService.pull returns a CommandResult (invokeCommand never throws), so we
+    // must inspect result.success — the old catch-only path always reported success.
+    const result = await gitService.pull({ path: this.activeRepository.repository.path });
+    if (result.success) {
       progressService.completeOperation(opId);
       this.handleRefresh();
-    } catch {
+    } else if (result.error?.code === 'MERGE_CONFLICT') {
       progressService.failOperation(opId);
-      // Error is logged; toast notification is shown via remote-operation-completed event
+      this.conflictOperationType = 'merge';
+      this.showConflictDialog = true;
+      this.handleRefresh();
+    } else if (result.error?.code === 'REBASE_CONFLICT') {
+      progressService.failOperation(opId);
+      this.conflictOperationType = 'rebase';
+      this.showConflictDialog = true;
+      this.handleRefresh();
+    } else {
+      progressService.failOperation(opId);
+      showToast(result.error?.message ?? 'Pull failed', 'error');
     }
   }
 
@@ -2487,8 +2504,13 @@ export class AppShell extends LitElement {
 
   private async handleCreateStash(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.createStash({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const result = await gitService.createStash({ path: this.activeRepository.repository.path });
+    if (result.success) {
+      showToast('Stash created', 'success');
+      this.handleRefresh();
+    } else {
+      showToast(result.error?.message ?? 'Failed to create stash', 'error');
+    }
   }
 
   private async handleRunGc(aggressive = false): Promise<void> {
@@ -2727,6 +2749,7 @@ export class AppShell extends LitElement {
                             .hasPartialStaging=${this.diffFilePartiallyStaged}
                             @file-edited=${() => this.handleRefresh()}
                             @status-changed=${() => this.handleRefresh()}
+                            @file-cleared=${this.handleCloseDiff}
                           ></lv-diff-view>
                         </div>
                       </div>
@@ -2752,6 +2775,7 @@ export class AppShell extends LitElement {
                               @close=${this.handleCloseFileHistory}
                               @commit-selected=${this.handleFileHistoryCommitSelected}
                               @view-diff=${this.handleFileHistoryViewDiff}
+                              @show-blame=${this.handleShowBlame}
                             ></lv-file-history>
                           </div>
                         `
@@ -2772,6 +2796,7 @@ export class AppShell extends LitElement {
                   @commit-file-selected=${this.handleCommitFileSelected}
                   @show-blame=${this.handleShowBlame}
                   @show-file-history=${this.handleShowFileHistory}
+                  @copy-sha=${this.handleCopySha}
                   @repository-changed=${() => this.handleRefresh()}
                 >
                   <lv-right-panel

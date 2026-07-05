@@ -472,9 +472,13 @@ export class LvBisectDialog extends LitElement {
   }
 
   private async fetchCurrentCommitInfo(oid: string): Promise<void> {
-    const result = await gitService.getCommit(oid);
+    const result = await gitService.getCommit(this.repositoryPath, oid);
     if (result.success && result.data) {
       this.currentCommitInfo = result.data;
+    } else {
+      // Leave a visible fallback instead of an eternal "Loading..." message
+      this.currentCommitInfo = null;
+      this.error = result.error?.message || 'Failed to load current commit details';
     }
   }
 

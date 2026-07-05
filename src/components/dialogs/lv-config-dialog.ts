@@ -457,7 +457,14 @@ export class LvConfigDialog extends LitElement {
         false // local
       );
 
-      if (!result.success) {
+      if (result.success) {
+        showToast('Setting saved', 'success');
+        // Update the in-memory value so re-renders don't snap the input back
+        // to the stale value.
+        this.settings = this.settings.map((s) =>
+          s.key === key ? { ...s, value } : s
+        );
+      } else {
         this.error = result.error?.message || 'Failed to save setting';
       }
     } catch (e) {

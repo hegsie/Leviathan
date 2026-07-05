@@ -344,6 +344,8 @@ export class LvSearchBar extends LitElement {
     this.dateTo = preset.filter.dateTo;
     this.filePath = preset.filter.filePath;
     this.branch = preset.filter.branch;
+    // Restore search mode; older presets may lack the field, so default to keyword.
+    this.searchMode = preset.filter.searchMode ?? 'keyword';
     this.emitSearch();
   }
 

@@ -774,6 +774,107 @@ describe('lv-diff-view', () => {
     });
   });
 
+  // ── Truncated / full diff ─────────────────────────────────────────────
+  describe('truncated diff', () => {
+    it('passes a default maxLines cap on the initial working diff fetch', async () => {
+      setupDefaultMocks();
+      await renderDiffView({ file: makeStatusEntry() });
+
+      const calls = findCommands('get_file_diff');
+      expect(calls.length).to.be.greaterThan(0);
+      const args = calls[calls.length - 1].args as { maxLines?: number };
+      expect(args.maxLines).to.equal(3000);
+    });
+
+    it('passes a default maxLines cap on the initial commit diff fetch', async () => {
+      setupDefaultMocks();
+      await renderDiffView({
+        file: null,
+        commitFile: { commitOid: 'abc123', filePath: 'src/main.ts' },
+      });
+
+      const calls = findCommands('get_commit_file_diff');
+      expect(calls.length).to.be.greaterThan(0);
+      const args = calls[calls.length - 1].args as { maxLines?: number };
+      expect(args.maxLines).to.equal(3000);
+    });
+
+    it('shows the "Load full diff" banner when the diff is truncated', async () => {
+      const diff = makeDiffFile({ truncated: true, totalLines: 50000 });
+      setupDefaultMocks({ diff });
+      const el = await renderDiffView();
+
+      const banner = el.shadowRoot!.querySelector('.large-diff-info');
+      expect(banner).to.not.be.null;
+      const btn = banner!.querySelector('.btn-link');
+      expect(btn).to.not.be.null;
+      expect(btn!.textContent).to.include('Load full diff');
+    });
+
+    it('re-fetches without a maxLines cap and hides the banner when "Load full diff" is clicked', async () => {
+      // First load: truncated. Second load (full): not truncated.
+      let firstLoad = true;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_file_diff': {
+            if (firstLoad) {
+              firstLoad = false;
+              return makeDiffFile({ truncated: true, totalLines: 50000 });
+            }
+            return makeDiffFile({ truncated: false });
+          }
+          case 'get_diff_tool':
+            return { tool: null };
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDiffView();
+
+      // Banner present initially
+      expect(el.shadowRoot!.querySelector('.large-diff-info')).to.not.be.null;
+
+      clearHistory();
+      const btn = el.shadowRoot!.querySelector('.large-diff-info .btn-link') as HTMLElement;
+      btn.click();
+
+      // Wait for the re-fetch to settle
+      const start = Date.now();
+      while (Date.now() - start < 2000) {
+        await new Promise((r) => setTimeout(r, 50));
+        await el.updateComplete;
+        if (!(el as unknown as { loading: boolean }).loading) break;
+      }
+      await el.updateComplete;
+
+      // The re-fetch used no maxLines cap
+      const calls = findCommands('get_file_diff');
+      expect(calls.length).to.be.greaterThan(0);
+      const args = calls[calls.length - 1].args as { maxLines?: number };
+      expect(args.maxLines).to.equal(undefined);
+
+      // Banner is gone now that the full diff is loaded
+      expect(el.shadowRoot!.querySelector('.large-diff-info')).to.be.null;
+    });
+
+    it('does not dispatch a load-full-diff event (handled internally)', async () => {
+      const diff = makeDiffFile({ truncated: true, totalLines: 50000 });
+      setupDefaultMocks({ diff });
+      const el = await renderDiffView();
+
+      let eventFired = false;
+      el.addEventListener('load-full-diff', () => { eventFired = true; });
+
+      const btn = el.shadowRoot!.querySelector('.large-diff-info .btn-link') as HTMLElement;
+      btn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(eventFired).to.be.false;
+    });
+  });
+
   // ── File status badge ──────────────────────────────────────────────────
   describe('file status badge', () => {
     it('renders the file status badge with correct class', async () => {

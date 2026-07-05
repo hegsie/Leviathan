@@ -212,6 +212,38 @@ export class LvGitflowPanel extends LitElement {
         text-align: center;
       }
 
+      .error-banner {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--spacing-sm);
+        margin: var(--spacing-sm);
+        padding: var(--spacing-sm);
+        background: rgba(var(--color-error-rgb, 239, 68, 68), 0.12);
+        border: 1px solid var(--color-error);
+        border-radius: var(--radius-sm);
+        color: var(--color-error);
+        font-size: var(--font-size-sm);
+      }
+
+      .error-banner-message {
+        flex: 1;
+      }
+
+      .error-banner-dismiss {
+        flex-shrink: 0;
+        border: none;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        padding: 0 4px;
+        font-size: var(--font-size-md);
+        line-height: 1;
+      }
+
+      .error-banner-dismiss:hover {
+        opacity: 0.7;
+      }
+
       .category-icon {
         width: 12px;
         height: 12px;
@@ -310,6 +342,7 @@ export class LvGitflowPanel extends LitElement {
 
   private async handleInitialize(): Promise<void> {
     if (this.operationInProgress) return;
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -335,6 +368,7 @@ export class LvGitflowPanel extends LitElement {
     const name = await showPrompt('Start Feature', 'Enter feature name:');
     if (!name || !name.trim()) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -358,6 +392,7 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishFeature(item: ActiveItem): Promise<void> {
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -374,6 +409,9 @@ export class LvGitflowPanel extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else if (result.error?.code === 'MERGE_CONFLICT') {
+        await this.loadActiveItems();
+        this.openConflictDialog();
       } else {
         this.error = result.error?.message || 'Failed to finish feature';
       }
@@ -389,6 +427,7 @@ export class LvGitflowPanel extends LitElement {
     const version = await showPrompt('Start Release', 'Enter release version:');
     if (!version || !version.trim()) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -415,6 +454,7 @@ export class LvGitflowPanel extends LitElement {
     const tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
     if (tagMessage === null) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -431,6 +471,9 @@ export class LvGitflowPanel extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else if (result.error?.code === 'MERGE_CONFLICT') {
+        await this.loadActiveItems();
+        this.openConflictDialog();
       } else {
         this.error = result.error?.message || 'Failed to finish release';
       }
@@ -446,6 +489,7 @@ export class LvGitflowPanel extends LitElement {
     const version = await showPrompt('Start Hotfix', 'Enter hotfix version:');
     if (!version || !version.trim()) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -472,6 +516,7 @@ export class LvGitflowPanel extends LitElement {
     const tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
     if (tagMessage === null) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -488,6 +533,9 @@ export class LvGitflowPanel extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else if (result.error?.code === 'MERGE_CONFLICT') {
+        await this.loadActiveItems();
+        this.openConflictDialog();
       } else {
         this.error = result.error?.message || 'Failed to finish hotfix';
       }
@@ -497,6 +545,22 @@ export class LvGitflowPanel extends LitElement {
     } finally {
       this.operationInProgress = false;
     }
+  }
+
+  private dismissError(): void {
+    this.error = null;
+  }
+
+  /**
+   * A gitflow finish that hit a merge conflict — open the app-level conflict
+   * resolution dialog so the user can resolve it.
+   */
+  private openConflictDialog(): void {
+    this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+      bubbles: true,
+      composed: true,
+      detail: { operationType: 'merge' },
+    }));
   }
 
   private toggleSection(category: GitFlowCategory): void {
@@ -633,20 +697,34 @@ export class LvGitflowPanel extends LitElement {
     `;
   }
 
+  private renderErrorBanner() {
+    if (!this.error) return nothing;
+    return html`
+      <div class="error-banner">
+        <span class="error-banner-message">${this.error}</span>
+        <button
+          class="error-banner-dismiss"
+          title="Dismiss"
+          @click=${this.dismissError}
+        >✕</button>
+      </div>
+    `;
+  }
+
   render() {
     if (this.loading) {
       return html`<div class="loading">Loading Git Flow...</div>`;
     }
 
-    if (this.error) {
-      return html`<div class="error">${this.error}</div>`;
-    }
-
     if (!this.config || !this.config.initialized) {
-      return this.renderInitSection();
+      return html`
+        ${this.renderErrorBanner()}
+        ${this.renderInitSection()}
+      `;
     }
 
     return html`
+      ${this.renderErrorBanner()}
       <div class="panel">
         ${this.renderCategorySection(
           'feature',

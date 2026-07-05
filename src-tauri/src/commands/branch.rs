@@ -266,9 +266,6 @@ pub async fn rename_branch(
 pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    let obj = repo.revparse_single(&ref_name)?;
-    let commit = obj.peel_to_commit()?;
-
     let mut checkout_opts = git2::build::CheckoutBuilder::new();
     if force.unwrap_or(false) {
         checkout_opts.force();
@@ -276,39 +273,44 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
         checkout_opts.safe();
     }
 
-    repo.checkout_tree(&obj, Some(&mut checkout_opts))?;
-
-    // Try to set HEAD to local branch first
+    // The working tree must always be checked out from the same commit HEAD
+    // ends up pointing at, so resolve the effective target ref FIRST. In
+    // particular, checking out a remote branch when a same-named local branch
+    // already exists must check out the LOCAL branch (like `git checkout`),
+    // not the remote tip — otherwise tree and HEAD diverge.
     if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
+        let obj = branch.get().peel(git2::ObjectType::Commit)?;
+        repo.checkout_tree(&obj, Some(&mut checkout_opts))?;
         repo.set_head(branch.get().name().ok_or_else(|| {
             LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
         })?)?;
     } else if let Ok(remote_branch) = repo.find_branch(&ref_name, git2::BranchType::Remote) {
-        // Checking out a remote branch - create a local tracking branch
+        // Checking out a remote branch - use or create a local tracking branch.
         // Extract the branch name without the remote prefix (e.g., "origin/feature" -> "feature")
-        let remote_name = remote_branch.get().shorthand().unwrap_or(&ref_name);
+        let remote_name = remote_branch
+            .get()
+            .shorthand()
+            .unwrap_or(&ref_name)
+            .to_string();
 
-        // Find the remote name and branch name
-        // Remote branch shorthand is like "origin/feature"
         if let Some(slash_pos) = remote_name.find('/') {
             let local_name = &remote_name[slash_pos + 1..];
 
-            // Check if local branch already exists
-            if repo
-                .find_branch(local_name, git2::BranchType::Local)
-                .is_ok()
-            {
-                // Local branch exists, just check it out
-                let local_branch = repo.find_branch(local_name, git2::BranchType::Local)?;
+            if let Ok(local_branch) = repo.find_branch(local_name, git2::BranchType::Local) {
+                // Local branch exists: check out ITS tree, not the remote tip
+                let obj = local_branch.get().peel(git2::ObjectType::Commit)?;
+                repo.checkout_tree(&obj, Some(&mut checkout_opts))?;
                 repo.set_head(local_branch.get().name().ok_or_else(|| {
                     LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
                 })?)?;
             } else {
                 // Create new local branch from the remote branch
+                let commit = remote_branch.get().peel_to_commit()?;
+                repo.checkout_tree(commit.as_object(), Some(&mut checkout_opts))?;
                 let mut new_branch = repo.branch(local_name, &commit, false)?;
 
                 // Set upstream tracking
-                new_branch.set_upstream(Some(remote_name))?;
+                new_branch.set_upstream(Some(&remote_name))?;
 
                 // Set HEAD to the new branch
                 repo.set_head(new_branch.get().name().ok_or_else(|| {
@@ -317,10 +319,15 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
             }
         } else {
             // Couldn't parse remote name, detach HEAD
+            let commit = remote_branch.get().peel_to_commit()?;
+            repo.checkout_tree(commit.as_object(), Some(&mut checkout_opts))?;
             repo.set_head_detached(commit.id())?;
         }
     } else {
         // Not a branch (could be a commit SHA or tag), detach HEAD
+        let obj = repo.revparse_single(&ref_name)?;
+        let commit = obj.peel_to_commit()?;
+        repo.checkout_tree(&obj, Some(&mut checkout_opts))?;
         repo.set_head_detached(commit.id())?;
     }
 
@@ -616,39 +623,45 @@ pub async fn checkout_with_autostash(
         }
     }
 
-    // Get target commit OID for checkout - use block to limit borrow scope
-    let resolve_result: std::result::Result<(git2::Oid, bool, bool), String> = {
-        let obj = match repo.revparse_single(&ref_name) {
-            Ok(obj) => obj,
-            Err(e) => {
-                return Err(LeviathanError::OperationFailed(format!(
-                    "RESTORE_STASH:Could not find ref '{}': {}",
-                    ref_name,
-                    e.message()
-                )));
-            }
-        };
-
-        let commit = match obj.peel_to_commit() {
-            Ok(c) => c,
-            Err(e) => {
-                return Err(LeviathanError::OperationFailed(format!(
-                    "RESTORE_STASH:Could not resolve commit: {}",
-                    e.message()
-                )));
-            }
-        };
-
+    // Get target commit OID for checkout. Errors are produced as closure
+    // values (NOT early function returns) so the map_err below actually runs
+    // and restores the auto-stash on failure.
+    let resolve_result: std::result::Result<(git2::Oid, bool, bool), String> = (|| {
         let is_local = repo.find_branch(&ref_name, git2::BranchType::Local).is_ok();
-        let is_remote = repo
-            .find_branch(&ref_name, git2::BranchType::Remote)
-            .is_ok()
-            || repo
-                .find_reference(&format!("refs/remotes/{}", ref_name))
-                .is_ok();
+        let is_remote = !is_local
+            && (repo
+                .find_branch(&ref_name, git2::BranchType::Remote)
+                .is_ok()
+                || repo
+                    .find_reference(&format!("refs/remotes/{}", ref_name))
+                    .is_ok());
 
+        // The working tree must be checked out from the commit HEAD ends up
+        // pointing at. A remote branch whose same-named local branch already
+        // exists checks out the LOCAL branch tip (mirrors `git checkout`),
+        // not the remote tip — otherwise tree and HEAD diverge.
+        if is_remote {
+            let local_name = ref_name
+                .find('/')
+                .map(|pos| &ref_name[pos + 1..])
+                .unwrap_or(ref_name.as_str());
+            if let Ok(local) = repo.find_branch(local_name, git2::BranchType::Local) {
+                let commit = local
+                    .get()
+                    .peel_to_commit()
+                    .map_err(|e| format!("Could not resolve commit: {}", e.message()))?;
+                return Ok((commit.id(), is_local, is_remote));
+            }
+        }
+
+        let obj = repo
+            .revparse_single(&ref_name)
+            .map_err(|e| format!("Could not find ref '{}': {}", ref_name, e.message()))?;
+        let commit = obj
+            .peel_to_commit()
+            .map_err(|e| format!("Could not resolve commit: {}", e.message()))?;
         Ok((commit.id(), is_local, is_remote))
-    }; // obj and commit dropped here
+    })();
 
     let (target_oid, is_local_branch, is_remote_branch) = resolve_result.map_err(|msg| {
         // Restore stash if checkout target resolution failed
@@ -656,7 +669,7 @@ pub async fn checkout_with_autostash(
             // Best effort - try to pop stash, but don't fail if it doesn't work
             let _ = repo.stash_pop(0, None);
         }
-        LeviathanError::OperationFailed(msg.replace("RESTORE_STASH:", ""))
+        LeviathanError::OperationFailed(msg)
     })?;
 
     // Perform checkout using the OID
@@ -754,8 +767,11 @@ pub async fn checkout_with_autostash(
 
     // If we stashed, try to apply the stash
     if stashed {
-        // Try to apply the stash
+        // Try to apply the stash. Reinstate the index so files the user had
+        // staged before the checkout come back staged instead of silently
+        // becoming unstaged.
         let mut stash_apply_opts = git2::StashApplyOptions::new();
+        stash_apply_opts.reinstantiate_index();
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.safe();
         stash_apply_opts.checkout_options(checkout_opts);
@@ -1507,5 +1523,141 @@ mod tests {
         assert!(remote_branch.is_some());
         // shorthand should strip "origin/" prefix
         assert_eq!(remote_branch.unwrap().shorthand, "feature/nested");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_remote_branch_with_existing_local_uses_local_tip() {
+        // Local "feature" is at commit A; origin/feature is at newer commit B.
+        // Checking out "origin/feature" must put BOTH the working tree and
+        // HEAD on local "feature" (commit A) — not tree=B with HEAD=A.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature"); // at commit A
+        let commit_b = repo.create_commit("B on main", &[("newer.txt", "from B")]);
+        repo.create_remote_branch("feature", commit_b);
+
+        let result = checkout(repo.path_str(), "origin/feature".to_string(), None).await;
+        assert!(result.is_ok(), "checkout failed: {:?}", result.err());
+
+        assert_eq!(repo.current_branch(), "feature");
+        // Working tree must match local feature (commit A): newer.txt absent
+        assert!(
+            !repo.path.join("newer.txt").exists(),
+            "working tree was checked out from the remote tip instead of the local branch"
+        );
+        // And the tree must be clean — no phantom modifications
+        let git_repo = repo.repo();
+        let statuses = git_repo.statuses(None).unwrap();
+        assert!(
+            statuses.is_empty(),
+            "unexpected dirty status after checkout: {:?}",
+            statuses
+                .iter()
+                .map(|s| s.path().unwrap_or("").to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_remote_branch_creates_local_tracking() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://example.com/repo.git");
+        let commit_b = repo.create_commit("B", &[("b.txt", "b")]);
+        repo.create_remote_branch("topic", commit_b);
+
+        let result = checkout(repo.path_str(), "origin/topic".to_string(), None).await;
+        assert!(result.is_ok(), "checkout failed: {:?}", result.err());
+
+        assert_eq!(repo.current_branch(), "topic");
+        let git_repo = repo.repo();
+        let local = git_repo
+            .find_branch("topic", git2::BranchType::Local)
+            .expect("local tracking branch should exist");
+        assert_eq!(local.get().target(), Some(commit_b));
+        assert!(repo.path.join("b.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_checkout_autostash_remote_branch_with_existing_local_uses_local_tip() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature"); // at commit A
+        let commit_b = repo.create_commit("B on main", &[("newer.txt", "from B")]);
+        repo.create_remote_branch("feature", commit_b);
+
+        let result = checkout_with_autostash(repo.path_str(), "origin/feature".to_string()).await;
+        assert!(result.is_ok(), "checkout failed: {:?}", result.err());
+        assert!(result.unwrap().success);
+
+        assert_eq!(repo.current_branch(), "feature");
+        assert!(
+            !repo.path.join("newer.txt").exists(),
+            "working tree was checked out from the remote tip instead of the local branch"
+        );
+        let git_repo = repo.repo();
+        let statuses = git_repo.statuses(None).unwrap();
+        assert!(
+            statuses.is_empty(),
+            "unexpected dirty status after checkout"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_autostash_bad_ref_restores_changes_without_prefix() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file("README.md", "# modified content");
+
+        let result = checkout_with_autostash(repo.path_str(), "no-such-ref".to_string()).await;
+        let err = result.expect_err("checkout of a nonexistent ref must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("RESTORE_STASH:"),
+            "internal RESTORE_STASH: prefix leaked into the user-facing error: {msg}"
+        );
+
+        // The auto-stashed changes must be restored, not left in the stash
+        let contents = std::fs::read_to_string(repo.path.join("README.md")).unwrap();
+        assert_eq!(
+            contents, "# modified content",
+            "working tree changes were not restored after failed checkout"
+        );
+        let mut git_repo = repo.repo();
+        let mut stash_count = 0;
+        git_repo
+            .stash_foreach(|_, _, _| {
+                stash_count += 1;
+                true
+            })
+            .unwrap();
+        assert_eq!(
+            stash_count, 0,
+            "auto-stash was left behind in the stash list"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_autostash_preserves_staged_files() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("other");
+        repo.create_file("README.md", "# staged change");
+        repo.stage_file("README.md");
+
+        let result = checkout_with_autostash(repo.path_str(), "other".to_string()).await;
+        assert!(result.is_ok(), "checkout failed: {:?}", result.err());
+        let data = result.unwrap();
+        assert!(data.success);
+        assert!(data.stashed);
+        assert!(data.stash_applied);
+
+        assert_eq!(repo.current_branch(), "other");
+        let git_repo = repo.repo();
+        let statuses = git_repo.statuses(None).unwrap();
+        let readme = statuses
+            .iter()
+            .find(|s| s.path() == Some("README.md"))
+            .expect("README.md should still have changes after checkout");
+        assert!(
+            readme.status().contains(git2::Status::INDEX_MODIFIED),
+            "staged change became unstaged across auto-stash checkout (status: {:?})",
+            readme.status()
+        );
     }
 }

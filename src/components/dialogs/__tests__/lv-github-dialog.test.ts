@@ -986,4 +986,89 @@ describe('lv-github-dialog', () => {
       expect(args.user).to.not.be.null;
     });
   });
+
+  describe('Create feedback toasts (regression)', () => {
+    async function openConnectedRepo(): Promise<LvGitHubDialog> {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      return el;
+    }
+
+    it('shows a success toast after creating a pull request', async () => {
+      const el = await openConnectedRepo();
+      const d = el as unknown as Record<string, unknown>;
+      d.createPrTitle = 'My PR';
+      d.createPrHead = 'feature/x';
+      d.createPrBase = 'main';
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await (el as unknown as { handleCreatePR: () => Promise<void> }).handleCreatePR();
+      await el.updateComplete;
+
+      expect(
+        uiStore.getState().toasts.some(
+          (t) => t.type === 'success' && /Pull request created successfully/.test(t.message)
+        )
+      ).to.be.true;
+    });
+
+    it('shows a success toast after creating an issue', async () => {
+      const el = await openConnectedRepo();
+      (el as unknown as { createIssueTitle: string }).createIssueTitle = 'My issue';
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await (el as unknown as { handleCreateIssue: () => Promise<void> }).handleCreateIssue();
+      await el.updateComplete;
+
+      expect(
+        uiStore.getState().toasts.some(
+          (t) => t.type === 'success' && /Issue created successfully/.test(t.message)
+        )
+      ).to.be.true;
+    });
+
+    it('shows a success toast after creating a release', async () => {
+      const el = await openConnectedRepo();
+      (el as unknown as { createReleaseTag: string }).createReleaseTag = 'v2.0.0';
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await (el as unknown as { handleCreateRelease: () => Promise<void> }).handleCreateRelease();
+      await el.updateComplete;
+
+      expect(
+        uiStore.getState().toasts.some(
+          (t) => t.type === 'success' && /Release created successfully/.test(t.message)
+        )
+      ).to.be.true;
+    });
+  });
+
+  describe('GitHub App resets the add-account flag (regression)', () => {
+    it('handleConnectGitHubApp clears isAddingAccount on success', async () => {
+      appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      const d = el as unknown as Record<string, unknown>;
+      d.isAddingAccount = true;
+      d.appId = '12345';
+      d.appPrivateKey = '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----';
+      d.appInstallationId = '67890';
+
+      await (el as unknown as { handleConnectGitHubApp: () => Promise<void> }).handleConnectGitHubApp();
+      await el.updateComplete;
+
+      expect((el as unknown as { isAddingAccount: boolean }).isAddingAccount).to.equal(false);
+    });
+  });
 });

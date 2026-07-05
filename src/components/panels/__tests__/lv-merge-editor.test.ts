@@ -35,6 +35,7 @@ function makeConflictFile(path: string): ConflictFile {
     ancestor: { oid: 'base-oid', path, mode: 0o100644 },
     ours: { oid: 'ours-oid', path, mode: 0o100644 },
     theirs: { oid: 'theirs-oid', path, mode: 0o100644 },
+    isBinary: false,
   };
 }
 
@@ -334,6 +335,65 @@ describe('lv-merge-editor', () => {
       // Empty labels default based on implementation
       expect(conflict.oursLabel).to.not.be.undefined;
       expect(conflict.theirsLabel).to.not.be.undefined;
+    });
+
+    it('treats a nested "<<<<<<<" line as content, preserving prior conflict content', async () => {
+      const el = await renderEditor();
+      const internal = el as unknown as {
+        outputContent: string;
+        parseOutputSegments: () => Array<{
+          type: string;
+          oursLines: string[];
+          theirsLines: string[];
+        }>;
+      };
+
+      // A '<<<<<<<' line appears within an already-open conflict's ours side.
+      internal.outputContent = [
+        '<<<<<<< HEAD',
+        'real-ours',
+        '<<<<<<< nested-marker-as-content',
+        '=======',
+        'real-theirs',
+        '>>>>>>> feature',
+      ].join('\n');
+
+      const segments = internal.parseOutputSegments();
+      const conflict = segments.find(s => s.type === 'conflict')!;
+      // The nested marker line is retained as ours content (not discarded).
+      expect(conflict.oursLines).to.deep.equal(['real-ours', '<<<<<<< nested-marker-as-content']);
+      expect(conflict.theirsLines).to.deep.equal(['real-theirs']);
+    });
+
+    it('supports diff3 output without leaking the base section into ours', async () => {
+      const el = await renderEditor();
+      const internal = el as unknown as {
+        outputContent: string;
+        parseOutputSegments: () => Array<{
+          type: string;
+          oursLines: string[];
+          theirsLines: string[];
+        }>;
+      };
+
+      // diff3-style conflict: ours ||||||| base ======= theirs
+      internal.outputContent = [
+        '<<<<<<< HEAD',
+        'our-line',
+        '||||||| merged common ancestors',
+        'base-line',
+        '=======',
+        'their-line',
+        '>>>>>>> feature',
+      ].join('\n');
+
+      const segments = internal.parseOutputSegments();
+      const conflict = segments.find(s => s.type === 'conflict')!;
+      expect(conflict.oursLines).to.deep.equal(['our-line']);
+      expect(conflict.theirsLines).to.deep.equal(['their-line']);
+      // Base content must NOT appear in ours or theirs.
+      expect(conflict.oursLines).to.not.include('base-line');
+      expect(conflict.theirsLines).to.not.include('base-line');
     });
   });
 
@@ -666,6 +726,82 @@ describe('lv-merge-editor', () => {
 
       const resolveCall = invokeHistory.find(h => h.command === 'resolve_conflict');
       expect(resolveCall).to.exist;
+    });
+  });
+
+  // ── Binary conflicts ────────────────────────────────────────────────────
+  describe('binary conflicts', () => {
+    it('renders take-side UI (no text editor) for a binary conflict', async () => {
+      const el = await renderEditor();
+      const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean };
+      internal.conflictFile = { ...makeConflictFile('image.png'), isBinary: true };
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 50));
+      internal.loading = false;
+      await el.updateComplete;
+
+      // No text output panel / editor for binary files.
+      expect(el.shadowRoot!.querySelector('.output-panel')).to.be.null;
+      expect(el.shadowRoot!.querySelector('.source-panels')).to.be.null;
+      // Binary conflict message + side buttons present.
+      expect(el.shadowRoot!.textContent).to.include('Binary file conflict');
+      expect(el.shadowRoot!.querySelector('.btn-ours')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.btn-theirs')).to.not.be.null;
+    });
+
+    it('resolves a binary conflict via resolve_conflict_take_side, not text resolve', async () => {
+      const el = await renderEditor();
+      const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean };
+      internal.conflictFile = { ...makeConflictFile('image.png'), isBinary: true };
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 50));
+      internal.loading = false;
+      await el.updateComplete;
+
+      let resolvedFired = false;
+      el.addEventListener('conflict-resolved', () => { resolvedFired = true; });
+
+      invokeHistory.length = 0;
+      const oursBtn = el.shadowRoot!.querySelector('.btn-ours') as HTMLButtonElement;
+      oursBtn.click();
+      await new Promise(r => setTimeout(r, 50));
+
+      const takeSide = invokeHistory.find(h => h.command === 'resolve_conflict_take_side');
+      expect(takeSide, 'take-side called').to.exist;
+      expect((takeSide!.args as Record<string, unknown>).side).to.equal('ours');
+      // Text resolve pipeline must NOT be used (would truncate binary to 0 bytes).
+      expect(invokeHistory.some(h => h.command === 'resolve_conflict')).to.be.false;
+      expect(resolvedFired).to.be.true;
+    });
+  });
+
+  // ── Deleted-side (modify/delete) conflicts ────────────────────────────────
+  describe('deleted-side conflicts', () => {
+    it('labels the deleted side and resolves it via take-side (deletion)', async () => {
+      const el = await renderEditor();
+      const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean };
+      // theirs deleted the file; ours modified it.
+      internal.conflictFile = { ...makeConflictFile('src/gone.ts'), theirs: null };
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 50));
+      internal.loading = false;
+      await el.updateComplete;
+
+      const theirsBtn = el.shadowRoot!.querySelector('.btn-theirs') as HTMLButtonElement;
+      expect(theirsBtn.textContent).to.include('delete file');
+
+      let resolvedFired = false;
+      el.addEventListener('conflict-resolved', () => { resolvedFired = true; });
+
+      invokeHistory.length = 0;
+      theirsBtn.click();
+      await new Promise(r => setTimeout(r, 50));
+
+      const takeSide = invokeHistory.find(h => h.command === 'resolve_conflict_take_side');
+      expect(takeSide, 'take-side called for deleted side').to.exist;
+      expect((takeSide!.args as Record<string, unknown>).side).to.equal('theirs');
+      expect(invokeHistory.some(h => h.command === 'resolve_conflict')).to.be.false;
+      expect(resolvedFired).to.be.true;
     });
   });
 });

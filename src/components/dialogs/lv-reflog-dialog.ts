@@ -465,6 +465,7 @@ export class LvReflogDialog extends LitElement {
       await navigator.clipboard.writeText(entry.oid);
     } catch (err) {
       console.error('Failed to copy hash:', err);
+      showToast('Failed to copy hash to clipboard', 'error');
     }
   }
 

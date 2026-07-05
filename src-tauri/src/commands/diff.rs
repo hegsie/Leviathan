@@ -758,6 +758,7 @@ pub async fn get_commit_file_diff(
     path: String,
     commit_oid: String,
     file_path: String,
+    max_lines: Option<u32>,
 ) -> Result<DiffFile> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let commit = repo.find_commit(git2::Oid::from_str(&commit_oid)?)?;
@@ -772,9 +773,13 @@ pub async fn get_commit_file_diff(
     let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
 
     let files = parse_diff(&diff)?;
-    files.into_iter().next().ok_or_else(|| {
-        crate::error::LeviathanError::OperationFailed("File not found in commit".to_string())
-    })
+    files
+        .into_iter()
+        .next()
+        .map(|f| maybe_truncate_diff(f, max_lines))
+        .ok_or_else(|| {
+            crate::error::LeviathanError::OperationFailed("File not found in commit".to_string())
+        })
 }
 
 /// A single line of blame output
@@ -1202,6 +1207,7 @@ mod tests {
             repo.path_str(),
             commit_oid.to_string(),
             "specific.txt".to_string(),
+            None,
         )
         .await;
 
@@ -1221,6 +1227,7 @@ mod tests {
             repo.path_str(),
             commit_oid.to_string(),
             "nonexistent.txt".to_string(),
+            None,
         )
         .await;
 

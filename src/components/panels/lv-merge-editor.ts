@@ -662,14 +662,17 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const segments: OutputSegment[] = [];
     let currentResolved: string[] = [];
     let inConflict = false;
-    let inOurs = false;
+    // Which side of the conflict we're currently accumulating.
+    // 'base' is the diff3 common-ancestor section — it is discarded, never
+    // mixed into ours.
+    let section: 'ours' | 'base' | 'theirs' = 'ours';
     let oursLines: string[] = [];
     let theirsLines: string[] = [];
     let oursLabel = '';
     let theirsLabel = '';
 
     for (const line of lines) {
-      if (line.startsWith('<<<<<<<')) {
+      if (!inConflict && line.startsWith('<<<<<<<')) {
         // Flush any accumulated resolved lines
         if (currentResolved.length > 0) {
           segments.push({
@@ -683,14 +686,17 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           currentResolved = [];
         }
         inConflict = true;
-        inOurs = true;
+        section = 'ours';
         oursLines = [];
         theirsLines = [];
         oursLabel = line.slice(7).trim() || 'OURS';
         theirsLabel = '';
-      } else if (line.startsWith('=======') && inConflict) {
-        inOurs = false;
-      } else if (line.startsWith('>>>>>>>') && inConflict) {
+      } else if (inConflict && line.startsWith('|||||||')) {
+        // diff3 common-ancestor marker — begin discarding base lines
+        section = 'base';
+      } else if (inConflict && line.startsWith('=======')) {
+        section = 'theirs';
+      } else if (inConflict && line.startsWith('>>>>>>>')) {
         theirsLabel = line.slice(7).trim() || 'THEIRS';
         segments.push({
           type: 'conflict',
@@ -701,15 +707,18 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           theirsLabel,
         });
         inConflict = false;
-        inOurs = false;
+        section = 'ours';
         oursLines = [];
         theirsLines = [];
       } else if (inConflict) {
-        if (inOurs) {
+        // A nested '<<<<<<<' (or any non-marker line) while already inside a
+        // conflict is treated as content, not as a new conflict start.
+        if (section === 'ours') {
           oursLines.push(line);
-        } else {
+        } else if (section === 'theirs') {
           theirsLines.push(line);
         }
+        // section === 'base': discard — never leak base into ours
       } else {
         currentResolved.push(line);
       }
@@ -918,6 +927,40 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   public getResolvedContent(): string {
     return this.outputContent;
+  }
+
+  private get isBinaryConflict(): boolean {
+    return this.conflictFile?.isBinary === true;
+  }
+
+  private get isDeletedSideConflict(): boolean {
+    return !!this.conflictFile && (!this.conflictFile.ours || !this.conflictFile.theirs);
+  }
+
+  /**
+   * Resolve the conflict by taking one whole side's blob verbatim.
+   * Binary-safe, and correctly stages a deletion when the chosen side removed
+   * the file (avoids the text pipeline truncating binary/deleted files).
+   */
+  private async handleTakeSide(side: 'ours' | 'theirs'): Promise<void> {
+    if (!this.repositoryPath || !this.conflictFile) return;
+
+    const result = await gitService.resolveConflictTakeSide(
+      this.repositoryPath,
+      this.conflictFile.path,
+      side,
+    );
+
+    if (result.success) {
+      this.dispatchEvent(new CustomEvent('conflict-resolved', {
+        detail: { file: this.conflictFile },
+        bubbles: true,
+        composed: true,
+      }));
+    } else {
+      console.error('Failed to resolve conflict:', result.error);
+      showToast(`Failed to resolve conflict: ${result.error?.message ?? 'Unknown error'}`, 'error');
+    }
   }
 
   private renderCodeView(content: string, diffAgainst?: string): ReturnType<typeof html> {
@@ -1165,6 +1208,37 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     return diffs;
   }
 
+  private renderBinaryConflict(): ReturnType<typeof html> {
+    if (!this.conflictFile) {
+      return html`<div class="empty">Select a file to resolve</div>`;
+    }
+
+    const oursDeleted = !this.conflictFile.ours;
+    const theirsDeleted = !this.conflictFile.theirs;
+
+    return html`
+      <div class="toolbar">
+        <span class="toolbar-title">${this.conflictFile.path}</span>
+      </div>
+      <div class="empty" style="flex-direction: column; gap: var(--spacing-md);">
+        <div>
+          <strong>Binary file conflict</strong>
+        </div>
+        <div style="font-style: normal; text-align: center; max-width: 420px;">
+          This file is binary and cannot be merged as text. Choose which version to keep.
+        </div>
+        <div class="toolbar-actions">
+          <button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')}>
+            ${oursDeleted ? 'Use Ours (delete file)' : 'Use Ours'}
+          </button>
+          <button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')}>
+            ${theirsDeleted ? 'Use Theirs (delete file)' : 'Use Theirs'}
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   render() {
     if (!this.conflictFile) {
       return html`<div class="empty">Select a file to resolve</div>`;
@@ -1172,6 +1246,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
     if (this.loading) {
       return html`<div class="loading">Loading file contents...</div>`;
+    }
+
+    // Binary conflicts cannot be edited as text — editing would truncate the
+    // file to 0 bytes. Offer whole-blob side selection instead.
+    if (this.isBinaryConflict) {
+      return this.renderBinaryConflict();
     }
 
     const oursChanges = this.getDiffCount(this.oursContent, this.baseContent);
@@ -1196,12 +1276,20 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <button class="btn" @click=${this.handleAcceptBase} title="Reset to common ancestor">
             Use Base
           </button>
-          <button class="btn btn-ours" @click=${this.handleAcceptOurs} title="Use entire file from current branch">
-            Use Ours
-          </button>
-          <button class="btn btn-theirs" @click=${this.handleAcceptTheirs} title="Use entire file from incoming branch">
-            Use Theirs
-          </button>
+          ${this.conflictFile && !this.conflictFile.ours
+            ? html`<button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} title="Ours deleted this file — keep it deleted">
+                Use Ours (delete file)
+              </button>`
+            : html`<button class="btn btn-ours" @click=${this.handleAcceptOurs} title="Use entire file from current branch">
+                Use Ours
+              </button>`}
+          ${this.conflictFile && !this.conflictFile.theirs
+            ? html`<button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} title="Theirs deleted this file — delete it">
+                Use Theirs (delete file)
+              </button>`
+            : html`<button class="btn btn-theirs" @click=${this.handleAcceptTheirs} title="Use entire file from incoming branch">
+                Use Theirs
+              </button>`}
           ${this.aiAvailable ? html`
             <button
               class="btn btn-ai"

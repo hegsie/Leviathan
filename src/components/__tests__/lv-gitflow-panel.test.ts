@@ -636,7 +636,7 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      const errorEl = el.shadowRoot!.querySelector('.error');
+      const errorEl = el.shadowRoot!.querySelector('.error-banner');
       expect(errorEl).to.not.be.null;
       expect(errorEl!.textContent).to.include('Init failed: no main branch');
     });
@@ -666,7 +666,7 @@ describe('lv-gitflow-panel', () => {
         await new Promise((r) => setTimeout(r, 150));
         await el.updateComplete;
 
-        const errorEl = el.shadowRoot!.querySelector('.error');
+        const errorEl = el.shadowRoot!.querySelector('.error-banner');
         expect(errorEl).to.not.be.null;
         expect(errorEl!.textContent).to.include('Branch already exists');
       } finally {
@@ -696,9 +696,110 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      const errorEl = el.shadowRoot!.querySelector('.error');
+      const errorEl = el.shadowRoot!.querySelector('.error-banner');
       expect(errorEl).to.not.be.null;
       expect(errorEl!.textContent).to.include('Merge conflict');
+    });
+
+    it('renders error as a dismissable inline banner above panel content', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            return DEFAULT_CONFIG;
+          case 'get_branches':
+            return featureBranches;
+          case 'gitflow_finish_feature':
+            throw new Error('Something broke');
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      (finishBtns[0] as HTMLButtonElement).click();
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      // Banner is shown AND the normal panel content is still rendered.
+      const banner = el.shadowRoot!.querySelector('.error-banner');
+      expect(banner).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.panel')).to.not.be.null;
+
+      // Dismiss clears the error.
+      const dismissBtn = el.shadowRoot!.querySelector('.error-banner-dismiss') as HTMLButtonElement;
+      expect(dismissBtn).to.not.be.null;
+      dismissBtn.click();
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.error-banner')).to.be.null;
+      expect(el.shadowRoot!.querySelector('.panel')).to.not.be.null;
+    });
+
+    it('opens the conflict dialog when finish feature returns MERGE_CONFLICT', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            return DEFAULT_CONFIG;
+          case 'get_branches':
+            return featureBranches;
+          case 'gitflow_finish_feature':
+            throw { code: 'MERGE_CONFLICT', message: 'conflicts while merging' };
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+
+      let conflictDetail: unknown = null;
+      el.addEventListener('open-conflict-dialog', ((e: CustomEvent) => {
+        conflictDetail = e.detail;
+      }) as EventListener);
+
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      (finishBtns[0] as HTMLButtonElement).click();
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      expect(conflictDetail).to.deep.equal({ operationType: 'merge' });
+      // No inline error banner when routing to the conflict dialog.
+      expect(el.shadowRoot!.querySelector('.error-banner')).to.be.null;
+    });
+
+    it('opens the conflict dialog when finish hotfix returns MERGE_CONFLICT', async () => {
+      setupMockPrompt('Hotfix 1.0.1');
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            return DEFAULT_CONFIG;
+          case 'get_branches':
+            return hotfixBranches;
+          case 'gitflow_finish_hotfix':
+            throw { code: 'MERGE_CONFLICT', message: 'conflicts while merging hotfix' };
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+
+      let conflictDetail: unknown = null;
+      el.addEventListener('open-conflict-dialog', ((e: CustomEvent) => {
+        conflictDetail = e.detail;
+      }) as EventListener);
+
+      try {
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+        (finishBtns[0] as HTMLButtonElement).click();
+        await new Promise((r) => setTimeout(r, 150));
+        await el.updateComplete;
+
+        expect(conflictDetail).to.deep.equal({ operationType: 'merge' });
+      } finally {
+        cleanupMockPrompt();
+      }
     });
   });
 

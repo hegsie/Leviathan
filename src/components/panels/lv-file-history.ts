@@ -7,6 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import type { Commit } from '../../types/git.types.ts';
 
 interface HistoryContextMenuState {
@@ -403,6 +404,7 @@ export class LvFileHistory extends LitElement {
       await navigator.clipboard.writeText(commit.oid);
     } catch (err) {
       console.error('Failed to copy hash:', err);
+      showToast('Failed to copy hash to clipboard', 'error');
     }
   }
 

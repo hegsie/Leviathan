@@ -120,6 +120,48 @@ describe('lv-config-dialog', () => {
     expect(successToast!.message).to.equal('Alias added');
   });
 
+  it('shows success toast and updates in-memory value on setting save', async () => {
+    const el = await fixture<LvConfigDialog>(
+      html`<lv-config-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-config-dialog>`,
+    );
+
+    // Seed a setting so we can verify the in-memory value updates.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).settings = [{ key: 'core.editor', value: 'vim', scope: 'local' }];
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleSaveSetting('core.editor', 'nano');
+
+    const toasts = uiStore.getState().toasts;
+    const successToast = toasts.find(t => t.type === 'success');
+    expect(successToast).to.not.be.undefined;
+    expect(successToast!.message).to.equal('Setting saved');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updated = (el as any).settings.find((s: { key: string }) => s.key === 'core.editor');
+    expect(updated.value).to.equal('nano');
+  });
+
+  it('shows error and leaves value unchanged on setting save failure', async () => {
+    failingCommands.add('set_config_value');
+
+    const el = await fixture<LvConfigDialog>(
+      html`<lv-config-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-config-dialog>`,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).settings = [{ key: 'core.editor', value: 'vim', scope: 'local' }];
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleSaveSetting('core.editor', 'nano');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).error).to.not.be.null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const setting = (el as any).settings.find((s: { key: string }) => s.key === 'core.editor');
+    expect(setting.value).to.equal('vim');
+  });
+
   it('shows success toast on alias delete', async () => {
     const el = await fixture<LvConfigDialog>(
       html`<lv-config-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-config-dialog>`,

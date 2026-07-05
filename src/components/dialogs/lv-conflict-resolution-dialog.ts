@@ -304,7 +304,7 @@ export class LvConflictResolutionDialog extends LitElement {
 
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
-  @property({ type: String }) operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' = 'merge';
+  @property({ type: String }) operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
 
   @state() private conflicts: ConflictFile[] = [];
   @state() private resolvedFiles: Set<string> = new Set();
@@ -421,9 +421,19 @@ export class LvConflictResolutionDialog extends LitElement {
     try {
       const result = await gitService.launchMergeTool(this.repositoryPath, conflictPath);
       if (result.success && result.data?.success) {
-        this.resolvedFiles = new Set([...this.resolvedFiles, conflictPath]);
-        this.requestUpdate();
-        showToast('Merge tool completed', 'success');
+        // The tool's exit code alone isn't authoritative — re-check the index to
+        // confirm the file is no longer conflicted before marking it resolved.
+        const conflictsResult = await gitService.getConflicts(this.repositoryPath);
+        const stillConflicted =
+          conflictsResult.success &&
+          (conflictsResult.data ?? []).some((c) => c.path === conflictPath);
+        if (stillConflicted) {
+          showToast('File still has conflicts', 'warning');
+        } else {
+          this.resolvedFiles = new Set([...this.resolvedFiles, conflictPath]);
+          this.requestUpdate();
+          showToast('Merge tool completed', 'success');
+        }
       } else {
         showToast(result.data?.message ?? result.error?.message ?? 'Merge tool failed', 'error');
       }
@@ -494,9 +504,22 @@ export class LvConflictResolutionDialog extends LitElement {
         case 'revert':
           result = await gitService.abortRevert({ path: this.repositoryPath });
           break;
+        case 'stash':
+          // There's no backend "abort stash apply". A hard reset to HEAD discards
+          // the conflicted working-tree + index changes without touching the stash
+          // entry, so the user's stashed changes remain recoverable.
+          result = await gitService.reset({
+            path: this.repositoryPath,
+            targetRef: 'HEAD',
+            mode: 'hard',
+          });
+          break;
       }
 
       if (result.success) {
+        if (this.operationType === 'stash') {
+          showToast('Stash application aborted — your changes remain in the stash', 'info');
+        }
         this.dispatchEvent(
           new CustomEvent('operation-aborted', {
             bubbles: true,
@@ -506,10 +529,12 @@ export class LvConflictResolutionDialog extends LitElement {
         this.close();
       } else {
         console.error('Failed to abort:', result.error);
+        showToast(result.error?.message ?? `Failed to abort ${this.getOperationTitle()}`, 'error');
         this.aborting = false; // Allow retry
       }
     } catch (err) {
       console.error('Failed to abort:', err);
+      showToast(`Failed to abort ${this.getOperationTitle()}`, 'error');
       this.aborting = false; // Allow retry
     }
   }
@@ -523,7 +548,10 @@ export class LvConflictResolutionDialog extends LitElement {
     ).length;
 
     if (unresolvedCount > 0) {
-      alert(`Please resolve all ${unresolvedCount} remaining conflict(s) before continuing.`);
+      showToast(
+        `Please resolve all ${unresolvedCount} remaining conflict(s) before continuing.`,
+        'warning'
+      );
       return;
     }
 
@@ -534,12 +562,16 @@ export class LvConflictResolutionDialog extends LitElement {
           result = await gitService.continueRebase({ path: this.repositoryPath });
           if (!result.success) {
             console.error('Failed to continue rebase:', result.error);
-            // Might have more conflicts
+            // Might have more conflicts — reload and stay open if any appeared.
             await this.loadConflicts();
             if (this.conflicts.length > 0) {
               this.resolvedFiles = new Set();
               return;
             }
+            // No new conflicts, but the operation genuinely failed — surface the
+            // error and keep the dialog open instead of falsely reporting success.
+            showToast(result.error?.message ?? 'Failed to continue rebase', 'error');
+            return;
           }
           break;
         case 'cherry-pick':
@@ -553,6 +585,8 @@ export class LvConflictResolutionDialog extends LitElement {
                 return;
               }
             }
+            showToast(result.error?.message ?? 'Failed to continue cherry-pick', 'error');
+            return;
           }
           break;
         case 'revert':
@@ -566,10 +600,35 @@ export class LvConflictResolutionDialog extends LitElement {
                 return;
               }
             }
+            showToast(result.error?.message ?? 'Failed to continue revert', 'error');
+            return;
           }
           break;
         case 'merge':
-          // Merge doesn't have a continue - just close after resolving
+          // Commit the in-progress merge (HEAD + MERGE_HEAD parents).
+          result = await gitService.commitMerge(this.repositoryPath);
+          if (!result.success) {
+            console.error('Failed to complete merge:', result.error);
+            if (result.error?.code === 'MERGE_CONFLICT') {
+              await this.loadConflicts();
+              if (this.conflicts.length > 0) {
+                this.resolvedFiles = new Set();
+                return;
+              }
+            }
+            showToast(result.error?.message ?? 'Failed to complete merge', 'error');
+            return;
+          }
+          break;
+        case 'stash':
+          // All conflicts resolved — the failed pop left the auto-stash at index 0;
+          // drop it now that its changes have been applied and resolved.
+          result = await gitService.dropStash({ path: this.repositoryPath, index: 0 });
+          if (!result.success) {
+            console.error('Failed to drop stash:', result.error);
+            showToast(result.error?.message ?? 'Failed to drop stash', 'error');
+            return;
+          }
           break;
       }
 
@@ -582,6 +641,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.close();
     } catch (err) {
       console.error('Failed to continue:', err);
+      showToast('Failed to continue', 'error');
     }
   }
 
@@ -607,6 +667,8 @@ export class LvConflictResolutionDialog extends LitElement {
         return 'Cherry-pick';
       case 'revert':
         return 'Revert';
+      case 'stash':
+        return 'Stash';
       default:
         return 'Merge';
     }
@@ -727,7 +789,11 @@ export class LvConflictResolutionDialog extends LitElement {
               @click=${this.handleContinue}
               ?disabled=${this.resolvedCount < this.totalCount}
             >
-              ${this.operationType === 'merge' ? 'Complete Merge' : `Continue ${this.getOperationTitle()}`}
+              ${this.operationType === 'merge'
+                ? 'Complete Merge'
+                : this.operationType === 'stash'
+                  ? 'Complete'
+                  : `Continue ${this.getOperationTitle()}`}
             </button>
           </div>
         </div>

@@ -231,7 +231,21 @@ pub async fn create_commit(
     }
 
     // Use git2 for unsigned commits (faster)
-    let repo = git2::Repository::open(Path::new(&path))?;
+    let mut repo = git2::Repository::open(Path::new(&path))?;
+
+    // A commit created while a merge is in progress must include MERGE_HEAD
+    // as a parent, otherwise the merged branch is silently dropped and the
+    // repository stays stuck in MERGING state. Collect the merge heads up
+    // front (mergehead_foreach needs a unique borrow of the repo).
+    let merging = repo.state() == git2::RepositoryState::Merge;
+    let mut merge_oids: Vec<git2::Oid> = Vec::new();
+    if merging {
+        repo.mergehead_foreach(|oid| {
+            merge_oids.push(*oid);
+            true
+        })?;
+    }
+    let repo = repo;
 
     let default_signature = repo.signature()?;
 
@@ -278,17 +292,31 @@ pub async fn create_commit(
             &parent_refs,
         )?
     } else {
-        let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-        let parents: Vec<&git2::Commit> = parent.as_ref().into_iter().collect();
+        let mut parents: Vec<git2::Commit> = repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .into_iter()
+            .collect();
 
-        repo.commit(
+        // Include MERGE_HEAD parents collected above when mid-merge
+        for oid in &merge_oids {
+            parents.push(repo.find_commit(*oid)?);
+        }
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+
+        let commit_oid = repo.commit(
             Some("HEAD"),
             &author_sig,
             &committer_sig,
             &message,
             &tree,
-            &parents,
-        )?
+            &parent_refs,
+        )?;
+        if merging {
+            repo.cleanup_state()?;
+        }
+        commit_oid
     };
 
     let commit = repo.find_commit(commit_oid)?;
@@ -1256,6 +1284,62 @@ pub async fn get_file_history(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    #[tokio::test]
+    async fn test_create_commit_mid_merge_includes_merge_head() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Conflicting merge, resolved manually, then committed from the
+        // normal commit panel: the commit must get MERGE_HEAD as a second
+        // parent and clear the MERGING state.
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+
+        let merge_result = crate::commands::merge::merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(merge_result.is_err(), "expected merge conflict");
+
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = create_commit(
+            repo.path_str(),
+            "Commit during merge".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            2,
+            "commit made mid-merge must keep MERGE_HEAD as a parent"
+        );
+    }
 
     #[tokio::test]
     async fn test_get_commit_history() {

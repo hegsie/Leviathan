@@ -222,26 +222,51 @@ pub async fn gitflow_finish_feature(
     let annotated_commit = repo.find_annotated_commit(feature_commit.id())?;
 
     if squash.unwrap_or(false) {
-        // Squash merge
+        // Squash merge: the changes must actually be committed (single
+        // parent, no merge commit). Conflicts abort BEFORE any branch
+        // deletion so the user can resolve them.
         repo.merge(&[&annotated_commit], None, None)?;
+        if repo.index()?.has_conflicts() {
+            return Err(LeviathanError::MergeConflict);
+        }
+        let mut index = repo.index()?;
+        let tree_oid = index.write_tree()?;
+        let tree = repo.find_tree(tree_oid)?;
+        let sig = repo.signature()?;
+        let develop_commit = develop_branch.get().peel_to_commit()?;
+        let message = format!("Squashed branch '{}' into {}", branch_name, develop);
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            &message,
+            &tree,
+            &[&develop_commit],
+        )?;
+        repo.cleanup_state()?;
     } else {
         // Regular merge (no-ff)
         let (analysis, _) = repo.merge_analysis(&[&annotated_commit])?;
         if analysis.is_fast_forward() || analysis.is_normal() {
             repo.merge(&[&annotated_commit], None, None)?;
 
-            if !repo.index()?.has_conflicts() {
-                // Auto-commit merge
-                let mut index = repo.index()?;
-                let tree_oid = index.write_tree()?;
-                let tree = repo.find_tree(tree_oid)?;
-                let sig = repo.signature()?;
-                let develop_commit = develop_branch.get().peel_to_commit()?;
-                let parents = vec![&develop_commit, &feature_commit];
-                let message = format!("Merge branch '{}' into {}", branch_name, develop);
-                repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
-                repo.cleanup_state()?;
+            // Conflicts must abort the finish (leaving MERGE_HEAD for the
+            // conflict-resolution flow) instead of silently skipping the
+            // commit and deleting the branch below.
+            if repo.index()?.has_conflicts() {
+                return Err(LeviathanError::MergeConflict);
             }
+
+            // Auto-commit merge
+            let mut index = repo.index()?;
+            let tree_oid = index.write_tree()?;
+            let tree = repo.find_tree(tree_oid)?;
+            let sig = repo.signature()?;
+            let develop_commit = develop_branch.get().peel_to_commit()?;
+            let parents = vec![&develop_commit, &feature_commit];
+            let message = format!("Merge branch '{}' into {}", branch_name, develop);
+            repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
+            repo.cleanup_state()?;
         }
     }
 
@@ -306,6 +331,28 @@ pub async fn gitflow_finish_release(
     tag_message: Option<String>,
     delete_branch: Option<bool>,
 ) -> Result<()> {
+    finish_release_like(
+        path,
+        version,
+        tag_message,
+        delete_branch,
+        "gitflow.prefix.release",
+        "release/",
+    )
+    .await
+}
+
+/// Shared implementation for release/hotfix finish: merge into master (with
+/// tag), merge into develop, delete the branch. The two flows differ only in
+/// which branch prefix they use.
+async fn finish_release_like(
+    path: String,
+    version: String,
+    tag_message: Option<String>,
+    delete_branch: Option<bool>,
+    prefix_key: &str,
+    prefix_default: &str,
+) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let config = repo.config()?;
 
@@ -316,8 +363,8 @@ pub async fn gitflow_finish_release(
         .get_string("gitflow.branch.develop")
         .unwrap_or_else(|_| "develop".to_string());
     let prefix = config
-        .get_string("gitflow.prefix.release")
-        .unwrap_or_else(|_| "release/".to_string());
+        .get_string(prefix_key)
+        .unwrap_or_else(|_| prefix_default.to_string());
     let tag_prefix = config
         .get_string("gitflow.prefix.versiontag")
         .unwrap_or_else(|_| "v".to_string());
@@ -343,7 +390,13 @@ pub async fn gitflow_finish_release(
     let annotated = repo.find_annotated_commit(release_commit.id())?;
     repo.merge(&[&annotated], None, None)?;
 
-    if !repo.index()?.has_conflicts() {
+    // Conflicts must abort the finish here — proceeding would tag nothing,
+    // check out develop over a conflicted tree, and delete the branch.
+    if repo.index()?.has_conflicts() {
+        return Err(LeviathanError::MergeConflict);
+    }
+
+    {
         let mut index = repo.index()?;
         let tree_oid = index.write_tree()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -378,7 +431,13 @@ pub async fn gitflow_finish_release(
     let annotated2 = repo.find_annotated_commit(release_commit2.id())?;
     repo.merge(&[&annotated2], None, None)?;
 
-    if !repo.index()?.has_conflicts() {
+    // Same as above: a conflicted develop merge must be surfaced (and the
+    // branch NOT deleted) so the user can resolve it.
+    if repo.index()?.has_conflicts() {
+        return Err(LeviathanError::MergeConflict);
+    }
+
+    {
         let mut index = repo.index()?;
         let tree_oid = index.write_tree()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -451,8 +510,18 @@ pub async fn gitflow_finish_hotfix(
     tag_message: Option<String>,
     delete_branch: Option<bool>,
 ) -> Result<()> {
-    // Hotfix finish is similar to release finish
-    gitflow_finish_release(path, version, tag_message, delete_branch).await
+    // Same flow as release finish, but the branch lives under the hotfix
+    // prefix — delegating with the release prefix made every hotfix finish
+    // fail with BranchNotFound.
+    finish_release_like(
+        path,
+        version,
+        tag_message,
+        delete_branch,
+        "gitflow.prefix.hotfix",
+        "hotfix/",
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -650,5 +719,122 @@ mod tests {
         let git_repo = repo.repo();
         let feature = git_repo.find_branch("feature/keep-feature", git2::BranchType::Local);
         assert!(feature.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_with_conflict_errors_and_keeps_branch() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "conflicting".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+
+        // Conflicting change on develop
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop change", &[("shared.txt", "develop content")]);
+
+        let result =
+            gitflow_finish_feature(repo.path_str(), "conflicting".to_string(), Some(true), None)
+                .await;
+
+        // Must surface the conflict, NOT report success
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        // Branch must NOT have been deleted, and the merge state must be
+        // intact for the conflict-resolution flow
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .find_branch("feature/conflicting", git2::BranchType::Local)
+            .is_ok());
+        assert_eq!(git_repo.state(), git2::RepositoryState::Merge);
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_squash_creates_commit() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "squashed".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature work", &[("squash.txt", "squash content")]);
+
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "squashed".to_string(),
+            Some(true),
+            Some(true), // squash
+        )
+        .await;
+        assert!(result.is_ok(), "squash finish failed: {:?}", result.err());
+
+        // The squashed changes must actually be committed on develop as a
+        // single-parent commit, with no merge state left behind
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert_eq!(repo.current_branch(), "develop");
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.parent_count(), 1);
+        assert!(repo.path.join("squash.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_finish_hotfix_uses_hotfix_prefix() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_hotfix(repo.path_str(), "1.0.1".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Hotfix work", &[("hotfix.txt", "fix")]);
+
+        // Before the fix this failed with BranchNotFound("release/1.0.1")
+        let result =
+            gitflow_finish_hotfix(repo.path_str(), "1.0.1".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "hotfix finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert!(git_repo.find_reference("refs/tags/v1.0.1").is_ok());
+        assert!(git_repo
+            .find_branch("hotfix/1.0.1", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_with_conflict_keeps_branch() {
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_release(repo.path_str(), "2.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("shared.txt", "release content")]);
+
+        // Conflicting change on master
+        repo.checkout_branch(&master);
+        repo.create_commit("Master change", &[("shared.txt", "master content")]);
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "2.0.0".to_string(), None, Some(true)).await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        // Branch kept, no tag created, merge state intact for resolution
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .find_branch("release/2.0.0", git2::BranchType::Local)
+            .is_ok());
+        assert!(git_repo.find_reference("refs/tags/v2.0.0").is_err());
+        assert_eq!(git_repo.state(), git2::RepositoryState::Merge);
     }
 }

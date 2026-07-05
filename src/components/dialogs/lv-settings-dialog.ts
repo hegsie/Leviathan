@@ -799,6 +799,7 @@ export class LvSettingsDialog extends LitElement {
   }
 
   private async handleCancelDownload(modelId: string): Promise<void> {
+    this.aiError = null;
     await localAiService.cancelModelDownload(modelId);
     const { [modelId]: _, ...rest } = this.downloadProgress;
     this.downloadProgress = rest;
@@ -806,6 +807,7 @@ export class LvSettingsDialog extends LitElement {
   }
 
   private async handleDeleteModel(modelId: string): Promise<void> {
+    this.aiError = null;
     // Unload first if this model is currently loaded
     if (this.localModelStatus === 'ready') {
       await localAiService.unloadModel();
@@ -833,6 +835,7 @@ export class LvSettingsDialog extends LitElement {
   }
 
   private async handleUnloadModel(): Promise<void> {
+    this.aiError = null;
     const result = await localAiService.unloadModel();
     if (result.success) {
       await Promise.all([this.loadLocalAiData(), this.loadAiProviders()]);

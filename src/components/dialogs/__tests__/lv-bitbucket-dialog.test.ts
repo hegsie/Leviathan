@@ -840,6 +840,125 @@ describe('lv-bitbucket-dialog', () => {
     });
   });
 
+  describe('App Password Basic-auth routing (regression)', () => {
+    // Regression: app-password accounts broke after the first session because the
+    // raw app password was stored in the per-account token slot and re-sent as a
+    // Bearer token (Bitbucket rejects app passwords as Bearer). App-password
+    // credentials must be stored prefixed (`bbapp:<user>:<pass>`) so the backend
+    // routes them through Basic auth on the connection check AND every API call.
+    it('reopen: passes the prefixed app-password credential to the connection check', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      // Simulate a previously-saved app-password account: the stored token slot
+      // holds the prefixed credential, not a raw OAuth bearer token.
+      keyringStore.set('bitbucket_token_bb-acc-1', 'bbapp:bbuser:app-secret-123');
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const check = invokeHistory.find((c) => c.command === 'check_bitbucket_connection_with_token');
+      expect(check, 'connection check ran with token').to.not.be.undefined;
+      // The prefixed credential is what the backend detects to build Basic auth.
+      expect((check!.args as Record<string, unknown>).token).to.equal('bbapp:bbuser:app-secret-123');
+    });
+
+    it('reopen: passes the prefixed credential to loadPullRequests (Basic auth for API calls)', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      keyringStore.set('bitbucket_token_bb-acc-1', 'bbapp:bbuser:app-secret-123');
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const prCall = invokeHistory.find((c) => c.command === 'list_bitbucket_pull_requests');
+      expect(prCall, 'PRs were loaded').to.not.be.undefined;
+      expect((prCall!.args as Record<string, unknown>).token).to.equal('bbapp:bbuser:app-secret-123');
+    });
+
+    it('save: stores the app password with the bbapp: prefix (not the raw password)', async () => {
+      // No accounts: the save flow creates a new account and stores its token.
+      unifiedProfileStore.getState().setAccounts([]);
+      connectionResponse = mockConnectedStatus;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { usernameInput: string }).usernameInput = 'bbuser';
+      (el as unknown as { appPasswordInput: string }).appPasswordInput = 'raw-app-pass';
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleSaveCredentials: () => Promise<void> }).handleSaveCredentials();
+      await el.updateComplete;
+
+      // The per-account token slot (bitbucket_token_*) must hold the prefixed
+      // credential, never the raw app password on its own.
+      const tokenWrite = invokeHistory.find(
+        (c) =>
+          c.command === 'store_keyring_token' &&
+          typeof (c.args as Record<string, string>).key === 'string' &&
+          (c.args as Record<string, string>).key.startsWith('bitbucket_token_')
+      );
+      expect(tokenWrite, 'account token was stored').to.not.be.undefined;
+      const value = (tokenWrite!.args as Record<string, string>).value;
+      expect(value).to.equal('bbapp:bbuser:raw-app-pass');
+    });
+  });
+
+  describe('Create PR feedback', () => {
+    it('shows a success toast after creating a pull request', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { activeTab: string }).activeTab = 'create-pr';
+      (el as unknown as { createPrTitle: string }).createPrTitle = 'My PR';
+      (el as unknown as { createPrSource: string }).createPrSource = 'feature/x';
+      (el as unknown as { createPrDestination: string }).createPrDestination = 'main';
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await (el as unknown as { handleCreatePr: () => Promise<void> }).handleCreatePr();
+      await el.updateComplete;
+
+      const toasts = uiStore.getState().toasts;
+      expect(
+        toasts.some((t) => t.type === 'success' && /Pull request created successfully/.test(t.message))
+      ).to.be.true;
+    });
+  });
+
+  describe('Disconnect clears a stale error', () => {
+    it('handleDisconnect resets a pre-existing error banner', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'bb-acc-1';
+      (el as unknown as { error: string | null }).error = 'stale error from before';
+      await el.updateComplete;
+
+      await (el as unknown as { handleDisconnect: () => Promise<void> }).handleDisconnect();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.equal(null);
+    });
+  });
+
   describe('OAuth completes after dialog closed', () => {
     it('persists the account and surfaces a toast instead of failing silently', async () => {
       connectionResponse = mockConnectedStatus;
