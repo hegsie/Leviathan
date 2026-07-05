@@ -1086,6 +1086,79 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(el.open, 'dialog closes after successful retry').to.be.false;
     });
 
+    it('refuses to fake an abort once the merge commit has landed', async () => {
+      const el = await openWithFinish({
+        kind: 'release',
+        name: '1.0.0',
+        branchName: 'release/1.0.0',
+        deleteBranch: true,
+      });
+
+      // Merge commits, finish step fails non-conflictingly → mergeCommitted.
+      mockInvoke = async (command: string) => {
+        if (command === 'gitflow_finish_release') {
+          throw { code: 'OPERATION_FAILED', message: 'branch checked out elsewhere' };
+        }
+        if (command === 'get_conflicts') return [];
+        return null;
+      };
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+      expect(el.open).to.be.true;
+
+      // Abort must NOT run abort_merge (a no-op on the clean repo) and must
+      // NOT claim a rollback — the commit exists; only the finish is pending.
+      clearToasts();
+      invokeHistory.length = 0;
+      const internal = el as unknown as {
+        showAbortConfirm: boolean;
+        handleAbortConfirm: () => Promise<void>;
+      };
+      internal.showAbortConfirm = true;
+      await internal.handleAbortConfirm.call(el);
+
+      expect(invokeHistory.some(h => h.command === 'abort_merge'), 'abort_merge NOT called').to.be.false;
+      expect(el.open, 'dialog stays open').to.be.true;
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some(t => t.type === 'warning' && /already committed/i.test(t.message))).to.be.true;
+    });
+
+    it('resets the committed marker even when the re-conflict load fails', async () => {
+      const el = await openWithFinish({
+        kind: 'release',
+        name: '1.0.0',
+        branchName: 'release/1.0.0',
+        deleteBranch: true,
+      });
+
+      // First Continue: master merge commits; the finish re-run hits the
+      // develop-side conflict AND the conflict load fails.
+      mockInvoke = async (command: string) => {
+        if (command === 'gitflow_finish_release') {
+          throw { code: 'MERGE_CONFLICT', message: 'develop conflicts' };
+        }
+        if (command === 'get_conflicts') {
+          throw { code: 'COMMAND_ERROR', message: 'read failed' };
+        }
+        return null;
+      };
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+      expect(el.open, 'dialog stays open on failed re-conflict load').to.be.true;
+
+      // User clicks Retry (load now succeeds), then Complete: the develop
+      // merge MUST be committed (marker was reset before the failed load).
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return [];
+        return null;
+      };
+      (el as unknown as { handleRetryLoad: () => void }).handleRetryLoad();
+      await new Promise(r => setTimeout(r, 50));
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'commit_merge'), 'develop merge committed').to.be.true;
+      expect(el.open, 'dialog closes after completion').to.be.false;
+    });
+
     it('commits the develop-side merge after a re-conflict instead of skipping it', async () => {
       const el = await openWithFinish({
         kind: 'release',

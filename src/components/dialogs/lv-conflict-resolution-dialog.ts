@@ -566,6 +566,18 @@ export class LvConflictResolutionDialog extends LitElement {
   private async handleAbortConfirm(): Promise<void> {
     if (!this.repositoryPath || this.aborting) return;
 
+    // Once the merge commit has landed (only the follow-up git-flow finish
+    // step failed), there is nothing left to abort — abort_merge would no-op
+    // on the clean repo while telling the user their merge was rolled back.
+    if (this.operationType === 'merge' && this.mergeCommitted) {
+      this.showAbortConfirm = false;
+      showToast(
+        'The merge is already committed and cannot be aborted — use Complete Merge to retry finishing',
+        'warning'
+      );
+      return;
+    }
+
     this.aborting = true;
     this.showAbortConfirm = false;
 
@@ -869,10 +881,19 @@ export class LvConflictResolutionDialog extends LitElement {
       // committed-merge marker is reset — otherwise commitMerge would be skipped
       // and the finish re-run would hit the still-in-progress develop merge.
       if (result.error?.code === 'MERGE_CONFLICT') {
+        // A MERGE_CONFLICT from the finish re-run always means a NEW merge is
+        // in progress — reset the committed marker BEFORE loading conflicts,
+        // so even a failed load (Retry path) leads Complete to commit this
+        // merge instead of skipping it and stranding the finish.
+        this.mergeCommitted = false;
         await this.loadConflicts();
         if (this.conflicts.length > 0) {
           this.resolvedFiles = new Set();
-          this.mergeCommitted = false;
+          return false;
+        }
+        if (this.loadFailed) {
+          // Index is conflicted but unreadable — stay open with the Retry
+          // affordance rather than falling through to a misleading toast.
           return false;
         }
       }
