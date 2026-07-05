@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@lit-labs/context": "^0.5.0",
-    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-deep-link": "^2.4.9",
     "@tauri-apps/plugin-dialog": "~2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",
@@ -38,7 +38,7 @@
   "devDependencies": {
     "@open-wc/testing": "^4.0.0",
     "@playwright/test": "1.61.0",
-    "@tauri-apps/cli": "^2.11.2",
+    "@tauri-apps/cli": "^2.11.3",
     "@types/mocha": "^10.0.10",
     "@web/dev-server-esbuild": "^1.0.5",
     "@web/test-runner": "^0.20.2",
