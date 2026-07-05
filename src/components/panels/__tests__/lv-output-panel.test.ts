@@ -47,6 +47,30 @@ describe('lv-output-panel', () => {
     expect(output!.textContent).to.contain('authentication failed');
   });
 
+  it('expansion stays on the same entry when new entries prepend', async () => {
+    const el = await fixture<LvOutputPanel>(html`<lv-output-panel></lv-output-panel>`);
+    logGitCommand('push', 'authentication failed', false);
+    await el.updateComplete;
+
+    // Expand the failed entry
+    (el.shadowRoot!.querySelector('.entry-header') as HTMLElement).click();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.entry-output')!.textContent).to.contain(
+      'authentication failed',
+    );
+
+    // A new entry prepends, shifting positions — the expansion must stay
+    // attached to the SAME entry, not slide to whatever is now first.
+    logGitCommand('checkout', '', true);
+    await el.updateComplete;
+
+    const entries = Array.from(el.shadowRoot!.querySelectorAll('.entry'));
+    expect(entries[0].querySelector('.entry-output'), 'new entry not expanded').to.not.exist;
+    expect(entries[1].querySelector('.entry-output')!.textContent).to.contain(
+      'authentication failed',
+    );
+  });
+
   it('Clear empties the list', async () => {
     const el = await fixture<LvOutputPanel>(html`<lv-output-panel></lv-output-panel>`);
     logGitCommand('merge', '', true);

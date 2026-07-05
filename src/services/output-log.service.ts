@@ -8,6 +8,9 @@
 const MAX_ENTRIES = 100;
 
 export interface OutputLogEntry {
+  /** Stable identity — UI state (e.g. row expansion) must key off this, not
+   *  the array position, which shifts every time a new entry is prepended. */
+  id: number;
   timestamp: number;
   command: string;
   output: string;
@@ -19,6 +22,7 @@ export interface OutputLogEntry {
 // Singleton log entries array and listeners
 const logEntries: OutputLogEntry[] = [];
 const listeners: Set<() => void> = new Set();
+let nextEntryId = 1;
 
 function notifyListeners(): void {
   for (const listener of listeners) {
@@ -46,6 +50,7 @@ export function logGitCommand(
   repoPath?: string,
 ): void {
   logEntries.unshift({
+    id: nextEntryId++,
     timestamp: Date.now(),
     command,
     output,

@@ -236,25 +236,26 @@ export class LvOutputPanel extends LitElement {
     this.expandedEntries = new Set();
   }
 
-  private toggleEntry(index: number): void {
+  private toggleEntry(id: number): void {
     const next = new Set(this.expandedEntries);
-    if (next.has(index)) {
-      next.delete(index);
+    if (next.has(id)) {
+      next.delete(id);
     } else {
-      next.add(index);
+      next.add(id);
     }
     this.expandedEntries = next;
   }
 
-  private renderEntry(entry: OutputLogEntry, index: number) {
-    const expanded = this.expandedEntries.has(index);
+  private renderEntry(entry: OutputLogEntry) {
+    // Keyed by stable entry id — array positions shift when entries prepend
+    const expanded = this.expandedEntries.has(entry.id);
     const statusClass = entry.success ? 'success' : 'failure';
 
     return html`
       <div class="entry">
         <div
           class="entry-header"
-          @click=${() => this.toggleEntry(index)}
+          @click=${() => this.toggleEntry(entry.id)}
           title="${entry.command}"
         >
           <svg class="expand-icon ${expanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -309,7 +310,7 @@ export class LvOutputPanel extends LitElement {
       <div class="entries">
         ${visible.length === 0
           ? html`<div class="empty">No output yet</div>`
-          : visible.map((entry, i) => this.renderEntry(entry, i))}
+          : visible.map((entry) => this.renderEntry(entry))}
       </div>
     `;
   }
