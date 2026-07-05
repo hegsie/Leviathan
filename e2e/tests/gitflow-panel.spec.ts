@@ -32,6 +32,10 @@ async function injectGitflowPanel(page: import('@playwright/test').Page): Promis
     const panel = document.createElement('lv-gitflow-panel') as HTMLElement & {
       repositoryPath: string;
     };
+    // The app shell now renders its own lv-gitflow-panel inside the left
+    // panel; scope this spec to the injected instance via a unique id so
+    // shadow-piercing locators don't match both.
+    panel.id = 'e2e-gitflow';
     panel.repositoryPath = '/tmp/test-repo';
     panel.style.cssText = 'display: block; width: 300px; height: 500px;';
     document.body.appendChild(panel);
@@ -39,7 +43,7 @@ async function injectGitflowPanel(page: import('@playwright/test').Page): Promis
 
   // Wait for the component to finish rendering with Playwright auto-piercing locators
   await page
-    .locator('lv-gitflow-panel .init-section, lv-gitflow-panel .section, lv-gitflow-panel .loading')
+    .locator('lv-gitflow-panel#e2e-gitflow .init-section, lv-gitflow-panel#e2e-gitflow .section, lv-gitflow-panel#e2e-gitflow .loading')
     .first()
     .waitFor({ state: 'visible' });
 }
@@ -98,23 +102,23 @@ test.describe('GitFlow Panel - Not Initialized', () => {
   });
 
   test('should show init section when git flow is not initialized', async ({ page }) => {
-    await expect(page.locator('lv-gitflow-panel .init-section')).toBeVisible();
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .init-section')).toBeVisible();
   });
 
   test('should display "Git Flow is not initialized" message', async ({ page }) => {
-    await expect(page.locator('lv-gitflow-panel .init-description')).toContainText(
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .init-description')).toContainText(
       'not initialized'
     );
   });
 
   test('should show Initialize Git Flow button', async ({ page }) => {
-    const btn = page.locator('lv-gitflow-panel .init-section .btn-primary');
+    const btn = page.locator('lv-gitflow-panel#e2e-gitflow .init-section .btn-primary');
     await expect(btn).toBeVisible();
     await expect(btn).toContainText('Initialize Git Flow');
   });
 
   test('clicking Initialize should call init_gitflow command', async ({ page }) => {
-    await page.locator('lv-gitflow-panel .init-section .btn-primary').click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .init-section .btn-primary').click();
 
     // Wait for the command to be captured
     await expect
@@ -141,10 +145,10 @@ test.describe('GitFlow Panel - Not Initialized', () => {
       },
     });
 
-    await page.locator('lv-gitflow-panel .init-section .btn-primary').click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .init-section .btn-primary').click();
 
     // Wait for section headers to appear (Feature, Release, Hotfix)
-    await expect(page.locator('lv-gitflow-panel .section-header')).toHaveCount(3, {
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .section-header')).toHaveCount(3, {
       timeout: 5000,
     });
   });
@@ -176,9 +180,9 @@ test.describe('GitFlow Panel - Init Failure', () => {
   });
 
   test('should show error message when init fails', async ({ page }) => {
-    await page.locator('lv-gitflow-panel .init-section .btn-primary').click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .init-section .btn-primary').click();
 
-    await expect(page.locator('lv-gitflow-panel .error')).toBeVisible();
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .error-banner')).toBeVisible();
   });
 });
 
@@ -263,7 +267,7 @@ test.describe('GitFlow Panel - Initialized', () => {
   });
 
   test('should show Feature, Release, and Hotfix section headers', async ({ page }) => {
-    const sectionTitles = page.locator('lv-gitflow-panel .section-header .section-title');
+    const sectionTitles = page.locator('lv-gitflow-panel#e2e-gitflow .section-header .section-title');
     await expect(sectionTitles).toHaveCount(3);
     await expect(sectionTitles.nth(0)).toContainText('Feature');
     await expect(sectionTitles.nth(1)).toContainText('Release');
@@ -272,16 +276,16 @@ test.describe('GitFlow Panel - Initialized', () => {
 
   test('Feature section should show active feature branches with count', async ({ page }) => {
     // Feature section title should show count (2)
-    const featureTitle = page.locator('lv-gitflow-panel .section').first().locator('.section-title');
+    const featureTitle = page.locator('lv-gitflow-panel#e2e-gitflow .section').first().locator('.section-title');
     await expect(featureTitle).toContainText('(2)');
 
     // Feature section should list 2 items
-    const featureItems = page.locator('lv-gitflow-panel .section').first().locator('.item');
+    const featureItems = page.locator('lv-gitflow-panel#e2e-gitflow .section').first().locator('.item');
     await expect(featureItems).toHaveCount(2);
   });
 
   test('each active feature should show its name and finish button', async ({ page }) => {
-    const featureSection = page.locator('lv-gitflow-panel .section').first();
+    const featureSection = page.locator('lv-gitflow-panel#e2e-gitflow .section').first();
     const itemNames = featureSection.locator('.item-name');
     const finishBtns = featureSection.locator('.item-finish-btn');
 
@@ -294,12 +298,12 @@ test.describe('GitFlow Panel - Initialized', () => {
 
   test('Hotfix section should show empty message when no active hotfixes', async ({ page }) => {
     // Hotfix is the third section
-    const hotfixSection = page.locator('lv-gitflow-panel .section').nth(2);
+    const hotfixSection = page.locator('lv-gitflow-panel#e2e-gitflow .section').nth(2);
     await expect(hotfixSection.locator('.empty-section')).toHaveText('No active items');
   });
 
   test('should show config summary with branch names at the bottom', async ({ page }) => {
-    const configSummary = page.locator('lv-gitflow-panel .config-summary');
+    const configSummary = page.locator('lv-gitflow-panel#e2e-gitflow .config-summary');
     await expect(configSummary).toBeVisible();
 
     const configRows = configSummary.locator('.config-row');
@@ -315,7 +319,7 @@ test.describe('GitFlow Panel - Initialized', () => {
   });
 
   test('each section header should have a Start button', async ({ page }) => {
-    const startButtons = page.locator('lv-gitflow-panel .section-actions .action-btn');
+    const startButtons = page.locator('lv-gitflow-panel#e2e-gitflow .section-actions .action-btn');
     await expect(startButtons).toHaveCount(3);
   });
 });
@@ -373,22 +377,22 @@ test.describe('GitFlow Panel - Section Toggle', () => {
   });
 
   test('clicking a section header should collapse the section', async ({ page }) => {
-    const firstHeader = page.locator('lv-gitflow-panel .section-header').first();
+    const firstHeader = page.locator('lv-gitflow-panel#e2e-gitflow .section-header').first();
     await firstHeader.click();
 
     // After collapsing, the section icon should have the 'collapsed' class
     await expect(
-      page.locator('lv-gitflow-panel .section').first().locator('.section-icon.collapsed')
+      page.locator('lv-gitflow-panel#e2e-gitflow .section').first().locator('.section-icon.collapsed')
     ).toBeVisible();
   });
 
   test('clicking a collapsed section header should expand it again', async ({ page }) => {
-    const firstHeader = page.locator('lv-gitflow-panel .section-header').first();
+    const firstHeader = page.locator('lv-gitflow-panel#e2e-gitflow .section-header').first();
 
     // Collapse
     await firstHeader.click();
     await expect(
-      page.locator('lv-gitflow-panel .section').first().locator('.section-icon.collapsed')
+      page.locator('lv-gitflow-panel#e2e-gitflow .section').first().locator('.section-icon.collapsed')
     ).toBeVisible();
 
     // Expand
@@ -397,10 +401,10 @@ test.describe('GitFlow Panel - Section Toggle', () => {
     // The collapsed class should be removed - section-icon without .collapsed should exist
     // and section-icon.collapsed should not
     await expect(
-      page.locator('lv-gitflow-panel .section').first().locator('.section-icon.collapsed')
+      page.locator('lv-gitflow-panel#e2e-gitflow .section').first().locator('.section-icon.collapsed')
     ).toHaveCount(0);
     await expect(
-      page.locator('lv-gitflow-panel .section').first().locator('.section-icon')
+      page.locator('lv-gitflow-panel#e2e-gitflow .section').first().locator('.section-icon')
     ).toBeVisible();
   });
 });
@@ -468,7 +472,7 @@ test.describe('GitFlow Panel - Operations', () => {
   });
 
   test('clicking Finish on a feature should call gitflow_finish_feature', async ({ page }) => {
-    await page.locator('lv-gitflow-panel .item-finish-btn').first().click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .item-finish-btn').first().click();
 
     await expect
       .poll(async () => {
@@ -480,7 +484,7 @@ test.describe('GitFlow Panel - Operations', () => {
 
   test('after finishing a feature, it should be removed from the UI list', async ({ page }) => {
     // Verify we start with 1 feature item
-    await expect(page.locator('lv-gitflow-panel .item')).toHaveCount(1);
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .item')).toHaveCount(1);
 
     // Mock get_branches to return empty features after finish
     await page.evaluate(() => {
@@ -523,10 +527,10 @@ test.describe('GitFlow Panel - Operations', () => {
       ).__TAURI_INTERNALS__.invoke = newInvoke;
     });
 
-    await page.locator('lv-gitflow-panel .item-finish-btn').first().click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .item-finish-btn').first().click();
 
     // After finishing, the feature should be removed and empty message shown
-    await expect(page.locator('lv-gitflow-panel .section').first().locator('.empty-section')).toHaveText(
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .section').first().locator('.empty-section')).toHaveText(
       'No active items'
     );
   });
@@ -535,7 +539,7 @@ test.describe('GitFlow Panel - Operations', () => {
     page,
   }) => {
     // Click the Start button in the Feature section (first section-actions .action-btn)
-    await page.locator('lv-gitflow-panel .section-actions .action-btn').first().click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .section-actions .action-btn').first().click();
 
     // The component uses showPrompt() which renders lv-prompt-dialog with lv-modal
     const promptInput = page.locator('lv-prompt-dialog .prompt-input');
@@ -614,9 +618,9 @@ test.describe('GitFlow Panel - Finish Feature Failure', () => {
   });
 
   test('should show error message when finish feature fails', async ({ page }) => {
-    await page.locator('lv-gitflow-panel .item-finish-btn').first().click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .item-finish-btn').first().click();
 
-    await expect(page.locator('lv-gitflow-panel .error')).toBeVisible();
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .error-banner')).toBeVisible();
   });
 });
 

@@ -106,11 +106,13 @@ test.describe('Bitbucket Dialog - Connection Flow', () => {
     await dialogs.bitbucket.appPasswordInput.fill('app-password-123');
 
     // Now inject the connected mock for the connect action. Bitbucket
-    // handleSaveCredentials stores credentials then calls checkConnection() which
-    // uses check_bitbucket_connection. (This also resets the command capture, so
-    // the assertion below sees only commands from the connect click onward.)
+    // handleSaveCredentials stores credentials, then builds the bbapp:-prefixed
+    // Basic-auth credential and calls checkConnection() with it, which uses
+    // check_bitbucket_connection_with_token. (This also resets the command
+    // capture, so the assertion below sees only commands from the connect
+    // click onward.)
     await startCommandCaptureWithMocks(page, {
-      check_bitbucket_connection: {
+      check_bitbucket_connection_with_token: {
         connected: true,
         user: { username: 'testuser', displayName: 'Test User', avatarUrl: '' },
       },
@@ -121,10 +123,14 @@ test.describe('Bitbucket Dialog - Connection Flow', () => {
 
     await dialogs.bitbucket.connectButton.click();
 
-    // Verify the connection command was called (actual command is check_bitbucket_connection)
-    await waitForCommand(page, 'check_bitbucket_connection');
-    const connectCmds = await findCommand(page, 'check_bitbucket_connection');
+    // Verify the connection check ran with the bbapp: Basic-auth credential —
+    // app passwords must never be sent as a raw Bearer token
+    await waitForCommand(page, 'check_bitbucket_connection_with_token');
+    const connectCmds = await findCommand(page, 'check_bitbucket_connection_with_token');
     expect(connectCmds.length).toBeGreaterThan(0);
+    expect(
+      (connectCmds[0].args as { token?: string }).token
+    ).toBe('bbapp:testuser:app-password-123');
   });
 
   test('should show error on failed connection', async ({ page }) => {
