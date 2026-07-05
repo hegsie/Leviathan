@@ -324,6 +324,10 @@ export class LvTagList extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // Keep in sync with app-level refreshes (e.g. a gitflow release finish
+    // creating a tag completes inside the shared conflict dialog) — same
+    // subscription as the sibling branch/stash/gitflow lists.
+    window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
     await this.loadTags();
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
@@ -331,9 +335,14 @@ export class LvTagList extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
   }
+
+  private handleRepositoryRefresh = (): void => {
+    void this.loadTags();
+  };
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {

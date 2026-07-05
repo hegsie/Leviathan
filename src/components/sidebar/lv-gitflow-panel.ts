@@ -282,8 +282,21 @@ export class LvGitflowPanel extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // Conflicted finishes complete inside the shared conflict dialog (branch
+    // deleted / finish re-run there), so reload when the app-level refresh
+    // fires — otherwise the finished item stays listed as active.
+    window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
     await this.loadConfig();
   }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
+  }
+
+  private handleRepositoryRefresh = (): void => {
+    void this.loadConfig();
+  };
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {

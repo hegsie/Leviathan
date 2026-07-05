@@ -152,6 +152,10 @@ export class LvStashList extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // Conflicted applies/pops complete inside the shared conflict dialog
+    // (which drops the stash there), so reload when the app-level refresh
+    // fires — otherwise the dropped entry stays listed.
+    window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
     await this.loadStashes();
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
@@ -159,9 +163,14 @@ export class LvStashList extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
   }
+
+  private handleRepositoryRefresh = (): void => {
+    void this.loadStashes();
+  };
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
