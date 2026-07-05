@@ -276,9 +276,9 @@ pub async fn detect_github_repo(path: String) -> Result<Option<DetectedGitHubRep
         .map_err(|e| LeviathanError::RepositoryNotFound(e.to_string()))?;
 
     // Check all remotes for GitHub URLs
-    for remote_name in repo.remotes()?.iter().flatten() {
+    for remote_name in repo.remotes()?.iter().flatten().flatten() {
         if let Ok(remote) = repo.find_remote(remote_name) {
-            if let Some(url) = remote.url() {
+            if let Ok(url) = remote.url() {
                 if let Some(parsed) = parse_github_url(url) {
                     return Ok(Some(DetectedGitHubRepo {
                         owner: parsed.0,

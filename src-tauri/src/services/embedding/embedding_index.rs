@@ -289,8 +289,8 @@ fn collect_commits(repo_path: &str) -> Result<Vec<(String, String, String)>, Str
         };
 
         let oid_str = oid.to_string();
-        let summary = commit.summary().unwrap_or("").to_string();
-        let message = commit.message().unwrap_or("").to_string();
+        let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
+        let message = commit.message().ok().unwrap_or("").to_string();
 
         let text = if message.len() > summary.len() {
             message

@@ -125,7 +125,7 @@ pub async fn create_branch(
     if checkout.unwrap_or(false) {
         let obj = reference.peel(git2::ObjectType::Commit)?;
         repo.checkout_tree(&obj, None)?;
-        repo.set_head(reference.name().ok_or_else(|| {
+        repo.set_head(reference.name().map_err(|_| {
             LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
         })?)?;
     }
@@ -280,7 +280,7 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
 
     // Try to set HEAD to local branch first
     if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
-        repo.set_head(branch.get().name().ok_or_else(|| {
+        repo.set_head(branch.get().name().map_err(|_| {
             LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
         })?)?;
     } else if let Ok(remote_branch) = repo.find_branch(&ref_name, git2::BranchType::Remote) {
@@ -300,7 +300,7 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
             {
                 // Local branch exists, just check it out
                 let local_branch = repo.find_branch(local_name, git2::BranchType::Local)?;
-                repo.set_head(local_branch.get().name().ok_or_else(|| {
+                repo.set_head(local_branch.get().name().map_err(|_| {
                     LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
                 })?)?;
             } else {
@@ -311,7 +311,7 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
                 new_branch.set_upstream(Some(remote_name))?;
 
                 // Set HEAD to the new branch
-                repo.set_head(new_branch.get().name().ok_or_else(|| {
+                repo.set_head(new_branch.get().name().map_err(|_| {
                     LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
                 })?)?;
             }
@@ -720,7 +720,7 @@ pub async fn checkout_with_autostash(
     // Set HEAD
     if is_local_branch {
         if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
-            repo.set_head(branch.get().name().ok_or_else(|| {
+            repo.set_head(branch.get().name().map_err(|_| {
                 LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
             })?)?;
         }
@@ -745,7 +745,7 @@ pub async fn checkout_with_autostash(
                 new_branch
             };
 
-        if let Some(name) = local_branch.get().name() {
+        if let Ok(name) = local_branch.get().name() {
             repo.set_head(name)?;
         }
     } else {

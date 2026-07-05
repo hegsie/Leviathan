@@ -182,7 +182,7 @@ pub async fn get_undo_history(path: String, max_count: Option<u32>) -> Result<Un
             break;
         }
 
-        let message = entry.message().unwrap_or("").to_string();
+        let message = entry.message().ok().flatten().unwrap_or("").to_string();
         let (action_type, description) = parse_reflog_action(&message);
 
         let after_ref = entry.id_new().to_string();
@@ -193,7 +193,7 @@ pub async fn get_undo_history(path: String, max_count: Option<u32>) -> Result<Un
         let details = serde_json::json!({
             "reflogIndex": index,
             "rawMessage": message,
-            "author": entry.committer().name().unwrap_or("Unknown"),
+            "author": entry.committer().name().ok().unwrap_or("Unknown"),
         });
 
         actions.push(UndoAction {
@@ -252,11 +252,17 @@ pub async fn undo_last_action(path: String) -> Result<UndoAction> {
 
         let current_oid = current_entry.id_new().to_string();
         let target_oid = previous_entry.id_new().to_string();
-        let msg = current_entry.message().unwrap_or("").to_string();
+        let msg = current_entry
+            .message()
+            .ok()
+            .flatten()
+            .unwrap_or("")
+            .to_string();
         let ts = current_entry.committer().when().seconds();
         let auth = current_entry
             .committer()
             .name()
+            .ok()
             .unwrap_or("Unknown")
             .to_string();
 
@@ -311,7 +317,12 @@ pub async fn redo_last_action(path: String) -> Result<UndoAction> {
             )
         })?;
 
-        let msg = current_entry.message().unwrap_or("").to_string();
+        let msg = current_entry
+            .message()
+            .ok()
+            .flatten()
+            .unwrap_or("")
+            .to_string();
         if !msg.to_lowercase().contains("reset") {
             return Err(crate::error::LeviathanError::OperationFailed(
                 "Nothing to redo: last action was not an undo".to_string(),
@@ -325,6 +336,7 @@ pub async fn redo_last_action(path: String) -> Result<UndoAction> {
         let auth = current_entry
             .committer()
             .name()
+            .ok()
             .unwrap_or("Unknown")
             .to_string();
 

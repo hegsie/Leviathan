@@ -331,7 +331,9 @@ fn tool_get_branches(params: BranchesParams) -> Result<Value, String> {
         .map_err(|e| format!("Failed to open repository: {}", e))?;
 
     let head = repo.head().ok();
-    let head_name = head.as_ref().and_then(|h| h.shorthand().map(String::from));
+    let head_name = head
+        .as_ref()
+        .and_then(|h| h.shorthand().ok().map(String::from));
 
     let mut branches = Vec::new();
 
@@ -489,13 +491,22 @@ fn tool_get_file_blame(params: BlameParams) -> Result<Value, String> {
     let mut hunks = Vec::new();
     for i in 0..blame.len() {
         if let Some(hunk) = blame.get_index(i) {
+            // `final_signature()` returns `Option<Signature>` (git2 0.21), so a hunk
+            // without a recoverable signature falls back to "Unknown"/epoch 0 rather
+            // than panicking.
             let sig = hunk.final_signature();
+            let author_name = sig
+                .as_ref()
+                .and_then(|s| s.name().ok())
+                .unwrap_or("Unknown")
+                .to_string();
+            let date = sig.as_ref().map(|s| s.when().seconds()).unwrap_or(0);
             hunks.push(serde_json::json!({
                 "lineStart": hunk.final_start_line(),
                 "lineEnd": hunk.final_start_line() + hunk.lines_in_hunk() - 1,
-                "author": sig.name().unwrap_or("Unknown").to_string(),
+                "author": author_name,
                 "commitSha": hunk.final_commit_id().to_string(),
-                "date": sig.when().seconds()
+                "date": date
             }));
         }
     }

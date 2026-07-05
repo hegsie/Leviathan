@@ -186,7 +186,7 @@ fn get_remote_status_internal(repo: &git2::Repository) -> Result<RemoteStatus, S
 
     let branch_name = head
         .shorthand()
-        .ok_or_else(|| "Invalid branch name".to_string())?;
+        .map_err(|_| "Invalid branch name".to_string())?;
 
     // Try to find upstream
     let local_branch = repo
