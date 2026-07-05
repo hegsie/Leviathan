@@ -1164,7 +1164,7 @@ export class AppShell extends LitElement {
       this.showConflictDialog = true;
       this.handleRefresh();
     } else if (data.stashed && data.stashApplied) {
-      showToast(`Switched to ${refName} (changes re-applied)`, 'info');
+      showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
     } else if (data.stashed && !data.stashApplied) {
       showToast(data.message, 'warning');
     }

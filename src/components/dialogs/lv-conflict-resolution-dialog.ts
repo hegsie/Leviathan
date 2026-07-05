@@ -354,6 +354,12 @@ export class LvConflictResolutionDialog extends LitElement {
    * it as "nothing to resolve".
    */
   @state() private loadFailed = false;
+  /**
+   * True once commitMerge has succeeded for this dialog session. If the
+   * git-flow completion step that follows fails, a retry must skip straight
+   * to it — re-running commitMerge would fail with "No merge in progress".
+   */
+  private mergeCommitted = false;
   @state() private aborting = false;
   @state() private showAbortConfirm = false;
   @state() private hasMergeTool = false;
@@ -381,6 +387,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.selectedIndex = 0;
       this.aborting = false;
       this.showAbortConfirm = false;
+      this.mergeCommitted = false;
       this.loadConflicts();
     }
   }
@@ -413,6 +420,7 @@ export class LvConflictResolutionDialog extends LitElement {
     this.resolvedFiles = new Set();
     this.aborting = false;
     this.showAbortConfirm = false;
+    this.mergeCommitted = false;
   }
 
   /** Re-run the conflict load after a failure, resetting resolution progress. */
@@ -583,7 +591,22 @@ export class LvConflictResolutionDialog extends LitElement {
           // them (clears the conflict index entries, resetting to HEAD) then discard
           // their working-tree changes (restores HEAD content). The stash entry is
           // never touched, so the stashed changes remain recoverable.
-          const conflictPaths = this.conflicts.map((c) => c.path);
+          // When the conflict LOAD failed, the local list is empty but the index
+          // is genuinely conflicted — re-fetch so Abort restores the real paths
+          // instead of no-opping with a false success message.
+          let conflictPaths = this.conflicts.map((c) => c.path);
+          if (this.loadFailed) {
+            const refetch = await gitService.getConflicts(this.repositoryPath);
+            if (!refetch.success || !refetch.data) {
+              showToast(
+                refetch.error?.message ?? 'Could not read conflicts — nothing was restored',
+                'error',
+              );
+              this.aborting = false;
+              return;
+            }
+            conflictPaths = refetch.data.map((c) => c.path);
+          }
           if (conflictPaths.length === 0) {
             result = { success: true } as CommandResult<void>;
           } else {
@@ -730,24 +753,30 @@ export class LvConflictResolutionDialog extends LitElement {
         case 'merge':
           // Commit the in-progress merge. When the failed operation was a squash
           // (e.g. a git-flow squash finish), complete it as a single-parent squash
-          // commit rather than a two-parent merge commit.
-          result = await gitService.commitMerge(this.repositoryPath, undefined, this.squashMerge);
-          if (!result.success) {
-            console.error('Failed to complete merge:', result.error);
-            if (result.error?.code === 'MERGE_CONFLICT') {
-              await this.loadConflicts();
-              if (this.conflicts.length > 0) {
-                this.resolvedFiles = new Set();
-                return;
+          // commit rather than a two-parent merge commit. If a previous Continue
+          // already committed the merge but the git-flow completion step failed,
+          // skip straight to that step — re-running commitMerge would fail with
+          // "No merge in progress" and make retry impossible.
+          if (!this.mergeCommitted) {
+            result = await gitService.commitMerge(this.repositoryPath, undefined, this.squashMerge);
+            if (!result.success) {
+              console.error('Failed to complete merge:', result.error);
+              if (result.error?.code === 'MERGE_CONFLICT') {
+                await this.loadConflicts();
+                if (this.conflicts.length > 0) {
+                  this.resolvedFiles = new Set();
+                  return;
+                }
               }
+              showToast(result.error?.message ?? 'Failed to complete merge', 'error');
+              return;
             }
-            showToast(result.error?.message ?? 'Failed to complete merge', 'error');
-            return;
+            this.mergeCommitted = true;
           }
           // If this merge was one side of a git-flow finish, the finish is only
           // PARTIALLY done (no tag, develop not merged, branch not deleted).
           // Complete it now; if it can't finish (routed back into the conflict
-          // flow, or errored) stay open.
+          // flow, or errored) stay open — the retry skips the committed merge.
           if (this.gitflowFinish && !(await this.completeGitflowFinish(this.gitflowFinish))) {
             return;
           }
@@ -836,12 +865,14 @@ export class LvConflictResolutionDialog extends LitElement {
     if (!result.success) {
       // A develop-side conflict on the re-run (e.g. release/hotfix master side was
       // just resolved) reopens the conflict flow for the develop side. The next
-      // Complete will re-invoke finish again (still idempotent on master) and
-      // complete the develop side.
+      // Complete must commit THIS new merge before re-invoking finish, so the
+      // committed-merge marker is reset — otherwise commitMerge would be skipped
+      // and the finish re-run would hit the still-in-progress develop merge.
       if (result.error?.code === 'MERGE_CONFLICT') {
         await this.loadConflicts();
         if (this.conflicts.length > 0) {
           this.resolvedFiles = new Set();
+          this.mergeCommitted = false;
           return false;
         }
       }

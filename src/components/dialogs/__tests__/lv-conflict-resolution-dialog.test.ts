@@ -1052,6 +1052,78 @@ describe('lv-conflict-resolution-dialog', () => {
       return el;
     }
 
+    it('retries skip the already-committed merge when the finish step failed', async () => {
+      const el = await openWithFinish({
+        kind: 'release',
+        name: '1.0.0',
+        branchName: 'release/1.0.0',
+        deleteBranch: true,
+      });
+
+      // First Continue: merge commits, but the finish re-invocation fails
+      // non-conflictingly — the dialog must stay open for retry.
+      mockInvoke = async (command: string) => {
+        if (command === 'gitflow_finish_release') {
+          throw { code: 'OPERATION_FAILED', message: 'branch checked out elsewhere' };
+        }
+        if (command === 'get_conflicts') return [];
+        return null;
+      };
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+      expect(el.open, 'dialog stays open after failed finish step').to.be.true;
+
+      // Second Continue: commitMerge must NOT run again (it would fail with
+      // "No merge in progress"); the finish step is retried directly.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return [];
+        return null;
+      };
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'commit_merge'), 'commit_merge NOT re-run').to.be.false;
+      expect(invokeHistory.some(h => h.command === 'gitflow_finish_release'), 'finish retried').to.be.true;
+      expect(el.open, 'dialog closes after successful retry').to.be.false;
+    });
+
+    it('commits the develop-side merge after a re-conflict instead of skipping it', async () => {
+      const el = await openWithFinish({
+        kind: 'release',
+        name: '1.0.0',
+        branchName: 'release/1.0.0',
+        deleteBranch: true,
+      });
+
+      // First Continue: master merge commits, finish re-run hits the
+      // develop-side conflict and reopens the dialog with new conflicts.
+      mockInvoke = async (command: string) => {
+        if (command === 'gitflow_finish_release') {
+          throw { code: 'MERGE_CONFLICT', message: 'develop conflicts' };
+        }
+        if (command === 'get_conflicts') {
+          return [{ path: 'dev.txt', ancestor: null, ours: null, theirs: null, isBinary: false }];
+        }
+        return null;
+      };
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+      expect(el.open, 'dialog stays open for the develop side').to.be.true;
+
+      // Second Continue (develop conflicts resolved): commitMerge must run
+      // AGAIN for the develop merge — the committed-merge marker was reset.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return [];
+        return null;
+      };
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: Array<{ path: string }> };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'commit_merge'), 'develop merge committed').to.be.true;
+      expect(invokeHistory.some(h => h.command === 'gitflow_finish_release'), 'finish re-invoked').to.be.true;
+      expect(el.open, 'dialog closes after full completion').to.be.false;
+    });
+
     it('re-invokes gitflow_finish_release after commit_merge for a release finish', async () => {
       const el = await openWithFinish({
         kind: 'release',
@@ -1227,6 +1299,40 @@ describe('lv-conflict-resolution-dialog', () => {
       // Complete stays disabled while the load is failed.
       const continueBtn = el.shadowRoot!.querySelector('.footer-actions .btn-primary') as HTMLButtonElement;
       expect(continueBtn.disabled).to.be.true;
+    });
+
+    it('Abort under loadFailed re-fetches conflicts and restores the real paths', async () => {
+      // Open a stash dialog whose initial conflict load fails.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') throw { code: 'COMMAND_ERROR', message: 'read failed' };
+        return null;
+      };
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      expect((el as unknown as { loadFailed: boolean }).loadFailed).to.be.true;
+
+      // Abort must re-fetch the REAL conflict list and restore those paths,
+      // not no-op on the empty local list with a false success message.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') {
+          return [{ path: 'a.txt', ancestor: null, ours: null, theirs: null, isBinary: false }];
+        }
+        return null;
+      };
+      invokeHistory.length = 0;
+      const internal = el as unknown as {
+        showAbortConfirm: boolean;
+        handleAbortConfirm: () => Promise<void>;
+      };
+      internal.showAbortConfirm = true;
+      await internal.handleAbortConfirm.call(el);
+
+      const unstage = invokeHistory.find(h => h.command === 'unstage_files');
+      expect(unstage, 'unstage_files called with re-fetched paths').to.exist;
+      expect((unstage!.args as { paths?: string[] }).paths).to.deep.equal(['a.txt']);
+      expect(invokeHistory.some(h => h.command === 'discard_changes'), 'discard_changes called').to.be.true;
     });
 
     it('Retry re-loads conflicts and recovers when the backend succeeds', async () => {

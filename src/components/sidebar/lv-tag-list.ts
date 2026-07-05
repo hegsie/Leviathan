@@ -537,7 +537,7 @@ export class LvTagList extends LitElement {
             detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
           }));
         } else if (data.stashed && data.stashApplied) {
-          showToast(`Switched to ${tag.name} (changes re-applied)`, 'info');
+          showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
         } else if (data.stashed && !data.stashApplied) {
           showToast(data.message, 'warning');
         }

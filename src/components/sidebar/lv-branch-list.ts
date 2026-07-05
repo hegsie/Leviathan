@@ -1047,7 +1047,7 @@ export class LvBranchList extends LitElement {
             detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
           }));
         } else if (data.stashed && data.stashApplied) {
-          showToast(`Switched to ${branch.shorthand} (changes re-applied)`, 'info');
+          showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
         } else if (data.stashed && !data.stashApplied) {
           showToast(data.message, 'warning');
         }
@@ -1638,7 +1638,7 @@ export class LvBranchList extends LitElement {
         // the stash conflicts first and re-run the operation.
         return;
       } else if (checkoutResult.data.stashed && checkoutResult.data.stashApplied) {
-        showToast(`Switched to ${targetBranch.shorthand} (changes re-applied)`, 'info');
+        showToast(checkoutResult.data.message, checkoutResult.data.message.includes('staged status was not preserved') ? 'warning' : 'info');
       } else if (checkoutResult.data.stashed && !checkoutResult.data.stashApplied) {
         showToast(checkoutResult.data.message, 'warning');
       }

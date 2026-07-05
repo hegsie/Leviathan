@@ -407,6 +407,23 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
       expect(toasts.some((t) => t.type === 'warning' && /stash conflicts/i.test(t.message))).to.be.true;
     });
 
+    it('surfaces the backend message, warning when staged status was not preserved', async () => {
+      const el = createAppShell();
+      const caveat =
+        'Switched to feature/x and re-applied stashed changes (staged status was not preserved)';
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleAutoStashToast(
+        { stashed: true, stashApplied: true, stashConflict: false, success: true, message: caveat },
+        'feature/x'
+      );
+      await new Promise((r) => setTimeout(r, 0));
+
+      const toasts = uiStore.getState().toasts;
+      // The caveat must reach the user as a warning, not be masked by a
+      // hardcoded "changes re-applied" info toast.
+      expect(toasts.some((t) => t.type === 'warning' && t.message === caveat)).to.be.true;
+    });
+
     it('does not open the dialog when the stash re-applies cleanly', async () => {
       const el = createAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
