@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
+import type { CommandResult } from '../../types/api.types.ts';
 import type { LvMergeEditor } from '../panels/lv-merge-editor.ts';
 import '../panels/lv-merge-editor.ts';
 
@@ -404,6 +405,14 @@ export class LvConflictResolutionDialog extends LitElement {
     }
 
     await this.checkMergeToolAvailability();
+
+    // A 'stash' dialog that finished loading with zero conflicts is an
+    // inescapable trap: Complete is disabled and Escape is suppressed, leaving
+    // only the destructive Abort. The stash was never applied, so auto-run the
+    // safe non-destructive exit (keeps the stash, discards nothing).
+    if (this.open && this.operationType === 'stash' && this.conflicts.length === 0) {
+      this.handleStashNotApplied();
+    }
   }
 
   private async checkMergeToolAvailability(): Promise<void> {
@@ -517,21 +526,34 @@ export class LvConflictResolutionDialog extends LitElement {
         case 'revert':
           result = await gitService.abortRevert({ path: this.repositoryPath });
           break;
-        case 'stash':
-          // There's no backend "abort stash apply". A hard reset to HEAD discards
-          // the conflicted working-tree + index changes without touching the stash
-          // entry, so the user's stashed changes remain recoverable.
-          result = await gitService.reset({
-            path: this.repositoryPath,
-            targetRef: 'HEAD',
-            mode: 'hard',
-          });
+        case 'stash': {
+          // There's no backend "abort stash apply". A hard reset to HEAD would
+          // destroy UNRELATED uncommitted changes when the stash was applied/popped
+          // onto a dirty tree. Instead restore ONLY the conflicted files: unstage
+          // them (clears the conflict index entries, resetting to HEAD) then discard
+          // their working-tree changes (restores HEAD content). The stash entry is
+          // never touched, so the stashed changes remain recoverable.
+          const conflictPaths = this.conflicts.map((c) => c.path);
+          if (conflictPaths.length === 0) {
+            result = { success: true } as CommandResult<void>;
+          } else {
+            const unstageResult = await gitService.unstageFiles(this.repositoryPath, {
+              paths: conflictPaths,
+            });
+            result = unstageResult.success
+              ? await gitService.discardChanges(this.repositoryPath, conflictPaths)
+              : unstageResult;
+          }
           break;
+        }
       }
 
       if (result.success) {
         if (this.operationType === 'stash') {
-          showToast('Stash application aborted — your changes remain in the stash', 'info');
+          showToast(
+            'Conflicted files restored — your changes remain in the stash',
+            'info',
+          );
         }
         this.dispatchEvent(
           new CustomEvent('operation-aborted', {
@@ -552,6 +574,27 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   }
 
+  /**
+   * Close a stash dialog that has nothing to resolve WITHOUT dropping or
+   * resetting anything. The backend reported a conflict but nothing was applied,
+   * so the changes remain safe in the stash. Used both when the user clicks
+   * Complete and automatically when the dialog loads with zero conflicts (which
+   * would otherwise be an inescapable trap — Complete disabled, Escape suppressed).
+   */
+  private handleStashNotApplied(): void {
+    showToast(
+      'The stash was not applied — your changes are still in the stash',
+      'warning',
+    );
+    this.dispatchEvent(
+      new CustomEvent('operation-aborted', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    this.close();
+  }
+
   private async handleContinue(): Promise<void> {
     if (!this.repositoryPath) return;
 
@@ -560,17 +603,7 @@ export class LvConflictResolutionDialog extends LitElement {
     // Dropping it here would permanently destroy never-applied changes, so refuse
     // to drop and close without touching the stash.
     if (this.operationType === 'stash' && this.conflicts.length === 0) {
-      showToast(
-        'The stash was not applied — your changes are still in the stash',
-        'warning'
-      );
-      this.dispatchEvent(
-        new CustomEvent('operation-aborted', {
-          bubbles: true,
-          composed: true,
-        })
-      );
-      this.close();
+      this.handleStashNotApplied();
       return;
     }
 
@@ -841,7 +874,9 @@ export class LvConflictResolutionDialog extends LitElement {
                 <div class="confirm-dialog">
                   <div class="confirm-title">Abort ${this.getOperationTitle()}?</div>
                   <div class="confirm-message">
-                    All resolved changes will be lost. This cannot be undone.
+                    ${this.operationType === 'stash'
+                      ? 'The conflicted files will be reverted to their committed (HEAD) state, discarding the applied stash changes in those files. Any unrelated uncommitted changes are kept, and the stash entry itself remains in the stash list.'
+                      : 'All resolved changes will be lost. This cannot be undone.'}
                   </div>
                   <div class="confirm-actions">
                     <button class="btn" @click=${this.handleAbortCancel}>Cancel</button>

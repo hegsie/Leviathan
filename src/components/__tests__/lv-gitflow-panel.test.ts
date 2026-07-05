@@ -487,7 +487,7 @@ describe('lv-gitflow-panel', () => {
       const el = await renderPanel();
       clearHistory();
 
-      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
       expect(finishBtns.length).to.be.greaterThan(0);
 
       (finishBtns[0] as HTMLButtonElement).click();
@@ -512,7 +512,7 @@ describe('lv-gitflow-panel', () => {
       setupMockPrompt('Release 1.0.0');
 
       try {
-        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
         expect(finishBtns.length).to.be.greaterThan(0);
 
         (finishBtns[0] as HTMLButtonElement).click();
@@ -538,7 +538,7 @@ describe('lv-gitflow-panel', () => {
       setupMockPrompt('Hotfix 1.0.1');
 
       try {
-        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
         expect(finishBtns.length).to.be.greaterThan(0);
 
         (finishBtns[0] as HTMLButtonElement).click();
@@ -565,7 +565,7 @@ describe('lv-gitflow-panel', () => {
         eventDetail = e.detail;
       }) as EventListener);
 
-      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
       (finishBtns[0] as HTMLButtonElement).click();
 
       await new Promise((r) => setTimeout(r, 150));
@@ -582,7 +582,7 @@ describe('lv-gitflow-panel', () => {
       setupMockPrompt(null);
 
       try {
-        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
         (finishBtns[0] as HTMLButtonElement).click();
 
         await new Promise((r) => setTimeout(r, 100));
@@ -690,7 +690,7 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
       (finishBtns[0] as HTMLButtonElement).click();
 
       await new Promise((r) => setTimeout(r, 150));
@@ -717,7 +717,7 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
       (finishBtns[0] as HTMLButtonElement).click();
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
@@ -758,7 +758,7 @@ describe('lv-gitflow-panel', () => {
         conflictDetail = e.detail;
       }) as EventListener);
 
-      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
       (finishBtns[0] as HTMLButtonElement).click();
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
@@ -791,7 +791,7 @@ describe('lv-gitflow-panel', () => {
       }) as EventListener);
 
       try {
-        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
         (finishBtns[0] as HTMLButtonElement).click();
         await new Promise((r) => setTimeout(r, 150));
         await el.updateComplete;

@@ -168,12 +168,24 @@ pub async fn commit_merge(
         return Err(LeviathanError::MergeConflict);
     }
 
-    // Default to git's own MERGE_MSG (what `git commit` would use mid-merge)
+    // Default to git's own MERGE_MSG (what `git commit` would use mid-merge).
+    // MERGE_MSG contains libgit2's '# Conflicts:' / '#\t<path>' comment lines;
+    // `git commit` strips '#'-prefixed lines during message cleanup, but git2's
+    // commit does not — so we must strip them ourselves, or they get baked into
+    // permanent history (in both the git2 and signed -m paths).
     let commit_message = message
         .filter(|m| !m.trim().is_empty())
         .or_else(|| {
             std::fs::read_to_string(repo.path().join("MERGE_MSG"))
                 .ok()
+                .map(|m| {
+                    m.lines()
+                        .filter(|line| !line.starts_with('#'))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim_end()
+                        .to_string()
+                })
                 .filter(|m| !m.trim().is_empty())
         })
         .unwrap_or_else(|| "Merge".to_string());
@@ -227,10 +239,24 @@ pub async fn commit_merge(
 /// the resolved index staged) and then commit the staged tree as an ordinary
 /// single-parent signed commit.
 async fn commit_merge_signed(path: &str, message: &str, is_squash: bool) -> Result<()> {
-    if is_squash {
+    // For a squash we clear the merge metadata BEFORE committing (so `git
+    // commit` produces a single-parent commit, not a 2-parent merge). But if the
+    // CLI commit then fails (missing GPG key, failing pre-commit hook), that
+    // cleanup would strand the user: a retry reports "No merge in progress" and
+    // `abort_merge` has nothing to abort. Snapshot MERGE_HEAD/MERGE_MSG first and
+    // restore them on failure so the merge stays resumable.
+    let saved_state = if is_squash {
         let repo = git2::Repository::open(Path::new(path))?;
+        let git_dir = repo.path().to_path_buf();
+        let merge_head_path = git_dir.join("MERGE_HEAD");
+        let merge_msg_path = git_dir.join("MERGE_MSG");
+        let merge_head = std::fs::read_to_string(&merge_head_path)?;
+        let merge_msg = std::fs::read_to_string(&merge_msg_path).ok();
         repo.cleanup_state()?;
-    }
+        Some((merge_head_path, merge_head, merge_msg_path, merge_msg))
+    } else {
+        None
+    };
 
     let output = create_command("git")
         .current_dir(path)
@@ -239,6 +265,14 @@ async fn commit_merge_signed(path: &str, message: &str, is_squash: bool) -> Resu
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git commit: {}", e)))?;
 
     if !output.status.success() {
+        // Restore the merge metadata we cleared so the user can retry or abort.
+        // (The resolved index is untouched by cleanup_state.)
+        if let Some((merge_head_path, merge_head, merge_msg_path, merge_msg)) = saved_state {
+            let _ = std::fs::write(&merge_head_path, merge_head);
+            if let Some(msg) = merge_msg {
+                let _ = std::fs::write(&merge_msg_path, msg);
+            }
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(LeviathanError::OperationFailed(format!(
             "Git commit failed: {}",
@@ -483,6 +517,11 @@ fn continue_rebase_cli(path: &str) -> Result<()> {
             .current_dir(path)
             // Accept recorded commit messages non-interactively (reword etc.)
             .env("GIT_EDITOR", "true")
+            // Force the C locale so our stdout/stderr matching below ("No
+            // changes", "nothing to commit", "CONFLICT") works regardless of the
+            // user's system language — a localized git would break the
+            // empty-patch skip and misclassify conflicts.
+            .env("LC_ALL", "C")
             .args(&args)
             .output()
             .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
@@ -1540,6 +1579,108 @@ mod tests {
             "squash merge commit must have a single parent"
         );
         assert_eq!(head.summary(), Some("Squashed"));
+    }
+
+    #[tokio::test]
+    async fn test_commit_merge_strips_conflict_comments_from_merge_msg() {
+        // MERGE_MSG carries libgit2's '# Conflicts:' / '#\t<path>' comment lines.
+        // Defaulting to it must NOT bake those comment lines into history.
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+
+        let result = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        // Simulate git's MERGE_MSG with conflict comment lines.
+        let merge_msg = "Merge branch 'feature'\n\n# Conflicts:\n#\tshared.txt\n";
+        std::fs::write(repo.repo().path().join("MERGE_MSG"), merge_msg).unwrap();
+
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // No explicit message → defaults to (cleaned) MERGE_MSG.
+        commit_merge(repo.path_str(), None, None).await.unwrap();
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        let msg = head.message().unwrap();
+        assert!(
+            !msg.lines().any(|l| l.starts_with('#')),
+            "commit message must not contain '#' comment lines: {:?}",
+            msg
+        );
+        assert!(
+            !msg.contains("Conflicts"),
+            "commit message must not contain the Conflicts block: {:?}",
+            msg
+        );
+        assert_eq!(head.summary(), Some("Merge branch 'feature'"));
+    }
+
+    #[tokio::test]
+    async fn test_commit_merge_signed_squash_restores_state_on_failure() {
+        // The squash-signed path clears merge state before running `git commit`.
+        // If that CLI commit fails (bogus signing config here), the merge state
+        // must be restored so the user can retry or abort.
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+
+        let result = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Force a signed commit whose signing will fail (bogus gpg program).
+        {
+            let git_repo = repo.repo();
+            let mut config = git_repo.config().unwrap();
+            config.set_bool("commit.gpgsign", true).unwrap();
+            config
+                .set_str("gpg.program", "/nonexistent/definitely-not-real-gpg")
+                .unwrap();
+        }
+
+        let result = commit_merge(repo.path_str(), Some("Squashed".to_string()), Some(true)).await;
+        assert!(
+            result.is_err(),
+            "signed squash commit should fail with a bogus gpg program"
+        );
+
+        // Merge state restored so retry/abort still work.
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Merge,
+            "merge state must be restored after a failed signed squash commit"
+        );
+        assert!(git_repo.path().join("MERGE_HEAD").exists());
     }
 
     #[tokio::test]

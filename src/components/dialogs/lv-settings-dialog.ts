@@ -800,7 +800,13 @@ export class LvSettingsDialog extends LitElement {
 
   private async handleCancelDownload(modelId: string): Promise<void> {
     this.aiError = null;
-    await localAiService.cancelModelDownload(modelId);
+    const result = await localAiService.cancelModelDownload(modelId);
+    // If the cancel failed, keep the progress entry (the download is still
+    // running) and surface the error instead of silently dropping the UI row.
+    if (!result.success) {
+      this.aiError = result.error?.message ?? 'Failed to cancel download';
+      return;
+    }
     const { [modelId]: _, ...rest } = this.downloadProgress;
     this.downloadProgress = rest;
     await this.loadLocalAiData();

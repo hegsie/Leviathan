@@ -418,20 +418,24 @@ async fn finish_release_like(
         Some(merge_oid)
     };
 
-    // Create the tag on master. Skip when it already exists (re-run after a
-    // conflict) so we don't fail with "tag already exists". Only tag a freshly
-    // created merge commit — when the master merge was skipped the tag
-    // necessarily already exists from the first run.
+    // Create the tag on master. Skip when it already exists (re-run after the
+    // develop-side conflict was resolved and tagged on the first pass) so we
+    // don't fail with "tag already exists". When it is MISSING we must still
+    // tag: on a re-run after a MASTER-side conflict was resolved via the dialog,
+    // master is already up-to-date so master_merge_oid is None — tag the current
+    // master tip (HEAD is on master here) so the release/hotfix isn't silently
+    // completed with no version tag.
     if repo
         .find_reference(&format!("refs/tags/{}", tag_name))
         .is_err()
     {
-        if let Some(merge_oid) = master_merge_oid {
-            let sig = repo.signature()?;
-            let merge_commit = repo.find_commit(merge_oid)?;
-            let tag_msg = tag_message.unwrap_or_else(|| format!("Release {}", version));
-            repo.tag(&tag_name, merge_commit.as_object(), &sig, &tag_msg, false)?;
-        }
+        let sig = repo.signature()?;
+        let target_commit = match master_merge_oid {
+            Some(merge_oid) => repo.find_commit(merge_oid)?,
+            None => repo.head()?.peel_to_commit()?,
+        };
+        let tag_msg = tag_message.unwrap_or_else(|| format!("Release {}", version));
+        repo.tag(&tag_name, target_commit.as_object(), &sig, &tag_msg, false)?;
     }
 
     // Merge into develop
@@ -873,6 +877,76 @@ mod tests {
         let mut revwalk = git_repo.revwalk().unwrap();
         revwalk.push(oid).unwrap();
         revwalk.count()
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_tags_after_master_conflict_resolved() {
+        // A MASTER-side conflict is resolved via the dialog (resolve_conflict +
+        // commit_merge). On re-run, master is up-to-date (master_merge_oid=None)
+        // but the tag was never created on the first pass — finish must still
+        // create it, pointing at the master tip, exactly once. Before the fix
+        // the tag block was gated on Some(merge_oid) and silently skipped.
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_release(repo.path_str(), "2.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("shared.txt", "release content")]);
+
+        // Conflicting change on master.
+        repo.checkout_branch(&master);
+        repo.create_commit("Master change", &[("shared.txt", "master content")]);
+
+        // First finish: master merge conflicts, no tag yet.
+        let result =
+            gitflow_finish_release(repo.path_str(), "2.0.0".to_string(), None, Some(true)).await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+        assert!(repo.repo().find_reference("refs/tags/v2.0.0").is_err());
+
+        // Resolve the master conflict and complete the merge (HEAD is on master).
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::commands::merge::commit_merge(repo.path_str(), None, None)
+            .await
+            .unwrap();
+
+        let master_tip = repo
+            .repo()
+            .refname_to_id(&format!("refs/heads/{}", master))
+            .unwrap();
+
+        // Re-run finish: must succeed AND create the tag on the master tip.
+        let result =
+            gitflow_finish_release(repo.path_str(), "2.0.0".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "re-run finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        let tag_ref = git_repo.find_reference("refs/tags/v2.0.0");
+        assert!(
+            tag_ref.is_ok(),
+            "version tag must be created after resolving the master conflict"
+        );
+        let tag_commit = tag_ref.unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            tag_commit.id(),
+            master_tip,
+            "tag must point at the master tip"
+        );
+
+        // Branch deleted.
+        assert!(git_repo
+            .find_branch("release/2.0.0", git2::BranchType::Local)
+            .is_err());
     }
 
     #[tokio::test]

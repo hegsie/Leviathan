@@ -316,7 +316,7 @@ export class LvStashList extends LitElement {
         // A conflicting apply left the changes in the working tree; open the
         // conflict resolution dialog. The stash was NOT dropped (apply, not pop),
         // so completion must keep it.
-        if (this.isConflictError(result.error?.message)) {
+        if (this.isConflictError(result.error)) {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
@@ -333,9 +333,12 @@ export class LvStashList extends LitElement {
     }
   }
 
-  /** True when a stash apply/pop error message indicates a merge conflict. */
-  private isConflictError(message: string | undefined): boolean {
-    return !!message && message.toLowerCase().includes('conflict');
+  /** True when a stash apply/pop error indicates a merge conflict. */
+  private isConflictError(error: { code?: string; message?: string } | undefined): boolean {
+    if (!error) return false;
+    // Prefer the structured error code; keep the message match as a fallback.
+    if (error.code === 'MERGE_CONFLICT') return true;
+    return !!error.message && error.message.toLowerCase().includes('conflict');
   }
 
   private async handlePopStash(): Promise<void> {
@@ -371,7 +374,7 @@ export class LvStashList extends LitElement {
         // A conflicting pop left the changes in the working tree AND left the
         // stash entry in place. Open the conflict resolution dialog; completion
         // must drop the stash (pop semantics) once conflicts are resolved.
-        if (this.isConflictError(result.error?.message)) {
+        if (this.isConflictError(result.error)) {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,

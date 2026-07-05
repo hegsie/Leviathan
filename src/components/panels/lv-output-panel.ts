@@ -230,7 +230,9 @@ export class LvOutputPanel extends LitElement {
   };
 
   private handleClear(): void {
-    clearLogEntries();
+    // Scope the clear to this panel's repository so clearing repo A's output
+    // doesn't wipe repo B's history. When unset (showing all), clears globally.
+    clearLogEntries(this.repositoryPath || undefined);
     this.expandedEntries = new Set();
   }
 

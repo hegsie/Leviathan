@@ -63,6 +63,38 @@ describe('output-log.service', () => {
       logGitCommand('merge', '', true);
       expect(notified).to.equal(2); // no notification after unsubscribe
     });
+
+    it('scoped clear removes only the target repo (and repo-independent) entries', () => {
+      logGitCommand('checkout', '', true, '/repoA');
+      logGitCommand('merge', '', true, '/repoB');
+      logGitCommand('store_github_token', '', true); // repo-independent
+
+      let notified = 0;
+      const unsubscribe = subscribeOutputLog(() => {
+        notified++;
+      });
+
+      // Clearing repo A must NOT destroy repo B's history.
+      clearLogEntries('/repoA');
+      expect(notified).to.equal(1);
+
+      const remaining = getLogEntries();
+      const commands = remaining.map((e) => e.command);
+      expect(commands).to.include('merge'); // repo B kept
+      expect(commands).to.not.include('checkout'); // repo A cleared
+      // Repo-independent entries are cleared when scoped (documented choice).
+      expect(commands).to.not.include('store_github_token');
+
+      unsubscribe();
+    });
+
+    it('zero-arg clear still empties everything (e2e/injected usage)', () => {
+      logGitCommand('checkout', '', true, '/repoA');
+      logGitCommand('merge', '', true, '/repoB');
+
+      clearLogEntries();
+      expect(getLogEntries().length).to.equal(0);
+    });
   });
 
   describe('shouldLogToOutput', () => {

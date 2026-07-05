@@ -77,6 +77,35 @@ describe('lv-settings-dialog AI error reset', () => {
     expect((el as unknown as { aiError: string | null }).aiError).to.be.null;
   });
 
+  it('handleCancelDownload removes the progress entry on success', async () => {
+    const el = await createComponent();
+    (el as unknown as { downloadProgress: Record<string, unknown> }).downloadProgress = {
+      m1: { progress: 50 },
+      m2: { progress: 10 },
+    };
+
+    await (el as unknown as { handleCancelDownload: (id: string) => Promise<void> }).handleCancelDownload('m1');
+
+    const progress = (el as unknown as { downloadProgress: Record<string, unknown> }).downloadProgress;
+    expect('m1' in progress, 'cancelled entry removed').to.be.false;
+    expect('m2' in progress, 'other download untouched').to.be.true;
+    expect((el as unknown as { aiError: string | null }).aiError).to.be.null;
+  });
+
+  it('handleCancelDownload keeps the progress entry and shows an error when cancel fails', async () => {
+    failingCommands = new Set(['cancel_model_download']);
+    const el = await createComponent();
+    (el as unknown as { downloadProgress: Record<string, unknown> }).downloadProgress = {
+      m1: { progress: 50 },
+    };
+
+    await (el as unknown as { handleCancelDownload: (id: string) => Promise<void> }).handleCancelDownload('m1');
+
+    const progress = (el as unknown as { downloadProgress: Record<string, unknown> }).downloadProgress;
+    expect('m1' in progress, 'progress entry retained on failed cancel').to.be.true;
+    expect((el as unknown as { aiError: string | null }).aiError).to.equal('AI operation failed');
+  });
+
   it('handleDeleteModel clears a stale aiError on success', async () => {
     const el = await createComponent();
     (el as unknown as { aiError: string | null }).aiError = 'stale error';

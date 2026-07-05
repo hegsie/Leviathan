@@ -1622,7 +1622,11 @@ export class LvBranchList extends LitElement {
       }
 
       if (checkoutResult.data.stashed && checkoutResult.data.stashConflict) {
-        showToast(`Switched to ${targetBranch.shorthand} — stash conflicts need resolution`, 'warning');
+        const actionName = action === 'merge' ? 'merge' : 'rebase';
+        showToast(
+          `Switched to ${targetBranch.shorthand}, but re-applying your stashed changes hit conflicts. The ${actionName} was NOT started — resolve the stash conflicts, then re-run the ${actionName}.`,
+          'warning',
+        );
         this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
           bubbles: true,
           composed: true,
@@ -1631,7 +1635,7 @@ export class LvBranchList extends LitElement {
         }));
         // The working tree is conflicted from the failed stash pop; do NOT fall
         // through into merge/rebase on a conflicted tree — the user must resolve
-        // the stash conflicts first.
+        // the stash conflicts first and re-run the operation.
         return;
       } else if (checkoutResult.data.stashed && checkoutResult.data.stashApplied) {
         showToast(`Switched to ${targetBranch.shorthand} (changes re-applied)`, 'info');

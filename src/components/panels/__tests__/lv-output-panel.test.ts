@@ -59,6 +59,30 @@ describe('lv-output-panel', () => {
     expect(el.shadowRoot!.querySelector('.empty')).to.exist;
   });
 
+  it('Clear on a scoped panel only clears its repo, keeping other repos', async () => {
+    const el = await fixture<LvOutputPanel>(
+      html`<lv-output-panel .repositoryPath=${'/repo/a'}></lv-output-panel>`,
+    );
+
+    logGitCommand('checkout', '', true, '/repo/a');
+    logGitCommand('merge', '', true, '/repo/b');
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelector('.clear-btn') as HTMLElement).click();
+    await el.updateComplete;
+
+    // Repo A's own view is now empty...
+    expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(0);
+
+    // ...but repo B's history survives (visible when we switch to it).
+    el.repositoryPath = '/repo/b';
+    await el.updateComplete;
+    const commandsB = Array.from(
+      el.shadowRoot!.querySelectorAll('.entry-command'),
+    ).map((n) => n.textContent?.trim());
+    expect(commandsB).to.deep.equal(['merge']);
+  });
+
   it('scopes entries to repositoryPath in multi-repo sessions', async () => {
     const el = await fixture<LvOutputPanel>(
       html`<lv-output-panel .repositoryPath=${'/repo/a'}></lv-output-panel>`,

@@ -878,7 +878,7 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(el.open).to.be.false;
     });
 
-    it('aborts a stash conflict via hard reset (keeping the stash) with info toast', async () => {
+    it('aborts a stash conflict by restoring ONLY the conflicted files (no hard reset, stash kept)', async () => {
       const el = await renderDialog('stash');
       el.open = true;
       await el.updateComplete;
@@ -890,13 +890,17 @@ describe('lv-conflict-resolution-dialog', () => {
       invokeHistory.length = 0;
       await (el as unknown as { handleAbortConfirm: () => Promise<void> }).handleAbortConfirm.bind(el)();
 
-      const resetCall = invokeHistory.find(h => h.command === 'reset');
-      expect(resetCall, 'reset called for stash abort').to.exist;
-      const args = resetCall!.args as Record<string, unknown>;
-      expect(args.mode).to.equal('hard');
-      expect(args.targetRef).to.equal('HEAD');
-      // Must NOT drop the stash on abort.
-      expect(invokeHistory.some(h => h.command === 'drop_stash')).to.be.false;
+      const conflictPaths = TEST_CONFLICTS.map(c => c.path);
+      // Path-scoped restore: unstage + discard the conflicted files only.
+      const unstageCall = invokeHistory.find(h => h.command === 'unstage_files');
+      expect(unstageCall, 'unstage_files called for conflicted paths').to.exist;
+      expect((unstageCall!.args as Record<string, unknown>).paths).to.deep.equal(conflictPaths);
+      const discardCall = invokeHistory.find(h => h.command === 'discard_changes');
+      expect(discardCall, 'discard_changes called for conflicted paths').to.exist;
+      expect((discardCall!.args as Record<string, unknown>).paths).to.deep.equal(conflictPaths);
+      // Must NOT hard-reset (would destroy unrelated changes) and must NOT drop the stash.
+      expect(invokeHistory.some(h => h.command === 'reset'), 'no hard reset').to.be.false;
+      expect(invokeHistory.some(h => h.command === 'drop_stash'), 'stash kept').to.be.false;
       expect(abortedFired).to.be.true;
       const infoToast = uiStore.getState().toasts.find(t => t.type === 'info');
       expect(infoToast, 'info toast shown').to.not.be.undefined;
@@ -907,41 +911,48 @@ describe('lv-conflict-resolution-dialog', () => {
   describe('stash with empty conflict list', () => {
     beforeEach(() => clearToasts());
 
-    it('disables the Complete button when a stash conflict applied nothing', async () => {
+    it('auto-closes (escaping the trap) without dropping when a stash conflict applied nothing', async () => {
       setupDefaultMocks([]);
       const el = await renderDialog('stash');
+      let abortedFired = false;
+      el.addEventListener('operation-aborted', () => { abortedFired = true; });
+
+      // Opening loads zero conflicts; the dialog must auto-run the safe exit
+      // instead of trapping the user (Complete disabled, Escape suppressed).
       el.open = true;
       await el.updateComplete;
       await new Promise(r => setTimeout(r, 100));
       await el.updateComplete;
 
-      const continueBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
-      expect(continueBtn.disabled, 'Complete disabled with 0 conflicts').to.be.true;
+      expect(invokeHistory.some(h => h.command === 'drop_stash'), 'drop_stash NOT called').to.be.false;
+      expect(invokeHistory.some(h => h.command === 'reset'), 'no hard reset').to.be.false;
+      expect(invokeHistory.some(h => h.command === 'unstage_files'), 'nothing restored').to.be.false;
+      expect(abortedFired, 'operation-aborted dispatched').to.be.true;
+      expect(el.open, 'dialog auto-closed').to.be.false;
+      const warnToast = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warnToast, 'warning toast shown').to.not.be.undefined;
+      expect(warnToast!.message).to.contain('still in the stash');
     });
 
-    it('refuses to drop the stash and warns when continuing with no conflicts', async () => {
-      setupDefaultMocks([]);
+    it('handleContinue with no conflicts refuses to drop and closes safely', async () => {
+      // Render WITH conflicts (so no auto-close), then drive the empty-conflict
+      // continue branch directly to prove it stays non-destructive.
       const el = await renderDialog('stash');
       el.open = true;
       await el.updateComplete;
       await new Promise(r => setTimeout(r, 100));
 
+      const internal = el as unknown as { conflicts: ConflictFile[] };
+      internal.conflicts = [];
       let abortedFired = false;
-      let completedFired = false;
       el.addEventListener('operation-aborted', () => { abortedFired = true; });
-      el.addEventListener('operation-completed', () => { completedFired = true; });
 
       invokeHistory.length = 0;
       await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
 
-      // Must NOT drop the stash — the changes were never applied.
       expect(invokeHistory.some(h => h.command === 'drop_stash'), 'drop_stash NOT called').to.be.false;
-      expect(completedFired, 'not completed').to.be.false;
       expect(abortedFired, 'operation-aborted dispatched').to.be.true;
       expect(el.open, 'dialog closed').to.be.false;
-      const warnToast = uiStore.getState().toasts.find(t => t.type === 'warning');
-      expect(warnToast, 'warning toast shown').to.not.be.undefined;
-      expect(warnToast!.message).to.contain('still in the stash');
     });
   });
 

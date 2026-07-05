@@ -119,6 +119,27 @@ describe('lv-stash-list conflict handling', () => {
     expect(captured.detail!.dropStashOnComplete).to.be.true;
   });
 
+  it('opens the dialog off the MERGE_CONFLICT error code even when the message lacks "conflict"', async () => {
+    const el = await createComponent();
+    setContextMenu(el, makeStash(3));
+    const captured = listenForConflict(el);
+
+    mockInvoke = (command: string) => {
+      if (command === 'pop_stash') {
+        // Message intentionally omits the word "conflict" — must key off code.
+        return Promise.reject({ code: 'MERGE_CONFLICT', message: 'Resolution required' });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    await (el as unknown as { handlePopStash: () => Promise<void> }).handlePopStash();
+
+    expect(captured.detail, 'open-conflict-dialog dispatched via error code').to.not.be.null;
+    expect(captured.detail!.operationType).to.equal('stash');
+    expect(captured.detail!.stashIndex).to.equal(3);
+    expect(captured.detail!.dropStashOnComplete).to.be.true;
+  });
+
   it('a non-conflict apply failure does NOT open the dialog', async () => {
     const el = await createComponent();
     setContextMenu(el, makeStash(0));

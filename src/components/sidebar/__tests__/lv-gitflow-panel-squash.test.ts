@@ -98,6 +98,32 @@ describe('lv-gitflow-panel squash finish conflict (Fix 6)', () => {
     expect(detail!.squash).to.be.true;
   });
 
+  it('renders a Squash button on feature items that finishes with squash=true', async () => {
+    const el = await createComponent();
+
+    // Populate an active feature item, then reload the active-items list.
+    mockInvoke = (command: string) => {
+      if (command === 'get_branches') {
+        return Promise.resolve([{ name: 'feature/x', isRemote: false }]);
+      }
+      return defaultMockInvoke(command);
+    };
+    await (el as unknown as { loadActiveItems: () => Promise<void> }).loadActiveItems();
+    await el.updateComplete;
+
+    const squashBtn = el.shadowRoot!.querySelector('.item-squash-btn') as HTMLButtonElement;
+    expect(squashBtn, 'squash button rendered on feature item').to.exist;
+
+    // Clicking the squash affordance must invoke the finish with squash=true.
+    squashBtn.click();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+
+    const finishCall = invokeCalls.find((c) => c.command === 'gitflow_finish_feature');
+    expect(finishCall, 'gitflow_finish_feature invoked from squash button').to.exist;
+    expect((finishCall!.args as Record<string, unknown>).squash).to.equal(true);
+  });
+
   it('dispatches squash=false for a normal (non-squash) finish conflict', async () => {
     const el = await createComponent();
 

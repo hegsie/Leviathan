@@ -162,6 +162,10 @@ export class LvGitflowPanel extends LitElement {
         color: var(--color-success);
       }
 
+      .item-squash-btn:hover {
+        color: var(--color-accent, var(--color-primary));
+      }
+
       .item-finish-btn svg {
         width: 12px;
         height: 12px;
@@ -599,6 +603,7 @@ export class LvGitflowPanel extends LitElement {
     onStart: () => void,
     onFinish: (item: ActiveItem) => void,
     colorClass: string,
+    onSquash?: (item: ActiveItem) => void,
   ) {
     const expanded = this.expandedSections.has(category);
 
@@ -629,7 +634,7 @@ export class LvGitflowPanel extends LitElement {
             </button>
           </div>
         </div>
-        ${expanded ? this.renderCategoryItems(category, items, onFinish) : nothing}
+        ${expanded ? this.renderCategoryItems(category, items, onFinish, onSquash) : nothing}
       </div>
     `;
   }
@@ -638,6 +643,7 @@ export class LvGitflowPanel extends LitElement {
     _category: GitFlowCategory,
     items: ActiveItem[],
     onFinish: (item: ActiveItem) => void,
+    onSquash?: (item: ActiveItem) => void,
   ) {
     if (items.length === 0) {
       return html`<div class="empty-section">No active items</div>`;
@@ -654,6 +660,22 @@ export class LvGitflowPanel extends LitElement {
               <path d="M18 9a9 9 0 01-9 9"></path>
             </svg>
             <span class="item-name" title="${item.branch}">${item.name}</span>
+            ${onSquash
+              ? html`
+                  <button
+                    class="item-finish-btn item-squash-btn"
+                    title="Squash and finish ${item.name}"
+                    @click=${() => onSquash(item)}
+                    ?disabled=${this.operationInProgress}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="8 7 12 3 16 7"></polyline>
+                      <polyline points="8 17 12 21 16 17"></polyline>
+                      <line x1="12" y1="3" x2="12" y2="21"></line>
+                    </svg>
+                  </button>
+                `
+              : nothing}
             <button
               class="item-finish-btn"
               title="Finish ${item.name}"
@@ -735,6 +757,7 @@ export class LvGitflowPanel extends LitElement {
           () => this.handleStartFeature(),
           (item) => this.handleFinishFeature(item),
           'feature-color',
+          (item) => this.handleFinishFeature(item, true),
         )}
         ${this.renderCategorySection(
           'release',

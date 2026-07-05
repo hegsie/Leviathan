@@ -27,6 +27,7 @@ const invokeCalls: Array<{ command: string; args?: unknown }> = [];
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvBranchList } from '../lv-branch-list.ts';
 import '../lv-branch-list.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -117,6 +118,40 @@ describe('lv-branch-list drop stash-conflict (Fix 4)', () => {
     // Crucially: the merge must NOT have run on the conflicted tree.
     expect(invokeCalls.some((c) => c.command === 'merge'), 'merge NOT called').to.be.false;
     expect(invokeCalls.some((c) => c.command === 'rebase'), 'rebase NOT called').to.be.false;
+  });
+
+  it('warns that the merge was NOT started and should be re-run after resolving the stash conflict', async () => {
+    const el = await createComponent();
+    const state = uiStore.getState();
+    state.toasts.forEach((t) => state.removeToast(t.id));
+
+    const source = makeBranch('feature/source');
+    const target = makeBranch('feature/target', false);
+    (el as unknown as { draggingBranch: unknown }).draggingBranch = source;
+
+    mockInvoke = (command: string) => {
+      if (command === 'checkout_with_autostash') {
+        return Promise.resolve({
+          success: true,
+          stashed: true,
+          stashApplied: false,
+          stashConflict: true,
+          message: 'stash conflict',
+        });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    await (el as unknown as { handleDrop: (e: DragEvent, b: unknown) => Promise<void> }).handleDrop(
+      fakeDragEvent(false),
+      target
+    );
+
+    const warnToast = uiStore.getState().toasts.find((t) => t.type === 'warning');
+    expect(warnToast, 'warning toast shown').to.not.be.undefined;
+    // The message must make clear the merge was abandoned and needs re-running.
+    expect(warnToast!.message).to.contain('NOT started');
+    expect(warnToast!.message.toLowerCase()).to.contain('re-run');
   });
 
   it('still merges after a clean checkout (no auto-stash conflict)', async () => {

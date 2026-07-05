@@ -69,10 +69,27 @@ export function getLogEntries(): ReadonlyArray<OutputLogEntry> {
 }
 
 /**
- * Clear all log entries.
+ * Clear log entries.
+ *
+ * With no argument, ALL entries are cleared (used by tests and injected setups).
+ *
+ * When `repoPath` is given, the log is scoped: entries for that repository are
+ * removed AND repo-independent entries (those with no repoPath) are removed too
+ * — those are the entries the scoped <lv-output-panel> actually displays, so
+ * clearing matches what the user sees. Other repositories' entries are preserved
+ * so clearing repo A never destroys repo B's history.
  */
-export function clearLogEntries(): void {
-  logEntries.length = 0;
+export function clearLogEntries(repoPath?: string): void {
+  if (repoPath === undefined) {
+    logEntries.length = 0;
+  } else {
+    // Keep only entries that belong to a DIFFERENT repository.
+    const kept = logEntries.filter(
+      (e) => e.repoPath !== undefined && e.repoPath !== repoPath,
+    );
+    logEntries.length = 0;
+    logEntries.push(...kept);
+  }
   notifyListeners();
 }
 
