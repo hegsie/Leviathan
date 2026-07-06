@@ -799,6 +799,22 @@ describe('lv-graph-canvas', () => {
       expect(findCommands('get_commit_history').length).to.equal(2);
     });
 
+    it('switching repos mid-stats-fetch does not leave the stats spinner stuck on', async () => {
+      // Regression: fetchCommitStats' finally only cleared isLoadingStats
+      // when still on the same repo, so switching away mid-fetch (esp. to an
+      // empty repo that runs no stats fetch of its own) left the spinner on.
+      const el = await renderCanvas();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).isLoadingStats = true; // simulate an in-flight stats fetch
+
+      // Switch to a different repo (uncached) — willUpdate must reset it
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoadingStats).to.be.false;
+    });
+
     it('a superseded load must not clear isLoading while the newest load is still running', async () => {
       // Regression: loadCommits' finally cleared isLoading unconditionally,
       // so double-switching between two uncached repos let the first

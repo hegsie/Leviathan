@@ -573,6 +573,10 @@ export class LvGraphCanvas extends LitElement {
 
       // A reload queued for the PREVIOUS repo must not leak into this one
       this.reloadQueued = false;
+      // Clear any stats spinner owned by the previous repo — the new repo's
+      // fetch (if any) will set it again; a repo with no stats to fetch must
+      // not inherit the old spinner
+      this.isLoadingStats = false;
 
       // Render instantly from the per-repo cache when switching back to a
       // visited tab, then revalidate in the background (no spinner). A repo
@@ -1189,13 +1193,19 @@ export class LvGraphCanvas extends LitElement {
         log.debug(`fetchCommitStats: discarding stats for ${repoPath}, now on ${this.repositoryPath}`);
       }
     } finally {
-      // Only clear loading state if we're still on the same repo
+      // Enforce the minimum-visible delay only while still on the same repo.
       if (this.repositoryPath === repoPath) {
-        // Ensure loading indicator is visible for minimum time
         const elapsed = Date.now() - startTime;
         if (elapsed < MIN_LOADING_DISPLAY_MS) {
           await new Promise(resolve => setTimeout(resolve, MIN_LOADING_DISPLAY_MS - elapsed));
         }
+      }
+      // Clear the stats spinner only for the CURRENT load. A superseded
+      // fetch (the user switched repos while it ran) must not clear a newer
+      // repo's spinner; the repo switch itself resets the flag (willUpdate)
+      // and the new repo's own fetch manages it from there — so switching
+      // away mid-fetch never leaves the spinner stuck on.
+      if (this.loadVersion === version) {
         this.isLoadingStats = false;
       }
     }
