@@ -37,6 +37,10 @@ class SearchIndexService {
   // dropped must not resurrect readiness (or leak the backend index) for a
   // closed tab
   private dropEpochs = new Map<string, number>();
+  // Paths with an in-flight refresh, to dedupe overlapping refreshes (the
+  // backend takes the index out first, so a concurrent refresh would trigger
+  // a redundant full rebuild)
+  private refreshingRepos = new Set<string>();
 
   /**
    * Build the search index for a repository.
@@ -110,25 +114,35 @@ class SearchIndexService {
    */
   async refresh(repoPath: string): Promise<void> {
     if (!this.readyRepos.has(repoPath)) return;
+    // Dedupe overlapping refreshes for the same repo: the backend's refresh
+    // takes the index out before its incremental walk, so a second
+    // concurrent refresh would find nothing and fall through to a full
+    // (up to 100k-commit) rebuild running alongside the first.
+    if (this.refreshingRepos.has(repoPath)) return;
+    this.refreshingRepos.add(repoPath);
     const epoch = this.dropEpochs.get(repoPath) ?? 0;
 
-    const result = await invokeCommand<number>('refresh_search_index', { path: repoPath });
-    if ((this.dropEpochs.get(repoPath) ?? 0) !== epoch) {
-      // The repo was closed while the refresh ran. The backend guards its
-      // reinsert by generation (and discards the stale result), so there is
-      // nothing to clean up here.
-      return;
-    }
-    if (result.success) {
-      // Invalidate search cache since results may have changed
-      searchResultCache.clear();
-    } else {
-      // A genuine refresh failure (e.g. corrupt/locked repo) means the
-      // backend took the index out and never reinserted it — the path is no
-      // longer searchable. Clear readiness so the next activation rebuilds
-      // from scratch instead of leaving the repo "ready" with no index.
-      this.readyRepos.delete(repoPath);
-      console.warn('[SearchIndex] Failed to refresh index:', result.error?.message);
+    try {
+      const result = await invokeCommand<number>('refresh_search_index', { path: repoPath });
+      if ((this.dropEpochs.get(repoPath) ?? 0) !== epoch) {
+        // The repo was closed while the refresh ran. The backend guards its
+        // reinsert by generation (and discards the stale result), so there is
+        // nothing to clean up here.
+        return;
+      }
+      if (result.success) {
+        // Invalidate search cache since results may have changed
+        searchResultCache.clear();
+      } else {
+        // A genuine refresh failure (e.g. corrupt/locked repo) means the
+        // backend took the index out and never reinserted it — the path is no
+        // longer searchable. Clear readiness so the next activation rebuilds
+        // from scratch instead of leaving the repo "ready" with no index.
+        this.readyRepos.delete(repoPath);
+        console.warn('[SearchIndex] Failed to refresh index:', result.error?.message);
+      }
+    } finally {
+      this.refreshingRepos.delete(repoPath);
     }
   }
 

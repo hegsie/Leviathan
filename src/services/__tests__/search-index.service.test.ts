@@ -162,6 +162,39 @@ describe('SearchIndexService', () => {
     });
   });
 
+  describe('refresh dedup', () => {
+    it('dedupes overlapping refreshes for the same repo (no redundant rebuild)', async () => {
+      // Regression: the backend refresh takes the index out first, so a
+      // second concurrent refresh would fall through to a full rebuild.
+      await searchIndexService.buildIndex('/repo/one');
+      invokeCallArgs.length = 0;
+
+      let releaseRefresh!: () => void;
+      pendingRefreshGate = new Promise((resolve) => {
+        releaseRefresh = resolve;
+      });
+
+      const first = searchIndexService.refresh('/repo/one');
+      const second = searchIndexService.refresh('/repo/one'); // overlaps — must no-op
+      releaseRefresh();
+      await Promise.all([first, second]);
+
+      const refreshCalls = invokeCallArgs.filter((c) => c.command === 'refresh_search_index');
+      expect(refreshCalls.length).to.equal(1);
+    });
+
+    it('allows a fresh refresh after the previous one settled', async () => {
+      await searchIndexService.buildIndex('/repo/one');
+      invokeCallArgs.length = 0;
+
+      await searchIndexService.refresh('/repo/one');
+      await searchIndexService.refresh('/repo/one');
+
+      const refreshCalls = invokeCallArgs.filter((c) => c.command === 'refresh_search_index');
+      expect(refreshCalls.length).to.equal(2);
+    });
+  });
+
   describe('refresh failure', () => {
     it('clears readiness on a genuine refresh failure so the next activation rebuilds', async () => {
       // Regression: the backend takes the index out before the incremental

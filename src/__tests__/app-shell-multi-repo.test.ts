@@ -519,6 +519,44 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  describe('search filter does not leak across tab switches', () => {
+    it("clears the graph canvas's searchFilter when the active repo changes", async () => {
+      // Regression: the canvas searchFilter was set imperatively and never
+      // bound in the template, so a tab switch left it holding the previous
+      // repo's filter — dimming the new repo's graph for a query never
+      // applied to it. It's now a reactive `.searchFilter` binding cleared
+      // by app-shell's repo-change handler.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        // Apply a filter on repo A
+        (el as any).handleSearchChange(
+          new CustomEvent('search-change', {
+            detail: { filter: { query: 'wip', author: '', dateFrom: '', dateTo: '', filePath: '', branch: '', searchMode: 'keyword' } },
+          })
+        );
+        await el.updateComplete;
+        const canvas = el.shadowRoot!.querySelector('lv-graph-canvas') as unknown as {
+          searchFilter: unknown;
+        };
+        expect(canvas.searchFilter, 'filter applied to active repo').to.not.be.null;
+
+        // Switch to repo B — the binding must clear the canvas filter
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+        expect((el as any).searchFilter, 'app-shell clears its filter on switch').to.be.null;
+        expect(canvas.searchFilter, 'canvas filter cleared via binding').to.be.null;
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
   describe('watcher lifecycle across open repos', () => {
     it('starts a watcher for every opened repo, not just the active one', async () => {
       const el = createAppShell();

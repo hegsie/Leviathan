@@ -2253,11 +2253,13 @@ export class AppShell extends LitElement {
   }
 
   private handleSearchChange(e: CustomEvent<{ filter: SearchFilter }>): void {
+    // The graph canvas receives this via the reactive `.searchFilter`
+    // template binding, so it stays in sync automatically — including being
+    // cleared to null when the active repo changes (tab switch). Pushing it
+    // imperatively here instead would leave the canvas holding the previous
+    // repo's filter on switch, dimming the new repo's graph for a query the
+    // user never applied to it.
     this.searchFilter = e.detail.filter;
-    // Pass filter to graph canvas
-    if (this.graphCanvas) {
-      this.graphCanvas.searchFilter = this.searchFilter;
-    }
   }
 
   private async openCommandPalette(): Promise<void> {
@@ -3126,6 +3128,7 @@ export class AppShell extends LitElement {
                 <div class="graph-area">
                   <lv-graph-canvas
                     repositoryPath=${this.activeRepository.repository.path}
+                    .searchFilter=${this.searchFilter}
                     @commit-selected=${this.handleCommitSelected}
                     @commit-context-menu=${this.handleCommitContextMenu}
                     @ref-context-menu=${this.handleRefContextMenu}
