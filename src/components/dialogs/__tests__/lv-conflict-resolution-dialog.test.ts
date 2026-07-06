@@ -1117,9 +1117,53 @@ describe('lv-conflict-resolution-dialog', () => {
       await internal.handleAbortConfirm.call(el);
 
       expect(invokeHistory.some(h => h.command === 'abort_merge'), 'abort_merge NOT called').to.be.false;
-      expect(el.open, 'dialog stays open').to.be.true;
+      // The dialog must NOT trap the user (Complete may fail persistently,
+      // e.g. branch checked out in a worktree) — it closes with an honest
+      // warning; the idempotent finish can be retried from the panel.
+      expect(el.open, 'dialog closes instead of trapping the user').to.be.false;
       const toasts = uiStore.getState().toasts;
       expect(toasts.some(t => t.type === 'warning' && /already committed/i.test(t.message))).to.be.true;
+    });
+
+    it('warns that master merge and tag survive an abort at the develop stage', async () => {
+      const el = await openWithFinish({
+        kind: 'release',
+        name: '1.0.0',
+        branchName: 'release/1.0.0',
+        deleteBranch: true,
+      });
+
+      // Master merge commits; finish re-run hits the develop-side conflict —
+      // the master merge and version tag have already landed.
+      mockInvoke = async (command: string) => {
+        if (command === 'gitflow_finish_release') {
+          throw { code: 'MERGE_CONFLICT', message: 'develop conflicts' };
+        }
+        if (command === 'get_conflicts') {
+          return [{ path: 'dev.txt', ancestor: null, ours: null, theirs: null, isBinary: false }];
+        }
+        return null;
+      };
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+      expect(el.open).to.be.true;
+
+      // Aborting now rolls back ONLY the develop merge — the toast must say
+      // the master merge and tag are already committed, not imply a full undo.
+      clearToasts();
+      mockInvoke = async () => null;
+      const internal = el as unknown as {
+        showAbortConfirm: boolean;
+        handleAbortConfirm: () => Promise<void>;
+      };
+      internal.showAbortConfirm = true;
+      await internal.handleAbortConfirm.call(el);
+
+      expect(el.open, 'dialog closes after the abort').to.be.false;
+      const toasts = uiStore.getState().toasts;
+      expect(
+        toasts.some(t => t.type === 'warning' && /master merge and version tag.*already committed/i.test(t.message)),
+        'honest partial-abort warning shown'
+      ).to.be.true;
     });
 
     it('resets the committed marker even when the re-conflict load fails', async () => {

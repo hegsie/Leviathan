@@ -360,6 +360,12 @@ export class LvConflictResolutionDialog extends LitElement {
    * to it — re-running commitMerge would fail with "No merge in progress".
    */
   private mergeCommitted = false;
+  /**
+   * True when an earlier commit from this git-flow finish (the master-side
+   * merge and version tag) already landed — an Abort at the develop stage
+   * only rolls back the develop merge and must say so.
+   */
+  private priorFinishCommitLanded = false;
   @state() private aborting = false;
   @state() private showAbortConfirm = false;
   @state() private hasMergeTool = false;
@@ -388,6 +394,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting = false;
       this.showAbortConfirm = false;
       this.mergeCommitted = false;
+      this.priorFinishCommitLanded = false;
       this.loadConflicts();
     }
   }
@@ -421,6 +428,7 @@ export class LvConflictResolutionDialog extends LitElement {
     this.aborting = false;
     this.showAbortConfirm = false;
     this.mergeCommitted = false;
+    this.priorFinishCommitLanded = false;
   }
 
   /** Re-run the conflict load after a failure, resetting resolution progress. */
@@ -569,12 +577,19 @@ export class LvConflictResolutionDialog extends LitElement {
     // Once the merge commit has landed (only the follow-up git-flow finish
     // step failed), there is nothing left to abort — abort_merge would no-op
     // on the clean repo while telling the user their merge was rolled back.
+    // Close the dialog rather than trapping the user (Complete may fail
+    // persistently, e.g. the branch is checked out in a worktree); the
+    // backend finish is idempotent and can be retried from the panel.
     if (this.operationType === 'merge' && this.mergeCommitted) {
       this.showAbortConfirm = false;
       showToast(
-        'The merge is already committed and cannot be aborted — use Complete Merge to retry finishing',
+        'The merge is already committed and cannot be rolled back — retry the finish from the Git Flow panel',
         'warning'
       );
+      this.dispatchEvent(
+        new CustomEvent('operation-aborted', { bubbles: true, composed: true })
+      );
+      this.close();
       return;
     }
 
@@ -638,6 +653,14 @@ export class LvConflictResolutionDialog extends LitElement {
           showToast(
             'Conflicted files restored — your changes remain in the stash',
             'info',
+          );
+        }
+        if (this.operationType === 'merge' && this.priorFinishCommitLanded) {
+          // Only the in-progress develop merge was rolled back — the master
+          // merge and version tag from this finish are already committed.
+          showToast(
+            'The develop merge was aborted, but the master merge and version tag from this finish are already committed',
+            'warning',
           );
         }
         this.dispatchEvent(
@@ -724,6 +747,7 @@ export class LvConflictResolutionDialog extends LitElement {
             await this.loadConflicts();
             if (this.conflicts.length > 0) {
               this.resolvedFiles = new Set();
+              this.selectedIndex = 0;
               return;
             }
             // No new conflicts, but the operation genuinely failed — surface the
@@ -740,6 +764,7 @@ export class LvConflictResolutionDialog extends LitElement {
               await this.loadConflicts();
               if (this.conflicts.length > 0) {
                 this.resolvedFiles = new Set();
+                this.selectedIndex = 0;
                 return;
               }
             }
@@ -755,6 +780,7 @@ export class LvConflictResolutionDialog extends LitElement {
               await this.loadConflicts();
               if (this.conflicts.length > 0) {
                 this.resolvedFiles = new Set();
+                this.selectedIndex = 0;
                 return;
               }
             }
@@ -777,6 +803,7 @@ export class LvConflictResolutionDialog extends LitElement {
                 await this.loadConflicts();
                 if (this.conflicts.length > 0) {
                   this.resolvedFiles = new Set();
+                  this.selectedIndex = 0;
                   return;
                 }
               }
@@ -884,11 +911,15 @@ export class LvConflictResolutionDialog extends LitElement {
         // A MERGE_CONFLICT from the finish re-run always means a NEW merge is
         // in progress — reset the committed marker BEFORE loading conflicts,
         // so even a failed load (Retry path) leads Complete to commit this
-        // merge instead of skipping it and stranding the finish.
+        // merge instead of skipping it and stranding the finish. Remember
+        // that a prior commit from this finish (master merge + tag) already
+        // landed, so a later Abort can be honest about what survives.
         this.mergeCommitted = false;
+        this.priorFinishCommitLanded = true;
         await this.loadConflicts();
         if (this.conflicts.length > 0) {
           this.resolvedFiles = new Set();
+          this.selectedIndex = 0;
           return false;
         }
         if (this.loadFailed) {
