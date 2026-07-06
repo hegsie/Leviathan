@@ -38,7 +38,7 @@
   "devDependencies": {
     "@open-wc/testing": "^4.0.0",
     "@playwright/test": "1.61.0",
-    "@tauri-apps/cli": "^2.11.3",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/mocha": "^10.0.10",
     "@web/dev-server-esbuild": "^1.0.5",
     "@web/test-runner": "^0.20.2",
