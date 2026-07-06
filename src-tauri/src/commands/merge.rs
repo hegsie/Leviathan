@@ -31,6 +31,27 @@ pub async fn merge(
 ) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
+    // Like git's pre-merge checks: refuse to start a merge while another
+    // operation is in progress, with an actionable message (instead of the
+    // misleading libgit2 "uncommitted change would be overwritten" error).
+    match repo.state() {
+        git2::RepositoryState::Clean => {}
+        git2::RepositoryState::Merge => {
+            return Err(LeviathanError::OperationFailed(
+                "You have not concluded your merge (MERGE_HEAD exists). \
+                 Resolve the conflicts and commit, or abort the merge, before merging again."
+                    .to_string(),
+            ));
+        }
+        state => {
+            return Err(LeviathanError::OperationFailed(format!(
+                "Cannot merge: another operation is in progress ({:?}). \
+                 Complete or abort it first.",
+                state
+            )));
+        }
+    }
+
     // Find the commit to merge
     let reference = repo
         .find_reference(&format!("refs/heads/{}", source_ref))
@@ -45,17 +66,52 @@ pub async fn merge(
     }
 
     if analysis.is_fast_forward() && !no_ff.unwrap_or(false) && !squash.unwrap_or(false) {
-        // Fast-forward merge
+        // Fast-forward merge. Check out the target tree SAFELY first — git
+        // aborts a merge that would overwrite local changes or untracked
+        // files — and only move the branch ref once the checkout succeeded.
         let target_oid = annotated_commit.id();
+        let target_commit = repo.find_commit(target_oid)?;
         let head = repo.head()?;
         let refname = head
             .name()
             .ok()
             .ok_or_else(|| LeviathanError::InvalidReference)?;
 
+        // Collect the conflicting paths so the error can name them, like
+        // git's "Your local changes to the following files ..." message.
+        let conflict_paths = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let notify_paths = std::rc::Rc::clone(&conflict_paths);
+        let mut checkout = git2::build::CheckoutBuilder::new();
+        checkout
+            .notify_on(git2::CheckoutNotificationType::CONFLICT)
+            .notify(move |_why, path, _baseline, _target, _workdir| {
+                if let Some(p) = path {
+                    notify_paths.borrow_mut().push(p.display().to_string());
+                }
+                true
+            });
+
+        match repo.checkout_tree(target_commit.as_object(), Some(&mut checkout)) {
+            Ok(()) => {}
+            Err(e) if e.code() == git2::ErrorCode::Conflict => {
+                let files = conflict_paths.borrow().join(", ");
+                return Err(LeviathanError::OperationFailed(if files.is_empty() {
+                    "Your local changes would be overwritten by merge. \
+                     Commit or stash them before you merge."
+                        .to_string()
+                } else {
+                    format!(
+                        "Your local changes to the following files would be \
+                         overwritten by merge: {}. Commit or stash them before you merge.",
+                        files
+                    )
+                }));
+            }
+            Err(e) => return Err(e.into()),
+        }
+
         let mut reference = repo.find_reference(refname)?;
         reference.set_target(target_oid, "Fast-forward merge")?;
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
     } else {
         // Normal or squash merge. Once repo.merge() succeeds the index/working
         // tree is in MERGING state; any subsequent failure must reset that
@@ -72,8 +128,11 @@ pub async fn merge(
             let tree_oid = repo.index()?.write_tree()?;
             let tree = repo.find_tree(tree_oid)?;
 
+            // Default to the MERGE_MSG libgit2 wrote during repo.merge() —
+            // git's canonical auto-message ("Merge branch 'feature'") — with
+            // '#' comment lines stripped, like `git commit` does.
             let commit_message =
-                message.unwrap_or_else(|| format!("Merge '{}' into HEAD", source_ref));
+                message.unwrap_or_else(|| default_merge_message(&repo, &source_ref));
 
             if squash.unwrap_or(false) {
                 repo.commit(
@@ -119,12 +178,71 @@ pub async fn merge(
     Ok(())
 }
 
-/// Abort an in-progress merge
+/// Default merge-commit message: the MERGE_MSG that libgit2 wrote when the
+/// merge started (git's canonical wording, e.g. "Merge branch 'feature'"),
+/// with '#' comment lines stripped the way `git commit` cleans messages.
+/// Falls back to git's canonical subject if MERGE_MSG is missing or empty.
+fn default_merge_message(repo: &git2::Repository, source_ref: &str) -> String {
+    std::fs::read_to_string(repo.path().join("MERGE_MSG"))
+        .ok()
+        .map(|m| {
+            m.lines()
+                .filter(|line| !line.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim_end()
+                .to_string()
+        })
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| format!("Merge branch '{}'", source_ref))
+}
+
+/// Abort an in-progress merge.
+///
+/// Mirrors `git merge --abort` (implemented as `git reset --merge`): only the
+/// paths the merge touched — where the index differs from HEAD, including
+/// conflicted and newly-added entries — are restored to HEAD. Uncommitted
+/// changes to files the merge did not touch are preserved, exactly like git.
 #[command]
 pub async fn abort_merge(path: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
+
+    // git: "fatal: There is no merge to abort (MERGE_HEAD missing)."
+    if repo.state() != git2::RepositoryState::Merge {
+        return Err(LeviathanError::OperationFailed(
+            "There is no merge to abort (MERGE_HEAD missing).".to_string(),
+        ));
+    }
+
+    // Paths written by the merge: everything where the index (auto-merged,
+    // conflicted, or newly added by the merge) differs from HEAD.
+    let head_tree = repo.head()?.peel_to_tree()?;
+    let index = repo.index()?;
+    let diff = repo.diff_tree_to_index(Some(&head_tree), Some(&index), None)?;
+
+    let mut touched: Vec<std::path::PathBuf> = Vec::new();
+    for delta in diff.deltas() {
+        for file in [delta.old_file(), delta.new_file()] {
+            if let Some(p) = file.path() {
+                if !touched.iter().any(|t| t == p) {
+                    touched.push(p.to_path_buf());
+                }
+            }
+        }
+    }
+
+    // Restore ONLY those paths to HEAD (force is scoped to them); everything
+    // else in the working tree is left alone.
+    if !touched.is_empty() {
+        let mut checkout = git2::build::CheckoutBuilder::new();
+        checkout.force();
+        for p in &touched {
+            checkout.path(p);
+        }
+        repo.checkout_head(Some(&mut checkout))?;
+    }
+
     repo.cleanup_state()?;
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
     Ok(())
 }
 
@@ -1263,13 +1381,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_abort_merge() {
+    async fn test_abort_merge_without_merge_in_progress_errors() {
+        // `git merge --abort` fails with "fatal: There is no merge to abort
+        // (MERGE_HEAD missing)." and leaves staged work untouched. It must
+        // NOT silently hard-reset the index and working tree.
         let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add file", &[("a.txt", "base")]);
+        repo.create_file("a.txt", "staged precious work");
+        repo.stage_file("a.txt");
 
-        // Even without an active merge, abort_merge should succeed
-        // (it just cleans up state and checks out HEAD)
         let result = abort_merge(repo.path_str()).await;
-        assert!(result.is_ok());
+        assert!(
+            result.is_err(),
+            "abort_merge without a merge in progress must fail like git"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no merge to abort"),
+            "unexpected message: {msg}"
+        );
+
+        // The staged edit is untouched.
+        let content = std::fs::read_to_string(repo.path.join("a.txt")).unwrap();
+        assert_eq!(content, "staged precious work");
+        let git_repo = repo.repo();
+        let statuses = git_repo.statuses(None).unwrap();
+        let entry = statuses
+            .iter()
+            .find(|s| s.path().ok() == Some("a.txt"))
+            .expect("a.txt should still have a status entry");
+        assert!(entry.status().contains(git2::Status::INDEX_MODIFIED));
+    }
+
+    #[tokio::test]
+    async fn test_abort_merge_preserves_unrelated_uncommitted_changes() {
+        // `git merge --abort` (git reset --merge) restores only what the
+        // merge touched; uncommitted changes to unrelated files survive.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add files",
+            &[("shared.txt", "base"), ("notes.txt", "notes\n")],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+
+        // Uncommitted edit to a file the merge does not touch.
+        repo.create_file("notes.txt", "notes\nmy uncommitted notes\n");
+
+        let result = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        abort_merge(repo.path_str()).await.unwrap();
+
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert!(!git_repo.index().unwrap().has_conflicts());
+        // The merged file is restored to HEAD...
+        let shared = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert_eq!(shared, "main content");
+        // ...but the unrelated uncommitted edit is preserved, like git.
+        let notes = std::fs::read_to_string(repo.path.join("notes.txt")).unwrap();
+        assert_eq!(notes, "notes\nmy uncommitted notes\n");
     }
 
     #[tokio::test]
@@ -1476,6 +1659,132 @@ mod tests {
 
         // Should return MergeConflict error
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_merge_ff_refuses_to_overwrite_local_changes() {
+        // git aborts a fast-forward merge that would overwrite uncommitted
+        // local changes ("Your local changes to the following files would be
+        // overwritten by merge ... Aborting"), leaving the ref unmoved.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add file", &[("file.txt", "base")]);
+        let pre_merge_oid = repo.head_oid();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("file.txt", "feature")]);
+        repo.checkout_branch(&initial_branch);
+
+        // Uncommitted local edit the fast-forward checkout would overwrite.
+        repo.create_file("file.txt", "my precious local edit");
+
+        let result = merge(repo.path_str(), "feature".to_string(), None, None, None).await;
+        assert!(
+            result.is_err(),
+            "fast-forward merge over local changes must refuse like git"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("overwritten by merge"),
+            "unexpected message: {msg}"
+        );
+
+        // Local edit preserved and ref unmoved.
+        let content = std::fs::read_to_string(repo.path.join("file.txt")).unwrap();
+        assert_eq!(content, "my precious local edit");
+        assert_eq!(repo.head_oid(), pre_merge_oid);
+    }
+
+    #[tokio::test]
+    async fn test_merge_ff_refuses_to_overwrite_untracked_file() {
+        // git: "The following untracked working tree files would be
+        // overwritten by merge ... Aborting".
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Add new file", &[("new.txt", "feature version")]);
+        repo.checkout_branch(&initial_branch);
+        let pre_merge_oid = repo.head_oid();
+
+        // Precious untracked file the fast-forward would overwrite.
+        repo.create_file("new.txt", "precious untracked content");
+
+        let result = merge(repo.path_str(), "feature".to_string(), None, None, None).await;
+        assert!(
+            result.is_err(),
+            "fast-forward merge over an untracked file must refuse like git"
+        );
+
+        let content = std::fs::read_to_string(repo.path.join("new.txt")).unwrap();
+        assert_eq!(content, "precious untracked content");
+        assert_eq!(repo.head_oid(), pre_merge_oid);
+    }
+
+    #[tokio::test]
+    async fn test_merge_refuses_when_merge_already_in_progress() {
+        // git: "error: Merging is not possible because you have unmerged
+        // files." / "You have not concluded your merge (MERGE_HEAD exists)."
+        // — not a misleading "uncommitted change would be overwritten".
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+
+        let result = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        let result = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let msg = result
+            .expect_err("merging while a merge is in progress must fail")
+            .to_string();
+        assert!(
+            msg.contains("not concluded your merge"),
+            "unexpected message: {msg}"
+        );
+        // The original merge state stays intact for resolve/abort.
+        assert_eq!(repo.repo().state(), git2::RepositoryState::Merge);
+    }
+
+    #[tokio::test]
+    async fn test_merge_default_message_is_canonical() {
+        // `git merge --no-edit feature` produces the subject
+        // "Merge branch 'feature'", not "Merge 'feature' into HEAD".
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature commit", &[("feature.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+
+        merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.summary().unwrap(), Some("Merge branch 'feature'"));
     }
 
     #[tokio::test]
