@@ -123,6 +123,11 @@ class SearchIndexService {
       // Invalidate search cache since results may have changed
       searchResultCache.clear();
     } else {
+      // A genuine refresh failure (e.g. corrupt/locked repo) means the
+      // backend took the index out and never reinserted it — the path is no
+      // longer searchable. Clear readiness so the next activation rebuilds
+      // from scratch instead of leaving the repo "ready" with no index.
+      this.readyRepos.delete(repoPath);
       console.warn('[SearchIndex] Failed to refresh index:', result.error?.message);
     }
   }

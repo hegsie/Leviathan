@@ -7,6 +7,9 @@ const invokeCallArgs: Array<{ command: string; args: Record<string, unknown> }> 
 // interleave a drop() with an in-flight build
 let pendingBuildGate: Promise<void> | null = null;
 let pendingRefreshGate: Promise<void> | null = null;
+// When true, refresh_search_index rejects (simulating a genuine backend
+// failure — corrupt/locked repo mid-session)
+let refreshShouldFail = false;
 
 // Mock Tauri API before importing any modules that use it
 const mockInvoke = async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
@@ -18,6 +21,7 @@ const mockInvoke = async (command: string, args?: Record<string, unknown>): Prom
       return Promise.resolve(500);
     case 'refresh_search_index':
       if (pendingRefreshGate) await pendingRefreshGate;
+      if (refreshShouldFail) return Promise.reject(new Error('corrupt repo'));
       return Promise.resolve(502);
     case 'search_index':
       return Promise.resolve([
@@ -50,6 +54,7 @@ describe('SearchIndexService', () => {
     invokeCallArgs.length = 0;
     pendingBuildGate = null;
     pendingRefreshGate = null;
+    refreshShouldFail = false;
     searchIndexService.invalidate();
   });
 
@@ -154,6 +159,21 @@ describe('SearchIndexService', () => {
       await searchIndexService.search('/path/to/repo', { query: 'test' });
       const secondCallCount = invokeCallArgs.filter((c) => c.command === 'search_index').length;
       expect(secondCallCount).to.equal(1); // Should not increase
+    });
+  });
+
+  describe('refresh failure', () => {
+    it('clears readiness on a genuine refresh failure so the next activation rebuilds', async () => {
+      // Regression: the backend takes the index out before the incremental
+      // walk; a genuine failure leaves no index, but readiness stayed true —
+      // the repo was stuck searchable-but-empty for the session.
+      await searchIndexService.buildIndex('/repo/one');
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+
+      refreshShouldFail = true;
+      await searchIndexService.refresh('/repo/one');
+
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
     });
   });
 

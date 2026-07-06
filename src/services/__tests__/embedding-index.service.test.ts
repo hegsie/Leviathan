@@ -119,6 +119,41 @@ describe('EmbeddingIndexService', () => {
     expect((cancelCall!.args as Record<string, unknown>).path).to.equal('/repo/a');
   });
 
+  it("a cancelled build's late completion must not clear a reopen build's marker", async () => {
+    // Regression: buildingRepos was a plain Set with no epoch, so a
+    // cancelled build's finally could delete the reopen build's in-flight
+    // marker, letting a third activation start a redundant concurrent build.
+    const path = '/repo/cancel-race';
+    let releaseFirst!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const build1 = embeddingIndexService.buildIndex(path); // in flight (epoch 0)
+    await embeddingIndexService.cancelBuild(path); // tab closed → epoch 1
+
+    // Reopen: a fresh build (epoch 1) starts and stays in flight
+    let releaseSecond!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseSecond = resolve;
+    });
+    const build2 = embeddingIndexService.buildIndex(path);
+
+    // The original cancelled build now finishes and runs its finally — it
+    // must NOT clear build2's (epoch-1) marker
+    releaseFirst();
+    await build1;
+
+    // A further activation must still be deduped against build2 — no third
+    // concurrent build
+    const build3 = embeddingIndexService.buildIndex(path);
+    const buildCalls = invokedCommands.filter((c) => c.command === 'build_embedding_index');
+    expect(buildCalls.length).to.equal(2);
+
+    // Cleanup: let build2 finish so no promise dangles into other tests
+    releaseSecond();
+    await Promise.all([build2, build3]);
+  });
+
   it('allows rebuilding a repo after its previous build finished', async () => {
     await embeddingIndexService.buildIndex('/repo/a');
     await embeddingIndexService.buildIndex('/repo/a');
