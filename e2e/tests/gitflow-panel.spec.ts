@@ -284,16 +284,18 @@ test.describe('GitFlow Panel - Initialized', () => {
     await expect(featureItems).toHaveCount(2);
   });
 
-  test('each active feature should show its name and finish button', async ({ page }) => {
+  test('each active feature should show its name, finish and squash buttons', async ({ page }) => {
     const featureSection = page.locator('lv-gitflow-panel#e2e-gitflow .section').first();
     const itemNames = featureSection.locator('.item-name');
-    const finishBtns = featureSection.locator('.item-finish-btn');
+    const finishBtns = featureSection.locator('.item-finish-btn:not(.item-squash-btn)');
+    const squashBtns = featureSection.locator('.item-squash-btn');
 
     await expect(itemNames).toHaveCount(2);
     await expect(itemNames.nth(0)).toHaveText('login-page');
     await expect(itemNames.nth(1)).toHaveText('api-update');
 
     await expect(finishBtns).toHaveCount(2);
+    await expect(squashBtns).toHaveCount(2);
   });
 
   test('Hotfix section should show empty message when no active hotfixes', async ({ page }) => {
