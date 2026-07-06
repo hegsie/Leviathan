@@ -2586,6 +2586,11 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
     const result = await gitService.createStash({ path: this.activeRepository.repository.path });
     if (result.success) {
+      if (result.data === null) {
+        // Clean working tree: nothing to stash — informational, not an error.
+        showToast('No local changes to save', 'info');
+        return;
+      }
       showToast('Stash created', 'success');
       this.handleRefresh();
     } else {

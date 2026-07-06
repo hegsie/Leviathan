@@ -49,6 +49,8 @@ pub struct GpgConfig {
     pub sign_tags: bool,
     /// GPG program path
     pub gpg_program: Option<String>,
+    /// Signature format (gpg.format): "openpgp" (default), "ssh", or "x509"
+    pub gpg_format: Option<String>,
 }
 
 /// Commit signature information
@@ -128,11 +130,40 @@ fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
 
 /// Check if GPG is available
 fn is_gpg_available() -> bool {
-    create_command("gpg")
+    gpg_binary_available("gpg")
+}
+
+/// Check whether a given OpenPGP program (gpg.program, default "gpg") is runnable.
+fn gpg_binary_available(program: &str) -> bool {
+    create_command(program)
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Expand a leading "~/" to the user's home directory.
+fn expand_tilde(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return Path::new(&home).join(rest).to_string_lossy().to_string();
+        }
+    }
+    p.to_string()
+}
+
+/// Whether a configured SSH signing key is usable: either a literal public key
+/// ("ssh-..." or "key::...") or a path to an existing key file. SSH signing does
+/// not involve the gpg binary at all.
+fn ssh_key_is_usable(key: &str) -> bool {
+    let key = key.trim();
+    if key.is_empty() {
+        return false;
+    }
+    if key.starts_with("ssh-") || key.starts_with("key::") {
+        return true;
+    }
+    Path::new(&expand_tilde(key)).exists()
 }
 
 /// Get GPG version
@@ -181,6 +212,11 @@ pub async fn get_gpg_config(path: String) -> Result<GpgConfig> {
         .ok()
         .filter(|s| !s.is_empty());
 
+    // Get the configured signature format (openpgp / ssh / x509)
+    let gpg_format = run_git_command(repo_path, &["config", "--get", "gpg.format"])
+        .ok()
+        .filter(|s| !s.is_empty());
+
     Ok(GpgConfig {
         gpg_available,
         gpg_version,
@@ -188,6 +224,7 @@ pub async fn get_gpg_config(path: String) -> Result<GpgConfig> {
         sign_commits,
         sign_tags,
         gpg_program,
+        gpg_format,
     })
 }
 
@@ -198,7 +235,6 @@ pub async fn get_gpg_config(path: String) -> Result<GpgConfig> {
 #[command]
 pub async fn get_signing_status(path: String) -> Result<SigningStatus> {
     let repo_path = Path::new(&path);
-    let gpg_available = is_gpg_available();
 
     // Check if commit signing is enabled
     let gpg_sign_enabled = run_git_command(repo_path, &["config", "--get", "commit.gpgsign"])
@@ -216,22 +252,35 @@ pub async fn get_signing_status(path: String) -> Result<SigningStatus> {
         .ok()
         .filter(|s| !s.is_empty());
 
-    // Determine if signing is possible
-    // We can sign if GPG is available and either:
-    // 1. A signing key is explicitly configured, or
-    // 2. There are GPG secret keys available (GPG will use default)
-    let can_sign = if !gpg_available {
-        false
-    } else if signing_key.is_some() {
-        // A signing key is configured - verify it exists
-        let key_id = signing_key.as_ref().unwrap();
-        run_command("gpg", &["--list-secret-keys", key_id]).is_ok()
-    } else {
-        // No signing key configured - check if there are any secret keys
-        run_command("gpg", &["--list-secret-keys"])
-            .ok()
-            .map(|output| output.contains("sec"))
+    // Signature format determines HOW we sign: SSH keys never touch the gpg binary.
+    let gpg_format = run_git_command(repo_path, &["config", "--get", "gpg.format"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // Determine if signing is possible.
+    let can_sign = if gpg_format.as_deref() == Some("ssh") {
+        // SSH signing: git signs with the configured key (a literal key or a key
+        // file); gpg is irrelevant. A usable signing key is sufficient.
+        signing_key
+            .as_ref()
+            .map(|k| ssh_key_is_usable(k))
             .unwrap_or(false)
+    } else {
+        // OpenPGP (default) / x509: invoke the configured gpg program.
+        let program = gpg_program.as_deref().unwrap_or("gpg");
+        if !gpg_binary_available(program) {
+            false
+        } else if let Some(key_id) = signing_key.as_ref() {
+            // A signing key is configured - verify it exists in the keyring.
+            run_command(program, &["--list-secret-keys", key_id]).is_ok()
+        } else {
+            // No signing key configured - check if there are any secret keys.
+            run_command(program, &["--list-secret-keys"])
+                .ok()
+                .map(|output| output.contains("sec"))
+                .unwrap_or(false)
+        }
     };
 
     Ok(SigningStatus {
@@ -415,6 +464,20 @@ pub async fn set_tag_signing(path: String, enabled: bool, global: Option<bool>) 
     Ok(())
 }
 
+/// Whether a commit object carries a signature blob (gpgsig header), regardless
+/// of whether it can be verified locally. Covers both PGP and SSH signatures.
+fn commit_has_signature(repo_path: &Path, oid: &str) -> bool {
+    let repo = match git2::Repository::open(repo_path) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let oid = match git2::Oid::from_str(oid) {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    repo.extract_signature(&oid, None).is_ok()
+}
+
 /// Get signature information for a commit
 #[command]
 pub async fn get_commit_signature(path: String, commit_oid: String) -> Result<CommitSignature> {
@@ -429,12 +492,22 @@ pub async fn get_commit_signature(path: String, commit_oid: String) -> Result<Co
     match output {
         Ok(line) => {
             let parts: Vec<&str> = line.split('|').collect();
-            let status = parts.first().map(|s| s.to_string());
+            let mut status = parts.first().map(|s| s.to_string());
 
-            let signed = status
+            let mut signed = status
                 .as_ref()
                 .map(|s| !s.is_empty() && s != "N")
                 .unwrap_or(false);
+
+            // A %G? of 'N' is ambiguous: it means either "no signature" OR
+            // "signature present but unverifiable" (e.g. an SSH signature with no
+            // gpg.ssh.allowedSignersFile configured). Distinguish by checking for
+            // an actual signature blob on the object; if one exists the commit IS
+            // signed, just not locally verifiable ('E' = cannot check).
+            if !signed && commit_has_signature(repo_path, &commit_oid) {
+                signed = true;
+                status = Some("E".to_string());
+            }
 
             let valid = status
                 .as_ref()
@@ -710,6 +783,7 @@ mod tests {
             sign_commits: true,
             sign_tags: false,
             gpg_program: None,
+            gpg_format: None,
         };
 
         assert!(config.gpg_available);
@@ -760,6 +834,7 @@ mod tests {
             sign_commits: false,
             sign_tags: false,
             gpg_program: None,
+            gpg_format: None,
         };
 
         assert!(!config.gpg_available);
@@ -868,5 +943,94 @@ mod tests {
         assert!(status.signing_key.is_none());
         assert!(status.gpg_program.is_none());
         assert!(!status.can_sign);
+    }
+
+    // Finding 98: an SSH signing key configured via gpg.format=ssh must be
+    // recognized as usable, without any gpg keyring being present.
+    #[tokio::test]
+    async fn test_get_signing_status_ssh_key_file() {
+        let repo = TestRepo::with_initial_commit();
+        let key_path = repo.path.join("signing_key.pub");
+        std::fs::write(&key_path, "ssh-ed25519 AAAAC3NzTEST test@example.com\n").unwrap();
+
+        run_git_command(&repo.path, &["config", "gpg.format", "ssh"]).unwrap();
+        run_git_command(
+            &repo.path,
+            &["config", "user.signingkey", key_path.to_str().unwrap()],
+        )
+        .unwrap();
+
+        let status = get_signing_status(repo.path_str()).await.unwrap();
+        assert_eq!(status.signing_key.as_deref(), key_path.to_str());
+        assert!(
+            status.can_sign,
+            "SSH signing with an existing key file must be reported as possible"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_signing_status_ssh_literal_key() {
+        let repo = TestRepo::with_initial_commit();
+        run_git_command(&repo.path, &["config", "gpg.format", "ssh"]).unwrap();
+        run_git_command(
+            &repo.path,
+            &["config", "user.signingkey", "ssh-ed25519 AAAAC3NzLITERAL"],
+        )
+        .unwrap();
+
+        let status = get_signing_status(repo.path_str()).await.unwrap();
+        assert!(
+            status.can_sign,
+            "a literal SSH public key must be reported as usable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_gpg_config_reports_ssh_format() {
+        let repo = TestRepo::with_initial_commit();
+        run_git_command(&repo.path, &["config", "gpg.format", "ssh"]).unwrap();
+
+        let config = get_gpg_config(repo.path_str()).await.unwrap();
+        assert_eq!(config.gpg_format.as_deref(), Some("ssh"));
+    }
+
+    // Finding 101: an SSH-signed commit with no gpg.ssh.allowedSignersFile
+    // configured (%G? == 'N') must still be reported as signed.
+    #[tokio::test]
+    async fn test_get_commit_signature_ssh_signed_no_allowed_signers() {
+        let keydir = tempfile::TempDir::new().unwrap();
+        let key = keydir.path().join("id");
+        let gen = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f", key.to_str().unwrap(), "-q"])
+            .output();
+        if gen.map(|o| !o.status.success()).unwrap_or(true) {
+            // ssh-keygen unavailable in this environment; nothing to exercise.
+            return;
+        }
+
+        let repo = TestRepo::with_initial_commit();
+        let pubkey = format!("{}.pub", key.to_str().unwrap());
+        run_git_command(&repo.path, &["config", "gpg.format", "ssh"]).unwrap();
+        run_git_command(&repo.path, &["config", "user.signingkey", &pubkey]).unwrap();
+
+        repo.create_file("s.txt", "x");
+        repo.stage_file("s.txt");
+        let out = std::process::Command::new("git")
+            .current_dir(&repo.path)
+            .args(["commit", "-S", "-m", "signed"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "ssh-signed commit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let head = repo.head_oid().to_string();
+        let sig = get_commit_signature(repo.path_str(), head).await.unwrap();
+        assert!(
+            sig.signed,
+            "an SSH-signed commit must be reported as signed even with no allowedSignersFile"
+        );
     }
 }

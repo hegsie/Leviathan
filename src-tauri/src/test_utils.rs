@@ -167,6 +167,20 @@ impl TestRepo {
             .expect("Failed to create lightweight tag");
     }
 
+    /// Install an executable hook into `.git/hooks/<name>` with the given
+    /// script body. On non-unix the executable bit cannot be set, so tests
+    /// that assert hook execution are unix-only.
+    #[cfg(unix)]
+    pub fn install_hook(&self, name: &str, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let hooks_dir = self.path.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).expect("Failed to create hooks dir");
+        let hook_path = hooks_dir.join(name);
+        std::fs::write(&hook_path, script).expect("Failed to write hook");
+        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))
+            .expect("Failed to chmod hook");
+    }
+
     /// Create a fake remote branch ref (simulates `origin/branch-name`).
     /// This creates a ref at `refs/remotes/origin/<name>` pointing at `target_oid`.
     pub fn create_remote_branch(&self, name: &str, target_oid: git2::Oid) {

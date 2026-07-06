@@ -270,6 +270,11 @@ export class LvStashList extends LitElement {
       });
 
       if (result.success) {
+        if (result.data === null) {
+          // Clean working tree: nothing to stash — informational, not an error.
+          showToast('No local changes to save', 'info');
+          return;
+        }
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-created', {
           bubbles: true,

@@ -475,6 +475,14 @@ pub async fn push(
                         token,
                     )?;
                 } else {
+                    // Run pre-push like canonical git — the git2 push path
+                    // otherwise bypasses it. A non-zero exit aborts the push.
+                    crate::commands::hooks::run_pre_push_branch(
+                        &repo,
+                        &remote_for_task,
+                        &branch_name,
+                    )?;
+
                     let mut git_remote = repo
                         .find_remote(&remote_for_task)
                         .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
@@ -637,6 +645,10 @@ fn push_single_remote(
         .map_err(|e| e.to_string())
     } else {
         let repo = git2::Repository::open(Path::new(path)).map_err(|e| e.message().to_string())?;
+
+        // Run pre-push like canonical git; a non-zero exit aborts the push.
+        crate::commands::hooks::run_pre_push_branch(&repo, remote_name, branch_name)
+            .map_err(|e| e.to_string())?;
 
         let mut git_remote = repo
             .find_remote(remote_name)
@@ -983,6 +995,82 @@ pub async fn cancel_operation(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    // ---- pre-push hook parity (git2 push path) ----
+
+    #[cfg(unix)]
+    #[test]
+    fn test_push_single_remote_pre_push_hook_aborts() {
+        let repo = TestRepo::with_initial_commit();
+        let bare = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(bare.path()).unwrap();
+        repo.add_remote("origin", &bare.path().to_string_lossy());
+        let branch = repo.current_branch();
+
+        // Hook drains stdin then rejects the push.
+        repo.install_hook(
+            "pre-push",
+            "#!/bin/sh\ncat >/dev/null\necho prepush-denied 1>&2\nexit 1\n",
+        );
+
+        let result = push_single_remote(
+            &repo.path_str(),
+            "origin",
+            &branch,
+            false,
+            false,
+            false,
+            None,
+        );
+        assert!(result.is_err(), "pre-push exit 1 must abort the push");
+        assert!(result.unwrap_err().contains("prepush-denied"));
+
+        // The remote must not have received the ref.
+        let bare_repo = git2::Repository::open(bare.path()).unwrap();
+        assert!(bare_repo
+            .refname_to_id(&format!("refs/heads/{}", branch))
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_push_single_remote_pre_push_receives_ref_line() {
+        let repo = TestRepo::with_initial_commit();
+        let bare = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(bare.path()).unwrap();
+        repo.add_remote("origin", &bare.path().to_string_lossy());
+        let branch = repo.current_branch();
+        let local_oid = repo.head_oid();
+
+        let marker = repo.path.join("prepush-stdin.log");
+        repo.install_hook(
+            "pre-push",
+            &format!("#!/bin/sh\ncat > \"{}\"\n", marker.display()),
+        );
+
+        push_single_remote(
+            &repo.path_str(),
+            "origin",
+            &branch,
+            false,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+
+        let stdin = std::fs::read_to_string(&marker).expect("pre-push must run");
+        let zero = crate::commands::hooks::ZERO_OID;
+        assert_eq!(
+            stdin.trim(),
+            format!(
+                "refs/heads/{b} {oid} refs/heads/{b} {zero}",
+                b = branch,
+                oid = local_oid,
+                zero = zero
+            )
+        );
+    }
 
     #[tokio::test]
     async fn test_add_remote() {

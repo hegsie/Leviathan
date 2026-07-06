@@ -33,8 +33,8 @@ describe('git.service - Clean operations', () => {
   describe('getCleanableFiles', () => {
     it('invokes get_cleanable_files command', async () => {
       const mockEntries: CleanEntry[] = [
-        { path: 'untracked.txt', isDirectory: false, isIgnored: false, size: 1024 },
-        { path: 'temp/', isDirectory: true, isIgnored: false, size: null },
+        { path: 'untracked.txt', isDirectory: false, isIgnored: false, isNestedRepo: false, size: 1024 },
+        { path: 'temp/', isDirectory: true, isIgnored: false, isNestedRepo: false, size: null },
       ];
       mockInvoke = () => Promise.resolve(mockEntries);
 
@@ -94,9 +94,9 @@ describe('git.service - Clean operations', () => {
 
     it('returns files with correct properties', async () => {
       const mockEntries: CleanEntry[] = [
-        { path: 'file1.txt', isDirectory: false, isIgnored: false, size: 1024 },
-        { path: 'file2.log', isDirectory: false, isIgnored: true, size: 2048 },
-        { path: 'temp/', isDirectory: true, isIgnored: false, size: null },
+        { path: 'file1.txt', isDirectory: false, isIgnored: false, isNestedRepo: false, size: 1024 },
+        { path: 'file2.log', isDirectory: false, isIgnored: true, isNestedRepo: false, size: 2048 },
+        { path: 'temp/', isDirectory: true, isIgnored: false, isNestedRepo: false, size: null },
       ];
       mockInvoke = () => Promise.resolve(mockEntries);
 
@@ -107,6 +107,16 @@ describe('git.service - Clean operations', () => {
       expect(result.data?.[1].isIgnored).to.be.true;
       expect(result.data?.[2].isDirectory).to.be.true;
       expect(result.data?.[2].size).to.be.null;
+    });
+
+    it('surfaces the isNestedRepo flag for nested git repositories', async () => {
+      const mockEntries: CleanEntry[] = [
+        { path: 'vendor/', isDirectory: true, isIgnored: false, isNestedRepo: true, size: null },
+      ];
+      mockInvoke = () => Promise.resolve(mockEntries);
+
+      const result = await getCleanableFiles('/test/repo', false, true);
+      expect(result.data?.[0].isNestedRepo).to.be.true;
     });
 
     it('handles error response', async () => {
@@ -136,6 +146,23 @@ describe('git.service - Clean operations', () => {
 
       const result = await cleanFiles('/test/repo', ['a.txt', 'b.txt', 'c.txt']);
       expect(result.data).to.equal(3);
+    });
+
+    it('defaults forceNested to false', async () => {
+      mockInvoke = () => Promise.resolve(0);
+
+      await cleanFiles('/test/repo', ['file.txt']);
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.forceNested).to.be.false;
+    });
+
+    it('passes forceNested when removing nested repositories', async () => {
+      mockInvoke = () => Promise.resolve(1);
+
+      await cleanFiles('/test/repo', ['vendor/'], true);
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.forceNested).to.be.true;
+      expect(args.paths).to.deep.equal(['vendor/']);
     });
 
     it('handles single file', async () => {

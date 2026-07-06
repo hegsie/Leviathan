@@ -20,11 +20,16 @@ const mockSubmodules: Submodule[] = [
 ];
 
 let failingCommands: Set<string> = new Set();
+let lastUpdateSubmodulesArgs: Record<string, unknown> | null = null;
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
-const mockInvoke: MockInvoke = async (command: string) => {
+const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
+
+  if (command === 'update_submodules') {
+    lastUpdateSubmodulesArgs = (args as Record<string, unknown>) ?? null;
+  }
 
   if (failingCommands.has(command)) {
     throw { code: 'COMMAND_ERROR', message: 'Operation failed' };
@@ -62,6 +67,7 @@ import { uiStore } from '../../../stores/ui.store.ts';
 describe('lv-submodule-dialog', () => {
   beforeEach(() => {
     failingCommands = new Set();
+    lastUpdateSubmodulesArgs = null;
     const state = uiStore.getState();
     state.toasts.forEach(t => state.removeToast(t.id));
   });
@@ -187,6 +193,23 @@ describe('lv-submodule-dialog', () => {
     const errorToast = toasts.find(t => t.type === 'error');
     expect(errorToast).to.not.be.undefined;
     expect(errorToast!.message).to.include('Operation failed');
+  });
+
+  it('single update checks out the recorded commit (no --remote)', async () => {
+    // Canonical `git submodule update <path>` checks out the commit recorded in
+    // the superproject. The per-submodule Update button must NOT pass
+    // remote:true, which would run `submodule update --remote`, advance the
+    // submodule past the recorded commit and dirty the superproject.
+    const el = await fixture<LvSubmoduleDialog>(
+      html`<lv-submodule-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-submodule-dialog>`,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleUpdate(mockSubmodules[0]);
+
+    expect(lastUpdateSubmodulesArgs).to.not.be.null;
+    expect(lastUpdateSubmodulesArgs!.submodulePaths).to.deep.equal([mockSubmodules[0].path]);
+    expect(lastUpdateSubmodulesArgs!.remote).to.not.equal(true);
   });
 
   it('shows error toast on single update failure', async () => {

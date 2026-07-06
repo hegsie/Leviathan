@@ -384,6 +384,21 @@ pub async fn clone_repository(
             .map_err(|e| LeviathanError::Custom(format!("Clone task failed: {}", e)))?;
 
             let repo = result?;
+
+            // git runs post-checkout after a clone checks out the initial
+            // working tree (old-ref = all-zeros, flag = 1). The shallow/CLI
+            // clone path above runs it natively via `git clone`; the git2 path
+            // does not, so run it here. Non-blocking.
+            if !bare {
+                let new_head = crate::commands::hooks::head_oid_string(&repo);
+                crate::commands::hooks::run_post_checkout(
+                    &repo,
+                    crate::commands::hooks::ZERO_OID,
+                    &new_head,
+                    true,
+                );
+            }
+
             let path = Path::new(&path);
 
             let name = path

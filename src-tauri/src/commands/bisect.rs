@@ -1,7 +1,7 @@
 //! Bisect command handlers
 //! Binary search through commits to find bug-introducing changes
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
@@ -73,24 +73,89 @@ fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
     if output.status.success() {
         Ok(stdout.trim().to_string())
     } else {
-        // Some bisect commands return non-zero but aren't errors (like bisect visualize)
-        // Check if stderr contains actual error
-        if stderr.contains("error:") || stderr.contains("fatal:") {
-            Err(LeviathanError::OperationFailed(stderr.trim().to_string()))
-        } else {
+        // A few bisect outcomes exit non-zero yet are legitimate results the UI
+        // must display rather than swallow: skip-exhaustion ("We cannot bisect
+        // more!", exit 2) and, on some git versions, the first-bad-commit summary.
+        // Everything else (e.g. swapped good/bad: "Some good revs are not
+        // ancestors of the bad rev.") is a real failure and must surface as an error.
+        let combined = format!("{}\n{}", stdout, stderr);
+        if combined.contains("We cannot bisect more")
+            || combined.contains("is the first bad commit")
+        {
             Ok(stdout.trim().to_string())
+        } else {
+            let message = if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            };
+            Err(LeviathanError::OperationFailed(message.to_string()))
         }
     }
 }
 
+/// Resolve the real git directory for `repo_path`. In a linked worktree `.git`
+/// is a plain file, so per-worktree bisect state lives under
+/// `<main>/.git/worktrees/<name>` rather than `<repo>/.git`.
+fn git_dir(repo_path: &Path) -> Option<PathBuf> {
+    run_git_command(repo_path, &["rev-parse", "--absolute-git-dir"])
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Read the recorded bisect terms (term for bad/new, term for good/old) from
+/// BISECT_TERMS. Defaults to ("bad", "good") when the file is absent.
+fn read_bisect_terms(git_dir: &Path) -> (String, String) {
+    let default = || ("bad".to_string(), "good".to_string());
+    match std::fs::read_to_string(git_dir.join("BISECT_TERMS")) {
+        Ok(content) => {
+            let mut lines = content.lines();
+            let bad = lines.next().map(|s| s.trim().to_string());
+            let good = lines.next().map(|s| s.trim().to_string());
+            match (bad, good) {
+                (Some(b), Some(g)) if !b.is_empty() && !g.is_empty() => (b, g),
+                _ => default(),
+            }
+        }
+        Err(_) => default(),
+    }
+}
+
+/// git's estimate for the number of remaining bisection steps (mirrors
+/// `estimate_bisect_steps` in git's bisect.c so the UI shows the same figure).
+fn estimate_bisect_steps(all: u32) -> u32 {
+    if all < 3 {
+        return 0;
+    }
+    let n = 31 - all.leading_zeros(); // floor(log2(all))
+    let e = 1u32 << n;
+    let x = all - e;
+    if e < 3 * x {
+        n
+    } else {
+        n - 1
+    }
+}
+
+/// Strip surrounding quotes that `git bisect log` puts around start arguments.
+fn unquote(s: &str) -> String {
+    s.trim_matches('\'').trim_matches('"').to_string()
+}
+
 /// Check if a bisect session is active
 fn is_bisect_active(repo_path: &Path) -> bool {
-    repo_path.join(".git/BISECT_START").exists()
+    git_dir(repo_path)
+        .map(|d| d.join("BISECT_START").exists())
+        .unwrap_or(false)
 }
 
 /// Parse the bisect log file
 fn parse_bisect_log(repo_path: &Path) -> Vec<BisectLogEntry> {
-    let log_path = repo_path.join(".git/BISECT_LOG");
+    let log_path = match git_dir(repo_path) {
+        Some(d) => d.join("BISECT_LOG"),
+        None => return Vec::new(),
+    };
     if !log_path.exists() {
         return Vec::new();
     }
@@ -104,19 +169,41 @@ fn parse_bisect_log(repo_path: &Path) -> Vec<BisectLogEntry> {
         .lines()
         .filter(|line| !line.starts_with('#') && !line.is_empty())
         .filter_map(|line| {
-            // Format: "git bisect good|bad|skip <commit>"
+            // Format: "git bisect <term|skip> <commit>". Custom terms produce
+            // e.g. "git bisect broken <sha>"; the bookkeeping "git bisect start
+            // '--term-new=broken' ..." line must be skipped, not shown as history.
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 4 && parts[0] == "git" && parts[1] == "bisect" {
-                Some(BisectLogEntry {
-                    commit_oid: parts[3].to_string(),
-                    action: parts[2].to_string(),
-                    message: None,
-                })
+                let action = unquote(parts[2]);
+                let commit = unquote(parts[3]);
+                if action == "start" || commit.is_empty() || commit.starts_with('-') {
+                    None
+                } else {
+                    Some(BisectLogEntry {
+                        commit_oid: commit,
+                        action,
+                        message: None,
+                    })
+                }
             } else {
                 None
             }
         })
         .collect()
+}
+
+/// The status returned when no bisect session is in progress.
+fn inactive_status() -> BisectStatus {
+    BisectStatus {
+        active: false,
+        current_commit: None,
+        bad_commit: None,
+        good_commit: None,
+        remaining: None,
+        total_steps: None,
+        current_step: None,
+        log: Vec::new(),
+    }
 }
 
 /// Get the current bisect status
@@ -125,54 +212,70 @@ pub async fn get_bisect_status(path: String) -> Result<BisectStatus> {
     let repo_path = Path::new(&path);
 
     if !is_bisect_active(repo_path) {
-        return Ok(BisectStatus {
-            active: false,
-            current_commit: None,
-            bad_commit: None,
-            good_commit: None,
-            remaining: None,
-            total_steps: None,
-            current_step: None,
-            log: Vec::new(),
-        });
+        return Ok(inactive_status());
     }
 
-    // Get current HEAD
+    let gdir = match git_dir(repo_path) {
+        Some(d) => d,
+        None => return Ok(inactive_status()),
+    };
+
+    // Honor custom terms (git bisect start --term-new/--term-old, or new/old).
+    let (term_bad, term_good) = read_bisect_terms(&gdir);
+
+    // Get current HEAD (the commit currently being tested)
     let current_commit = run_git_command(repo_path, &["rev-parse", "HEAD"]).ok();
 
-    // Read bad commit
-    let bad_commit = std::fs::read_to_string(repo_path.join(".git/refs/bisect/bad"))
+    // Read the bad/new ref via git so it resolves in linked worktrees and honors
+    // packed refs (raw .git/refs/bisect/* file reads break in both cases).
+    let bad_ref = format!("refs/bisect/{}", term_bad);
+    let bad_commit = run_git_command(repo_path, &["rev-parse", "--verify", "--quiet", &bad_ref])
         .ok()
-        .map(|s| s.trim().to_string());
+        .filter(|s| !s.is_empty());
 
-    // Find first good commit (there might be multiple)
-    let good_commit = std::fs::read_dir(repo_path.join(".git/refs/bisect"))
-        .ok()
-        .and_then(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .find(|e| e.file_name().to_string_lossy().starts_with("good-"))
-                .and_then(|e| std::fs::read_to_string(e.path()).ok())
-                .map(|s| s.trim().to_string())
-        });
+    // Collect all good/old refs (there can be several: <term_good>-<sha>).
+    let good_prefix = format!("refs/bisect/{}-", term_good);
+    let good_refs: Vec<String> = run_git_command(
+        repo_path,
+        &["for-each-ref", "--format=%(refname)", "refs/bisect"],
+    )
+    .map(|out| {
+        out.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| l.starts_with(&good_prefix))
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let good_commit = good_refs
+        .first()
+        .and_then(|r| run_git_command(repo_path, &["rev-parse", r]).ok())
+        .filter(|s| !s.is_empty());
 
     // Parse the log
     let log = parse_bisect_log(repo_path);
 
-    // Estimate remaining steps
-    let remaining_info = if bad_commit.is_some() && good_commit.is_some() {
-        // Try to get the remaining count from git bisect
-        let output = run_git_command(repo_path, &["bisect", "visualize", "--oneline", "--count"]);
-        if let Ok(count_str) = output {
-            if let Ok(count) = count_str.parse::<u32>() {
-                // Approximate steps = log2(count)
-                let steps = (count as f64).log2().ceil() as u32;
-                Some((count, steps))
-            } else {
-                None
+    // Estimate remaining work exactly as git prints it:
+    //   "Bisecting: N revisions left to test after this (roughly M steps)"
+    // where N = all - reaches - 1 (all = candidate commits in the range,
+    // reaches = commits reachable from the current midpoint) and
+    // M = estimate_bisect_steps(all).
+    let remaining_info = if bad_commit.is_some() && !good_refs.is_empty() {
+        let count = |start: &str| -> Option<u32> {
+            let mut args: Vec<&str> = vec!["rev-list", "--count", start, "--not"];
+            for r in &good_refs {
+                args.push(r.as_str());
             }
-        } else {
-            None
+            run_git_command(repo_path, &args)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+        };
+        match (count(&bad_ref), count("HEAD")) {
+            (Some(all), Some(reaches)) if all > 0 => {
+                let remaining = all.saturating_sub(reaches).saturating_sub(1);
+                Some((remaining, estimate_bisect_steps(all)))
+            }
+            _ => None,
         }
     } else {
         None
@@ -585,5 +688,156 @@ Date:   Mon Jan 1 12:00:00 2024 +0000
         let output = "abc123def456 is the first bad commit\ncommit abc123def456";
         let culprit = parse_culprit_from_output(output);
         assert!(culprit.is_none());
+    }
+
+    // Finding 94: swapped good/bad must surface an error rather than silently
+    // reporting a started session the user is then stuck in.
+    #[tokio::test]
+    async fn test_bisect_start_rejects_swapped_good_bad() {
+        let repo = TestRepo::with_initial_commit();
+        for i in 2..=6 {
+            repo.create_commit(
+                &format!("Commit {}", i),
+                &[(format!("f{}.txt", i).as_str(), "x")],
+            );
+        }
+        // Mark an ancestor as "bad" and its descendant HEAD as "good" (swapped).
+        let bad_oid = run_git_command(&repo.path, &["rev-parse", "HEAD~4"]).unwrap();
+        let good_oid = repo.head_oid().to_string();
+
+        let result = bisect_start(repo.path_str(), Some(bad_oid), Some(good_oid)).await;
+        assert!(
+            result.is_err(),
+            "swapped good/bad must surface an error, not a silent success"
+        );
+
+        let _ = run_git_command(&repo.path, &["bisect", "reset"]);
+    }
+
+    // Finding 95: remaining / total_steps must be populated (they were always None
+    // because `git bisect visualize --oneline --count` never emits a bare count).
+    #[tokio::test]
+    async fn test_bisect_status_populates_progress() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+        for i in 2..=9 {
+            repo.create_commit(
+                &format!("Commit {}", i),
+                &[(format!("f{}.txt", i).as_str(), "x")],
+            );
+        }
+        let bad_oid = repo.head_oid().to_string();
+
+        bisect_start(repo.path_str(), Some(bad_oid), Some(good_oid))
+            .await
+            .unwrap();
+
+        let status = get_bisect_status(repo.path_str()).await.unwrap();
+        assert!(status.active);
+        assert!(status.remaining.is_some(), "remaining should be populated");
+        assert!(
+            status.total_steps.is_some(),
+            "total_steps should be populated"
+        );
+
+        let _ = run_git_command(&repo.path, &["bisect", "reset"]);
+    }
+
+    // Finding 96: bisect state must be detected inside a linked worktree, where
+    // `.git` is a file and per-worktree state lives under the resolved git dir.
+    #[tokio::test]
+    async fn test_bisect_status_in_worktree() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+        for i in 2..=6 {
+            repo.create_commit(
+                &format!("Commit {}", i),
+                &[(format!("f{}.txt", i).as_str(), "x")],
+            );
+        }
+        let bad_oid = repo.head_oid().to_string();
+
+        let wt_parent = tempfile::TempDir::new().unwrap();
+        let wt_path = wt_parent.path().join("wt");
+        let out = std::process::Command::new("git")
+            .current_dir(&repo.path)
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                wt_path.to_str().unwrap(),
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // In a linked worktree `.git` is a file, not a directory.
+        assert!(wt_path.join(".git").is_file());
+
+        let wt_str = wt_path.to_string_lossy().to_string();
+        bisect_start(wt_str.clone(), Some(bad_oid), Some(good_oid))
+            .await
+            .unwrap();
+
+        let status = get_bisect_status(wt_str).await.unwrap();
+        assert!(
+            status.active,
+            "bisect must be detected as active in a linked worktree"
+        );
+        assert!(status.bad_commit.is_some());
+
+        let _ = run_git_command(&wt_path, &["bisect", "reset"]);
+    }
+
+    // Finding 97: sessions started with custom terms must resolve bad/good via
+    // the recorded terms, and the bookkeeping "start" line must not pollute history.
+    #[tokio::test]
+    async fn test_bisect_status_custom_terms() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+        for i in 2..=6 {
+            repo.create_commit(
+                &format!("Commit {}", i),
+                &[(format!("f{}.txt", i).as_str(), "x")],
+            );
+        }
+        let bad_oid = repo.head_oid().to_string();
+
+        run_git_command(
+            &repo.path,
+            &[
+                "bisect",
+                "start",
+                "--term-new=broken",
+                "--term-old=working",
+                bad_oid.as_str(),
+                good_oid.as_str(),
+            ],
+        )
+        .unwrap();
+
+        let status = get_bisect_status(repo.path_str()).await.unwrap();
+        assert!(status.active);
+        assert!(
+            status.bad_commit.is_some(),
+            "bad commit should resolve via custom term refs/bisect/broken"
+        );
+        assert!(
+            status.good_commit.is_some(),
+            "good commit should resolve via custom term refs/bisect/working-*"
+        );
+        assert!(
+            status
+                .log
+                .iter()
+                .all(|e| e.action != "start" && !e.commit_oid.starts_with('-')),
+            "the start bookkeeping line must not appear as a history entry"
+        );
+
+        let _ = run_git_command(&repo.path, &["bisect", "reset"]);
     }
 }

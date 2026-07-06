@@ -696,6 +696,19 @@ export class LvGpgDialog extends LitElement {
       return;
     }
 
+    // SSH signing (gpg.format=ssh) does not use GPG or a GPG keyring at all — git
+    // signs with the configured SSH key. A configured signing key is sufficient;
+    // never push a working SSH signer into the "generate a GPG key" flow.
+    if (this.config.gpgFormat === 'ssh') {
+      if (this.config.signingKey) {
+        this.setupMode = false;
+      } else {
+        this.setupMode = true;
+        this.setupStep = 'configure';
+      }
+      return;
+    }
+
     // Check if GPG is truly available (must have both available flag AND version)
     const gpgTrulyAvailable = this.config.gpgAvailable && !!this.config.gpgVersion;
 

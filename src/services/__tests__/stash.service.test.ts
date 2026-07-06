@@ -148,6 +148,16 @@ describe('git.service - Stash operations', () => {
       expect(result.success).to.be.false;
       expect(result.error?.message).to.include('No local changes');
     });
+
+    it('returns a successful null result when the working tree is clean (no-op)', async () => {
+      // Backend returns null (not an error) when there is nothing to stash,
+      // mirroring `git stash push` ("No local changes to save", exit 0).
+      mockInvoke = () => Promise.resolve(null);
+
+      const result = await createStash({ path: '/test/repo' });
+      expect(result.success).to.be.true;
+      expect(result.data).to.be.null;
+    });
   });
 
   describe('applyStash', () => {

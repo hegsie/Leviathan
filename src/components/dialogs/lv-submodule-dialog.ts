@@ -450,9 +450,12 @@ export class LvSubmoduleDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
+    // Canonical `git submodule update <path>`: check out the commit the
+    // superproject has recorded for this submodule, leaving the superproject
+    // clean. (Passing remote:true would run `--remote`, checking out the
+    // upstream branch tip instead and dirtying the working tree.)
     const result = await gitService.updateSubmodules(this.repositoryPath, {
       submodulePaths: [submodule.path],
-      remote: true,
     });
 
     if (result.success) {

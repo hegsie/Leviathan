@@ -111,6 +111,11 @@ pub async fn checkout_file_from_commit(
         .write()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to write index: {}", e)))?;
 
+    // File checkout (retrieving a file from a commit): git runs post-checkout
+    // with flag=0 and HEAD unchanged as both old and new ref. Non-blocking.
+    let head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &head, &head, false);
+
     let content_str = if is_binary {
         String::new()
     } else {
@@ -174,6 +179,11 @@ pub async fn checkout_file_from_branch(
     index
         .write()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to write index: {}", e)))?;
+
+    // File checkout (retrieving a file from a branch tip): git runs
+    // post-checkout with flag=0 and HEAD unchanged. Non-blocking.
+    let head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &head, &head, false);
 
     let content_str = if is_binary {
         String::new()
@@ -553,5 +563,64 @@ mod tests {
         let index = git_repo.index().unwrap();
         let entry = index.get_path(Path::new("README.md"), 0);
         assert!(entry.is_some());
+    }
+
+    // ---- post-checkout (flag=0) hook parity for file checkouts ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_checkout_file_from_commit_runs_post_checkout_flag0() {
+        let repo = TestRepo::with_initial_commit();
+        let first_oid = repo.head_oid();
+        repo.create_commit("Update README", &[("README.md", "# Updated Repo")]);
+        let head = repo.head_oid();
+
+        let marker = repo.path.join("pc.log");
+        repo.install_hook(
+            "post-checkout",
+            &format!("#!/bin/sh\necho \"$1 $2 $3\" > \"{}\"\n", marker.display()),
+        );
+
+        checkout_file_from_commit(
+            repo.path_str(),
+            "README.md".to_string(),
+            first_oid.to_string(),
+        )
+        .await
+        .unwrap();
+
+        let logged = std::fs::read_to_string(&marker).expect("post-checkout must run");
+        // File checkout: HEAD unchanged on both sides, flag 0.
+        assert_eq!(logged.trim(), format!("{} {} 0", head, head));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_checkout_file_from_branch_runs_post_checkout_flag0() {
+        let repo = TestRepo::with_initial_commit();
+        let main = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("README.md", "# Feature")]);
+        repo.checkout_branch(&main);
+        let head = repo.head_oid();
+
+        let marker = repo.path.join("pc.log");
+        repo.install_hook(
+            "post-checkout",
+            &format!("#!/bin/sh\necho \"$3\" > \"{}\"\n", marker.display()),
+        );
+
+        checkout_file_from_branch(
+            repo.path_str(),
+            "README.md".to_string(),
+            "feature".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let logged = std::fs::read_to_string(&marker).expect("post-checkout must run");
+        assert_eq!(logged.trim(), "0", "file checkout flag must be 0");
+        let _ = head;
     }
 }

@@ -568,6 +568,10 @@ export class LvBranchList extends LitElement {
   @state() private hiddenBranches = new Set<string>();
   @state() private showSortMenu = false;
   @state() private operationInProgress = false;
+  // Names of local branches the backend reports as merged into HEAD (real
+  // graph_descendant_of detection, including tip==HEAD). Refreshed by
+  // loadBranches; used for the "Delete Merged Branches" flow and its badge.
+  @state() private mergedBranchNames = new Set<string>();
 
   @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
   @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
@@ -690,9 +694,10 @@ export class LvBranchList extends LitElement {
     this.error = null;
 
     try {
-      const [branchesResult] = await Promise.all([
+      const [branchesResult, , cleanupResult] = await Promise.all([
         gitService.getBranches(this.repositoryPath),
         gitService.getRemotes(this.repositoryPath),
+        gitService.getCleanupCandidates(this.repositoryPath),
       ]);
 
       if (!branchesResult.success) {
@@ -808,6 +813,15 @@ export class LvBranchList extends LitElement {
         };
       });
 
+      // Track the set of branches the backend considers merged into HEAD, so
+      // the "Delete Merged Branches" flow and its badge reflect real
+      // `git branch --merged` semantics rather than an ahead-of-upstream guess.
+      // Fetched in the Promise.all above to keep loadBranches to a single await
+      // point (extra await points perturb render timing for callers).
+      this.mergedBranchNames = cleanupResult.success && cleanupResult.data
+        ? new Set(cleanupResult.data.filter(c => c.category === 'merged').map(c => c.name))
+        : new Set();
+
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Unknown error';
     } finally {
@@ -905,20 +919,18 @@ export class LvBranchList extends LitElement {
   }
 
   /**
-   * Find all local branches that are merged into HEAD
+   * Find all local branches that are merged into HEAD.
+   *
+   * Uses the backend's real merge detection (graph_descendant_of against HEAD,
+   * including tip==HEAD equality) — the same data the cleanup dialog uses —
+   * instead of an ahead-of-UPSTREAM==0 heuristic. That heuristic diverged from
+   * `git branch --merged` in both directions: it wrongly flagged fully-pushed
+   * unmerged branches (ahead-of-upstream 0 right after a push) as merged, and it
+   * missed merged branches that have no upstream at all (aheadBehind undefined).
    */
   private getMergedBranches(): Branch[] {
     const allLocal = this.localBranchGroups.flatMap(g => g.branches);
-    // A branch is considered merged if it's:
-    // 1. Not HEAD
-    // 2. Behind 0 commits (meaning HEAD contains all its commits)
-    // Note: This is a simple heuristic. For perfect accuracy,
-    // we'd need to check if HEAD is a descendant of the branch.
-    return allLocal.filter(b =>
-      !b.isHead &&
-      b.aheadBehind &&
-      b.aheadBehind.ahead === 0
-    );
+    return allLocal.filter(b => !b.isHead && this.mergedBranchNames.has(b.name));
   }
 
   /**
@@ -1279,7 +1291,10 @@ export class LvBranchList extends LitElement {
     if (!branch) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.createBranchDialog.open(branch.shorthand);
+    // For remote branches the start point must be the full remote-tracking name
+    // (e.g. "origin/feature"); the stripped shorthand ("feature") either fails to
+    // resolve or resolves to a same-named LOCAL branch at a different commit.
+    this.createBranchDialog.open(branch.isRemote ? branch.name : branch.shorthand);
   }
 
   private async handleTrackRemoteBranch(): Promise<void> {
@@ -1626,8 +1641,11 @@ export class LvBranchList extends LitElement {
       );
       if (!confirmed) return;
 
-      // First checkout target branch (with auto-stash for uncommitted changes)
-      const checkoutResult = await gitService.checkoutWithAutoStash(this.repositoryPath, targetBranch.shorthand);
+      // First checkout target branch (with auto-stash for uncommitted changes).
+      // Use the full branch.name — for remote branches this is the full
+      // "origin/topic" reference the backend needs to create/use a local
+      // tracking branch; the stripped shorthand ("topic") cannot be resolved.
+      const checkoutResult = await gitService.checkoutWithAutoStash(this.repositoryPath, targetBranch.name);
 
       if (!checkoutResult.success || !checkoutResult.data?.success) {
         console.error('Checkout failed:', checkoutResult.data?.message || checkoutResult.error);

@@ -247,6 +247,11 @@ export class LvCleanDialog extends LitElement {
         color: var(--color-warning);
       }
 
+      .file-badge.nested-repo {
+        background: var(--color-error-bg, rgba(192, 57, 43, 0.15));
+        color: var(--color-error);
+      }
+
       .file-size {
         font-size: var(--font-size-xs);
         color: var(--color-text-muted);
@@ -354,8 +359,12 @@ export class LvCleanDialog extends LitElement {
 
       if (result.success && result.data) {
         this.entries = result.data;
-        // Select all by default
-        this.selectedPaths = new Set(this.entries.map(e => e.path));
+        // Select all by default EXCEPT untracked nested git repositories:
+        // deleting those destroys embedded history, so they require an explicit
+        // opt-in (mirroring `git clean`'s need for a second `-f`).
+        this.selectedPaths = new Set(
+          this.entries.filter(e => !e.isNestedRepo).map(e => e.path)
+        );
       } else if (!result.success) {
         showToast(result.error?.message || 'Failed to load cleanable files', 'error');
       }
@@ -419,11 +428,28 @@ export class LvCleanDialog extends LitElement {
   private async handleClean(): Promise<void> {
     if (this.selectedPaths.size === 0) return;
 
+    // If any selected entry is an untracked nested git repository, require an
+    // explicit confirmation before force-deleting it (this destroys the nested
+    // repo's history, which `git clean` guards behind a second `-f`).
+    const nestedRepos = this.entries.filter(
+      e => this.selectedPaths.has(e.path) && e.isNestedRepo
+    );
+    if (nestedRepos.length > 0) {
+      const names = nestedRepos.map(e => e.path).join(', ');
+      const confirmed = window.confirm(
+        `${nestedRepos.length === 1 ? 'A nested git repository' : 'Nested git repositories'} ` +
+          `(${names}) will be permanently deleted, including all its history. ` +
+          `This cannot be undone. Continue?`
+      );
+      if (!confirmed) return;
+    }
+    const forceNested = nestedRepos.length > 0;
+
     this.cleaning = true;
 
     try {
       const paths = Array.from(this.selectedPaths);
-      const result = await gitService.cleanFiles(this.repositoryPath, paths);
+      const result = await gitService.cleanFiles(this.repositoryPath, paths, forceNested);
 
       if (result.success) {
         this.dispatchEvent(new CustomEvent('files-cleaned', {
@@ -484,7 +510,11 @@ export class LvCleanDialog extends LitElement {
         <div class="file-info">
           <span class="file-path" title="${entry.path}">${entry.path}</span>
           ${entry.isIgnored ? html`<span class="file-badge ignored">ignored</span>` : nothing}
-          ${entry.isDirectory ? html`<span class="file-badge directory">dir</span>` : nothing}
+          ${entry.isNestedRepo
+            ? html`<span class="file-badge nested-repo">nested repo</span>`
+            : entry.isDirectory
+              ? html`<span class="file-badge directory">dir</span>`
+              : nothing}
         </div>
         ${entry.size !== null ? html`
           <span class="file-size">${this.formatSize(entry.size)}</span>

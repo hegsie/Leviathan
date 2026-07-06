@@ -123,11 +123,14 @@ pub async fn create_branch(
     let reference = branch.get();
 
     if checkout.unwrap_or(false) {
+        let old_head = crate::commands::hooks::head_oid_string(&repo);
         let obj = reference.peel(git2::ObjectType::Commit)?;
         repo.checkout_tree(&obj, None)?;
         repo.set_head(reference.name().map_err(|_| {
             LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
         })?)?;
+        let new_head = crate::commands::hooks::head_oid_string(&repo);
+        crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
     }
 
     Ok(Branch {
@@ -266,6 +269,10 @@ pub async fn rename_branch(
 pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
+    // Capture HEAD before the switch so the post-checkout hook receives the
+    // correct <old-ref> argument (githooks(5)).
+    let old_head = crate::commands::hooks::head_oid_string(&repo);
+
     let mut checkout_opts = git2::build::CheckoutBuilder::new();
     if force.unwrap_or(false) {
         checkout_opts.force();
@@ -330,6 +337,10 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
         repo.checkout_tree(&obj, Some(&mut checkout_opts))?;
         repo.set_head_detached(commit.id())?;
     }
+
+    // Branch/commit switch complete — run post-checkout (flag=1), non-blocking.
+    let new_head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
 
     Ok(())
 }
@@ -574,6 +585,9 @@ pub async fn checkout_with_autostash(
 ) -> Result<CheckoutWithStashResult> {
     let mut repo = git2::Repository::open(Path::new(&path))?;
 
+    // Capture HEAD before the switch for the post-checkout hook's <old-ref>.
+    let old_head = crate::commands::hooks::head_oid_string(&repo);
+
     // Check if there are uncommitted changes
     let has_changes = {
         let statuses = repo.statuses(None)?;
@@ -764,6 +778,11 @@ pub async fn checkout_with_autostash(
     } else {
         repo.set_head_detached(target_oid)?;
     }
+
+    // HEAD/working tree switched — run post-checkout (flag=1), non-blocking.
+    // Runs before the stash re-apply so it fires even if re-applying conflicts.
+    let new_head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
 
     // If we stashed, try to re-apply the stash.
     if stashed {
@@ -1886,5 +1905,98 @@ mod tests {
             1,
             "stash must be preserved so the user's changes aren't lost"
         );
+    }
+
+    // ---- post-checkout hook parity ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_checkout_runs_post_checkout_hook() {
+        let repo = TestRepo::with_initial_commit();
+        let main = repo.current_branch();
+        let old_head = repo.head_oid();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature", &[("f.txt", "f")]);
+        let feature_head = repo.head_oid();
+        repo.checkout_branch(&main);
+
+        let marker = repo.path.join("post-checkout.log");
+        repo.install_hook(
+            "post-checkout",
+            &format!("#!/bin/sh\necho \"$1 $2 $3\" > \"{}\"\n", marker.display()),
+        );
+
+        // Switch to feature via the command under test.
+        checkout(repo.path_str(), "feature".to_string(), None)
+            .await
+            .unwrap();
+
+        let logged = std::fs::read_to_string(&marker).expect("post-checkout hook must run");
+        let logged = logged.trim();
+        assert_eq!(
+            logged,
+            format!("{} {} 1", old_head, feature_head),
+            "post-checkout must receive <old> <new> 1"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_checkout_post_checkout_hook_is_nonblocking() {
+        let repo = TestRepo::with_initial_commit();
+        let main = repo.current_branch();
+        repo.create_branch("feature");
+        repo.install_hook("post-checkout", "#!/bin/sh\nexit 1\n");
+
+        // A failing post-checkout hook must NOT fail the checkout.
+        let result = checkout(repo.path_str(), "feature".to_string(), None).await;
+        assert!(result.is_ok(), "post-checkout is non-blocking");
+        assert_eq!(repo.current_branch(), "feature");
+        let _ = main;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_checkout_with_autostash_runs_post_checkout_hook() {
+        let repo = TestRepo::with_initial_commit();
+        let main = repo.current_branch();
+        let old_head = repo.head_oid();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature", &[("f.txt", "f")]);
+        let feature_head = repo.head_oid();
+        repo.checkout_branch(&main);
+
+        let marker = repo.path.join("post-checkout.log");
+        repo.install_hook(
+            "post-checkout",
+            &format!("#!/bin/sh\necho \"$1 $2 $3\" > \"{}\"\n", marker.display()),
+        );
+
+        checkout_with_autostash(repo.path_str(), "feature".to_string())
+            .await
+            .unwrap();
+
+        let logged = std::fs::read_to_string(&marker).expect("post-checkout hook must run");
+        assert_eq!(logged.trim(), format!("{} {} 1", old_head, feature_head));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_create_branch_checkout_runs_post_checkout_hook() {
+        let repo = TestRepo::with_initial_commit();
+        let marker = repo.path.join("post-checkout.log");
+        repo.install_hook(
+            "post-checkout",
+            &format!("#!/bin/sh\necho \"$3\" > \"{}\"\n", marker.display()),
+        );
+
+        create_branch(repo.path_str(), "brand-new".to_string(), None, Some(true))
+            .await
+            .unwrap();
+
+        let logged = std::fs::read_to_string(&marker).expect("post-checkout hook must run");
+        assert_eq!(logged.trim(), "1", "branch-switch flag must be 1");
     }
 }

@@ -88,15 +88,16 @@ describe('git.service - Advanced search operations', () => {
       expect(sentFilter.maxParents).to.equal(1);
       expect(sentFilter.noMerges).to.be.true;
       expect(sentFilter.firstParent).to.be.true;
-      expect(args.maxCount).to.equal(50);
+      expect(args.maxResults).to.equal(50);
     });
 
-    it('passes maxCount parameter', async () => {
+    it('passes the result limit as maxResults', async () => {
       mockInvoke = () => Promise.resolve([]);
 
       await filterCommits('/test/repo', {}, 200);
       const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.maxCount).to.equal(200);
+      expect(args.maxResults).to.equal(200);
+      expect(args.maxCount).to.be.undefined;
     });
 
     it('returns empty array when no matches', async () => {
@@ -167,12 +168,13 @@ describe('git.service - Advanced search operations', () => {
       expect(result.data?.length).to.equal(1);
     });
 
-    it('passes maxCount parameter', async () => {
+    it('passes the result limit as maxResults', async () => {
       mockInvoke = () => Promise.resolve([]);
 
       await getBranchDiffCommits('/test/repo', 'main', 'feature', 100);
       const args = lastInvokedArgs as Record<string, unknown>;
-      expect(args.maxCount).to.equal(100);
+      expect(args.maxResults).to.equal(100);
+      expect(args.maxCount).to.be.undefined;
     });
 
     it('returns empty array when branches are identical', async () => {

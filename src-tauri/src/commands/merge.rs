@@ -112,6 +112,10 @@ pub async fn merge(
 
         let mut reference = repo.find_reference(refname)?;
         reference.set_target(target_oid, "Fast-forward merge")?;
+
+        // git runs post-merge after a fast-forward merge too (flag 0 = not a
+        // squash merge). Non-blocking.
+        crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
     } else {
         // Normal or squash merge. Once repo.merge() succeeds the index/working
         // tree is in MERGING state; any subsequent failure must reset that
@@ -144,6 +148,10 @@ pub async fn merge(
                     &[&head],
                 )?;
             } else {
+                // git runs pre-merge-commit before creating an automatic merge
+                // commit; a non-zero exit aborts the merge (blocking).
+                crate::commands::hooks::run_hook_blocking(&repo, "pre-merge-commit", &[], None)?;
+
                 let source_commit = repo.find_commit(annotated_commit.id())?;
                 repo.commit(
                     Some("HEAD"),
@@ -153,6 +161,9 @@ pub async fn merge(
                     &tree,
                     &[&head, &source_commit],
                 )?;
+
+                // post-merge after the merge commit (flag 0 = not a squash).
+                crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
             }
             Ok(())
         })();
@@ -309,10 +320,17 @@ pub async fn commit_merge(
         })
         .unwrap_or_else(|| "Merge".to_string());
 
-    // Route signed commits through the git CLI (git2 cannot sign).
+    // Route signed commits through the git CLI (git2 cannot sign) — which runs
+    // hooks natively.
     if crate::commands::commit::should_sign_commit(&path, None)? {
         return commit_merge_signed(&path, &commit_message, is_squash).await;
     }
+
+    // Concluding a (conflicted) merge via `git commit` runs pre-commit and
+    // commit-msg; the git2 path otherwise bypasses them. pre-commit can veto;
+    // commit-msg can veto or rewrite the message.
+    crate::commands::hooks::run_hook_blocking(&repo, "pre-commit", &[], None)?;
+    let commit_message = crate::commands::hooks::run_commit_msg_hook(&repo, &commit_message)?;
 
     let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
@@ -347,6 +365,10 @@ pub async fn commit_merge(
         )?;
     }
     repo.cleanup_state()?;
+
+    // post-commit runs after the merge commit is recorded; never blocks.
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
+
     Ok(())
 }
 
@@ -2412,5 +2434,99 @@ theirs
 
         let result = get_conflict_details(repo.path_str(), "nonexistent.txt".to_string()).await;
         assert!(result.is_err());
+    }
+
+    // ---- merge hook parity ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_merge_pre_merge_commit_hook_aborts() {
+        let repo = TestRepo::with_initial_commit();
+        let initial = repo.current_branch();
+        let head_before = repo.head_oid();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature", &[("feature.txt", "content")]);
+        repo.checkout_branch(&initial);
+
+        repo.install_hook("pre-merge-commit", "#!/bin/sh\necho denied 1>&2\nexit 1\n");
+
+        // no_ff forces an actual merge commit, so pre-merge-commit must run.
+        let result = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "pre-merge-commit exit 1 must abort the merge"
+        );
+        assert!(result.unwrap_err().to_string().contains("denied"));
+
+        // Merge must be aborted: state clean and HEAD unmoved.
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert_eq!(repo.head_oid(), head_before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_merge_runs_post_merge_hook() {
+        let repo = TestRepo::with_initial_commit();
+        let initial = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature", &[("feature.txt", "content")]);
+        repo.checkout_branch(&initial);
+
+        let marker = repo.path.join("post-merge.log");
+        repo.install_hook(
+            "post-merge",
+            &format!("#!/bin/sh\necho \"$1\" > \"{}\"\n", marker.display()),
+        );
+
+        merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let logged = std::fs::read_to_string(&marker).expect("post-merge must run");
+        assert_eq!(logged.trim(), "0", "post-merge flag must be 0 (not squash)");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_fast_forward_merge_runs_post_merge_hook() {
+        let repo = TestRepo::with_initial_commit();
+        let initial = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature", &[("feature.txt", "content")]);
+        repo.checkout_branch(&initial);
+
+        let marker = repo.path.join("post-merge.log");
+        repo.install_hook(
+            "post-merge",
+            &format!("#!/bin/sh\ntouch \"{}\"\n", marker.display()),
+        );
+
+        // Plain fast-forward merge.
+        merge(repo.path_str(), "feature".to_string(), None, None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            marker.exists(),
+            "post-merge must run after fast-forward too"
+        );
     }
 }

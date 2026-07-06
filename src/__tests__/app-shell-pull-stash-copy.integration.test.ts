@@ -223,6 +223,14 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
 
   describe('handleCreateStash', () => {
     it('shows a success toast and refreshes on success', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'create_stash') {
+          return { index: 0, message: 'WIP', oid: 'abc123' };
+        }
+        if (command === 'open_repository') return mockOpenRepository;
+        return null;
+      };
+
       const el = createAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handleCreateStash();
@@ -231,6 +239,27 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
       expect(findCommands('open_repository').length).to.be.greaterThan(0);
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'success' && /Stash created/i.test(t.message))).to.be.true;
+    });
+
+    it('shows an informational (not error) toast and does not refresh when the tree is clean', async () => {
+      // Backend returns null when there is nothing to stash — a benign no-op,
+      // mirroring `git stash push` ("No local changes to save", exit 0).
+      mockInvoke = async (command: string) => {
+        if (command === 'create_stash') return null;
+        if (command === 'open_repository') return mockOpenRepository;
+        return null;
+      };
+
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleCreateStash();
+
+      expect(findCommands('create_stash').length).to.equal(1);
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error')).to.be.false;
+      expect(toasts.some((t) => t.type === 'info' && /No local changes to save/i.test(t.message))).to.be.true;
+      // Clean tree: no state change, so no refresh.
+      expect(findCommands('open_repository').length).to.equal(0);
     });
 
     it('shows an error toast and does not refresh on failure', async () => {

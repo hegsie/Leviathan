@@ -49,7 +49,9 @@ function setupDefaultMocks(stashes = mockStashes): void {
       case 'get_stashes':
         return stashes;
       case 'create_stash':
-        return null;
+        // A real stash is created (non-null) when the tree has changes; null is
+        // reserved for the clean-tree no-op case covered by its own test.
+        return { index: 0, message: 'WIP on main: abc123 first commit', oid: 'abc123' };
       case 'apply_stash':
         return null;
       case 'pop_stash':
@@ -201,6 +203,28 @@ describe('lv-stash-list', () => {
       const createCalls = findCommands('create_stash');
       expect(createCalls.length).to.equal(1);
       expect(stashCreatedFired).to.be.true;
+    });
+
+    it('create stash on a clean tree is a no-op: no stash-created event', async () => {
+      // Backend returns null when there is nothing to stash (clean tree). This
+      // is a benign no-op — no event, no error.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_stashes') return mockStashes;
+        if (command === 'create_stash') return null;
+        return null;
+      };
+      const el = await renderStashList();
+      clearHistory();
+
+      let stashCreatedFired = false;
+      el.addEventListener('stash-created', () => { stashCreatedFired = true; });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleCreateStash();
+      await el.updateComplete;
+
+      expect(findCommands('create_stash').length).to.equal(1);
+      expect(stashCreatedFired).to.be.false;
     });
 
     it('click Apply calls apply_stash with correct index', async () => {
