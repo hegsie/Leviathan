@@ -582,8 +582,13 @@ export class LvConflictResolutionDialog extends LitElement {
     // backend finish is idempotent and can be retried from the panel.
     if (this.operationType === 'merge' && this.mergeCommitted) {
       this.showAbortConfirm = false;
+      // A squash finish must NOT be re-run from the panel (its merge is not
+      // idempotent once the squash commit landed) — only the branch deletion
+      // remains; other finishes are idempotently re-runnable.
       showToast(
-        'The merge is already committed and cannot be rolled back — retry the finish from the Git Flow panel',
+        this.gitflowFinish && this.squashMerge
+          ? 'The squash commit is already on develop and cannot be rolled back — delete the feature branch from the branch list to finish'
+          : 'The merge is already committed and cannot be rolled back — retry the finish from the Git Flow panel',
         'warning'
       );
       this.dispatchEvent(
