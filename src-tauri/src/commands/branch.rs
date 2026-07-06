@@ -1710,7 +1710,7 @@ mod tests {
         let statuses = git_repo.statuses(None).unwrap();
         let readme = statuses
             .iter()
-            .find(|s| s.path() == Some("README.md"))
+            .find(|s| s.path().ok() == Some("README.md"))
             .expect("README.md should still have changes after checkout");
         assert!(
             readme.status().contains(git2::Status::INDEX_MODIFIED),
