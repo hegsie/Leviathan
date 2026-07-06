@@ -913,9 +913,12 @@ export class LvGraphCanvas extends LitElement {
         this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
       }
     } finally {
-      this.isLoading = false;
-      // Only the newest load owns the in-flight marker
+      // Only the NEWEST load owns the shared state. A superseded load (the
+      // user switched tabs again before this one resolved) must not clear
+      // isLoading — that would drop the spinner while the newest load is
+      // still running, flashing a stale/empty graph under the new tab.
       if (this.loadVersion === currentVersion) {
+        this.isLoading = false;
         this.inFlightLoadPath = null;
         if (this.reloadQueued) {
           // A refresh was requested mid-load. reloadQueued is only ever set

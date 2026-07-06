@@ -799,6 +799,47 @@ describe('lv-graph-canvas', () => {
       expect(findCommands('get_commit_history').length).to.equal(2);
     });
 
+    it('a superseded load must not clear isLoading while the newest load is still running', async () => {
+      // Regression: loadCommits' finally cleared isLoading unconditionally,
+      // so double-switching between two uncached repos let the first
+      // (superseded) load drop the spinner while the second was still in
+      // flight — flashing a stale graph with no loading indicator.
+      const el = await renderCanvas();
+
+      // Gate get_commit_history so we control when each load resolves
+      const gates: Array<() => void> = [];
+      mockInvoke = async (command: string) => {
+        if (command === 'get_commit_history') {
+          await new Promise<void>((resolve) => gates.push(resolve));
+          return defaultCommits;
+        }
+        if (command === 'get_refs_by_commit') return defaultRefs;
+        return null;
+      };
+
+      // Switch to A (load v+1, gated), then B (load v+2, gated) before A resolves
+      el.repositoryPath = '/repo/a';
+      await el.updateComplete;
+      el.repositoryPath = '/repo/b';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.true;
+
+      // Resolve A's (superseded) load first — it must NOT clear isLoading
+      gates[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading, 'superseded load must not drop the spinner').to.be.true;
+
+      // Resolve B's (newest) load — now the spinner clears
+      gates[1]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.false;
+    });
+
     it('a failed background revalidation does not paint an error over the cached graph', async () => {
       const el = await renderCanvas();
       await switchRepo(el, '/other/repo');
