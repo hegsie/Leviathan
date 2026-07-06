@@ -699,6 +699,15 @@ export class AppShell extends LitElement {
     this.handleRefresh();
   };
 
+  // Cycle the active repository tab by offset (wraps around both ends)
+  private cycleRepositoryTab(offset: number): void {
+    const state = repositoryStore.getState();
+    const count = state.openRepositories.length;
+    if (count < 2) return;
+    const next = (state.activeIndex + offset + count) % count;
+    state.setActiveIndex(next);
+  }
+
   // Route file-watcher events. Events for the active repo trigger a
   // (debounced) refresh; events for background repos only mark them stale so
   // they refresh when their tab becomes active again.
@@ -946,6 +955,9 @@ export class AppShell extends LitElement {
       push: () => this.handlePush(),
       createStash: () => this.handleCreateStash(),
       closeDiff: () => this.handleCloseOverlay(),
+      nextTab: () => this.cycleRepositoryTab(1),
+      previousTab: () => this.cycleRepositoryTab(-1),
+      selectTab: (index) => repositoryStore.getState().setActiveIndex(index),
     });
 
     // Subscribe to progress updates

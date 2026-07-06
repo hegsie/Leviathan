@@ -172,6 +172,39 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  describe('tab cycling shortcuts', () => {
+    it('cycles forward and wraps at the end', () => {
+      const el = createAppShell();
+      repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+      repositoryStore.getState().addRepository(mockRepo('/repo/two', 'two'));
+      repositoryStore.getState().addRepository(mockRepo('/repo/three', 'three'));
+      // active is 2 (last added)
+
+      (el as any).cycleRepositoryTab(1);
+      expect(repositoryStore.getState().activeIndex).to.equal(0);
+      (el as any).cycleRepositoryTab(1);
+      expect(repositoryStore.getState().activeIndex).to.equal(1);
+    });
+
+    it('cycles backward and wraps at the start', () => {
+      const el = createAppShell();
+      repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+      repositoryStore.getState().addRepository(mockRepo('/repo/two', 'two'));
+      repositoryStore.getState().setActiveIndex(0);
+
+      (el as any).cycleRepositoryTab(-1);
+      expect(repositoryStore.getState().activeIndex).to.equal(1);
+    });
+
+    it('is a no-op with fewer than two repos', () => {
+      const el = createAppShell();
+      repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+
+      (el as any).cycleRepositoryTab(1);
+      expect(repositoryStore.getState().activeIndex).to.equal(0);
+    });
+  });
+
   describe('background repo staleness', () => {
     it('marks a background repo stale on watcher events instead of refreshing it', () => {
       const el = createAppShell();
