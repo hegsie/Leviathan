@@ -79,6 +79,7 @@ interface GitflowFinishDetail {
   branchName: string;
   deleteBranch: boolean;
   tagMessage?: string;
+  priorFinishCommitLanded?: boolean;
 }
 
 interface ConflictDetail {
@@ -201,6 +202,11 @@ describe('lv-gitflow-panel squash finish conflict (Fix 6)', () => {
       if (command === 'gitflow_finish_release') {
         return Promise.reject({ code: 'MERGE_CONFLICT', message: 'conflict' });
       }
+      if (command === 'get_branches') {
+        // HEAD on develop → the backend already merged+tagged master before
+        // conflicting on the develop merge.
+        return Promise.resolve([{ name: 'develop', isHead: true, isRemote: false }]);
+      }
       return defaultMockInvoke(command);
     };
 
@@ -217,6 +223,37 @@ describe('lv-gitflow-panel squash finish conflict (Fix 6)', () => {
     expect(detail!.gitflowFinish!.branchName).to.equal('release/1.0.0');
     expect(detail!.gitflowFinish!.deleteBranch).to.be.true;
     expect(detail!.gitflowFinish!.tagMessage).to.equal('Release 1.0.0');
+    // Develop-stage conflict: master merge + tag already landed.
+    expect(detail!.gitflowFinish!.priorFinishCommitLanded).to.be.true;
+
+    cleanupMockPrompt();
+  });
+
+  it('marks priorFinishCommitLanded false when the master merge itself conflicts', async () => {
+    const el = await createComponent();
+    setupMockPrompt('Release 2.0.0');
+
+    let detail: ConflictDetail | null = null;
+    el.addEventListener('open-conflict-dialog', (e) => {
+      detail = (e as CustomEvent<ConflictDetail>).detail;
+    });
+
+    mockInvoke = (command: string) => {
+      if (command === 'gitflow_finish_release') {
+        return Promise.reject({ code: 'MERGE_CONFLICT', message: 'conflict' });
+      }
+      if (command === 'get_branches') {
+        // HEAD still on master → the master merge itself conflicted; no tag yet.
+        return Promise.resolve([{ name: 'main', isHead: true, isRemote: false }]);
+      }
+      return defaultMockInvoke(command);
+    };
+
+    await (el as unknown as {
+      handleFinishRelease: (item: { name: string; branch: string }) => Promise<void>;
+    }).handleFinishRelease({ name: '2.0.0', branch: 'release/2.0.0' });
+
+    expect(detail!.gitflowFinish!.priorFinishCommitLanded).to.not.be.true;
 
     cleanupMockPrompt();
   });

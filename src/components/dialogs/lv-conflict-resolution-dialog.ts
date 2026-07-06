@@ -27,6 +27,13 @@ export interface GitflowFinishContext {
   deleteBranch: boolean;
   /** Tag message for release/hotfix finish re-invocation. */
   tagMessage?: string;
+  /**
+   * True when a commit from THIS finish already landed before the conflict —
+   * i.e. a release/hotfix whose master merge + version tag committed and then
+   * conflicted on the develop merge. An Abort then only rolls back the develop
+   * merge, so the dialog must say the master merge and tag survive.
+   */
+  priorFinishCommitLanded?: boolean;
 }
 
 @customElement('lv-conflict-resolution-dialog')
@@ -394,7 +401,11 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting = false;
       this.showAbortConfirm = false;
       this.mergeCommitted = false;
-      this.priorFinishCommitLanded = false;
+      // Seed from the finish context: a first-run release/hotfix whose master
+      // merge + tag already landed before the develop conflict opens here with
+      // this set, so Abort is honest about what survives even on this path
+      // (not just the dialog-internal re-run).
+      this.priorFinishCommitLanded = this.gitflowFinish?.priorFinishCommitLanded ?? false;
       this.loadConflicts();
     }
   }
@@ -564,7 +575,36 @@ export class LvConflictResolutionDialog extends LitElement {
 
   private handleAbort(): void {
     if (this.aborting) return;
+    // Once the merge commit has landed (only the follow-up git-flow finish
+    // step failed), there is nothing to abort — exit directly WITHOUT the
+    // "all resolved changes will be lost" confirm, which would be false here
+    // (nothing is lost, nothing is rolled back). This is the user's safe exit
+    // from a persistently-failing finish, not a destructive action.
+    if (this.operationType === 'merge' && this.mergeCommitted) {
+      this.exitAfterCommittedMerge();
+      return;
+    }
     this.showAbortConfirm = true;
+  }
+
+  /**
+   * Leave the dialog when the merge is already committed and only the git-flow
+   * finish step remains (and keeps failing). Nothing is rolled back.
+   */
+  private exitAfterCommittedMerge(): void {
+    // A squash finish must NOT be re-run from the panel (its merge is not
+    // idempotent once the squash commit landed) — only the branch deletion
+    // remains; other finishes are idempotently re-runnable.
+    showToast(
+      this.gitflowFinish && this.squashMerge
+        ? 'The squash commit is already on develop and cannot be rolled back — delete the feature branch from the branch list to finish'
+        : 'The merge is already committed and cannot be rolled back — retry the finish from the Git Flow panel',
+      'warning'
+    );
+    this.dispatchEvent(
+      new CustomEvent('operation-aborted', { bubbles: true, composed: true })
+    );
+    this.close();
   }
 
   private handleAbortCancel(): void {
@@ -574,27 +614,12 @@ export class LvConflictResolutionDialog extends LitElement {
   private async handleAbortConfirm(): Promise<void> {
     if (!this.repositoryPath || this.aborting) return;
 
-    // Once the merge commit has landed (only the follow-up git-flow finish
-    // step failed), there is nothing left to abort — abort_merge would no-op
-    // on the clean repo while telling the user their merge was rolled back.
-    // Close the dialog rather than trapping the user (Complete may fail
-    // persistently, e.g. the branch is checked out in a worktree); the
-    // backend finish is idempotent and can be retried from the panel.
+    // Safety net: if the merge was committed after the confirm opened, exit
+    // without a no-op abort_merge. handleAbort normally routes here before the
+    // confirm ever renders.
     if (this.operationType === 'merge' && this.mergeCommitted) {
       this.showAbortConfirm = false;
-      // A squash finish must NOT be re-run from the panel (its merge is not
-      // idempotent once the squash commit landed) — only the branch deletion
-      // remains; other finishes are idempotently re-runnable.
-      showToast(
-        this.gitflowFinish && this.squashMerge
-          ? 'The squash commit is already on develop and cannot be rolled back — delete the feature branch from the branch list to finish'
-          : 'The merge is already committed and cannot be rolled back — retry the finish from the Git Flow panel',
-        'warning'
-      );
-      this.dispatchEvent(
-        new CustomEvent('operation-aborted', { bubbles: true, composed: true })
-      );
-      this.close();
+      this.exitAfterCommittedMerge();
       return;
     }
 

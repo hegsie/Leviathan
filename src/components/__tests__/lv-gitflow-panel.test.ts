@@ -763,15 +763,14 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      expect(conflictDetail).to.deep.equal({
-        operationType: 'merge',
-        squash: false,
-        gitflowFinish: {
-          kind: 'feature',
-          name: 'login',
-          branchName: 'feature/login',
-          deleteBranch: true,
-        },
+      const fd = conflictDetail as { operationType: string; squash: boolean; gitflowFinish: Record<string, unknown> };
+      expect(fd.operationType).to.equal('merge');
+      expect(fd.squash).to.be.false;
+      expect(fd.gitflowFinish).to.include({
+        kind: 'feature',
+        name: 'login',
+        branchName: 'feature/login',
+        deleteBranch: true,
       });
       // No inline error banner when routing to the conflict dialog.
       expect(el.shadowRoot!.querySelector('.error-banner')).to.be.null;
@@ -805,16 +804,15 @@ describe('lv-gitflow-panel', () => {
         await new Promise((r) => setTimeout(r, 150));
         await el.updateComplete;
 
-        expect(conflictDetail).to.deep.equal({
-          operationType: 'merge',
-          squash: false,
-          gitflowFinish: {
-            kind: 'hotfix',
-            name: '1.0.1',
-            branchName: 'hotfix/1.0.1',
-            deleteBranch: true,
-            tagMessage: 'Hotfix 1.0.1',
-          },
+        const fd = conflictDetail as { operationType: string; squash: boolean; gitflowFinish: Record<string, unknown> };
+        expect(fd.operationType).to.equal('merge');
+        expect(fd.squash).to.be.false;
+        expect(fd.gitflowFinish).to.include({
+          kind: 'hotfix',
+          name: '1.0.1',
+          branchName: 'hotfix/1.0.1',
+          deleteBranch: true,
+          tagMessage: 'Hotfix 1.0.1',
         });
       } finally {
         cleanupMockPrompt();

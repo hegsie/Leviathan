@@ -506,6 +506,9 @@ export class LvGitflowPanel extends LitElement {
           branchName: item.branch,
           deleteBranch: true,
           tagMessage: tagMessage || undefined,
+          // The backend merges+tags master BEFORE the develop merge; a conflict
+          // while HEAD is on develop means that master merge + tag already landed.
+          priorFinishCommitLanded: await this.isOnDevelopBranch(),
         });
       } else {
         this.error = result.error?.message || 'Failed to finish release';
@@ -574,6 +577,9 @@ export class LvGitflowPanel extends LitElement {
           branchName: item.branch,
           deleteBranch: true,
           tagMessage: tagMessage || undefined,
+          // The backend merges+tags master BEFORE the develop merge; a conflict
+          // while HEAD is on develop means that master merge + tag already landed.
+          priorFinishCommitLanded: await this.isOnDevelopBranch(),
         });
       } else {
         this.error = result.error?.message || 'Failed to finish hotfix';
@@ -596,6 +602,18 @@ export class LvGitflowPanel extends LitElement {
    * the dialog COMPLETE the finish (tag / merge develop / delete branch) after the
    * conflict is resolved, instead of leaving it half-done.
    */
+  /**
+   * True when HEAD is on the develop branch — after a release/hotfix finish
+   * conflict this means the backend already merged into master and created the
+   * version tag (both happen before the develop merge), so those survive an abort.
+   */
+  private async isOnDevelopBranch(): Promise<boolean> {
+    const develop = this.config?.developBranch ?? 'develop';
+    const result = await gitService.getBranches(this.repositoryPath);
+    if (!result.success || !result.data) return false;
+    return result.data.some((b) => b.isHead && b.name === develop);
+  }
+
   private openConflictDialog(squash: boolean, gitflowFinish: GitflowFinishContext): void {
     this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
       bubbles: true,

@@ -1139,11 +1139,25 @@ export class LvBranchList extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.deleteBranch(
+      let result = await gitService.deleteBranch(
         this.repositoryPath,
         branch.name,
         false
       );
+
+      // A not-fully-merged branch (e.g. one whose changes were squash-merged,
+      // so its tip is not an ancestor of HEAD) can't be deleted without force.
+      // Offer force instead of dead-ending — there's no other force path in
+      // this menu, and the squash-finish flow directs users here.
+      if (!result.success && /not fully merged/i.test(result.error?.message ?? '')) {
+        const forceConfirmed = await showConfirm(
+          'Branch Not Fully Merged',
+          `"${branch.shorthand}" is not fully merged (its changes may have been squash-merged). Force delete it anyway?\n\nThis action cannot be undone.`,
+          'warning'
+        );
+        if (!forceConfirmed) return;
+        result = await gitService.deleteBranch(this.repositoryPath, branch.name, true);
+      }
 
       if (result.success) {
         await this.loadBranches();
