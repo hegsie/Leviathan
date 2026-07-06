@@ -48,12 +48,18 @@ pub async fn get_stashes(path: String) -> Result<Vec<Stash>> {
 }
 
 /// Create a new stash
+///
+/// Returns `Ok(None)` when the working tree is clean and there is nothing to
+/// stash. This mirrors `git stash push`, which prints "No local changes to
+/// save" and exits 0 — a benign informational no-op, not a failure. libgit2
+/// reports nothing-to-stash as `ErrorCode::NotFound`; we translate that into a
+/// `None` result so the UI can show an informational toast instead of an error.
 #[command]
 pub async fn create_stash(
     path: String,
     message: Option<String>,
     include_untracked: Option<bool>,
-) -> Result<Stash> {
+) -> Result<Option<Stash>> {
     let mut repo = git2::Repository::open(Path::new(&path))?;
     let signature = repo.signature()?;
 
@@ -62,13 +68,17 @@ pub async fn create_stash(
         flags |= git2::StashFlags::INCLUDE_UNTRACKED;
     }
 
-    let oid = repo.stash_save(&signature, message.as_deref().unwrap_or("WIP"), Some(flags))?;
+    let oid = match repo.stash_save(&signature, message.as_deref().unwrap_or("WIP"), Some(flags)) {
+        Ok(oid) => oid,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
 
-    Ok(Stash {
+    Ok(Some(Stash {
         index: 0,
         message: message.unwrap_or_else(|| "WIP".to_string()),
         oid: oid.to_string(),
-    })
+    }))
 }
 
 /// Apply a stash
@@ -299,7 +309,7 @@ mod tests {
 
         let result = create_stash(repo.path_str(), Some("Test stash".to_string()), None).await;
         assert!(result.is_ok());
-        let stash = result.unwrap();
+        let stash = result.unwrap().expect("clean tree? expected a stash");
         assert_eq!(stash.index, 0);
         assert_eq!(stash.message, "Test stash");
     }
@@ -315,16 +325,25 @@ mod tests {
 
         let result = create_stash(repo.path_str(), None, None).await;
         assert!(result.is_ok());
-        let stash = result.unwrap();
+        let stash = result.unwrap().expect("expected a stash");
         assert_eq!(stash.message, "WIP");
     }
 
     #[tokio::test]
-    async fn test_create_stash_no_changes_fails() {
+    async fn test_create_stash_no_changes_is_noop() {
         let repo = TestRepo::with_initial_commit();
-        // No changes to stash
+        // No changes to stash. Canonical `git stash push` on a clean tree prints
+        // "No local changes to save" and exits 0 — a benign no-op, not a failure.
         let result = create_stash(repo.path_str(), Some("Empty stash".to_string()), None).await;
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Ok(None)),
+            "stashing a clean tree must be a successful no-op (Ok(None)), got {:?}",
+            result
+        );
+
+        // And no stash entry should have been created.
+        let stashes = get_stashes(repo.path_str()).await.unwrap();
+        assert!(stashes.is_empty());
     }
 
     #[tokio::test]

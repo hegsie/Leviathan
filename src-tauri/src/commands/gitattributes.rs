@@ -72,6 +72,66 @@ fn parse_attribute_token(token: &str) -> AttributeEntry {
     }
 }
 
+/// Split a trimmed .gitattributes line into its pattern and the remainder
+/// (the attribute list).
+///
+/// Per gitattributes(5), a pattern containing whitespace may be wrapped in
+/// double quotes, with C-style escapes (`\"`, `\\`, `\n`, `\t`, octal `\nnn`)
+/// inside. Otherwise the pattern is the first whitespace-delimited token.
+fn split_pattern_and_rest(trimmed: &str) -> (String, &str) {
+    if let Some(after_quote) = trimmed.strip_prefix('"') {
+        let bytes = after_quote.as_bytes();
+        let mut out: Vec<u8> = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' => {
+                    // Closing quote: everything after it is the attribute list.
+                    let rest = &after_quote[i + 1..];
+                    return (String::from_utf8_lossy(&out).into_owned(), rest);
+                }
+                b'\\' => {
+                    i += 1;
+                    if i >= bytes.len() {
+                        break;
+                    }
+                    match bytes[i] {
+                        b'n' => out.push(b'\n'),
+                        b't' => out.push(b'\t'),
+                        b'r' => out.push(b'\r'),
+                        c @ b'0'..=b'7' => {
+                            // Up to three octal digits.
+                            let mut val = (c - b'0') as u32;
+                            let mut digits = 1;
+                            while digits < 3
+                                && i + 1 < bytes.len()
+                                && (b'0'..=b'7').contains(&bytes[i + 1])
+                            {
+                                i += 1;
+                                val = val * 8 + (bytes[i] - b'0') as u32;
+                                digits += 1;
+                            }
+                            out.push(val as u8);
+                        }
+                        other => out.push(other),
+                    }
+                    i += 1;
+                }
+                b => {
+                    out.push(b);
+                    i += 1;
+                }
+            }
+        }
+        // Malformed (no closing quote): fall through to the unquoted split below.
+    }
+
+    match trimmed.split_once(char::is_whitespace) {
+        Some((pattern, rest)) => (pattern.to_string(), rest),
+        None => (trimmed.to_string(), ""),
+    }
+}
+
 /// Parse the entire .gitattributes content into structured entries
 fn parse_gitattributes(content: &str) -> Vec<GitAttribute> {
     let mut entries = Vec::new();
@@ -84,15 +144,15 @@ fn parse_gitattributes(content: &str) -> Vec<GitAttribute> {
             continue;
         }
 
-        // Split line into pattern and attributes
-        // The pattern is the first whitespace-delimited token
-        let mut parts = trimmed.split_whitespace();
-        let pattern = match parts.next() {
-            Some(p) => p.to_string(),
-            None => continue,
-        };
+        // Split line into pattern and attributes. The pattern may be quoted if it
+        // contains whitespace, so it is not simply the first whitespace token.
+        let (pattern, rest) = split_pattern_and_rest(trimmed);
+        if pattern.is_empty() {
+            continue;
+        }
 
-        let attributes: Vec<AttributeEntry> = parts.map(parse_attribute_token).collect();
+        let attributes: Vec<AttributeEntry> =
+            rest.split_whitespace().map(parse_attribute_token).collect();
 
         entries.push(GitAttribute {
             pattern,
@@ -376,6 +436,50 @@ mod tests {
             entries[0].attributes[3].value,
             AttributeValue::Unspecified
         ));
+    }
+
+    // Regression (finding 93): a quoted pattern containing whitespace must be
+    // parsed as a single pattern with C-style unescaping, per gitattributes(5).
+    // Canonical git: `"foo bar.txt" text` assigns `text` to the file `foo bar.txt`.
+    #[test]
+    fn test_parse_gitattributes_quoted_pattern_with_space() {
+        let content = "\"foo bar.txt\" text\n";
+        let entries = parse_gitattributes(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pattern, "foo bar.txt");
+        assert_eq!(entries[0].attributes.len(), 1);
+        assert_eq!(entries[0].attributes[0].name, "text");
+        assert!(matches!(
+            entries[0].attributes[0].value,
+            AttributeValue::Set
+        ));
+    }
+
+    #[test]
+    fn test_parse_gitattributes_quoted_pattern_multiple_attrs() {
+        let content = "\"my dir/file name.psd\" filter=lfs diff=lfs -text\n";
+        let entries = parse_gitattributes(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pattern, "my dir/file name.psd");
+        assert_eq!(entries[0].attributes.len(), 3);
+        assert_eq!(entries[0].attributes[0].name, "filter");
+        assert_eq!(entries[0].attributes[2].name, "text");
+        assert!(matches!(
+            entries[0].attributes[2].value,
+            AttributeValue::Unset
+        ));
+    }
+
+    #[test]
+    fn test_parse_gitattributes_quoted_pattern_octal_escape() {
+        // git writes non-ASCII bytes as octal escapes inside quotes; "caf\303\251"
+        // is the UTF-8 encoding of "café".
+        let content = "\"caf\\303\\251.log\" text\n";
+        let entries = parse_gitattributes(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pattern, "café.log");
+        assert_eq!(entries[0].attributes.len(), 1);
+        assert_eq!(entries[0].attributes[0].name, "text");
     }
 
     #[tokio::test]

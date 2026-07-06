@@ -81,6 +81,12 @@ pub async fn search_in_files(
 
     if use_regex {
         cmd.arg("-E");
+    } else {
+        // Non-regex ("plain text") search must match the query literally, exactly
+        // like `git grep -F`. Without -F, git grep treats the pattern as a basic
+        // regular expression: literal queries like "a.c" over-match ("abc") and
+        // queries containing regex metacharacters like "a[" fatally error.
+        cmd.arg("-F");
     }
 
     cmd.arg("--").arg(&query);
@@ -187,52 +193,87 @@ pub async fn search_in_diff(
     let query_lower = query.to_lowercase();
     let mut results: Vec<SearchResult> = Vec::new();
     let mut current_file = String::new();
-    let mut current_line_number: u32 = 0;
+    // The old-side path parsed from the "--- a/<path>" header. Needed for deleted
+    // files, whose new-side header is "+++ /dev/null" and thus carries no path.
+    let mut old_file = String::new();
+    // Separate counters for the two sides of the hunk: added lines advance the
+    // new-side counter, removed lines advance the old-side counter.
+    let mut current_new_line: u32 = 0;
+    let mut current_old_line: u32 = 0;
 
     for line in stdout.lines() {
-        // Track the current file from diff headers
-        if let Some(file) = line.strip_prefix("+++ b/") {
-            current_file = file.to_string();
+        // Track the old-side path from the "--- a/<path>" header (or /dev/null
+        // for added files). Must be checked before the generic "-" line handling.
+        if let Some(rest) = line.strip_prefix("--- ") {
+            old_file = rest.strip_prefix("a/").unwrap_or(rest).to_string();
             continue;
         }
-        if line.starts_with("+++ ") || line.starts_with("--- ") {
+        // Track the current file from the new-side header. Deleted files report
+        // "+++ /dev/null", so fall back to the old-side path parsed above.
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            current_file = match rest.strip_prefix("b/") {
+                Some(path) => path.to_string(),
+                None => old_file.clone(),
+            };
             continue;
         }
 
-        // Parse hunk header for line numbers: @@ -old,count +new,count @@
+        // Parse hunk header for line numbers: @@ -oldStart,count +newStart,count @@
         if line.starts_with("@@") {
-            if let Some(plus_part) = line.split('+').nth(1) {
-                if let Some(num_str) = plus_part.split(',').next() {
-                    if let Some(num_str) = num_str.split(' ').next() {
-                        current_line_number = num_str.parse().unwrap_or(0);
-                    }
-                }
+            let mut tokens = line.split(' ');
+            let _ = tokens.next(); // "@@"
+            if let Some(old_tok) = tokens.next() {
+                current_old_line = old_tok
+                    .trim_start_matches('-')
+                    .split(',')
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
+            }
+            if let Some(new_tok) = tokens.next() {
+                current_new_line = new_tok
+                    .trim_start_matches('+')
+                    .split(',')
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
             }
             continue;
         }
 
-        // Check added or removed lines for the query
-        if (line.starts_with('+') || line.starts_with('-'))
-            && !line.starts_with("+++")
-            && !line.starts_with("---")
-        {
-            let content = &line[1..]; // Strip the +/- prefix
+        // Check added lines for the query (new-side numbering).
+        if line.starts_with('+') && !line.starts_with("+++") {
+            let content = &line[1..]; // Strip the '+' prefix
 
             if content.to_lowercase().contains(&query_lower) {
                 let (match_start, match_end) = find_match_position(content, &query, false);
 
                 results.push(SearchResult {
                     file_path: current_file.clone(),
-                    line_number: current_line_number,
+                    line_number: current_new_line,
                     line_content: content.to_string(),
                     match_start,
                     match_end,
                 });
             }
 
-            if line.starts_with('+') {
-                current_line_number += 1;
+            current_new_line += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            let content = &line[1..]; // Strip the '-' prefix
+
+            if content.to_lowercase().contains(&query_lower) {
+                let (match_start, match_end) = find_match_position(content, &query, false);
+
+                results.push(SearchResult {
+                    file_path: current_file.clone(),
+                    line_number: current_old_line,
+                    line_content: content.to_string(),
+                    match_start,
+                    match_end,
+                });
             }
+
+            current_old_line += 1;
         }
     }
 
@@ -325,6 +366,10 @@ pub async fn search_in_commit_messages(
         .arg("log")
         .arg(format!("--grep={}", query))
         .arg("-i")
+        // Match the query literally (like `git log --grep=… -F`). Without -F the
+        // query is treated as a regex, so "v1.2" would spuriously match "v1x2"
+        // and invalid patterns like "fix a[" would make git log exit non-zero.
+        .arg("--fixed-strings")
         .arg("--format=%H|%an|%at|%s")
         .arg(format!("-{}", max_commits));
 
@@ -407,7 +452,11 @@ pub async fn search_commits_by_content(
     cmd.arg("-C")
         .arg(&path)
         .arg("log")
-        .arg("--format=%H|%h|%s|%an|%at")
+        // Use NUL (%x00) as the field separator so that a commit subject (%s) or
+        // author name (%an) containing '|' cannot be misparsed into the wrong
+        // field. File names from --name-only never contain NUL, so they remain
+        // unambiguously distinguishable from header lines.
+        .arg("--format=%H%x00%h%x00%s%x00%an%x00%at")
         .arg("--name-only")
         .arg(format!("-{}", max_count));
 
@@ -454,14 +503,14 @@ pub async fn search_commits_by_content(
             continue;
         }
 
-        // Check if this is a commit header line (contains | separators)
-        if line.contains('|') && line.split('|').count() >= 5 {
+        // Header lines contain NUL field separators; file names never do.
+        if line.contains('\0') {
             // Save previous commit if exists
             if let Some(commit) = current_commit.take() {
                 results.push(commit);
             }
 
-            let parts: Vec<&str> = line.splitn(5, '|').collect();
+            let parts: Vec<&str> = line.splitn(5, '\0').collect();
             if parts.len() == 5 {
                 current_commit = Some(SearchCommit {
                     oid: parts[0].to_string(),
@@ -505,7 +554,9 @@ pub async fn search_commits_by_file(
     cmd.arg("-C")
         .arg(&path)
         .arg("log")
-        .arg("--format=%H|%h|%s|%an|%at")
+        // NUL-separated fields so a '|' in the subject/author cannot corrupt
+        // field parsing (see search_commits_by_content for details).
+        .arg("--format=%H%x00%h%x00%s%x00%an%x00%at")
         .arg("--name-only")
         .arg(format!("-{}", max_count))
         .arg("--")
@@ -541,14 +592,14 @@ pub async fn search_commits_by_file(
             continue;
         }
 
-        // Check if this is a commit header line (contains | separators)
-        if line.contains('|') && line.split('|').count() >= 5 {
+        // Header lines contain NUL field separators; file names never do.
+        if line.contains('\0') {
             // Save previous commit if exists
             if let Some(commit) = current_commit.take() {
                 results.push(commit);
             }
 
-            let parts: Vec<&str> = line.splitn(5, '|').collect();
+            let parts: Vec<&str> = line.splitn(5, '\0').collect();
             if parts.len() == 5 {
                 current_commit = Some(SearchCommit {
                     oid: parts[0].to_string(),
@@ -681,6 +732,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_in_files_literal_non_regex() {
+        // Regression (finding 107): a non-regex search must match literally
+        // (like `git grep -F`). "a.c" must match only the literal "a.c literal"
+        // line, not "abc" (where '.' would match 'b' under BRE semantics).
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add literal test", &[("lit.txt", "abc\na.c literal\n")]);
+
+        let result = search_in_files(
+            repo.path_str(),
+            "a.c".to_string(),
+            Some(false), // case-insensitive
+            Some(false), // NOT regex → literal
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let files = result.unwrap();
+        let total: u32 = files.iter().map(|f| f.match_count).sum();
+        assert_eq!(total, 1, "literal 'a.c' should match exactly one line");
+        assert!(files
+            .iter()
+            .flat_map(|f| &f.matches)
+            .all(|m| m.line_content.contains("a.c literal")));
+    }
+
+    #[tokio::test]
+    async fn test_search_in_files_literal_regex_metacharacters_no_error() {
+        // Regression (finding 107): a literal query containing regex
+        // metacharacters (e.g. an unbalanced "[") must NOT error out; under -F it
+        // is matched verbatim rather than compiled as an invalid regex.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add bracket", &[("br.txt", "value a[ here\n")]);
+
+        let result = search_in_files(
+            repo.path_str(),
+            "a[".to_string(),
+            Some(false),
+            Some(false),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok(), "literal 'a[' must not error");
+        let files = result.unwrap();
+        let total: u32 = files.iter().map(|f| f.match_count).sum();
+        assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
     async fn test_search_in_diff_unstaged() {
         let repo = TestRepo::with_initial_commit();
         repo.create_commit("Add base file", &[("diff_test.txt", "original content")]);
@@ -724,6 +827,44 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_in_diff_deleted_file_attribution() {
+        // Regression (finding 109): content removed by deleting a file must be
+        // attributed to that deleted file (whose new-side header is
+        // "+++ /dev/null"), not to the previous file in the diff, and removed
+        // lines must carry old-side (not new-side) line numbers.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "Add base files",
+            &[
+                ("alive.txt", "alive line 1\n"),
+                ("doomed.txt", "secret_token here\nsecond line\n"),
+            ],
+        );
+
+        // Modify alive.txt and delete doomed.txt in the working tree.
+        repo.create_file("alive.txt", "alive line 1\nalive line 2\n");
+        std::fs::remove_file(format!("{}/doomed.txt", repo.path_str()))
+            .expect("failed to delete doomed.txt");
+
+        let result = search_in_diff(repo.path_str(), "secret_token".to_string(), Some(false)).await;
+
+        assert!(result.is_ok());
+        let matches = result.unwrap();
+        let m = matches
+            .iter()
+            .find(|m| m.line_content.contains("secret_token"))
+            .expect("secret_token match should be present");
+        assert_eq!(
+            m.file_path, "doomed.txt",
+            "removed content must be attributed to the deleted file"
+        );
+        assert_eq!(
+            m.line_number, 1,
+            "removed line must use its old-side line number, not 0"
+        );
     }
 
     #[tokio::test]
@@ -811,6 +952,22 @@ mod tests {
         assert!(!commits.is_empty());
     }
 
+    #[tokio::test]
+    async fn test_search_in_commit_messages_literal_not_regex() {
+        // Regression (finding 108): the message query must be matched literally,
+        // so "v1.2" must NOT match a commit message of "release v1x2".
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("release v1x2", &[("rel.txt", "content")]);
+
+        let result = search_in_commit_messages(repo.path_str(), "v1.2".to_string(), Some(50)).await;
+
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap().is_empty(),
+            "literal 'v1.2' must not match 'v1x2'"
+        );
+    }
+
     #[test]
     fn test_find_match_position_case_sensitive() {
         let (start, end) = find_match_position("hello world", "world", true);
@@ -861,6 +1018,69 @@ mod tests {
             .matches
             .iter()
             .any(|m| m.file_path.contains("content_test.txt"))));
+    }
+
+    #[tokio::test]
+    async fn test_search_commits_by_content_subject_with_pipe() {
+        // Regression (finding 106): a commit subject containing '|' must not
+        // corrupt the author/date fields of the parsed SearchCommit.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "feat: support a|b unique_pipe_token in parser",
+            &[("pipe_content.txt", "unique_pipe_token_body")],
+        );
+
+        let result = search_commits_by_content(
+            repo.path_str(),
+            "unique_pipe_token_body".to_string(),
+            Some(false),
+            Some(false),
+            Some(50),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let commits = result.unwrap();
+        let commit = commits
+            .iter()
+            .find(|c| c.message.starts_with("feat: support a|b"))
+            .expect("commit with pipe subject should be present");
+        assert_eq!(
+            commit.message,
+            "feat: support a|b unique_pipe_token in parser"
+        );
+        assert_eq!(commit.author_name, "Test User");
+        assert!(
+            commit.author_date > 0,
+            "author date must parse (not fall back to 0)"
+        );
+        assert!(commit
+            .matches
+            .iter()
+            .any(|m| m.file_path.contains("pipe_content.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_search_commits_by_file_subject_with_pipe() {
+        // Regression (finding 106): search_commits_by_file shares the same
+        // parsing; a '|' in the subject must not corrupt fields.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "chore: rename a|b in config",
+            &[("piped_config.json", "{}")],
+        );
+
+        let result = search_commits_by_file(repo.path_str(), "*.json".to_string(), Some(50)).await;
+
+        assert!(result.is_ok());
+        let commits = result.unwrap();
+        let commit = commits
+            .iter()
+            .find(|c| c.message.starts_with("chore: rename a|b"))
+            .expect("commit with pipe subject should be present");
+        assert_eq!(commit.message, "chore: rename a|b in config");
+        assert_eq!(commit.author_name, "Test User");
+        assert!(commit.author_date > 0);
     }
 
     #[tokio::test]

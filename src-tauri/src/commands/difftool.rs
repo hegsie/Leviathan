@@ -257,8 +257,26 @@ pub async fn launch_diff_tool(
 
     // Determine what to diff
     if let Some(ref commit_oid) = commit {
-        // Diff against a specific commit
-        cmd.arg(commit_oid);
+        // Show the change introduced BY this commit (parent vs commit), which
+        // matches the in-app commit diff view. `git difftool <commit>` alone
+        // would compare the commit against the current working tree instead.
+        let has_parent = git2::Repository::open(repo_path)
+            .ok()
+            .and_then(|r| {
+                let oid = git2::Oid::from_str(commit_oid).ok()?;
+                let c = r.find_commit(oid).ok()?;
+                Some(c.parent_count() > 0)
+            })
+            .unwrap_or(true);
+
+        if has_parent {
+            cmd.arg(format!("{}^", commit_oid));
+            cmd.arg(commit_oid);
+        } else {
+            // Root (parentless) commit: diff against the empty tree.
+            cmd.arg("4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+            cmd.arg(commit_oid);
+        }
     } else if staged.unwrap_or(false) {
         // Diff staged changes (index vs HEAD)
         cmd.arg("--staged");
@@ -395,6 +413,54 @@ mod tests {
             launch_diff_tool(repo.path_str(), "nonexistent.txt".to_string(), None, None).await;
         // Git difftool should handle this gracefully
         assert!(result.is_ok());
+    }
+
+    /// Finding 60: launching the diff tool for a commit's file must show the
+    /// change introduced BY the commit (parent vs commit), NOT commit vs the
+    /// current working tree.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_launch_diff_tool_commit_shows_parent_vs_commit() {
+        let repo = TestRepo::new();
+        // C1: f.txt = v1
+        repo.create_commit("c1", &[("f.txt", "v1\n")]);
+        // C2: f.txt = v2
+        let c2 = repo.create_commit("c2", &[("f.txt", "v2\n")]);
+        // Worktree edited to something different entirely.
+        repo.create_file("f.txt", "worktree-version\n");
+
+        // Capture dir for the mock diff tool to record LEFT/RIGHT.
+        let capture = repo.path.join("capture");
+        std::fs::create_dir_all(&capture).unwrap();
+        let cmd = format!(
+            "cp \"$LOCAL\" '{}/left.txt'; cp \"$REMOTE\" '{}/right.txt'",
+            capture.display(),
+            capture.display()
+        );
+        run_git_config(Some(Path::new(&repo.path_str())), &["diff.tool", "mock"]).unwrap();
+        run_git_config(
+            Some(Path::new(&repo.path_str())),
+            &["difftool.mock.cmd", &cmd],
+        )
+        .unwrap();
+
+        let result = launch_diff_tool(
+            repo.path_str(),
+            "f.txt".to_string(),
+            None,
+            Some(c2.to_string()),
+        )
+        .await;
+        assert!(result.is_ok(), "launch failed: {:?}", result.err());
+        assert!(result.unwrap().success);
+
+        let left = std::fs::read_to_string(capture.join("left.txt")).unwrap();
+        let right = std::fs::read_to_string(capture.join("right.txt")).unwrap();
+        assert_eq!(left, "v1\n", "LEFT should be the parent version");
+        assert_eq!(
+            right, "v2\n",
+            "RIGHT should be the commit version, not the worktree"
+        );
     }
 
     #[tokio::test]

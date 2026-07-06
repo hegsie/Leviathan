@@ -133,6 +133,19 @@ fn build_refs_map(repo: &git2::Repository) -> HashMap<String, Vec<GraphRef>> {
         }
     }
 
+    // Detached HEAD: `git log --decorate` marks the checked-out commit with
+    // "(HEAD)". libgit2 reports HEAD as a reference literally named "HEAD"
+    // (skipped above) that matches no branch/tag, so add the decoration here.
+    if repo.head_detached().unwrap_or(false) {
+        if let Some(oid) = head.as_ref().and_then(|h| h.target()) {
+            refs_map.entry(oid.to_string()).or_default().push(GraphRef {
+                name: "HEAD".to_string(),
+                ref_type: "head".to_string(),
+                is_current: true,
+            });
+        }
+    }
+
     refs_map
 }
 
@@ -703,6 +716,37 @@ mod tests {
         assert!(
             initial_node.is_fork,
             "Initial commit should be a fork point"
+        );
+    }
+
+    // Finding 112: with a detached HEAD, `git log --decorate` marks the
+    // checked-out commit with "(HEAD)". The graph must emit a current "head"
+    // ref on that commit even though no branch points at it.
+    #[tokio::test]
+    async fn test_get_commit_graph_detached_head_decoration() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Second commit", &[("f.txt", "x")]);
+        let detached_oid = repo.head_oid();
+        {
+            let git = repo.repo();
+            git.set_head_detached(detached_oid)
+                .expect("Failed to detach HEAD");
+        }
+
+        let result = get_commit_graph(repo.path_str(), Some(100), None, None).await;
+        assert!(result.is_ok());
+        let graph = result.unwrap();
+
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| n.oid == detached_oid.to_string())
+            .expect("checked-out commit should be in the graph");
+        assert!(
+            node.refs
+                .iter()
+                .any(|r| r.ref_type == "head" && r.is_current),
+            "detached HEAD commit should carry a current 'head' decoration"
         );
     }
 

@@ -6,6 +6,179 @@ use tauri::command;
 use crate::error::{LeviathanError, Result};
 use crate::models::Commit;
 
+/// Message git prints when a cherry-pick becomes empty (its changes are already
+/// present). Canonical git stops and creates no commit rather than polluting
+/// history with an empty commit.
+const EMPTY_CHERRY_PICK_MSG: &str = "The cherry-pick is now empty because its changes are already present in HEAD; no commit was created. Skip or abort the cherry-pick to continue.";
+
+/// Message git prints when a revert becomes empty (there is nothing to undo).
+const EMPTY_REVERT_MSG: &str = "The revert is now empty because there is nothing to undo; no commit was created. Skip or abort the revert to continue.";
+
+/// Name of the sidecar file tracking the commits still to be applied during a
+/// multi-commit cherry-pick sequence (used so `continue` can resume the range).
+const CHERRY_PICK_SEQUENCE: &str = "CHERRY_PICK_SEQUENCE";
+
+/// Name of the sidecar file storing the pre-sequence HEAD oid so that aborting a
+/// multi-commit cherry-pick rewinds to the exact commit it started from
+/// (matching `git cherry-pick --abort`), rather than leaving already-applied
+/// picks on the branch.
+const CHERRY_PICK_SEQUENCE_HEAD: &str = "CHERRY_PICK_SEQUENCE_HEAD";
+
+/// Restore the working tree and index to HEAD when aborting a cherry-pick or
+/// revert, while preserving uncommitted changes to files the operation did not
+/// touch. This mirrors `git cherry-pick --abort` / `git revert --abort`, which
+/// use reset --merge semantics and do NOT force-reset the entire working tree.
+///
+/// A blanket `checkout_head().force()` (the previous behavior) destroys any
+/// unrelated uncommitted work, so we instead force-checkout ONLY the paths the
+/// aborted operation actually affected (its conflicted paths plus any path whose
+/// staged content differs from HEAD).
+fn restore_after_abort(repo: &git2::Repository) -> Result<()> {
+    let head_commit = repo.head()?.peel_to_commit()?;
+    let head_tree = head_commit.tree()?;
+    let mut index = repo.index()?;
+
+    // Collect exactly the paths the operation touched.
+    let mut affected: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+
+    if let Ok(conflicts) = index.conflicts() {
+        for conflict in conflicts.flatten() {
+            if let Some(entry) = conflict.our.or(conflict.their).or(conflict.ancestor) {
+                affected.insert(entry.path);
+            }
+        }
+    }
+
+    let diff = repo.diff_tree_to_index(Some(&head_tree), Some(&index), None)?;
+    for delta in diff.deltas() {
+        if let Some(p) = delta.new_file().path_bytes() {
+            affected.insert(p.to_vec());
+        }
+        if let Some(p) = delta.old_file().path_bytes() {
+            affected.insert(p.to_vec());
+        }
+    }
+
+    // Reset the index to HEAD so conflict stages are cleared.
+    index.read_tree(&head_tree)?;
+    index.write()?;
+
+    if affected.is_empty() {
+        return Ok(());
+    }
+
+    // Files the operation ADDED are absent from HEAD, so a path-scoped checkout
+    // has nothing to write for them and would leave them behind. Delete them
+    // from the working tree explicitly (still scoped to operation paths, so
+    // unrelated untracked files are untouched).
+    if let Some(workdir) = repo.workdir() {
+        for path in &affected {
+            let rel = Path::new(std::str::from_utf8(path).unwrap_or(""));
+            if head_tree.get_path(rel).is_err() {
+                let _ = std::fs::remove_file(workdir.join(rel));
+            }
+        }
+    }
+
+    // Force-checkout only the affected paths; unrelated dirty files survive.
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.force();
+    for path in &affected {
+        checkout.path(path.as_slice());
+    }
+    repo.checkout_head(Some(&mut checkout))?;
+
+    Ok(())
+}
+
+/// Apply a single non-merge commit as a cherry-pick onto the current HEAD and
+/// create the resulting commit, matching canonical git semantics:
+/// - refuses root commits and merge commits (a merge needs an explicit mainline);
+/// - stops (creates no commit) when the result would be empty;
+/// - runs the post-commit hook git's sequencer runs.
+///
+/// Returns `Ok(Some(commit))` on success, `Ok(None)` when the pick conflicts
+/// (the repository is left in cherry-pick state with CHERRY_PICK_HEAD written so
+/// the caller can persist sequencer state), and `Err` on any hard failure
+/// (including an empty pick, which git treats as a stop condition).
+fn cherry_pick_one(repo: &git2::Repository, commit: &git2::Commit) -> Result<Option<Commit>> {
+    if commit.parent_count() == 0 {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Cannot cherry-pick root commit {}",
+            commit.id()
+        )));
+    }
+    if commit.parent_count() > 1 {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Commit {} is a merge but no mainline parent was given; refusing to cherry-pick a merge commit without an explicit mainline.",
+            commit.id()
+        )));
+    }
+
+    let mut checkout_builder = git2::build::CheckoutBuilder::new();
+    checkout_builder
+        .allow_conflicts(true)
+        .conflict_style_merge(true);
+    let mut opts = git2::CherrypickOptions::new();
+    opts.checkout_builder(checkout_builder);
+
+    repo.cherrypick(commit, Some(&mut opts))?;
+
+    let mut index = repo.index()?;
+    if index.has_conflicts() {
+        return Ok(None);
+    }
+
+    let head = repo.head()?.peel_to_commit()?;
+    let tree_oid = index.write_tree()?;
+    if tree_oid == head.tree_id() {
+        return Err(LeviathanError::OperationFailed(
+            EMPTY_CHERRY_PICK_MSG.to_string(),
+        ));
+    }
+    let tree = repo.find_tree(tree_oid)?;
+    let signature = repo.signature()?;
+
+    let new_oid = repo.commit(
+        Some("HEAD"),
+        &signature,
+        &commit.author(),
+        commit.message().unwrap_or(""),
+        &tree,
+        &[&head],
+    )?;
+
+    repo.cleanup_state()?;
+    // The sequencer runs post-commit (but not pre-commit / commit-msg) for each
+    // cherry-picked commit. (prepare-commit-msg is not run here: this path never
+    // opens an editor, a documented deviation from githooks(5).)
+    crate::commands::hooks::run_hook_noblock(repo, "post-commit", &[]);
+
+    let new_commit = repo.find_commit(new_oid)?;
+    Ok(Some(Commit::from_git2(&new_commit)))
+}
+
+/// Persist multi-commit cherry-pick sequencer state on a conflict: the commits
+/// still to apply and the HEAD the sequence started from (for abort rewind).
+fn write_sequencer_state(
+    repo: &git2::Repository,
+    pre_sequence_head: git2::Oid,
+    remaining: &[String],
+) -> Result<()> {
+    std::fs::write(
+        repo.path().join(CHERRY_PICK_SEQUENCE_HEAD),
+        pre_sequence_head.to_string(),
+    )?;
+    std::fs::write(repo.path().join(CHERRY_PICK_SEQUENCE), remaining.join("\n"))?;
+    Ok(())
+}
+
+/// Remove the multi-commit cherry-pick sequencer sidecar files.
+fn clear_sequencer_state(repo: &git2::Repository) {
+    let _ = std::fs::remove_file(repo.path().join(CHERRY_PICK_SEQUENCE));
+    let _ = std::fs::remove_file(repo.path().join(CHERRY_PICK_SEQUENCE_HEAD));
+}
+
 /// Cherry-pick a commit onto the current branch
 ///
 /// Options:
@@ -15,6 +188,7 @@ pub async fn cherry_pick(
     path: String,
     commit_oid: String,
     no_commit: Option<bool>,
+    mainline: Option<u32>,
 ) -> Result<Commit> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let no_commit = no_commit.unwrap_or(false);
@@ -64,9 +238,28 @@ pub async fn cherry_pick(
     let mut opts = git2::CherrypickOptions::new();
     opts.checkout_builder(checkout_builder);
 
-    // For merge commits, specify mainline parent (1 = the branch that was merged into)
+    // Merge commits are ambiguous: git refuses to cherry-pick one unless the
+    // caller picks which parent's diff to apply via an explicit mainline.
     if commit.parent_count() > 1 {
-        opts.mainline(1);
+        match mainline {
+            Some(m) if m >= 1 && m <= commit.parent_count() as u32 => {
+                opts.mainline(m);
+            }
+            Some(m) => {
+                return Err(LeviathanError::OperationFailed(format!(
+                    "Mainline {} is out of range: commit {} has {} parents.",
+                    m,
+                    commit_oid,
+                    commit.parent_count()
+                )));
+            }
+            None => {
+                return Err(LeviathanError::OperationFailed(format!(
+                    "Commit {} is a merge but no mainline parent was given; choose which parent to cherry-pick relative to.",
+                    commit_oid
+                )));
+            }
+        }
     }
 
     repo.cherrypick(&commit, Some(&mut opts))?;
@@ -97,6 +290,15 @@ pub async fn cherry_pick(
     // No conflicts - the working directory and index are updated, now create the commit
     let head = repo.head()?.peel_to_commit()?;
     let tree_oid = index.write_tree()?;
+
+    // If the pick is already applied the result is empty; git stops here (leaving
+    // CHERRY_PICK_HEAD in place) instead of creating an empty commit.
+    if tree_oid == head.tree_id() {
+        return Err(LeviathanError::OperationFailed(
+            EMPTY_CHERRY_PICK_MSG.to_string(),
+        ));
+    }
+
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
 
@@ -111,6 +313,8 @@ pub async fn cherry_pick(
 
     // Clean up cherry-pick state
     repo.cleanup_state()?;
+    // The sequencer runs post-commit for the cherry-picked commit.
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
 
     let new_commit = repo.find_commit(new_oid)?;
     Ok(Commit::from_git2(&new_commit))
@@ -121,8 +325,9 @@ pub async fn cherry_pick(
 pub async fn continue_cherry_pick(path: String) -> Result<Commit> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    // Check if we're actually in a cherry-pick state
-    let cherry_pick_head_path = Path::new(&path).join(".git/CHERRY_PICK_HEAD");
+    // Check if we're actually in a cherry-pick state. Resolve the state file via
+    // repo.path() so this works in linked worktrees (where <wt>/.git is a file).
+    let cherry_pick_head_path = repo.path().join("CHERRY_PICK_HEAD");
     if !cherry_pick_head_path.exists() {
         return Err(LeviathanError::OperationFailed(
             "No cherry-pick in progress".to_string(),
@@ -148,6 +353,15 @@ pub async fn continue_cherry_pick(path: String) -> Result<Commit> {
 
     // Create the commit
     let tree_oid = index.write_tree()?;
+
+    // A conflict resolution that leaves nothing to apply is empty; git stops
+    // rather than recording an empty commit.
+    if tree_oid == head.tree_id() {
+        return Err(LeviathanError::OperationFailed(
+            EMPTY_CHERRY_PICK_MSG.to_string(),
+        ));
+    }
+
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
 
@@ -160,12 +374,48 @@ pub async fn continue_cherry_pick(path: String) -> Result<Commit> {
         &[&head],
     )?;
 
-    // Clean up cherry-pick state
-    std::fs::remove_file(&cherry_pick_head_path)?;
+    // Clean up cherry-pick state for the resolved commit.
+    let _ = std::fs::remove_file(&cherry_pick_head_path);
     repo.cleanup_state()?;
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
 
-    let new_commit = repo.find_commit(new_oid)?;
-    Ok(Commit::from_git2(&new_commit))
+    let mut last = {
+        let new_commit = repo.find_commit(new_oid)?;
+        Commit::from_git2(&new_commit)
+    };
+
+    // If this cherry-pick was part of a multi-commit sequence, apply the
+    // remaining commits now (the real sequencer resumes automatically).
+    let seq_path = repo.path().join(CHERRY_PICK_SEQUENCE);
+    if let Ok(contents) = std::fs::read_to_string(&seq_path) {
+        let remaining: Vec<String> = contents
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        for (i, oid_str) in remaining.iter().enumerate() {
+            let oid = git2::Oid::from_str(oid_str)
+                .map_err(|_| LeviathanError::CommitNotFound(oid_str.clone()))?;
+            let commit = repo
+                .find_commit(oid)
+                .map_err(|_| LeviathanError::CommitNotFound(oid_str.clone()))?;
+
+            match cherry_pick_one(&repo, &commit)? {
+                Some(c) => last = c,
+                None => {
+                    // Conflict again: persist the not-yet-applied remainder so
+                    // the next continue resumes from here.
+                    let still: Vec<String> = remaining.iter().skip(i + 1).cloned().collect();
+                    std::fs::write(&seq_path, still.join("\n"))?;
+                    return Err(LeviathanError::CherryPickConflict);
+                }
+            }
+        }
+    }
+
+    clear_sequencer_state(&repo);
+    Ok(last)
 }
 
 /// Abort a cherry-pick in progress
@@ -173,22 +423,44 @@ pub async fn continue_cherry_pick(path: String) -> Result<Commit> {
 pub async fn abort_cherry_pick(path: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    // Remove cherry-pick state file if it exists
-    let cherry_pick_head_path = Path::new(&path).join(".git/CHERRY_PICK_HEAD");
-    if cherry_pick_head_path.exists() {
-        std::fs::remove_file(&cherry_pick_head_path)?;
+    // git refuses to abort when no cherry-pick is in progress and leaves the
+    // working tree untouched; blindly force-resetting here would destroy
+    // uncommitted work. Resolve the state file via repo.path() (worktree-safe).
+    let cherry_pick_head_path = repo.path().join("CHERRY_PICK_HEAD");
+    if !cherry_pick_head_path.exists() {
+        return Err(LeviathanError::OperationFailed(
+            "There is no cherry-pick in progress to abort.".to_string(),
+        ));
     }
 
-    // Reset to HEAD
+    // If this was a multi-commit sequence, rewind HEAD to the commit the
+    // sequence started from so already-applied picks are removed too.
+    if let Ok(head_str) = std::fs::read_to_string(repo.path().join(CHERRY_PICK_SEQUENCE_HEAD)) {
+        if let Ok(pre_seq_oid) = git2::Oid::from_str(head_str.trim()) {
+            let head_ref = repo.head()?;
+            if head_ref.is_branch() {
+                let branch_name = head_ref.shorthand().unwrap_or("HEAD");
+                let refname = format!("refs/heads/{}", branch_name);
+                repo.reference(&refname, pre_seq_oid, true, "cherry-pick: abort")?;
+            } else {
+                repo.set_head_detached(pre_seq_oid)?;
+            }
+        }
+    }
+
+    // Restore the working tree to (the possibly rewound) HEAD, preserving
+    // unrelated uncommitted changes.
+    restore_after_abort(&repo)?;
+
     repo.cleanup_state()?;
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+    clear_sequencer_state(&repo);
 
     Ok(())
 }
 
 /// Revert a commit (create a new commit that undoes the changes)
 #[command]
-pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
+pub async fn revert(path: String, commit_oid: String, mainline: Option<u32>) -> Result<Commit> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     // Check for existing operations in progress
@@ -221,9 +493,28 @@ pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
     let mut opts = git2::RevertOptions::new();
     opts.checkout_builder(checkout_builder);
 
-    // For merge commits, specify mainline parent (1 = the branch that was merged into)
+    // Merge commits are ambiguous: git refuses to revert one unless the caller
+    // picks which parent's change to undo via an explicit mainline.
     if commit.parent_count() > 1 {
-        opts.mainline(1);
+        match mainline {
+            Some(m) if m >= 1 && m <= commit.parent_count() as u32 => {
+                opts.mainline(m);
+            }
+            Some(m) => {
+                return Err(LeviathanError::OperationFailed(format!(
+                    "Mainline {} is out of range: commit {} has {} parents.",
+                    m,
+                    commit_oid,
+                    commit.parent_count()
+                )));
+            }
+            None => {
+                return Err(LeviathanError::OperationFailed(format!(
+                    "Commit {} is a merge but no mainline parent was given; choose which parent to revert relative to.",
+                    commit_oid
+                )));
+            }
+        }
     }
 
     repo.revert(&commit, Some(&mut opts))?;
@@ -237,14 +528,36 @@ pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
     // No conflicts - the working directory and index are updated, now create the commit
     let head = repo.head()?.peel_to_commit()?;
     let tree_oid = index.write_tree()?;
+
+    // A revert that changes nothing is empty; git stops rather than recording an
+    // empty commit (leaving REVERT_HEAD in place).
+    if tree_oid == head.tree_id() {
+        return Err(LeviathanError::OperationFailed(
+            EMPTY_REVERT_MSG.to_string(),
+        ));
+    }
+
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
 
-    let revert_message = format!(
-        "Revert \"{}\"\n\nThis reverts commit {}.",
-        commit.summary().ok().flatten().unwrap_or(""),
-        commit_oid
-    );
+    let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
+    let revert_message = if commit.parent_count() > 1 {
+        // Reverting a merge: git records which parent the changes were made to.
+        let m = mainline.unwrap_or(1);
+        let parent_oid = commit
+            .parent((m - 1) as usize)
+            .map(|p| p.id().to_string())
+            .unwrap_or_default();
+        format!(
+            "Revert \"{}\"\n\nThis reverts commit {}, reversing\nchanges made to {}.",
+            summary, commit_oid, parent_oid
+        )
+    } else {
+        format!(
+            "Revert \"{}\"\n\nThis reverts commit {}.",
+            summary, commit_oid
+        )
+    };
 
     let new_oid = repo.commit(
         Some("HEAD"),
@@ -257,6 +570,7 @@ pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
 
     // Clean up revert state
     repo.cleanup_state()?;
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
 
     let new_commit = repo.find_commit(new_oid)?;
     Ok(Commit::from_git2(&new_commit))
@@ -267,8 +581,9 @@ pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
 pub async fn continue_revert(path: String) -> Result<Commit> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    // Check if we're actually in a revert state
-    let revert_head_path = Path::new(&path).join(".git/REVERT_HEAD");
+    // Check if we're actually in a revert state. Resolve via repo.path() so this
+    // works in linked worktrees (where <wt>/.git is a file, not a directory).
+    let revert_head_path = repo.path().join("REVERT_HEAD");
     if !revert_head_path.exists() {
         return Err(LeviathanError::OperationFailed(
             "No revert in progress".to_string(),
@@ -294,6 +609,15 @@ pub async fn continue_revert(path: String) -> Result<Commit> {
 
     // Create the revert commit
     let tree_oid = index.write_tree()?;
+
+    // A conflict resolution that undoes nothing is empty; git stops rather than
+    // recording an empty commit.
+    if tree_oid == head.tree_id() {
+        return Err(LeviathanError::OperationFailed(
+            EMPTY_REVERT_MSG.to_string(),
+        ));
+    }
+
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
 
@@ -313,8 +637,9 @@ pub async fn continue_revert(path: String) -> Result<Commit> {
     )?;
 
     // Clean up revert state
-    std::fs::remove_file(&revert_head_path)?;
+    let _ = std::fs::remove_file(&revert_head_path);
     repo.cleanup_state()?;
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
 
     let new_commit = repo.find_commit(new_oid)?;
     Ok(Commit::from_git2(&new_commit))
@@ -325,15 +650,20 @@ pub async fn continue_revert(path: String) -> Result<Commit> {
 pub async fn abort_revert(path: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    // Remove revert state file if it exists
-    let revert_head_path = Path::new(&path).join(".git/REVERT_HEAD");
-    if revert_head_path.exists() {
-        std::fs::remove_file(&revert_head_path)?;
+    // git refuses to abort when no revert is in progress and leaves the working
+    // tree untouched; blindly force-resetting here would destroy uncommitted
+    // work. Resolve the state file via repo.path() (worktree-safe).
+    let revert_head_path = repo.path().join("REVERT_HEAD");
+    if !revert_head_path.exists() {
+        return Err(LeviathanError::OperationFailed(
+            "There is no revert in progress to abort.".to_string(),
+        ));
     }
 
-    // Reset to HEAD
+    // Restore the working tree to HEAD, preserving unrelated uncommitted changes.
+    restore_after_abort(&repo)?;
+
     repo.cleanup_state()?;
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
 
     Ok(())
 }
@@ -356,77 +686,33 @@ pub async fn cherry_pick_range(path: String, commit_oids: Vec<String>) -> Result
         ));
     }
 
+    // Record the HEAD the sequence starts from so an abort mid-sequence can
+    // rewind to it (matching git's return-to-pre-sequence-HEAD on --abort).
+    let pre_sequence_head = repo.head()?.peel_to_commit()?.id();
+
     let mut results = Vec::new();
 
-    for commit_oid in &commit_oids {
+    for (i, commit_oid) in commit_oids.iter().enumerate() {
         let oid = git2::Oid::from_str(commit_oid)
             .map_err(|_| LeviathanError::CommitNotFound(commit_oid.clone()))?;
         let commit = repo
             .find_commit(oid)
             .map_err(|_| LeviathanError::CommitNotFound(commit_oid.clone()))?;
 
-        if commit.parent_count() == 0 {
-            return Err(LeviathanError::OperationFailed(format!(
-                "Cannot cherry-pick root commit {}",
-                commit_oid
-            )));
-        }
-
-        let mut checkout_builder = git2::build::CheckoutBuilder::new();
-        checkout_builder
-            .allow_conflicts(true)
-            .conflict_style_merge(true);
-
-        let mut opts = git2::CherrypickOptions::new();
-        opts.checkout_builder(checkout_builder);
-
-        if commit.parent_count() > 1 {
-            opts.mainline(1);
-        }
-
-        repo.cherrypick(&commit, Some(&mut opts))?;
-
-        let mut index = repo.index()?;
-        if index.has_conflicts() {
-            // Write the remaining commits to a sequence file so the user can continue
-            let remaining: Vec<String> = commit_oids
-                .iter()
-                .skip(results.len() + 1)
-                .cloned()
-                .collect();
-            if !remaining.is_empty() {
-                let seq_path = Path::new(&path).join(".git/CHERRY_PICK_SEQUENCE");
-                std::fs::write(&seq_path, remaining.join("\n"))?;
+        match cherry_pick_one(&repo, &commit)? {
+            Some(new_commit) => results.push(new_commit),
+            None => {
+                // Conflict: persist the not-yet-applied commits and the
+                // pre-sequence HEAD so continue/abort behave like git's
+                // sequencer.
+                let remaining: Vec<String> = commit_oids.iter().skip(i + 1).cloned().collect();
+                write_sequencer_state(&repo, pre_sequence_head, &remaining)?;
+                return Err(LeviathanError::CherryPickConflict);
             }
-            return Err(LeviathanError::CherryPickConflict);
         }
-
-        // Create the commit
-        let head = repo.head()?.peel_to_commit()?;
-        let tree_oid = index.write_tree()?;
-        let tree = repo.find_tree(tree_oid)?;
-        let signature = repo.signature()?;
-
-        let new_oid = repo.commit(
-            Some("HEAD"),
-            &signature,
-            &commit.author(),
-            commit.message().unwrap_or(""),
-            &tree,
-            &[&head],
-        )?;
-
-        repo.cleanup_state()?;
-
-        let new_commit = repo.find_commit(new_oid)?;
-        results.push(Commit::from_git2(&new_commit));
     }
 
-    // Clean up sequence file if it exists
-    let seq_path = Path::new(&path).join(".git/CHERRY_PICK_SEQUENCE");
-    if seq_path.exists() {
-        let _ = std::fs::remove_file(&seq_path);
-    }
+    clear_sequencer_state(&repo);
 
     Ok(results)
 }
@@ -487,7 +773,9 @@ pub async fn get_rebase_state(path: String) -> Result<RebaseState> {
         });
     }
 
-    let git_dir = Path::new(&path).join(".git");
+    // Resolve via repo.path() so per-worktree rebase state is found in linked
+    // worktrees (where <wt>/.git is a gitdir-pointer file, not a directory).
+    let git_dir = repo.path();
     let rebase_merge_dir = git_dir.join("rebase-merge");
     let rebase_apply_dir = git_dir.join("rebase-apply");
 
@@ -610,7 +898,9 @@ pub async fn get_rebase_todo(path: String) -> Result<RebaseTodo> {
         ));
     }
 
-    let git_dir = Path::new(&path).join(".git");
+    // Resolve via repo.path() so per-worktree rebase state is found in linked
+    // worktrees (where <wt>/.git is a gitdir-pointer file, not a directory).
+    let git_dir = repo.path();
     let rebase_merge_dir = git_dir.join("rebase-merge");
     let rebase_apply_dir = git_dir.join("rebase-apply");
 
@@ -659,7 +949,9 @@ pub async fn update_rebase_todo(path: String, entries: Vec<RebaseTodoEntry>) -> 
         ));
     }
 
-    let git_dir = Path::new(&path).join(".git");
+    // Resolve via repo.path() so per-worktree rebase state is found in linked
+    // worktrees (where <wt>/.git is a gitdir-pointer file, not a directory).
+    let git_dir = repo.path();
     let rebase_merge_dir = git_dir.join("rebase-merge");
     let rebase_apply_dir = git_dir.join("rebase-apply");
 
@@ -1192,74 +1484,30 @@ pub async fn cherry_pick_from_branch(
     // Reverse so we apply oldest first
     commit_oids.reverse();
 
+    // Record the pre-sequence HEAD for abort rewind.
+    let pre_sequence_head = repo.head()?.peel_to_commit()?.id();
+
     // Cherry-pick each commit
     let mut results = Vec::new();
 
-    for oid in &commit_oids {
+    for (i, oid) in commit_oids.iter().enumerate() {
         let commit = repo.find_commit(*oid)?;
 
-        if commit.parent_count() == 0 {
-            return Err(LeviathanError::OperationFailed(format!(
-                "Cannot cherry-pick root commit {}",
-                oid
-            )));
-        }
-
-        let mut checkout_builder = git2::build::CheckoutBuilder::new();
-        checkout_builder
-            .allow_conflicts(true)
-            .conflict_style_merge(true);
-
-        let mut opts = git2::CherrypickOptions::new();
-        opts.checkout_builder(checkout_builder);
-
-        if commit.parent_count() > 1 {
-            opts.mainline(1);
-        }
-
-        repo.cherrypick(&commit, Some(&mut opts))?;
-
-        let mut index = repo.index()?;
-        if index.has_conflicts() {
-            // Write remaining commits to sequence file for continuation
-            let remaining: Vec<String> = commit_oids
-                .iter()
-                .skip(results.len() + 1)
-                .map(|o| o.to_string())
-                .collect();
-            if !remaining.is_empty() {
-                let seq_path = Path::new(&path).join(".git/CHERRY_PICK_SEQUENCE");
-                std::fs::write(&seq_path, remaining.join("\n"))?;
+        match cherry_pick_one(&repo, &commit)? {
+            Some(new_commit) => results.push(new_commit),
+            None => {
+                let remaining: Vec<String> = commit_oids
+                    .iter()
+                    .skip(i + 1)
+                    .map(|o| o.to_string())
+                    .collect();
+                write_sequencer_state(&repo, pre_sequence_head, &remaining)?;
+                return Err(LeviathanError::CherryPickConflict);
             }
-            return Err(LeviathanError::CherryPickConflict);
         }
-
-        // Create the commit
-        let head = repo.head()?.peel_to_commit()?;
-        let tree_oid = index.write_tree()?;
-        let tree = repo.find_tree(tree_oid)?;
-        let signature = repo.signature()?;
-
-        let new_oid = repo.commit(
-            Some("HEAD"),
-            &signature,
-            &commit.author(),
-            commit.message().unwrap_or(""),
-            &tree,
-            &[&head],
-        )?;
-
-        repo.cleanup_state()?;
-
-        let new_commit = repo.find_commit(new_oid)?;
-        results.push(Commit::from_git2(&new_commit));
     }
 
-    // Clean up sequence file if it exists
-    let seq_path = Path::new(&path).join(".git/CHERRY_PICK_SEQUENCE");
-    if seq_path.exists() {
-        let _ = std::fs::remove_file(&seq_path);
-    }
+    clear_sequencer_state(&repo);
 
     Ok(results)
 }
@@ -1294,7 +1542,13 @@ mod tests {
         assert!(!test_repo.path.join("feature.txt").exists());
 
         // Cherry-pick the feature commit
-        let result = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
+        let result = cherry_pick(
+            test_repo.path_str(),
+            feature_commit_oid.to_string(),
+            None,
+            None,
+        )
+        .await;
 
         assert!(result.is_ok(), "Cherry-pick should succeed");
         let new_commit = result.unwrap();
@@ -1337,6 +1591,7 @@ mod tests {
             test_repo.path_str(),
             feature_commit_oid.to_string(),
             Some(true),
+            None,
         )
         .await;
 
@@ -1385,7 +1640,13 @@ mod tests {
         test_repo.checkout_branch("main");
 
         // Cherry-pick should result in conflict
-        let result = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
+        let result = cherry_pick(
+            test_repo.path_str(),
+            feature_commit_oid.to_string(),
+            None,
+            None,
+        )
+        .await;
 
         assert!(result.is_err(), "Cherry-pick should fail with conflict");
         let err = result.unwrap_err();
@@ -1424,7 +1685,13 @@ mod tests {
         test_repo.checkout_branch("main");
 
         // Cherry-pick to create conflict
-        let _ = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
+        let _ = cherry_pick(
+            test_repo.path_str(),
+            feature_commit_oid.to_string(),
+            None,
+            None,
+        )
+        .await;
 
         // Verify we're in cherry-pick state
         assert_eq!(test_repo.repo().state(), git2::RepositoryState::CherryPick);
@@ -1470,7 +1737,13 @@ mod tests {
         let main_head_before = test_repo.head_oid();
 
         // Cherry-pick to create conflict
-        let _ = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
+        let _ = cherry_pick(
+            test_repo.path_str(),
+            feature_commit_oid.to_string(),
+            None,
+            None,
+        )
+        .await;
 
         // Manually resolve the conflict by writing resolved content
         std::fs::write(test_repo.path.join("conflict.txt"), "resolved content").unwrap();
@@ -1514,7 +1787,7 @@ mod tests {
         let root_oid = test_repo.create_commit("Root commit", &[("file.txt", "content")]);
 
         // Try to cherry-pick the root commit
-        let result = cherry_pick(test_repo.path_str(), root_oid.to_string(), None).await;
+        let result = cherry_pick(test_repo.path_str(), root_oid.to_string(), None, None).await;
 
         assert!(
             result.is_err(),
@@ -1549,13 +1822,25 @@ mod tests {
         test_repo.checkout_branch("main");
 
         // First cherry-pick creates conflict
-        let _ = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None).await;
+        let _ = cherry_pick(
+            test_repo.path_str(),
+            feature_commit_oid.to_string(),
+            None,
+            None,
+        )
+        .await;
 
         // Verify we're in cherry-pick state
         assert_eq!(test_repo.repo().state(), git2::RepositoryState::CherryPick);
 
         // Second cherry-pick should fail
-        let result = cherry_pick(test_repo.path_str(), another_commit_oid.to_string(), None).await;
+        let result = cherry_pick(
+            test_repo.path_str(),
+            another_commit_oid.to_string(),
+            None,
+            None,
+        )
+        .await;
 
         assert!(
             result.is_err(),
@@ -1583,9 +1868,14 @@ mod tests {
 
         // Switch back to main and cherry-pick
         test_repo.checkout_branch("main");
-        let result = cherry_pick(test_repo.path_str(), feature_commit_oid.to_string(), None)
-            .await
-            .unwrap();
+        let result = cherry_pick(
+            test_repo.path_str(),
+            feature_commit_oid.to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Verify author is preserved
         assert_eq!(result.author.name, original_author.name().unwrap());
@@ -1633,10 +1923,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_abort_cherry_pick_no_operation() {
+        // Canonical git: `git cherry-pick --abort` with no cherry-pick in
+        // progress fails ("no cherry-pick or revert in progress") and touches
+        // nothing. A blanket force-reset here would destroy uncommitted work.
         let repo = TestRepo::with_initial_commit();
-        // Aborting when no cherry-pick in progress should still succeed
+
+        // Make an uncommitted edit to a tracked file.
+        std::fs::write(repo.path.join("README.md"), "uncommitted precious work").unwrap();
+
         let result = abort_cherry_pick(repo.path_str()).await;
-        assert!(result.is_ok());
+        assert!(
+            result.is_err(),
+            "Abort with no cherry-pick in progress must fail like git"
+        );
+
+        // The uncommitted edit must survive (nothing was force-reset).
+        let content = std::fs::read_to_string(repo.path.join("README.md")).unwrap();
+        assert_eq!(content, "uncommitted precious work");
     }
 
     #[tokio::test]
@@ -1669,7 +1972,7 @@ mod tests {
         assert!(test_repo.path.join("revert-me.txt").exists());
 
         // Revert the commit
-        let result = revert(test_repo.path_str(), commit_to_revert.to_string()).await;
+        let result = revert(test_repo.path_str(), commit_to_revert.to_string(), None).await;
         assert!(result.is_ok(), "Revert should succeed");
 
         let revert_commit = result.unwrap();
@@ -1694,7 +1997,7 @@ mod tests {
         test_repo.create_commit("Modify file", &[("file.txt", "modified content")]);
 
         // Revert the original commit - this should conflict
-        let result = revert(test_repo.path_str(), commit_to_revert.to_string()).await;
+        let result = revert(test_repo.path_str(), commit_to_revert.to_string(), None).await;
 
         assert!(result.is_err(), "Revert should fail with conflict");
         let err = result.unwrap_err();
@@ -1711,7 +2014,7 @@ mod tests {
         test_repo.create_commit("Modify file", &[("file.txt", "modified content")]);
 
         // Revert to create conflict
-        let _ = revert(test_repo.path_str(), commit_to_revert.to_string()).await;
+        let _ = revert(test_repo.path_str(), commit_to_revert.to_string(), None).await;
 
         // Abort
         let abort_result = abort_revert(test_repo.path_str()).await;
@@ -1727,6 +2030,7 @@ mod tests {
         let result = revert(
             repo.path_str(),
             "0000000000000000000000000000000000000000".to_string(),
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1734,10 +2038,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_abort_revert_no_operation() {
+        // Canonical git: `git revert --abort` with no revert in progress fails
+        // and touches nothing.
         let repo = TestRepo::with_initial_commit();
-        // Aborting when no revert in progress should still succeed
+
+        std::fs::write(repo.path.join("README.md"), "uncommitted precious work").unwrap();
+
         let result = abort_revert(repo.path_str()).await;
-        assert!(result.is_ok());
+        assert!(
+            result.is_err(),
+            "Abort with no revert in progress must fail like git"
+        );
+
+        let content = std::fs::read_to_string(repo.path.join("README.md")).unwrap();
+        assert_eq!(content, "uncommitted precious work");
     }
 
     #[tokio::test]
@@ -1746,7 +2060,7 @@ mod tests {
 
         let commit_oid = repo.create_commit("Original message", &[("file.txt", "content")]);
 
-        let result = revert(repo.path_str(), commit_oid.to_string()).await;
+        let result = revert(repo.path_str(), commit_oid.to_string(), None).await;
         assert!(result.is_ok());
         let revert_commit = result.unwrap();
 
@@ -2515,5 +2829,406 @@ mod tests {
         // The initial commit is a root commit so it will fail on root commit check
         // Actually, it will try to cherry-pick root commit which should fail
         assert!(result.is_err());
+    }
+
+    // ==================== Regression tests: canonical git parity ====================
+
+    /// Build a merge commit on the current HEAD merging in `other`, returning its
+    /// oid. The merge's tree is just HEAD's tree (content is irrelevant for these
+    /// tests, which only exercise the merge-parent handling).
+    fn make_merge_commit(repo: &TestRepo, other: git2::Oid) -> git2::Oid {
+        let git_repo = repo.repo();
+        let sig = git_repo.signature().unwrap();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        let other_commit = git_repo.find_commit(other).unwrap();
+        let tree = head.tree().unwrap();
+        git_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "Merge commit",
+                &tree,
+                &[&head, &other_commit],
+            )
+            .unwrap()
+    }
+
+    // ---- Finding 42: empty cherry-pick / revert must stop, not commit ----
+
+    #[tokio::test]
+    async fn test_cherry_pick_already_applied_stops() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Commit a change on feature, then make the identical change on main.
+        test_repo.create_commit("Base", &[("f.txt", "x")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_oid = test_repo.create_commit("Change to y", &[("f.txt", "y")]);
+
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Same change to y", &[("f.txt", "y")]);
+        let head_before = test_repo.head_oid();
+
+        // Cherry-picking the already-applied change must stop with an empty error
+        // and create NO commit (matching `git cherry-pick`'s default --empty=stop).
+        let result = cherry_pick(test_repo.path_str(), feature_oid.to_string(), None, None).await;
+        assert!(result.is_err(), "empty cherry-pick must not succeed");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("empty"),
+            "error should explain the pick is empty"
+        );
+
+        // HEAD must not have advanced (no empty commit was created).
+        assert_eq!(test_repo.head_oid(), head_before);
+        // git leaves CHERRY_PICK_HEAD in place so the user can skip/abort.
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::CherryPick);
+    }
+
+    #[tokio::test]
+    async fn test_revert_already_undone_stops() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        // f.txt starts at x, A changes it to y, B changes it back to x (the exact
+        // inverse). Reverting A is then a no-op → empty.
+        test_repo.create_commit("Setup", &[("f.txt", "x")]);
+        let add_oid = test_repo.create_commit("A: x->y", &[("f.txt", "y")]);
+        test_repo.create_commit("B: y->x", &[("f.txt", "x")]);
+        let head_before = test_repo.head_oid();
+
+        // Reverting the already-undone commit is empty; git stops.
+        let result = revert(test_repo.path_str(), add_oid.to_string(), None).await;
+        assert!(result.is_err(), "empty revert must not succeed");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("empty"),
+            "error should explain the revert is empty"
+        );
+        assert_eq!(test_repo.head_oid(), head_before);
+    }
+
+    // ---- Finding 43: merge commits require an explicit mainline ----
+
+    #[tokio::test]
+    async fn test_cherry_pick_merge_without_mainline_refuses() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feat = test_repo.create_commit("Feature", &[("feat.txt", "f")]);
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main", &[("main.txt", "m")]);
+        let merge_oid = make_merge_commit(&test_repo, feat);
+
+        // Without a mainline, git refuses to cherry-pick a merge commit.
+        let result = cherry_pick(test_repo.path_str(), merge_oid.to_string(), None, None).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("mainline"),
+            "error should mention the missing mainline"
+        );
+
+        // An out-of-range mainline is rejected too.
+        let result = cherry_pick(test_repo.path_str(), merge_oid.to_string(), None, Some(5)).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .to_lowercase()
+            .contains("out of range"));
+    }
+
+    #[tokio::test]
+    async fn test_revert_merge_without_mainline_refuses() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feat = test_repo.create_commit("Feature", &[("feat.txt", "f")]);
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main", &[("main.txt", "m")]);
+        let merge_oid = make_merge_commit(&test_repo, feat);
+
+        let result = revert(test_repo.path_str(), merge_oid.to_string(), None).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("mainline"),
+            "error should mention the missing mainline"
+        );
+    }
+
+    // ---- Finding 40: aborting must preserve unrelated uncommitted work ----
+
+    #[tokio::test]
+    async fn test_abort_cherry_pick_preserves_unrelated_changes() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Commit conflict.txt and unrelated.txt on main.
+        test_repo.create_commit(
+            "Add files",
+            &[("conflict.txt", "base"), ("unrelated.txt", "orig")],
+        );
+        let repo = test_repo.repo();
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        let parent = head_commit.parent(0).unwrap();
+        repo.branch("feature", &parent, false).unwrap();
+        test_repo.checkout_branch("feature");
+        let feature_oid =
+            test_repo.create_commit("Feature conflict", &[("conflict.txt", "feature")]);
+        test_repo.checkout_branch("main");
+        // Re-add conflict.txt on main so the pick conflicts.
+        test_repo.create_commit("Main conflict", &[("conflict.txt", "main")]);
+
+        // Uncommitted edit to an unrelated tracked file.
+        std::fs::write(test_repo.path.join("unrelated.txt"), "PRECIOUS WORK").unwrap();
+
+        // Cherry-pick conflicts on conflict.txt.
+        let result = cherry_pick(test_repo.path_str(), feature_oid.to_string(), None, None).await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+
+        // Abort must restore conflict.txt but preserve the unrelated edit.
+        abort_cherry_pick(test_repo.path_str()).await.unwrap();
+
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        let unrelated = std::fs::read_to_string(test_repo.path.join("unrelated.txt")).unwrap();
+        assert_eq!(
+            unrelated, "PRECIOUS WORK",
+            "unrelated uncommitted work must survive the abort"
+        );
+        let conflict = std::fs::read_to_string(test_repo.path.join("conflict.txt")).unwrap();
+        assert_eq!(conflict, "main", "conflicted file restored to HEAD");
+    }
+
+    #[tokio::test]
+    async fn test_abort_revert_preserves_unrelated_changes() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        test_repo.create_commit("Add unrelated", &[("unrelated.txt", "orig")]);
+        let add_oid = test_repo.create_commit("Add file", &[("file.txt", "original")]);
+        test_repo.create_commit("Modify file", &[("file.txt", "modified")]);
+
+        std::fs::write(test_repo.path.join("unrelated.txt"), "PRECIOUS WORK").unwrap();
+
+        // Reverting the add conflicts on file.txt (later modified).
+        let result = revert(test_repo.path_str(), add_oid.to_string(), None).await;
+        assert!(matches!(result, Err(LeviathanError::RevertConflict)));
+
+        abort_revert(test_repo.path_str()).await.unwrap();
+
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        let unrelated = std::fs::read_to_string(test_repo.path.join("unrelated.txt")).unwrap();
+        assert_eq!(unrelated, "PRECIOUS WORK");
+    }
+
+    // ---- Finding 44: multi-commit sequencer abort rewinds & continue resumes ----
+
+    /// Set up main at M with a feature branch [A (clean), B (conflicts), C (clean)]
+    /// branched before M. Returns (pre_sequence_head = M, [A, B, C]).
+    fn setup_range(test_repo: &TestRepo) -> (git2::Oid, git2::Oid, git2::Oid, git2::Oid) {
+        // Base commit adds shared.txt.
+        test_repo.create_commit("Base", &[("shared.txt", "base")]);
+        // Feature branch from base.
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let a = test_repo.create_commit("A adds a.txt", &[("a.txt", "a")]);
+        let b = test_repo.create_commit("B edits shared", &[("shared.txt", "feature")]);
+        let c = test_repo.create_commit("C adds c.txt", &[("c.txt", "c")]);
+        // Main diverges: edit shared.txt so B will conflict.
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main edits shared", &[("shared.txt", "main")]);
+        let m = test_repo.head_oid();
+        (m, a, b, c)
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_range_abort_rewinds_applied_picks() {
+        let test_repo = TestRepo::with_initial_commit();
+        let (m, a, b, _c) = setup_range(&test_repo);
+
+        // Range [A, B]: A applies cleanly, B conflicts.
+        let result =
+            cherry_pick_range(test_repo.path_str(), vec![a.to_string(), b.to_string()]).await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+
+        // A was applied on top of M, so HEAD advanced and a.txt exists.
+        assert_ne!(test_repo.head_oid(), m);
+        assert!(test_repo.path.join("a.txt").exists());
+
+        // Abort must rewind HEAD all the way back to the pre-sequence commit M,
+        // removing the already-applied A (git's return-to-pre-sequence-HEAD).
+        abort_cherry_pick(test_repo.path_str()).await.unwrap();
+
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            test_repo.head_oid(),
+            m,
+            "abort must rewind to pre-sequence HEAD"
+        );
+        assert!(
+            !test_repo.path.join("a.txt").exists(),
+            "applied pick removed"
+        );
+        // Sequencer sidecar files must be cleaned up.
+        let git_dir = test_repo.repo().path().to_path_buf();
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE).exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE_HEAD).exists());
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_range_continue_resumes_remaining() {
+        let test_repo = TestRepo::with_initial_commit();
+        let (_m, a, b, c) = setup_range(&test_repo);
+
+        // Range [A, B, C]: A clean, B conflicts, C still pending.
+        let result = cherry_pick_range(
+            test_repo.path_str(),
+            vec![a.to_string(), b.to_string(), c.to_string()],
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+
+        // Resolve B's conflict and stage it.
+        std::fs::write(test_repo.path.join("shared.txt"), "resolved").unwrap();
+        let repo = test_repo.repo();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("shared.txt")).unwrap();
+        index.write().unwrap();
+
+        // Continue must commit B AND resume the remaining pick C.
+        let last = continue_cherry_pick(test_repo.path_str()).await.unwrap();
+        assert_eq!(last.summary, "C adds c.txt", "the last resumed pick is C");
+
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert!(test_repo.path.join("a.txt").exists());
+        assert!(test_repo.path.join("c.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("shared.txt")).unwrap(),
+            "resolved"
+        );
+        // Sequencer sidecar files must be gone.
+        let git_dir = test_repo.repo().path().to_path_buf();
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE).exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE_HEAD).exists());
+    }
+
+    // ---- Finding 45: state files resolved via repo.path() for linked worktrees ----
+
+    #[tokio::test]
+    async fn test_continue_cherry_pick_in_linked_worktree() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        // Build a conflict scenario on main.
+        test_repo.create_commit("Add", &[("conflict.txt", "base")]);
+        let repo = test_repo.repo();
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        let parent = head_commit.parent(0).unwrap();
+        repo.branch("feature", &parent, false).unwrap();
+        test_repo.checkout_branch("feature");
+        let feature_oid = test_repo.create_commit("Feature", &[("conflict.txt", "feature")]);
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main", &[("conflict.txt", "main")]);
+
+        // Create a linked worktree (checked out on a new branch "wt").
+        let wt_path = test_repo
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt_path);
+        {
+            let git_repo = test_repo.repo();
+            git_repo.worktree("wt", &wt_path, None).unwrap();
+        }
+        let wt_path_str = wt_path.to_string_lossy().to_string();
+
+        // Cherry-pick in the worktree conflicts.
+        let result = cherry_pick(wt_path_str.clone(), feature_oid.to_string(), None, None).await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+
+        // Resolve the conflict inside the worktree and stage it.
+        std::fs::write(wt_path.join("conflict.txt"), "resolved in wt").unwrap();
+        {
+            let wt_repo = git2::Repository::open(&wt_path).unwrap();
+            let mut index = wt_repo.index().unwrap();
+            index
+                .add_path(std::path::Path::new("conflict.txt"))
+                .unwrap();
+            index.write().unwrap();
+        }
+
+        // Continue must find CHERRY_PICK_HEAD via repo.path() (the per-worktree
+        // gitdir) rather than <wt>/.git/CHERRY_PICK_HEAD, which does not exist.
+        let cont = continue_cherry_pick(wt_path_str.clone()).await;
+        assert!(
+            cont.is_ok(),
+            "continue must succeed in a linked worktree, got: {:?}",
+            cont.err()
+        );
+
+        let _ = std::fs::remove_dir_all(&wt_path);
+    }
+
+    // ---- Finding 46: post-commit hook runs for cherry-pick / revert ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_cherry_pick_runs_post_commit_hook() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        let marker = test_repo.path.join("post-commit-ran");
+        test_repo.install_hook(
+            "post-commit",
+            &format!("#!/bin/sh\ntouch \"{}\"\n", marker.display()),
+        );
+
+        // A clean cherry-pick.
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_oid = test_repo.create_commit("Feature", &[("feature.txt", "content")]);
+        test_repo.checkout_branch("main");
+
+        cherry_pick(test_repo.path_str(), feature_oid.to_string(), None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            marker.exists(),
+            "post-commit hook must run for a cherry-pick commit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_revert_runs_post_commit_hook() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        let marker = test_repo.path.join("post-commit-ran");
+        test_repo.install_hook(
+            "post-commit",
+            &format!("#!/bin/sh\ntouch \"{}\"\n", marker.display()),
+        );
+
+        let commit = test_repo.create_commit("Add file", &[("f.txt", "content")]);
+        revert(test_repo.path_str(), commit.to_string(), None)
+            .await
+            .unwrap();
+
+        assert!(
+            marker.exists(),
+            "post-commit hook must run for a revert commit"
+        );
     }
 }
