@@ -40,12 +40,12 @@ pub async fn get_tags(path: String) -> Result<Vec<Tag>> {
         // Try to get tag details if it's an annotated tag
         let (message, tagger, is_annotated, target_oid) = if let Ok(tag) = repo.find_tag(oid) {
             let tagger = tag.tagger().map(|sig| Signature {
-                name: sig.name().unwrap_or("").to_string(),
-                email: sig.email().unwrap_or("").to_string(),
+                name: sig.name().ok().unwrap_or("").to_string(),
+                email: sig.email().ok().unwrap_or("").to_string(),
                 timestamp: sig.when().seconds(),
             });
             (
-                tag.message().map(|s| s.to_string()),
+                tag.message().ok().flatten().map(|s| s.to_string()),
                 tagger,
                 true,
                 tag.target_id().to_string(),
@@ -99,9 +99,13 @@ pub async fn get_tag_details(path: String, name: String) -> Result<TagDetails> {
             oid: ref_oid.to_string(),
             target_oid: tag.target_id().to_string(),
             is_annotated: true,
-            message: tag.message().map(|s| s.to_string()),
-            tagger_name: tag.tagger().and_then(|s| s.name().map(|n| n.to_string())),
-            tagger_email: tag.tagger().and_then(|s| s.email().map(|e| e.to_string())),
+            message: tag.message().ok().flatten().map(|s| s.to_string()),
+            tagger_name: tag
+                .tagger()
+                .and_then(|s| s.name().ok().map(|n| n.to_string())),
+            tagger_email: tag
+                .tagger()
+                .and_then(|s| s.email().ok().map(|e| e.to_string())),
             tagger_date: tag.tagger().map(|s| s.when().seconds()),
             is_signed,
         }
@@ -149,8 +153,8 @@ pub async fn create_tag(
         (
             true,
             Some(Signature {
-                name: signature.name().unwrap_or("").to_string(),
-                email: signature.email().unwrap_or("").to_string(),
+                name: signature.name().ok().unwrap_or("").to_string(),
+                email: signature.email().ok().unwrap_or("").to_string(),
                 timestamp: signature.when().seconds(),
             }),
         )
@@ -251,8 +255,8 @@ pub async fn edit_tag_message(path: String, name: String, message: String) -> Re
         target_oid: target_oid.to_string(),
         is_annotated: true,
         message: Some(message),
-        tagger_name: signature.name().map(|s| s.to_string()),
-        tagger_email: signature.email().map(|e| e.to_string()),
+        tagger_name: signature.name().ok().map(|s| s.to_string()),
+        tagger_email: signature.email().ok().map(|e| e.to_string()),
         tagger_date: Some(signature.when().seconds()),
         is_signed,
     })

@@ -125,7 +125,7 @@ pub async fn create_branch(
     if checkout.unwrap_or(false) {
         let obj = reference.peel(git2::ObjectType::Commit)?;
         repo.checkout_tree(&obj, None)?;
-        repo.set_head(reference.name().ok_or_else(|| {
+        repo.set_head(reference.name().map_err(|_| {
             LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
         })?)?;
     }
@@ -281,7 +281,7 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
     if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
         let obj = branch.get().peel(git2::ObjectType::Commit)?;
         repo.checkout_tree(&obj, Some(&mut checkout_opts))?;
-        repo.set_head(branch.get().name().ok_or_else(|| {
+        repo.set_head(branch.get().name().map_err(|_| {
             LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
         })?)?;
     } else if let Ok(remote_branch) = repo.find_branch(&ref_name, git2::BranchType::Remote) {
@@ -300,7 +300,7 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
                 // Local branch exists: check out ITS tree, not the remote tip
                 let obj = local_branch.get().peel(git2::ObjectType::Commit)?;
                 repo.checkout_tree(&obj, Some(&mut checkout_opts))?;
-                repo.set_head(local_branch.get().name().ok_or_else(|| {
+                repo.set_head(local_branch.get().name().map_err(|_| {
                     LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
                 })?)?;
             } else {
@@ -313,7 +313,7 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
                 new_branch.set_upstream(Some(&remote_name))?;
 
                 // Set HEAD to the new branch
-                repo.set_head(new_branch.get().name().ok_or_else(|| {
+                repo.set_head(new_branch.get().name().map_err(|_| {
                     LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
                 })?)?;
             }
@@ -733,7 +733,7 @@ pub async fn checkout_with_autostash(
     // Set HEAD
     if is_local_branch {
         if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
-            repo.set_head(branch.get().name().ok_or_else(|| {
+            repo.set_head(branch.get().name().map_err(|_| {
                 LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
             })?)?;
         }
@@ -758,7 +758,7 @@ pub async fn checkout_with_autostash(
                 new_branch
             };
 
-        if let Some(name) = local_branch.get().name() {
+        if let Ok(name) = local_branch.get().name() {
             repo.set_head(name)?;
         }
     } else {
@@ -1710,7 +1710,7 @@ mod tests {
         let statuses = git_repo.statuses(None).unwrap();
         let readme = statuses
             .iter()
-            .find(|s| s.path() == Some("README.md"))
+            .find(|s| s.path().ok() == Some("README.md"))
             .expect("README.md should still have changes after checkout");
         assert!(
             readme.status().contains(git2::Status::INDEX_MODIFIED),

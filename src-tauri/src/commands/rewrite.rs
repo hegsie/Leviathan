@@ -242,7 +242,7 @@ pub async fn revert(path: String, commit_oid: String) -> Result<Commit> {
 
     let revert_message = format!(
         "Revert \"{}\"\n\nThis reverts commit {}.",
-        commit.summary().unwrap_or(""),
+        commit.summary().ok().flatten().unwrap_or(""),
         commit_oid
     );
 
@@ -299,7 +299,7 @@ pub async fn continue_revert(path: String) -> Result<Commit> {
 
     let revert_message = format!(
         "Revert \"{}\"\n\nThis reverts commit {}.",
-        original_commit.summary().unwrap_or(""),
+        original_commit.summary().ok().flatten().unwrap_or(""),
         original_oid_str
     );
 
@@ -581,7 +581,7 @@ fn parse_todo_line(line: &str, repo: &git2::Repository) -> Option<RebaseTodoEntr
     } else {
         repo.find_commit(git2::Oid::from_str(&commit_oid).ok()?)
             .ok()
-            .and_then(|c| c.summary().map(|s| s.to_string()))
+            .and_then(|c| c.summary().ok().flatten().map(|s| s.to_string()))
             .unwrap_or_default()
     };
 
@@ -2098,9 +2098,9 @@ mod tests {
         // Verify the commit history no longer contains the dropped commit
         let git_repo = repo.repo();
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.summary().unwrap(), "Keep 2");
+        assert_eq!(head.summary().unwrap(), Some("Keep 2"));
         let parent = head.parent(0).unwrap();
-        assert_eq!(parent.summary().unwrap(), "Keep 1");
+        assert_eq!(parent.summary().unwrap(), Some("Keep 1"));
     }
 
     #[tokio::test]
@@ -2195,11 +2195,11 @@ mod tests {
         // Verify the commit chain: D -> C -> A -> initial
         let git_repo = repo.repo();
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.summary().unwrap(), "Commit D");
+        assert_eq!(head.summary().unwrap(), Some("Commit D"));
         let c = head.parent(0).unwrap();
-        assert_eq!(c.summary().unwrap(), "Commit C");
+        assert_eq!(c.summary().unwrap(), Some("Commit C"));
         let a = c.parent(0).unwrap();
-        assert_eq!(a.summary().unwrap(), "Commit A");
+        assert_eq!(a.summary().unwrap(), Some("Commit A"));
     }
 
     // ==================== Reorder Commits Tests ====================
@@ -2234,9 +2234,9 @@ mod tests {
         // Verify the commit order is now reversed: A on top, B below
         let git_repo = repo.repo();
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.summary().unwrap(), "Commit A");
+        assert_eq!(head.summary().unwrap(), Some("Commit A"));
         let parent = head.parent(0).unwrap();
-        assert_eq!(parent.summary().unwrap(), "Commit B");
+        assert_eq!(parent.summary().unwrap(), Some("Commit B"));
     }
 
     #[tokio::test]
@@ -2274,11 +2274,11 @@ mod tests {
         // Verify the commit order: B -> A -> C -> base
         let git_repo = repo.repo();
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.summary().unwrap(), "Commit B");
+        assert_eq!(head.summary().unwrap(), Some("Commit B"));
         let second = head.parent(0).unwrap();
-        assert_eq!(second.summary().unwrap(), "Commit A");
+        assert_eq!(second.summary().unwrap(), Some("Commit A"));
         let third = second.parent(0).unwrap();
-        assert_eq!(third.summary().unwrap(), "Commit C");
+        assert_eq!(third.summary().unwrap(), Some("Commit C"));
     }
 
     #[tokio::test]
@@ -2362,9 +2362,9 @@ mod tests {
         // Verify commit messages are preserved
         let git_repo = repo.repo();
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.summary().unwrap(), "Message for A");
+        assert_eq!(head.summary().unwrap(), Some("Message for A"));
         let parent = head.parent(0).unwrap();
-        assert_eq!(parent.summary().unwrap(), "Message for B");
+        assert_eq!(parent.summary().unwrap(), Some("Message for B"));
     }
 
     #[tokio::test]
@@ -2392,9 +2392,9 @@ mod tests {
         // Verify commit order is still A -> B
         let git_repo = repo.repo();
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.summary().unwrap(), "Commit B");
+        assert_eq!(head.summary().unwrap(), Some("Commit B"));
         let parent = head.parent(0).unwrap();
-        assert_eq!(parent.summary().unwrap(), "Commit A");
+        assert_eq!(parent.summary().unwrap(), Some("Commit A"));
     }
 
     #[tokio::test]

@@ -75,10 +75,10 @@ pub async fn get_submodules(path: String) -> Result<Vec<Submodule>> {
 
     // Iterate through submodules
     for submodule in repo.submodules()? {
-        let name = submodule.name().unwrap_or("").to_string();
+        let name = submodule.name().ok().unwrap_or("").to_string();
         let sm_path = submodule.path().to_string_lossy().to_string();
-        let url = submodule.url().map(|s| s.to_string());
-        let branch = submodule.branch().map(|s| s.to_string());
+        let url = submodule.url().ok().flatten().map(|s| s.to_string());
+        let branch = submodule.branch().ok().flatten().map(|s| s.to_string());
 
         // Determine status
         let status = match submodule.open() {
@@ -176,9 +176,9 @@ pub async fn add_submodule(
     let submodule = repo.find_submodule(&submodule_path)?;
 
     Ok(Submodule {
-        name: submodule.name().unwrap_or("").to_string(),
+        name: submodule.name().ok().unwrap_or("").to_string(),
         path: submodule.path().to_string_lossy().to_string(),
-        url: submodule.url().map(|s| s.to_string()),
+        url: submodule.url().ok().flatten().map(|s| s.to_string()),
         head_oid: None,
         branch,
         initialized: false,

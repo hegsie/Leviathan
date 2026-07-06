@@ -31,7 +31,7 @@ pub async fn get_note(
     let result = match repo.find_note(Some(notes_ref), oid) {
         Ok(note) => Some(GitNote {
             commit_oid,
-            message: note.message().unwrap_or("").to_string(),
+            message: note.message().ok().unwrap_or("").to_string(),
             notes_ref: notes_ref.to_string(),
         }),
         Err(_) => None,
@@ -52,7 +52,7 @@ pub async fn get_notes(path: String, notes_ref: Option<String>) -> Result<Vec<Gi
             if let Ok(note) = repo.find_note(Some(notes_ref_str), annotated_oid) {
                 notes.push(GitNote {
                     commit_oid: annotated_oid.to_string(),
-                    message: note.message().unwrap_or("").to_string(),
+                    message: note.message().ok().unwrap_or("").to_string(),
                     notes_ref: notes_ref_str.to_string(),
                 });
             } else {
@@ -127,7 +127,7 @@ pub async fn get_notes_refs(path: String) -> Result<Vec<String>> {
     let mut refs = Vec::new();
 
     for r in (repo.references_glob("refs/notes/*")?).flatten() {
-        if let Some(name) = r.name() {
+        if let Ok(name) = r.name() {
             refs.push(name.to_string());
         }
     }

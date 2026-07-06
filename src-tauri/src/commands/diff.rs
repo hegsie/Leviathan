@@ -366,7 +366,7 @@ pub async fn get_file_diff(
         ))?;
 
         for entry in statuses.iter() {
-            if let Some(entry_path) = entry.path() {
+            if let Ok(entry_path) = entry.path() {
                 let normalized_entry_path = entry_path.replace('\\', "/");
                 // Case-insensitive comparison on Windows
                 #[cfg(target_os = "windows")]
@@ -891,7 +891,7 @@ pub async fn get_file_blame(
                         author.name().unwrap_or("Unknown").to_string(),
                         author.email().unwrap_or("").to_string(),
                         author.when().seconds(),
-                        commit.summary().unwrap_or("").to_string(),
+                        commit.summary().ok().flatten().unwrap_or("").to_string(),
                     )
                 } else {
                     ("Unknown".to_string(), "".to_string(), 0, "".to_string())

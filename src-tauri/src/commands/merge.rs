@@ -50,6 +50,7 @@ pub async fn merge(
         let head = repo.head()?;
         let refname = head
             .name()
+            .ok()
             .ok_or_else(|| LeviathanError::InvalidReference)?;
 
         let mut reference = repo.find_reference(refname)?;
@@ -598,7 +599,7 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
         commits.push(RebaseCommit {
             oid: oid.to_string(),
             short_id: oid.to_string()[..7].to_string(),
-            summary: commit.summary().unwrap_or("").to_string(),
+            summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
             action: "pick".to_string(),
         });
     }
@@ -1533,7 +1534,7 @@ mod tests {
             2,
             "merge commit must have both parents"
         );
-        assert_eq!(head.summary(), Some("Merge feature"));
+        assert_eq!(head.summary().unwrap(), Some("Merge feature"));
     }
 
     #[tokio::test]
@@ -1578,7 +1579,7 @@ mod tests {
             1,
             "squash merge commit must have a single parent"
         );
-        assert_eq!(head.summary(), Some("Squashed"));
+        assert_eq!(head.summary().unwrap(), Some("Squashed"));
     }
 
     #[tokio::test]
@@ -1627,7 +1628,7 @@ mod tests {
             "commit message must not contain the Conflicts block: {:?}",
             msg
         );
-        assert_eq!(head.summary(), Some("Merge branch 'feature'"));
+        assert_eq!(head.summary().unwrap(), Some("Merge branch 'feature'"));
     }
 
     #[tokio::test]
@@ -1732,7 +1733,7 @@ mod tests {
         let statuses = git_repo.statuses(None).unwrap();
         let entry = statuses
             .iter()
-            .find(|s| s.path() == Some("doomed.txt"))
+            .find(|s| s.path().ok() == Some("doomed.txt"))
             .expect("deletion should be staged");
         assert!(entry.status().contains(git2::Status::INDEX_DELETED));
     }

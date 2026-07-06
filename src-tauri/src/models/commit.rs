@@ -29,8 +29,8 @@ pub struct Signature {
 impl From<git2::Signature<'_>> for Signature {
     fn from(sig: git2::Signature) -> Self {
         Signature {
-            name: sig.name().unwrap_or("Unknown").to_string(),
-            email: sig.email().unwrap_or("").to_string(),
+            name: sig.name().ok().unwrap_or("Unknown").to_string(),
+            email: sig.email().ok().unwrap_or("").to_string(),
             timestamp: sig.when().seconds(),
         }
     }
@@ -39,8 +39,8 @@ impl From<git2::Signature<'_>> for Signature {
 /// Convert a git2 Commit to our Commit model
 impl Commit {
     pub fn from_git2(commit: &git2::Commit) -> Self {
-        let message = commit.message().unwrap_or("").to_string();
-        let summary = commit.summary().unwrap_or("").to_string();
+        let message = commit.message().ok().unwrap_or("").to_string();
+        let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
         let body = message
             .lines()
             .skip(1)

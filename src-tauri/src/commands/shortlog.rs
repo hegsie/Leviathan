@@ -125,8 +125,8 @@ pub async fn shortlog(
             commit.author()
         };
 
-        let person_name = person.name().unwrap_or("Unknown").to_string();
-        let person_email = person.email().map(|s| s.to_string());
+        let person_name = person.name().ok().unwrap_or("Unknown").to_string();
+        let person_email = person.email().ok().map(|s| s.to_string());
 
         // Use email as key if showing email, otherwise use name
         let key = if show_email {
@@ -136,7 +136,7 @@ pub async fn shortlog(
             person_email.clone().unwrap_or_else(|| person_name.clone())
         };
 
-        let commit_summary = commit.summary().unwrap_or("").to_string();
+        let commit_summary = commit.summary().ok().flatten().unwrap_or("").to_string();
 
         let entry = contributors_map
             .entry(key)
