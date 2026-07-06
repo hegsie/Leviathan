@@ -133,6 +133,22 @@ describe('lv-left-panel', () => {
       const tagList = el.shadowRoot!.querySelector('lv-tag-list');
       expect(tagList).to.exist;
     });
+
+    it('shows Git Flow section header', async () => {
+      const el = await renderPanel();
+
+      const sectionHeaders = el.shadowRoot!.querySelectorAll('.section-header');
+      const headerTexts = Array.from(sectionHeaders).map(h => h.textContent!.trim());
+      expect(headerTexts.some(t => t.includes('Git Flow'))).to.be.true;
+    });
+
+    it('renders lv-gitflow-panel component with the repository path', async () => {
+      const el = await renderPanel();
+
+      const gitflowPanel = el.shadowRoot!.querySelector('lv-gitflow-panel') as HTMLElement & { repositoryPath: string };
+      expect(gitflowPanel).to.exist;
+      expect(gitflowPanel.repositoryPath).to.equal(REPO_PATH);
+    });
   });
 
   // ── Section expand/collapse ────────────────────────────────────────────

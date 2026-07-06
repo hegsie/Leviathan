@@ -799,13 +799,21 @@ export class LvSettingsDialog extends LitElement {
   }
 
   private async handleCancelDownload(modelId: string): Promise<void> {
-    await localAiService.cancelModelDownload(modelId);
+    this.aiError = null;
+    const result = await localAiService.cancelModelDownload(modelId);
+    // If the cancel failed, keep the progress entry (the download is still
+    // running) and surface the error instead of silently dropping the UI row.
+    if (!result.success) {
+      this.aiError = result.error?.message ?? 'Failed to cancel download';
+      return;
+    }
     const { [modelId]: _, ...rest } = this.downloadProgress;
     this.downloadProgress = rest;
     await this.loadLocalAiData();
   }
 
   private async handleDeleteModel(modelId: string): Promise<void> {
+    this.aiError = null;
     // Unload first if this model is currently loaded
     if (this.localModelStatus === 'ready') {
       await localAiService.unloadModel();
@@ -833,6 +841,7 @@ export class LvSettingsDialog extends LitElement {
   }
 
   private async handleUnloadModel(): Promise<void> {
+    this.aiError = null;
     const result = await localAiService.unloadModel();
     if (result.success) {
       await Promise.all([this.loadLocalAiData(), this.loadAiProviders()]);

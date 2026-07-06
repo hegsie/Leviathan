@@ -1314,6 +1314,7 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   private async handleDisconnect(): Promise<void> {
     this.isLoading = true;
+    this.error = null;
 
     try {
       // Delete token for selected account or legacy token
@@ -1356,6 +1357,7 @@ export class LvAzureDevOpsDialog extends LitElement {
     if (!confirmed) return;
 
     this.isLoading = true;
+    this.error = null;
 
     // Delete the account record (source of truth) FIRST, then best-effort token
     // cleanup, matching GitHub/GitLab/OIDC. Deleting tokens first leaves a
@@ -1673,6 +1675,7 @@ export class LvAzureDevOpsDialog extends LitElement {
               <button
                 class="btn btn-danger-outline"
                 @click=${this.handleDeleteIntegration}
+                ?disabled=${this.isLoading}
               >
                 Delete Integration
               </button>

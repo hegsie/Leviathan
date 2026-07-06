@@ -1556,6 +1556,9 @@ export class LvGitHubDialog extends LitElement {
         scopes: status.scopes?.length ? status.scopes : ['app-installation'],
       };
       this.selectedAccountId = accountId;
+      // The new account now exists and is selected — the add flow is complete
+      // (mirrors the PAT and OAuth success paths).
+      this.isAddingAccount = false;
       this.syncSharedConnectionStatus(true);
 
       showToast('Connected via GitHub App', 'success');
@@ -1625,6 +1628,7 @@ export class LvGitHubDialog extends LitElement {
         this.createPrDraft = false;
         this.activeTab = 'pull-requests';
         await this.loadPullRequests();
+        showToast('Pull request created successfully', 'success');
       } else {
         this.error = result.error?.message ?? 'Failed to create pull request';
       }
@@ -1675,6 +1679,7 @@ export class LvGitHubDialog extends LitElement {
         this.createIssueLabels = [];
         this.activeTab = 'issues';
         await this.loadIssues();
+        showToast('Issue created successfully', 'success');
       } else {
         this.error = result.error?.message ?? 'Failed to create issue';
       }
@@ -1737,6 +1742,7 @@ export class LvGitHubDialog extends LitElement {
         this.createReleaseGenerateNotes = true;
         this.activeTab = 'releases';
         await this.loadReleases();
+        showToast('Release created successfully', 'success');
       } else {
         this.error = result.error?.message ?? 'Failed to create release';
       }

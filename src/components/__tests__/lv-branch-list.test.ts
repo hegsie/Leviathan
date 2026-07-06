@@ -164,6 +164,9 @@ describe('lv-branch-list', () => {
   beforeEach(() => {
     clearHistory();
     setupDefaultMocks();
+    // Hidden branches persist to localStorage keyed by repo path — clear so
+    // one test's hide action can't leak into the next test
+    window.localStorage.clear();
   });
 
   // ── 1. Rendering ──────────────────────────────────────────────────────
@@ -864,6 +867,58 @@ describe('lv-branch-list', () => {
       if (deleteCalled) {
         expect(branchesChangedFired).to.be.true;
       }
+    });
+
+    it('offers force delete when a branch is not fully merged', async () => {
+      const deleteCalls: Array<{ force: unknown }> = [];
+      let removed = false;
+
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_branches':
+            return removed ? allBranches.filter((b) => b.name !== 'feature-x') : allBranches;
+          case 'get_remotes':
+            return [];
+          case 'delete_branch': {
+            const a = args as { force?: boolean };
+            deleteCalls.push({ force: a.force });
+            if (!a.force) {
+              // Squash-merged branch: not an ancestor of HEAD
+              throw { code: 'OPERATION_FAILED', message: 'Branch is not fully merged. Use force to delete anyway.' };
+            }
+            removed = true;
+            return null;
+          }
+          case 'plugin:dialog|message':
+            return 'Ok'; // confirm both the initial delete AND the force prompt
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderBranchList();
+
+      const branchItems = el.shadowRoot!.querySelectorAll('.branch-item');
+      const featureItem = Array.from(branchItems).find((item) =>
+        item.textContent?.includes('feature-x'),
+      );
+      featureItem!.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }),
+      );
+      await el.updateComplete;
+
+      const menuItems = el.shadowRoot!.querySelectorAll('.context-menu-item');
+      const deleteBtn = Array.from(menuItems).find((btn) =>
+        btn.textContent?.trim().includes('Delete branch'),
+      ) as HTMLButtonElement;
+      deleteBtn.click();
+
+      await new Promise((r) => setTimeout(r, 250));
+      await el.updateComplete;
+
+      // First attempt without force fails; a force retry follows the confirm.
+      expect(deleteCalls.map((c) => c.force)).to.deep.equal([false, true]);
+      expect(removed).to.be.true;
     });
   });
 });

@@ -379,6 +379,8 @@ export interface ConflictFile {
   ancestor: ConflictEntry | null;
   ours: ConflictEntry | null;
   theirs: ConflictEntry | null;
+  /** True when any side of the conflict is binary — must not be edited as text */
+  isBinary: boolean;
 }
 
 export interface ConflictEntry {

@@ -4,62 +4,19 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles, buttonStyles } from '../../styles/shared-styles.ts';
+import {
+  type OutputLogEntry,
+  getLogEntries,
+  clearLogEntries,
+  subscribeOutputLog,
+} from '../../services/output-log.service.ts';
 
-const MAX_ENTRIES = 100;
-
-export interface OutputLogEntry {
-  timestamp: number;
-  command: string;
-  output: string;
-  success: boolean;
-}
-
-// Singleton log entries array and listeners
-const logEntries: OutputLogEntry[] = [];
-const listeners: Set<() => void> = new Set();
-
-function notifyListeners(): void {
-  for (const listener of listeners) {
-    listener();
-  }
-}
-
-/**
- * Log a git command execution result.
- * Call this from other components to record output in the panel.
- */
-export function logGitCommand(command: string, output: string, success: boolean): void {
-  logEntries.unshift({
-    timestamp: Date.now(),
-    command,
-    output,
-    success,
-  });
-
-  // Trim to max entries
-  if (logEntries.length > MAX_ENTRIES) {
-    logEntries.length = MAX_ENTRIES;
-  }
-
-  notifyListeners();
-}
-
-/**
- * Get current log entries (read-only snapshot).
- */
-export function getLogEntries(): ReadonlyArray<OutputLogEntry> {
-  return logEntries;
-}
-
-/**
- * Clear all log entries.
- */
-export function clearLogEntries(): void {
-  logEntries.length = 0;
-  notifyListeners();
-}
+// The log store lives in output-log.service.ts (populated by the IPC layer);
+// re-export the store API here for existing consumers of this module.
+export { logGitCommand, getLogEntries, clearLogEntries } from '../../services/output-log.service.ts';
+export type { OutputLogEntry } from '../../services/output-log.service.ts';
 
 function formatTimestamp(ts: number): string {
   const d = new Date(ts);
@@ -111,6 +68,18 @@ export class LvOutputPanel extends LitElement {
       }
 
       .clear-btn:hover {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .close-btn {
+        font-size: var(--font-size-xs);
+        padding: 2px 8px;
+        border-radius: var(--radius-sm);
+        color: var(--color-text-muted);
+      }
+
+      .close-btn:hover {
         background: var(--color-bg-hover);
         color: var(--color-text-primary);
       }
@@ -214,18 +183,46 @@ export class LvOutputPanel extends LitElement {
     `,
   ];
 
+  /** When set (by the app shell), renders a close button that emits `close` */
+  @property({ type: Boolean }) closable = false;
+
+  /**
+   * When set, only entries for this repository (plus repo-independent
+   * entries) are shown — required for multi-repo sessions. Unset shows all.
+   */
+  @property({ type: String }) repositoryPath = '';
+
   @state() private entries: ReadonlyArray<OutputLogEntry> = [];
   @state() private expandedEntries = new Set<number>();
+
+  private get visibleEntries(): OutputLogEntry[] {
+    if (!this.repositoryPath) return [...this.entries];
+    return this.entries.filter(
+      (e) => !e.repoPath || e.repoPath === this.repositoryPath,
+    );
+  }
+
+  willUpdate(changed: Map<string, unknown>): void {
+    // Collapse all rows when switching repositories — a different repo shows a
+    // different set of entries, so carrying expansion state (keyed by entry id)
+    // across the switch would be meaningless.
+    if (changed.has('repositoryPath')) {
+      this.expandedEntries = new Set();
+    }
+  }
+
+  private unsubscribeLog?: () => void;
 
   connectedCallback(): void {
     super.connectedCallback();
     this.entries = getLogEntries();
-    listeners.add(this.handleLogUpdate);
+    this.unsubscribeLog = subscribeOutputLog(this.handleLogUpdate);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
-    listeners.delete(this.handleLogUpdate);
+    this.unsubscribeLog?.();
+    this.unsubscribeLog = undefined;
   }
 
   private handleLogUpdate = (): void => {
@@ -234,29 +231,32 @@ export class LvOutputPanel extends LitElement {
   };
 
   private handleClear(): void {
-    clearLogEntries();
+    // Scope the clear to this panel's repository so clearing repo A's output
+    // doesn't wipe repo B's history. When unset (showing all), clears globally.
+    clearLogEntries(this.repositoryPath || undefined);
     this.expandedEntries = new Set();
   }
 
-  private toggleEntry(index: number): void {
+  private toggleEntry(id: number): void {
     const next = new Set(this.expandedEntries);
-    if (next.has(index)) {
-      next.delete(index);
+    if (next.has(id)) {
+      next.delete(id);
     } else {
-      next.add(index);
+      next.add(id);
     }
     this.expandedEntries = next;
   }
 
-  private renderEntry(entry: OutputLogEntry, index: number) {
-    const expanded = this.expandedEntries.has(index);
+  private renderEntry(entry: OutputLogEntry) {
+    // Keyed by stable entry id — array positions shift when entries prepend
+    const expanded = this.expandedEntries.has(entry.id);
     const statusClass = entry.success ? 'success' : 'failure';
 
     return html`
       <div class="entry">
         <div
           class="entry-header"
-          @click=${() => this.toggleEntry(index)}
+          @click=${() => this.toggleEntry(entry.id)}
           title="${entry.command}"
         >
           <svg class="expand-icon ${expanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -274,28 +274,44 @@ export class LvOutputPanel extends LitElement {
   }
 
   render() {
+    const visible = this.visibleEntries;
     return html`
       <div class="header">
         <span class="header-title">
           Output
-          ${this.entries.length > 0
-            ? html`<span class="entry-count">(${this.entries.length})</span>`
+          ${visible.length > 0
+            ? html`<span class="entry-count">(${visible.length})</span>`
             : nothing}
         </span>
         <div class="header-actions">
-          ${this.entries.length > 0
+          ${visible.length > 0
             ? html`
                 <button class="clear-btn" @click=${this.handleClear}>
                   Clear
                 </button>
               `
             : nothing}
+          ${this.closable
+            ? html`
+                <button
+                  class="close-btn"
+                  title="Close output panel"
+                  aria-label="Close output panel"
+                  @click=${() =>
+                    this.dispatchEvent(
+                      new CustomEvent('close', { bubbles: true, composed: true })
+                    )}
+                >
+                  ✕
+                </button>
+              `
+            : nothing}
         </div>
       </div>
       <div class="entries">
-        ${this.entries.length === 0
+        ${visible.length === 0
           ? html`<div class="empty">No output yet</div>`
-          : this.entries.map((entry, i) => this.renderEntry(entry, i))}
+          : visible.map((entry) => this.renderEntry(entry))}
       </div>
     `;
   }

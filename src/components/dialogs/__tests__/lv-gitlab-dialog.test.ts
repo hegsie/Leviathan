@@ -774,4 +774,101 @@ describe('lv-gitlab-dialog', () => {
       expect(toasts.some((t) => t.type === 'success' && /Connected GitLab/.test(t.message))).to.be.true;
     });
   });
+
+  describe('OAuth updates shared connection status (regression)', () => {
+    it('marks the account connected in the shared store after OAuth completes', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gl-acc-1';
+      await el.updateComplete;
+
+      // Clear any status set during load so we observe the OAuth-driven update.
+      unifiedProfileStore.setState({ accountConnectionStatus: {} });
+
+      await (el as unknown as {
+        handleOAuthComplete: (t: { accessToken: string }, url?: string) => Promise<void>;
+      }).handleOAuthComplete({ accessToken: 'glpat_oauth' }, 'https://gitlab.com');
+      await el.updateComplete;
+
+      const status = unifiedProfileStore.getState().accountConnectionStatus['gl-acc-1'];
+      expect(status?.status).to.equal('connected');
+    });
+  });
+
+  describe('Create feedback toasts (regression)', () => {
+    it('shows a success toast after creating a merge request', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { createMrTitle: string }).createMrTitle = 'My MR';
+      (el as unknown as { createMrSource: string }).createMrSource = 'feature/x';
+      (el as unknown as { createMrTarget: string }).createMrTarget = 'main';
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await (el as unknown as { handleCreateMr: () => Promise<void> }).handleCreateMr();
+      await el.updateComplete;
+
+      expect(
+        uiStore.getState().toasts.some(
+          (t) => t.type === 'success' && /Merge request created successfully/.test(t.message)
+        )
+      ).to.be.true;
+    });
+
+    it('shows a success toast after creating an issue', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { createIssueTitle: string }).createIssueTitle = 'My issue';
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await (el as unknown as { handleCreateIssue: () => Promise<void> }).handleCreateIssue();
+      await el.updateComplete;
+
+      expect(
+        uiStore.getState().toasts.some(
+          (t) => t.type === 'success' && /Issue created successfully/.test(t.message)
+        )
+      ).to.be.true;
+    });
+  });
+
+  describe('Disconnect clears a stale error (regression)', () => {
+    it('handleDisconnect resets a pre-existing error banner', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gl-acc-1';
+      (el as unknown as { error: string | null }).error = 'stale error';
+      await el.updateComplete;
+
+      await (el as unknown as { handleDisconnect: () => Promise<void> }).handleDisconnect();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.equal(null);
+    });
+  });
 });

@@ -324,6 +324,10 @@ export class LvTagList extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // Keep in sync with app-level refreshes (e.g. a gitflow release finish
+    // creating a tag completes inside the shared conflict dialog) — same
+    // subscription as the sibling branch/stash/gitflow lists.
+    window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
     await this.loadTags();
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
@@ -331,9 +335,14 @@ export class LvTagList extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
   }
+
+  private handleRepositoryRefresh = (): void => {
+    void this.loadTags();
+  };
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
@@ -520,8 +529,15 @@ export class LvTagList extends LitElement {
         const data = result.data;
         if (data.stashed && data.stashConflict) {
           showToast(`Switched to ${tag.name} — stash conflicts need resolution`, 'warning');
+          // Open the conflict resolution dialog so the user can resolve the failed
+          // auto-stash pop (pop semantics: entry at index 0, drop it once resolved).
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
+          }));
         } else if (data.stashed && data.stashApplied) {
-          showToast(`Switched to ${tag.name} (changes re-applied)`, 'info');
+          showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
         } else if (data.stashed && !data.stashApplied) {
           showToast(data.message, 'warning');
         }
@@ -531,7 +547,7 @@ export class LvTagList extends LitElement {
           composed: true,
         }));
       } else {
-        const errorMsg = result.data?.message || result.error || 'Unknown error';
+        const errorMsg = result.data?.message || result.error?.message || 'Unknown error';
         console.error('Failed to checkout tag:', errorMsg);
         showToast(`Failed to checkout tag: ${errorMsg}`, 'error');
       }
@@ -619,6 +635,7 @@ export class LvTagList extends LitElement {
 
       if (result.success) {
         await this.loadTags();
+        showToast(`Pushed tag ${tag.name} to remote`, 'success');
         this.dispatchEvent(new CustomEvent('tags-changed', {
           bubbles: true,
           composed: true,

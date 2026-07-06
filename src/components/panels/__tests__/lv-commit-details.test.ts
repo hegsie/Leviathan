@@ -5,6 +5,7 @@
  */
 
 import { expect, fixture, html } from '@open-wc/testing';
+import { uiStore } from '../../../stores/ui.store.ts';
 import type { Commit } from '../../../types/git.types.ts';
 
 let failingCommands: Set<string> = new Set();
@@ -76,5 +77,93 @@ describe('lv-commit-details', () => {
     // Loading state should be cleared
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((el as any).loadingFiles).to.be.false;
+  });
+
+  it('shows an error message (not "No files changed") when loadFiles fails', async () => {
+    failingCommands.add('get_commit_files');
+
+    const el = await fixture<LvCommitDetails>(
+      html`<lv-commit-details .repositoryPath=${'/test/repo'} .commit=${mockCommit}></lv-commit-details>`,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).loadFiles();
+    await el.updateComplete;
+
+    // filesError state is set to the backend message
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).filesError).to.contain('Failed to get files');
+
+    // The error is rendered, and the misleading "No files changed" is NOT shown
+    const errorNode = el.shadowRoot!.querySelector('.files-error');
+    expect(errorNode).to.not.be.null;
+    expect(errorNode!.textContent).to.contain('Failed to get files');
+
+    const text = el.shadowRoot!.textContent ?? '';
+    expect(text).to.not.contain('No files changed');
+  });
+
+  it('clears filesError and shows files on a subsequent successful load', async () => {
+    const el = await fixture<LvCommitDetails>(
+      html`<lv-commit-details .repositoryPath=${'/test/repo'} .commit=${mockCommit}></lv-commit-details>`,
+    );
+
+    // First load fails
+    failingCommands.add('get_commit_files');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).loadFiles();
+    await el.updateComplete;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).filesError).to.not.be.null;
+
+    // Second load succeeds -> error must clear
+    failingCommands.delete('get_commit_files');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).loadFiles();
+    await el.updateComplete;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).filesError).to.be.null;
+    expect(el.shadowRoot!.querySelector('.files-error')).to.be.null;
+  });
+
+  it('dispatches copy-sha after copying the full SHA', async () => {
+    const el = await fixture<LvCommitDetails>(
+      html`<lv-commit-details .repositoryPath=${'/test/repo'} .commit=${mockCommit}></lv-commit-details>`,
+    );
+
+    let received: { sha: string } | null = null;
+    el.addEventListener('copy-sha', (e) => {
+      received = (e as CustomEvent).detail;
+    });
+
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: () => Promise.resolve() },
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).copyFullSha();
+
+    expect(received).to.not.be.null;
+    expect(received!.sha).to.equal(mockCommit.oid.substring(0, 7));
+  });
+
+  it('shows an error toast when copying the SHA fails', async () => {
+    uiStore.setState({ toasts: [] });
+
+    const el = await fixture<LvCommitDetails>(
+      html`<lv-commit-details .repositoryPath=${'/test/repo'} .commit=${mockCommit}></lv-commit-details>`,
+    );
+
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: () => Promise.reject(new Error('denied')) },
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).copyFullSha();
+
+    const toasts = uiStore.getState().toasts;
+    expect(toasts.some((t) => t.type === 'error' && /copy sha/i.test(t.message))).to.be.true;
   });
 });

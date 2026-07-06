@@ -356,8 +356,11 @@ export async function getCommitHistory(
   return invokeCommand<Commit[]>("get_commit_history", args);
 }
 
-export async function getCommit(oid: string): Promise<CommandResult<Commit>> {
-  return invokeCommand<Commit>("get_commit", { oid });
+export async function getCommit(
+  repoPath: string,
+  oid: string,
+): Promise<CommandResult<Commit>> {
+  return invokeCommand<Commit>("get_commit", { path: repoPath, oid });
 }
 
 /**
@@ -983,6 +986,20 @@ export async function abortMerge(
 }
 
 /**
+ * Complete an in-progress merge after all conflicts are resolved: creates
+ * the merge commit (HEAD + MERGE_HEAD parents) and clears the MERGING state.
+ * When `squash` is true, a single-parent commit is created instead so a
+ * conflicted gitflow squash finish completes as a squash rather than a merge.
+ */
+export async function commitMerge(
+  path: string,
+  message?: string,
+  squash?: boolean,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("commit_merge", { path, message, squash });
+}
+
+/**
  * Rebase operations
  */
 export async function rebase(
@@ -1089,11 +1106,29 @@ export async function resolveConflict(
   path: string,
   filePath: string,
   content: string,
+  deleteFile?: boolean,
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>("resolve_conflict", {
     path,
     filePath,
     content,
+    deleteFile,
+  });
+}
+
+/**
+ * Resolve a conflict by taking one side's blob verbatim (binary-safe).
+ * If the chosen side deleted the file, the resolution is the file's removal.
+ */
+export async function resolveConflictTakeSide(
+  path: string,
+  filePath: string,
+  side: "ours" | "theirs",
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("resolve_conflict_take_side", {
+    path,
+    filePath,
+    side,
   });
 }
 
@@ -1390,11 +1425,13 @@ export async function getFileDiff(
   repoPath: string,
   filePath: string,
   staged?: boolean,
+  maxLines?: number,
 ): Promise<CommandResult<DiffFile>> {
   return invokeCommand<DiffFile>("get_file_diff", {
     path: repoPath,
     filePath,
     staged,
+    maxLines,
   });
 }
 
@@ -1412,11 +1449,13 @@ export async function getCommitFileDiff(
   repoPath: string,
   commitOid: string,
   filePath: string,
+  maxLines?: number,
 ): Promise<CommandResult<DiffFile>> {
   return invokeCommand<DiffFile>("get_commit_file_diff", {
     path: repoPath,
     commitOid,
     filePath,
+    maxLines,
   });
 }
 
@@ -3931,21 +3970,6 @@ export async function checkBitbucketConnectionWithToken(
     "check_bitbucket_connection_with_token",
     { token },
   );
-}
-
-/**
- * Store Bitbucket OAuth token
- */
-export async function storeBitbucketOAuthToken(
-  accessToken: string,
-  refreshToken?: string,
-  expiresIn?: number,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("store_bitbucket_oauth_token", {
-    accessToken,
-    refreshToken,
-    expiresIn,
-  });
 }
 
 export async function detectBitbucketRepo(

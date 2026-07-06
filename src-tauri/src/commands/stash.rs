@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::command;
 
-use crate::error::Result;
+use crate::error::{LeviathanError, Result};
 use crate::models::Stash;
 
 /// Result of showing stash contents
@@ -78,6 +78,13 @@ pub async fn apply_stash(path: String, index: usize, drop_after: Option<bool>) -
 
     repo.stash_apply(index, None)?;
 
+    // git_stash_apply returns success (0) even when the apply lands merge
+    // conflicts. Surface the conflict so the UI opens the resolution flow, and
+    // keep the stash regardless — `drop_after` is only honoured on a CLEAN apply.
+    if repo.index()?.has_conflicts() {
+        return Err(LeviathanError::MergeConflict);
+    }
+
     if drop_after.unwrap_or(false) {
         repo.stash_drop(index)?;
     }
@@ -97,7 +104,19 @@ pub async fn drop_stash(path: String, index: usize) -> Result<()> {
 #[command]
 pub async fn pop_stash(path: String, index: usize) -> Result<()> {
     let mut repo = git2::Repository::open(Path::new(&path))?;
-    repo.stash_pop(index, None)?;
+
+    // Do NOT use stash_pop: git_stash_pop drops the stash even when the apply
+    // lands conflicts (git_stash_apply returns 0 on a conflicted apply), which
+    // silently loses the stashed changes. Apply first, and only drop when the
+    // apply was clean — on a conflict, surface it and keep the stash so the user
+    // can resolve (and the entry remains recoverable).
+    repo.stash_apply(index, None)?;
+
+    if repo.index()?.has_conflicts() {
+        return Err(LeviathanError::MergeConflict);
+    }
+
+    repo.stash_drop(index)?;
     Ok(())
 }
 
@@ -430,6 +449,61 @@ mod tests {
         // Stash should be gone (pop = apply + drop)
         let stashes = get_stashes(repo.path_str()).await.unwrap();
         assert!(stashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pop_stash_conflict_retains_stash() {
+        let repo = TestRepo::with_initial_commit();
+        setup_tracked_file(&repo, "file.txt", "base");
+
+        // Stash a modification; working tree reverts to "base".
+        repo.create_file("file.txt", "stashed content");
+        create_stash(repo.path_str(), Some("Conflicting".to_string()), None)
+            .await
+            .unwrap();
+
+        // Commit a divergent change so applying the stash triggers a 3-way merge
+        // conflict (working tree is clean, so stash_apply merges instead of
+        // refusing). git_stash_apply returns success even with the conflict.
+        repo.create_commit("Diverge", &[("file.txt", "committed change")]);
+
+        let result = pop_stash(repo.path_str(), 0).await;
+        assert!(
+            matches!(result, Err(LeviathanError::MergeConflict)),
+            "conflicted pop must return MergeConflict, got {:?}",
+            result
+        );
+
+        // Stash must be retained (NOT dropped) on a conflicted pop.
+        let stashes = get_stashes(repo.path_str()).await.unwrap();
+        assert_eq!(stashes.len(), 1, "stash must survive a conflicted pop");
+
+        // Index must reflect the conflict.
+        let git_repo = git2::Repository::open(&repo.path).unwrap();
+        assert!(git_repo.index().unwrap().has_conflicts());
+    }
+
+    #[tokio::test]
+    async fn test_apply_stash_conflict_keeps_stash_even_with_drop() {
+        let repo = TestRepo::with_initial_commit();
+        setup_tracked_file(&repo, "file.txt", "base");
+
+        repo.create_file("file.txt", "stashed content");
+        create_stash(repo.path_str(), Some("Conflicting".to_string()), None)
+            .await
+            .unwrap();
+
+        repo.create_commit("Diverge", &[("file.txt", "committed change")]);
+
+        // Even with drop_after=true, a conflicted apply must NOT drop the stash.
+        let result = apply_stash(repo.path_str(), 0, Some(true)).await;
+        assert!(
+            matches!(result, Err(LeviathanError::MergeConflict)),
+            "conflicted apply must return MergeConflict, got {:?}",
+            result
+        );
+        let stashes = get_stashes(repo.path_str()).await.unwrap();
+        assert_eq!(stashes.len(), 1, "stash must survive a conflicted apply");
     }
 
     #[tokio::test]

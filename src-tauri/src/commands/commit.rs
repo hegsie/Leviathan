@@ -231,7 +231,34 @@ pub async fn create_commit(
     }
 
     // Use git2 for unsigned commits (faster)
-    let repo = git2::Repository::open(Path::new(&path))?;
+    let mut repo = git2::Repository::open(Path::new(&path))?;
+
+    // A commit created while a merge is in progress must include MERGE_HEAD
+    // as a parent, otherwise the merged branch is silently dropped and the
+    // repository stays stuck in MERGING state. Collect the merge heads up
+    // front (mergehead_foreach needs a unique borrow of the repo).
+    //
+    // Cherry-pick and revert also leave sequencer state (CHERRY_PICK_HEAD /
+    // REVERT_HEAD) that must be cleared after committing, or the app stays
+    // stuck showing the operation "in progress". Unlike a merge, though, the
+    // resulting commit keeps a SINGLE parent (HEAD only) — the picked/reverted
+    // commit is NOT an extra parent.
+    let state = repo.state();
+    let merging = state == git2::RepositoryState::Merge;
+    let needs_cleanup = matches!(
+        state,
+        git2::RepositoryState::Merge
+            | git2::RepositoryState::CherryPick
+            | git2::RepositoryState::Revert
+    );
+    let mut merge_oids: Vec<git2::Oid> = Vec::new();
+    if merging {
+        repo.mergehead_foreach(|oid| {
+            merge_oids.push(*oid);
+            true
+        })?;
+    }
+    let repo = repo;
 
     let default_signature = repo.signature()?;
 
@@ -278,17 +305,31 @@ pub async fn create_commit(
             &parent_refs,
         )?
     } else {
-        let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-        let parents: Vec<&git2::Commit> = parent.as_ref().into_iter().collect();
+        let mut parents: Vec<git2::Commit> = repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .into_iter()
+            .collect();
 
-        repo.commit(
+        // Include MERGE_HEAD parents collected above when mid-merge
+        for oid in &merge_oids {
+            parents.push(repo.find_commit(*oid)?);
+        }
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+
+        let commit_oid = repo.commit(
             Some("HEAD"),
             &author_sig,
             &committer_sig,
             &message,
             &tree,
-            &parents,
-        )?
+            &parent_refs,
+        )?;
+        if needs_cleanup {
+            repo.cleanup_state()?;
+        }
+        commit_oid
     };
 
     let commit = repo.find_commit(commit_oid)?;
@@ -296,7 +337,7 @@ pub async fn create_commit(
 }
 
 /// Check if a commit should be signed based on explicit parameter or repo config
-fn should_sign_commit(path: &str, sign_commit: Option<bool>) -> Result<bool> {
+pub(crate) fn should_sign_commit(path: &str, sign_commit: Option<bool>) -> Result<bool> {
     match sign_commit {
         Some(sign) => Ok(sign),
         None => {
@@ -1271,6 +1312,62 @@ mod tests {
     use crate::test_utils::TestRepo;
 
     #[tokio::test]
+    async fn test_create_commit_mid_merge_includes_merge_head() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Conflicting merge, resolved manually, then committed from the
+        // normal commit panel: the commit must get MERGE_HEAD as a second
+        // parent and clear the MERGING state.
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+
+        let merge_result = crate::commands::merge::merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(merge_result.is_err(), "expected merge conflict");
+
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = create_commit(
+            repo.path_str(),
+            "Commit during merge".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            2,
+            "commit made mid-merge must keep MERGE_HEAD as a parent"
+        );
+    }
+
+    #[tokio::test]
     async fn test_get_commit_history() {
         let repo = TestRepo::with_initial_commit();
         repo.create_commit("Second commit", &[("file2.txt", "content")]);
@@ -1929,5 +2026,107 @@ mod tests {
         assert!(!is_leap_year(1900));
         assert!(!is_leap_year(2023));
         assert!(is_leap_year(2400));
+    }
+
+    #[tokio::test]
+    async fn test_create_commit_mid_cherrypick_clears_state() {
+        // A cherry-pick that conflicts leaves CHERRY_PICK_HEAD set. Resolving
+        // and committing via the normal commit panel must produce a SINGLE
+        // parent commit AND clear the sequencer state, otherwise the app stays
+        // stuck showing "cherry-pick in progress".
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let pick_oid = repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+
+        // Divergent change on the base branch so the cherry-pick conflicts.
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+
+        {
+            let git_repo = repo.repo();
+            let commit = git_repo.find_commit(pick_oid).unwrap();
+            // A conflicting cherry-pick still sets CHERRY_PICK_HEAD.
+            let _ = git_repo.cherrypick(&commit, None);
+            assert_eq!(git_repo.state(), git2::RepositoryState::CherryPick);
+        }
+
+        // Resolve by staging the file.
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = create_commit(
+            repo.path_str(),
+            "Cherry-picked change".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Clean,
+            "cherry-pick state must be cleared after committing"
+        );
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            1,
+            "a cherry-pick commit keeps a single parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_commit_mid_revert_clears_state() {
+        // A revert leaves REVERT_HEAD set; committing must clear it and keep a
+        // single parent.
+        let repo = TestRepo::with_initial_commit();
+        let target = repo.create_commit("Add file", &[("revert_me.txt", "content")]);
+
+        {
+            let git_repo = repo.repo();
+            let commit = git_repo.find_commit(target).unwrap();
+            git_repo.revert(&commit, None).unwrap();
+            assert_eq!(git_repo.state(), git2::RepositoryState::Revert);
+        }
+
+        let result = create_commit(
+            repo.path_str(),
+            "Revert add file".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Clean,
+            "revert state must be cleared after committing"
+        );
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            1,
+            "a revert commit keeps a single parent"
+        );
     }
 }

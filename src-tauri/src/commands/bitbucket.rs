@@ -11,6 +11,16 @@ use tauri::command;
 
 const BITBUCKET_API_BASE: &str = "https://api.bitbucket.org/2.0";
 
+/// Sentinel prefix marking a per-account token slot that actually holds an
+/// app-password credential of the form `<PREFIX><username>:<app_password>`.
+/// App passwords must be sent as HTTP Basic auth, NOT as a Bearer token
+/// (Bitbucket rejects app passwords presented as `Bearer`). OAuth access
+/// tokens are stored raw (no prefix) and continue to use Bearer auth.
+///
+/// Must stay in sync with `BITBUCKET_APP_PASSWORD_PREFIX` in
+/// `src/services/credential.service.ts`.
+const APP_PASSWORD_PREFIX: &str = "bbapp:";
+
 // ============================================================================
 // Credential Management (handled by frontend credential service via OS keyring - these are stubs)
 // ============================================================================
@@ -143,16 +153,36 @@ fn get_auth_header(username: &str, password: &str) -> String {
     format!("Basic {}", BASE64.encode(credentials.as_bytes()))
 }
 
+/// Build the Authorization header for a per-account token.
+///
+/// A token stored with the `bbapp:` prefix is an app-password credential
+/// (`bbapp:<username>:<app_password>`) and must use HTTP Basic auth. Any other
+/// token is treated as an OAuth access token and uses Bearer auth. This lets a
+/// single token slot carry either credential kind and route it correctly,
+/// mirroring how Azure DevOps auto-detects JWT vs PAT.
+fn build_token_auth_header(token: &str) -> String {
+    if let Some(rest) = token.strip_prefix(APP_PASSWORD_PREFIX) {
+        // Split on the FIRST colon only: usernames never contain a colon, and an
+        // app password may, so everything after the first colon is the password.
+        if let Some((username, password)) = rest.split_once(':') {
+            return get_auth_header(username, password);
+        }
+    }
+    format!("Bearer {}", token)
+}
+
 /// Get auth header - prefer OAuth token if provided, otherwise use username/password
 fn get_auth_header_with_token(
     token: Option<&str>,
     username: Option<&str>,
     app_password: Option<&str>,
 ) -> Result<String> {
-    // Prefer OAuth token if provided
+    // Prefer a per-account token if provided. It may be an OAuth bearer token or
+    // a prefixed app-password credential; build_token_auth_header picks the right
+    // scheme for each.
     if let Some(t) = token {
         if !t.is_empty() {
-            return Ok(format!("Bearer {}", t));
+            return Ok(build_token_auth_header(t));
         }
     }
 
@@ -262,7 +292,7 @@ pub async fn check_bitbucket_connection_with_token(
 
     let response = client
         .get(format!("{}/user", BITBUCKET_API_BASE))
-        .header("Authorization", format!("Bearer {}", token))
+        .header("Authorization", build_token_auth_header(&token))
         .send()
         .await
         .map_err(|e| {
@@ -1274,6 +1304,68 @@ mod tests {
     fn test_get_auth_header_with_token_no_credentials_errors() {
         let result = get_auth_header_with_token(None, None, None);
         assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // build_token_auth_header Tests (app-password vs OAuth routing)
+    // ========================================================================
+
+    #[test]
+    fn test_build_token_auth_header_oauth_uses_bearer() {
+        // A raw OAuth access token (no prefix) must use Bearer auth.
+        let header = build_token_auth_header("oauth_access_token_abc");
+        assert_eq!(header, "Bearer oauth_access_token_abc");
+    }
+
+    #[test]
+    fn test_build_token_auth_header_app_password_uses_basic() {
+        // A prefixed app-password credential must use Basic auth, decoding to
+        // username:app_password.
+        let header = build_token_auth_header("bbapp:myuser:my-app-password");
+        assert!(header.starts_with("Basic "));
+        let encoded = header.strip_prefix("Basic ").unwrap();
+        let decoded = BASE64.decode(encoded).expect("Should be valid base64");
+        let decoded_str = String::from_utf8(decoded).expect("Should be valid UTF-8");
+        assert_eq!(decoded_str, "myuser:my-app-password");
+    }
+
+    #[test]
+    fn test_build_token_auth_header_app_password_with_colon_in_password() {
+        // Only the first colon separates username from password; a colon inside
+        // the password must be preserved.
+        let header = build_token_auth_header("bbapp:myuser:pa:ss:word");
+        let encoded = header.strip_prefix("Basic ").unwrap();
+        let decoded = BASE64.decode(encoded).expect("Should be valid base64");
+        let decoded_str = String::from_utf8(decoded).expect("Should be valid UTF-8");
+        assert_eq!(decoded_str, "myuser:pa:ss:word");
+    }
+
+    #[test]
+    fn test_build_token_auth_header_prefix_without_colon_falls_back_to_bearer() {
+        // Malformed (prefix but no username:password separator) — treat as bearer
+        // rather than panicking.
+        let header = build_token_auth_header("bbapp:no-separator");
+        assert_eq!(header, "Bearer bbapp:no-separator");
+    }
+
+    #[test]
+    fn test_get_auth_header_with_token_app_password_token_uses_basic() {
+        // End-to-end: an app-password credential passed via the token slot routes
+        // through Basic auth for every API call (PRs, issues, pipelines, create).
+        let result = get_auth_header_with_token(Some("bbapp:user:pass"), None, None);
+        assert!(result.is_ok());
+        let header = result.unwrap();
+        assert!(header.starts_with("Basic "));
+        let encoded = header.strip_prefix("Basic ").unwrap();
+        let decoded = BASE64.decode(encoded).expect("Should be valid base64");
+        assert_eq!(String::from_utf8(decoded).unwrap(), "user:pass");
+    }
+
+    #[test]
+    fn test_get_auth_header_with_token_oauth_token_uses_bearer() {
+        let result = get_auth_header_with_token(Some("oauth_token"), None, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Bearer oauth_token");
     }
 
     #[test]

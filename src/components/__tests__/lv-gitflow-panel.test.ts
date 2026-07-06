@@ -487,7 +487,7 @@ describe('lv-gitflow-panel', () => {
       const el = await renderPanel();
       clearHistory();
 
-      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
       expect(finishBtns.length).to.be.greaterThan(0);
 
       (finishBtns[0] as HTMLButtonElement).click();
@@ -512,7 +512,7 @@ describe('lv-gitflow-panel', () => {
       setupMockPrompt('Release 1.0.0');
 
       try {
-        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
         expect(finishBtns.length).to.be.greaterThan(0);
 
         (finishBtns[0] as HTMLButtonElement).click();
@@ -538,7 +538,7 @@ describe('lv-gitflow-panel', () => {
       setupMockPrompt('Hotfix 1.0.1');
 
       try {
-        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
         expect(finishBtns.length).to.be.greaterThan(0);
 
         (finishBtns[0] as HTMLButtonElement).click();
@@ -565,7 +565,7 @@ describe('lv-gitflow-panel', () => {
         eventDetail = e.detail;
       }) as EventListener);
 
-      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
       (finishBtns[0] as HTMLButtonElement).click();
 
       await new Promise((r) => setTimeout(r, 150));
@@ -582,7 +582,7 @@ describe('lv-gitflow-panel', () => {
       setupMockPrompt(null);
 
       try {
-        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
         (finishBtns[0] as HTMLButtonElement).click();
 
         await new Promise((r) => setTimeout(r, 100));
@@ -636,7 +636,7 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      const errorEl = el.shadowRoot!.querySelector('.error');
+      const errorEl = el.shadowRoot!.querySelector('.error-banner');
       expect(errorEl).to.not.be.null;
       expect(errorEl!.textContent).to.include('Init failed: no main branch');
     });
@@ -666,7 +666,7 @@ describe('lv-gitflow-panel', () => {
         await new Promise((r) => setTimeout(r, 150));
         await el.updateComplete;
 
-        const errorEl = el.shadowRoot!.querySelector('.error');
+        const errorEl = el.shadowRoot!.querySelector('.error-banner');
         expect(errorEl).to.not.be.null;
         expect(errorEl!.textContent).to.include('Branch already exists');
       } finally {
@@ -690,15 +690,133 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn');
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
       (finishBtns[0] as HTMLButtonElement).click();
 
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      const errorEl = el.shadowRoot!.querySelector('.error');
+      const errorEl = el.shadowRoot!.querySelector('.error-banner');
       expect(errorEl).to.not.be.null;
       expect(errorEl!.textContent).to.include('Merge conflict');
+    });
+
+    it('renders error as a dismissable inline banner above panel content', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            return DEFAULT_CONFIG;
+          case 'get_branches':
+            return featureBranches;
+          case 'gitflow_finish_feature':
+            throw new Error('Something broke');
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
+      (finishBtns[0] as HTMLButtonElement).click();
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      // Banner is shown AND the normal panel content is still rendered.
+      const banner = el.shadowRoot!.querySelector('.error-banner');
+      expect(banner).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.panel')).to.not.be.null;
+
+      // Dismiss clears the error.
+      const dismissBtn = el.shadowRoot!.querySelector('.error-banner-dismiss') as HTMLButtonElement;
+      expect(dismissBtn).to.not.be.null;
+      dismissBtn.click();
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.error-banner')).to.be.null;
+      expect(el.shadowRoot!.querySelector('.panel')).to.not.be.null;
+    });
+
+    it('opens the conflict dialog when finish feature returns MERGE_CONFLICT', async () => {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            return DEFAULT_CONFIG;
+          case 'get_branches':
+            return featureBranches;
+          case 'gitflow_finish_feature':
+            throw { code: 'MERGE_CONFLICT', message: 'conflicts while merging' };
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+
+      let conflictDetail: unknown = null;
+      el.addEventListener('open-conflict-dialog', ((e: CustomEvent) => {
+        conflictDetail = e.detail;
+      }) as EventListener);
+
+      const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
+      (finishBtns[0] as HTMLButtonElement).click();
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      const fd = conflictDetail as { operationType: string; squash: boolean; gitflowFinish: Record<string, unknown> };
+      expect(fd.operationType).to.equal('merge');
+      expect(fd.squash).to.be.false;
+      expect(fd.gitflowFinish).to.include({
+        kind: 'feature',
+        name: 'login',
+        branchName: 'feature/login',
+        deleteBranch: true,
+      });
+      // No inline error banner when routing to the conflict dialog.
+      expect(el.shadowRoot!.querySelector('.error-banner')).to.be.null;
+    });
+
+    it('opens the conflict dialog when finish hotfix returns MERGE_CONFLICT', async () => {
+      setupMockPrompt('Hotfix 1.0.1');
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            return DEFAULT_CONFIG;
+          case 'get_branches':
+            return hotfixBranches;
+          case 'gitflow_finish_hotfix':
+            throw { code: 'MERGE_CONFLICT', message: 'conflicts while merging hotfix' };
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+
+      let conflictDetail: unknown = null;
+      el.addEventListener('open-conflict-dialog', ((e: CustomEvent) => {
+        conflictDetail = e.detail;
+      }) as EventListener);
+
+      try {
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
+        (finishBtns[0] as HTMLButtonElement).click();
+        await new Promise((r) => setTimeout(r, 150));
+        await el.updateComplete;
+
+        const fd = conflictDetail as { operationType: string; squash: boolean; gitflowFinish: Record<string, unknown> };
+        expect(fd.operationType).to.equal('merge');
+        expect(fd.squash).to.be.false;
+        expect(fd.gitflowFinish).to.include({
+          kind: 'hotfix',
+          name: '1.0.1',
+          branchName: 'hotfix/1.0.1',
+          deleteBranch: true,
+          tagMessage: 'Hotfix 1.0.1',
+        });
+      } finally {
+        cleanupMockPrompt();
+      }
     });
   });
 

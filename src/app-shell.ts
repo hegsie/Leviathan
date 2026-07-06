@@ -12,11 +12,13 @@ import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
 import './components/panels/lv-diff-view.ts';
 import './components/panels/lv-blame-view.ts';
+import './components/panels/lv-output-panel.ts';
 import './components/sidebar/lv-left-panel.ts';
 import './components/sidebar/lv-right-panel.ts';
 import './components/dialogs/lv-settings-dialog.ts';
 import './components/dialogs/lv-modal.ts';
 import './components/dialogs/lv-conflict-resolution-dialog.ts';
+import type { GitflowFinishContext } from './components/dialogs/lv-conflict-resolution-dialog.ts';
 import './components/dialogs/lv-command-palette.ts';
 import './components/dialogs/lv-reflog-dialog.ts';
 import './components/dialogs/lv-keyboard-shortcuts-dialog.ts';
@@ -159,6 +161,22 @@ export class AppShell extends LitElement {
         overflow: hidden;
         min-width: 400px;
         position: relative;
+      }
+
+      .output-panel-container {
+        height: 240px;
+        flex-shrink: 0;
+        border-top: 1px solid var(--color-border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .output-panel-container lv-output-panel {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
       }
 
       .graph-area {
@@ -510,10 +528,20 @@ export class AppShell extends LitElement {
 
   // Conflict resolution dialog
   @state() private showConflictDialog = false;
-  @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' = 'merge';
+  @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
+  // Stash-completion semantics for the conflict dialog (which entry to drop and
+  // whether to drop it at all — pop drops, plain apply keeps).
+  @state() private conflictStashIndex = 0;
+  @state() private conflictDropStashOnComplete = true;
+  // Whether a conflicted merge should complete as a squash (single-parent) commit.
+  @state() private conflictSquashMerge = false;
+  // When a git-flow finish conflicts, the finish context so the dialog can COMPLETE
+  // the finish (tag / merge develop / delete branch) after the conflict is resolved.
+  @state() private conflictGitflowFinish: GitflowFinishContext | null = null;
 
   // Command palette
   @state() private showCommandPalette = false;
+  @state() private showOutputPanel = false;
   @state() private branches: Branch[] = [];
   @state() private trackedFiles: string[] = [];
 
@@ -679,19 +707,45 @@ export class AppShell extends LitElement {
 
   // Handle open-conflict-dialog events from child components (e.g., interactive rebase)
   private handleOpenConflictDialogEvent = (e: Event): void => {
-    const customEvent = e as CustomEvent<{ operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' }>;
+    const customEvent = e as CustomEvent<{
+      operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash';
+      stashIndex?: number;
+      dropStashOnComplete?: boolean;
+      squash?: boolean;
+      gitflowFinish?: GitflowFinishContext;
+    }>;
     if (customEvent.detail?.operationType) {
       this.conflictOperationType = customEvent.detail.operationType;
     }
+    // Thread stash-completion semantics so the dialog drops the correct entry
+    // (and only when the failed operation had pop semantics).
+    this.conflictStashIndex = customEvent.detail?.stashIndex ?? 0;
+    this.conflictDropStashOnComplete = customEvent.detail?.dropStashOnComplete ?? true;
+    // A squash finish that conflicted must complete as a squash, not a merge commit.
+    this.conflictSquashMerge = customEvent.detail?.squash ?? false;
+    // A conflicted git-flow finish carries the context to complete the finish.
+    this.conflictGitflowFinish = customEvent.detail?.gitflowFinish ?? null;
     this.showConflictDialog = true;
+    this.handleRefresh();
   };
 
   // Handle merge-conflict events from branch list (e.g., sidebar merge resulting in conflicts)
   private handleMergeConflictEvent = (): void => {
     this.conflictOperationType = 'merge';
+    this.resetConflictDetailState();
     this.showConflictDialog = true;
     this.handleRefresh();
   };
+
+  // Reset the conflict-dialog completion semantics to defaults so a value set by a
+  // prior operation (e.g. squash=true from a git-flow squash finish, or a non-zero
+  // stash index) can't leak into an unrelated conflict resolution.
+  private resetConflictDetailState(): void {
+    this.conflictStashIndex = 0;
+    this.conflictDropStashOnComplete = true;
+    this.conflictSquashMerge = false;
+    this.conflictGitflowFinish = null;
+  }
 
   // Handle gitflow events (init, feature/release/hotfix operations) to trigger refresh
   private handleGitflowEvent = (): void => {
@@ -1100,8 +1154,17 @@ export class AppShell extends LitElement {
   private handleAutoStashToast(data: gitService.CheckoutWithStashResult, refName: string): void {
     if (data.stashed && data.stashConflict) {
       showToast(`Switched to ${refName} — stash conflicts need resolution`, 'warning');
+      // Open the conflict dialog so the user can resolve the failed stash pop.
+      // Auto-stash is pop semantics: the conflicted auto-stash sits at index 0 and
+      // must be dropped once its changes are applied and resolved.
+      this.conflictOperationType = 'stash';
+      this.conflictStashIndex = 0;
+      this.conflictDropStashOnComplete = true;
+      this.conflictSquashMerge = false;
+      this.showConflictDialog = true;
+      this.handleRefresh();
     } else if (data.stashed && data.stashApplied) {
-      showToast(`Switched to ${refName} (changes re-applied)`, 'info');
+      showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
     } else if (data.stashed && !data.stashApplied) {
       showToast(data.message, 'warning');
     }
@@ -1123,6 +1186,7 @@ export class AppShell extends LitElement {
       showToast(`Merged ${refName}`, 'success');
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       this.conflictOperationType = 'merge';
+      this.resetConflictDetailState();
       this.showConflictDialog = true;
       notifyWarning(
         'Merge Conflict',
@@ -1151,6 +1215,7 @@ export class AppShell extends LitElement {
       showToast(`Rebased onto ${refName}`, 'success');
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       this.conflictOperationType = 'rebase';
+      this.resetConflictDetailState();
       this.showConflictDialog = true;
       notifyWarning(
         'Rebase Conflict',
@@ -1248,6 +1313,7 @@ export class AppShell extends LitElement {
   private handleCherryPickConflict(): void {
     // Show conflict resolution dialog
     this.conflictOperationType = 'cherry-pick';
+    this.resetConflictDetailState();
     this.showConflictDialog = true;
     notifyWarning(
       'Cherry-pick Conflict',
@@ -1276,6 +1342,7 @@ export class AppShell extends LitElement {
       this.conflictOperationType = 'revert';
     }
 
+    this.resetConflictDetailState();
     this.showConflictDialog = true;
   }
 
@@ -1305,6 +1372,7 @@ export class AppShell extends LitElement {
     } else if (result.error?.code === 'REVERT_CONFLICT') {
       // Show conflict resolution dialog
       this.conflictOperationType = 'revert';
+      this.resetConflictDetailState();
       this.showConflictDialog = true;
       notifyWarning(
         'Revert Conflict',
@@ -1719,7 +1787,7 @@ export class AppShell extends LitElement {
 
   private handleCopySha(e: CustomEvent<{ sha: string }>): void {
     // Show brief feedback that SHA was copied
-    log.debug(`Copied ${e.detail.sha} to clipboard`);
+    showToast(`Copied SHA ${e.detail.sha} to clipboard`, 'success');
   }
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry; isPartiallyStaged?: boolean }>): void {
@@ -2020,6 +2088,13 @@ export class AppShell extends LitElement {
         icon: 'refresh',
         shortcut: `${mod}R`,
         action: () => this.handleRefresh(),
+      },
+      {
+        id: 'toggle-output-panel',
+        label: 'Toggle Output Panel',
+        category: 'action',
+        icon: 'terminal',
+        action: () => { this.showOutputPanel = !this.showOutputPanel; },
       },
       {
         id: 'stash',
@@ -2445,39 +2520,61 @@ export class AppShell extends LitElement {
   private async handleFetch(): Promise<void> {
     if (!this.activeRepository) return;
     const opId = progressService.startOperation('fetch', 'Fetching from remote...');
-    try {
-      await gitService.fetch({ path: this.activeRepository.repository.path });
+    // gitService.fetch returns a CommandResult (invokeCommand never throws), so we
+    // must inspect result.success — a catch-only path always reported success and
+    // the backend emits remote-operation-completed only on success, so failures
+    // were fully silent.
+    const result = await gitService.fetch({ path: this.activeRepository.repository.path });
+    if (result.success) {
       progressService.completeOperation(opId);
       this.handleRefresh();
-    } catch {
+    } else {
       progressService.failOperation(opId);
-      // Error is logged; toast notification is shown via remote-operation-completed event
+      showToast(result.error?.message ?? 'Fetch failed', 'error');
     }
   }
 
   private async handlePull(): Promise<void> {
     if (!this.activeRepository) return;
     const opId = progressService.startOperation('pull', 'Pulling from remote...');
-    try {
-      await gitService.pull({ path: this.activeRepository.repository.path });
+    // gitService.pull returns a CommandResult (invokeCommand never throws), so we
+    // must inspect result.success — the old catch-only path always reported success.
+    const result = await gitService.pull({ path: this.activeRepository.repository.path });
+    if (result.success) {
       progressService.completeOperation(opId);
       this.handleRefresh();
-    } catch {
+    } else if (result.error?.code === 'MERGE_CONFLICT') {
       progressService.failOperation(opId);
-      // Error is logged; toast notification is shown via remote-operation-completed event
+      this.conflictOperationType = 'merge';
+      this.resetConflictDetailState();
+      this.showConflictDialog = true;
+      this.handleRefresh();
+    } else if (result.error?.code === 'REBASE_CONFLICT') {
+      progressService.failOperation(opId);
+      this.conflictOperationType = 'rebase';
+      this.resetConflictDetailState();
+      this.showConflictDialog = true;
+      this.handleRefresh();
+    } else {
+      progressService.failOperation(opId);
+      showToast(result.error?.message ?? 'Pull failed', 'error');
     }
   }
 
   private async handlePush(): Promise<void> {
     if (!this.activeRepository) return;
     const opId = progressService.startOperation('push', 'Pushing to remote...');
-    try {
-      await gitService.push({ path: this.activeRepository.repository.path });
+    // gitService.push returns a CommandResult (invokeCommand never throws), so we
+    // must inspect result.success — a catch-only path always reported success and
+    // the backend emits remote-operation-completed only on success, so failures
+    // were fully silent.
+    const result = await gitService.push({ path: this.activeRepository.repository.path });
+    if (result.success) {
       progressService.completeOperation(opId);
       this.handleRefresh();
-    } catch {
+    } else {
       progressService.failOperation(opId);
-      // Error is logged; toast notification is shown via remote-operation-completed event
+      showToast(result.error?.message ?? 'Push failed', 'error');
     }
   }
 
@@ -2487,8 +2584,13 @@ export class AppShell extends LitElement {
 
   private async handleCreateStash(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.createStash({ path: this.activeRepository.repository.path });
-    this.handleRefresh();
+    const result = await gitService.createStash({ path: this.activeRepository.repository.path });
+    if (result.success) {
+      showToast('Stash created', 'success');
+      this.handleRefresh();
+    } else {
+      showToast(result.error?.message ?? 'Failed to create stash', 'error');
+    }
   }
 
   private async handleRunGc(aggressive = false): Promise<void> {
@@ -2727,6 +2829,7 @@ export class AppShell extends LitElement {
                             .hasPartialStaging=${this.diffFilePartiallyStaged}
                             @file-edited=${() => this.handleRefresh()}
                             @status-changed=${() => this.handleRefresh()}
+                            @file-cleared=${this.handleCloseDiff}
                           ></lv-diff-view>
                         </div>
                       </div>
@@ -2752,10 +2855,22 @@ export class AppShell extends LitElement {
                               @close=${this.handleCloseFileHistory}
                               @commit-selected=${this.handleFileHistoryCommitSelected}
                               @view-diff=${this.handleFileHistoryViewDiff}
+                              @show-blame=${this.handleShowBlame}
                             ></lv-file-history>
                           </div>
                         `
                       : ''}
+                ${this.showOutputPanel
+                  ? html`
+                      <div class="output-panel-container">
+                        <lv-output-panel
+                          closable
+                          .repositoryPath=${this.activeRepository.repository.path}
+                          @close=${() => { this.showOutputPanel = false; }}
+                        ></lv-output-panel>
+                      </div>
+                    `
+                  : ''}
               </main>
 
               ${this.rightPanelVisible ? html`
@@ -2772,6 +2887,7 @@ export class AppShell extends LitElement {
                   @commit-file-selected=${this.handleCommitFileSelected}
                   @show-blame=${this.handleShowBlame}
                   @show-file-history=${this.handleShowFileHistory}
+                  @copy-sha=${this.handleCopySha}
                   @repository-changed=${() => this.handleRefresh()}
                 >
                   <lv-right-panel
@@ -2820,6 +2936,10 @@ export class AppShell extends LitElement {
               open
               repositoryPath=${this.activeRepository.repository.path}
               operationType=${this.conflictOperationType}
+              .stashIndex=${this.conflictStashIndex}
+              .dropStashOnComplete=${this.conflictDropStashOnComplete}
+              .squashMerge=${this.conflictSquashMerge}
+              .gitflowFinish=${this.conflictGitflowFinish}
               @operation-completed=${this.handleConflictResolved}
               @operation-aborted=${this.handleConflictAborted}
             ></lv-conflict-resolution-dialog>

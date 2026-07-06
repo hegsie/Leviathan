@@ -17,6 +17,11 @@ import { DiffVirtualScrollManager, DIFF_LINE_HEIGHT, type VisibleRange } from '.
 
 type DiffViewMode = 'unified' | 'split';
 
+// Default cap on the number of diff lines fetched from the backend. When a diff
+// exceeds this, the backend sets diff.truncated=true and we show a "Load full
+// diff" affordance that re-fetches with no limit.
+const DEFAULT_MAX_DIFF_LINES = 3000;
+
 interface DiffSegment {
   text: string;
   changed: boolean;
@@ -967,6 +972,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   @state() private currentHunkIndex = 0;
   @state() private hasDiffTool = false;
   @state() private launchingDiffTool = false;
+  // When true, load the diff without a line cap (set by "Load full diff").
+  @state() private showFullDiff = false;
 
   private virtualScrollManager = new DiffVirtualScrollManager();
   private flatLines: FlatDiffItem[] = [];
@@ -1027,6 +1034,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
+    // A different file/commit resets the "show full diff" opt-in so large diffs
+    // are re-truncated by default.
+    if (changedProperties.has('file') || changedProperties.has('commitFile')) {
+      this.showFullDiff = false;
+    }
     if (changedProperties.has('file') && this.file) {
       await this.loadWorkingDiff();
     }
@@ -1090,7 +1102,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       const result = await gitService.getFileDiff(
         this.repositoryPath,
         this.file.path,
-        this.file.isStaged
+        this.file.isStaged,
+        this.showFullDiff ? undefined : DEFAULT_MAX_DIFF_LINES
       );
 
       if (result.success) {
@@ -1123,7 +1136,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       const result = await gitService.getCommitFileDiff(
         this.repositoryPath,
         this.commitFile.commitOid,
-        this.commitFile.filePath
+        this.commitFile.filePath,
+        this.showFullDiff ? undefined : DEFAULT_MAX_DIFF_LINES
       );
 
       if (result.success) {
@@ -2056,13 +2070,15 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     this.requestUpdate();
   }
 
-  private handleLoadFullDiff(): void {
-    // Re-fetch the diff without truncation limit
-    this.dispatchEvent(new CustomEvent('load-full-diff', {
-      bubbles: true,
-      composed: true,
-      detail: { path: this.diff?.path },
-    }));
+  private async handleLoadFullDiff(): Promise<void> {
+    // Re-fetch the diff without the line cap, in place. Once loaded the diff is
+    // no longer truncated, so the "Load full diff" banner disappears.
+    this.showFullDiff = true;
+    if (this.commitFile) {
+      await this.loadCommitDiff();
+    } else if (this.file) {
+      await this.loadWorkingDiff();
+    }
   }
 
   private renderVirtualizedUnifiedView(): TemplateResult {

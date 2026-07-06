@@ -573,8 +573,11 @@ export class LvBranchList extends LitElement {
   @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
   @query('lv-branch-cleanup-dialog') private branchCleanupDialog!: LvBranchCleanupDialog;
 
+  private static readonly HIDDEN_BRANCHES_STORAGE_PREFIX = 'lv-hidden-branches:';
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    this.loadHiddenBranches();
     await this.loadBranches();
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
@@ -639,7 +642,40 @@ export class LvBranchList extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+      this.loadHiddenBranches();
       await this.loadBranches();
+    }
+  }
+
+  private get hiddenBranchesStorageKey(): string {
+    return `${LvBranchList.HIDDEN_BRANCHES_STORAGE_PREFIX}${this.repositoryPath}`;
+  }
+
+  private loadHiddenBranches(): void {
+    if (!this.repositoryPath) return;
+    try {
+      const stored = localStorage.getItem(this.hiddenBranchesStorageKey);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        this.hiddenBranches = new Set(Array.isArray(parsed) ? parsed : []);
+      } else {
+        this.hiddenBranches = new Set();
+      }
+    } catch {
+      // localStorage unavailable or corrupt - start with an empty set
+      this.hiddenBranches = new Set();
+    }
+  }
+
+  private saveHiddenBranches(): void {
+    if (!this.repositoryPath) return;
+    try {
+      localStorage.setItem(
+        this.hiddenBranchesStorageKey,
+        JSON.stringify(Array.from(this.hiddenBranches)),
+      );
+    } catch {
+      // localStorage quota exceeded or unavailable - silently ignore
     }
   }
 
@@ -824,6 +860,7 @@ export class LvBranchList extends LitElement {
     } else {
       this.hiddenBranches.add(branchName);
     }
+    this.saveHiddenBranches();
     this.requestUpdate();
   }
 
@@ -1003,8 +1040,14 @@ export class LvBranchList extends LitElement {
         const data = result.data;
         if (data.stashed && data.stashConflict) {
           showToast(`Switched to ${branch.shorthand} — stash conflicts need resolution`, 'warning');
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            // Auto-stash is pop semantics: entry at index 0, drop it once resolved.
+            detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
+          }));
         } else if (data.stashed && data.stashApplied) {
-          showToast(`Switched to ${branch.shorthand} (changes re-applied)`, 'info');
+          showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
         } else if (data.stashed && !data.stashApplied) {
           showToast(data.message, 'warning');
         }
@@ -1096,11 +1139,25 @@ export class LvBranchList extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.deleteBranch(
+      let result = await gitService.deleteBranch(
         this.repositoryPath,
         branch.name,
         false
       );
+
+      // A not-fully-merged branch (e.g. one whose changes were squash-merged,
+      // so its tip is not an ancestor of HEAD) can't be deleted without force.
+      // Offer force instead of dead-ending — there's no other force path in
+      // this menu, and the squash-finish flow directs users here.
+      if (!result.success && /not fully merged/i.test(result.error?.message ?? '')) {
+        const forceConfirmed = await showConfirm(
+          'Branch Not Fully Merged',
+          `"${branch.shorthand}" is not fully merged (its changes may have been squash-merged). Force delete it anyway?\n\nThis action cannot be undone.`,
+          'warning'
+        );
+        if (!forceConfirmed) return;
+        result = await gitService.deleteBranch(this.repositoryPath, branch.name, true);
+      }
 
       if (result.success) {
         await this.loadBranches();
@@ -1145,21 +1202,12 @@ export class LvBranchList extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else if (result.error?.code === 'MERGE_CONFLICT') {
+        // Open the conflict-resolution dialog (same flow as the drag-drop path)
+        this.dispatchEvent(new CustomEvent('merge-conflict', { bubbles: true, composed: true }));
       } else {
-        // Check if it's a merge conflict
-        if (result.error?.code === 'MERGE_CONFLICT') {
-          const abortConfirmed = await showConfirm(
-            'Merge Conflict',
-            'There are merge conflicts. Would you like to abort the merge?',
-            'warning'
-          );
-          if (abortConfirmed) {
-            await gitService.abortMerge({ path: this.repositoryPath });
-          }
-        } else {
-          console.error('Merge failed:', result.error);
-          showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
-        }
+        console.error('Merge failed:', result.error);
+        showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
       this.operationInProgress = false;
@@ -1194,21 +1242,16 @@ export class LvBranchList extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else if (result.error?.code === 'REBASE_CONFLICT') {
+        // Open the conflict-resolution dialog (same flow as the drag-drop path)
+        this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+          bubbles: true,
+          composed: true,
+          detail: { operationType: 'rebase' },
+        }));
       } else {
-        // Check if it's a rebase conflict
-        if (result.error?.code === 'REBASE_CONFLICT') {
-          const abortConfirmed = await showConfirm(
-            'Rebase Conflict',
-            'There are rebase conflicts. Would you like to abort the rebase?',
-            'warning'
-          );
-          if (abortConfirmed) {
-            await gitService.abortRebase({ path: this.repositoryPath });
-          }
-        } else {
-          console.error('Rebase failed:', result.error);
-          showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
-        }
+        console.error('Rebase failed:', result.error);
+        showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
       this.operationInProgress = false;
@@ -1421,10 +1464,11 @@ export class LvBranchList extends LitElement {
     const isDropTarget = this.dropTargetBranch?.name === branch.name;
     const dropClass = isDropTarget ? `drop-target drop-target-${this.dropAction}` : '';
     const staleClass = this.isBranchStale(branch) ? 'stale' : '';
+    const hiddenClass = this.hiddenBranches.has(branch.name) ? 'hidden-branch' : '';
 
     return html`
       <li
-        class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''} ${isDragging ? 'dragging' : ''} ${dropClass} ${staleClass} ${this.contextMenu.visible && this.contextMenu.branch?.name === branch.name ? 'context-target' : ''}"
+        class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''} ${isDragging ? 'dragging' : ''} ${dropClass} ${staleClass} ${hiddenClass} ${this.contextMenu.visible && this.contextMenu.branch?.name === branch.name ? 'context-target' : ''}"
         role="listitem"
         draggable=${!branch.isHead ? 'true' : 'false'}
         @click=${() => this.handleBranchClick(branch)}
@@ -1592,9 +1636,23 @@ export class LvBranchList extends LitElement {
       }
 
       if (checkoutResult.data.stashed && checkoutResult.data.stashConflict) {
-        showToast(`Switched to ${targetBranch.shorthand} — stash conflicts need resolution`, 'warning');
+        const actionName = action === 'merge' ? 'merge' : 'rebase';
+        showToast(
+          `Switched to ${targetBranch.shorthand}, but re-applying your stashed changes hit conflicts. The ${actionName} was NOT started — resolve the stash conflicts, then re-run the ${actionName}.`,
+          'warning',
+        );
+        this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+          bubbles: true,
+          composed: true,
+          // Auto-stash is pop semantics: entry at index 0, drop it once resolved.
+          detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
+        }));
+        // The working tree is conflicted from the failed stash pop; do NOT fall
+        // through into merge/rebase on a conflicted tree — the user must resolve
+        // the stash conflicts first and re-run the operation.
+        return;
       } else if (checkoutResult.data.stashed && checkoutResult.data.stashApplied) {
-        showToast(`Switched to ${targetBranch.shorthand} (changes re-applied)`, 'info');
+        showToast(checkoutResult.data.message, checkoutResult.data.message.includes('staged status was not preserved') ? 'warning' : 'info');
       } else if (checkoutResult.data.stashed && !checkoutResult.data.stashApplied) {
         showToast(checkoutResult.data.message, 'warning');
       }

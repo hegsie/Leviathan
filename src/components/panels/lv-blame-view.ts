@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { codeStyles } from '../../styles/code-styles.ts';
 import { getFileBlame } from '../../services/git.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { formatRelativeTime } from '../../utils/format.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { BlameLine } from '../../types/git.types.ts';
@@ -432,7 +433,7 @@ export class LvBlameView extends CodeRenderMixin(LitElement) {
         this.lines = result.data.lines;
         this.processLinesIntoGroups();
       } else {
-        this.error = typeof result.error === 'string' ? result.error : 'Failed to load blame';
+        this.error = result.error?.message ?? 'Failed to load blame';
       }
     } catch (e) {
       this.error = e instanceof Error ? e.message : 'Failed to load blame';
@@ -512,6 +513,7 @@ export class LvBlameView extends CodeRenderMixin(LitElement) {
       await navigator.clipboard.writeText(group.commitOid);
     } catch (err) {
       console.error('Failed to copy hash:', err);
+      showToast('Failed to copy hash to clipboard', 'error');
     }
   }
 
@@ -523,6 +525,7 @@ export class LvBlameView extends CodeRenderMixin(LitElement) {
       await navigator.clipboard.writeText(line.content);
     } catch (err) {
       console.error('Failed to copy line:', err);
+      showToast('Failed to copy line to clipboard', 'error');
     }
   }
 

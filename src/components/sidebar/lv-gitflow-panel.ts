@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showPrompt } from '../../services/dialog.service.ts';
 import type { GitFlowConfig } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
+import type { GitflowFinishContext } from '../dialogs/lv-conflict-resolution-dialog.ts';
 
 type GitFlowCategory = 'feature' | 'release' | 'hotfix';
 
@@ -162,6 +163,10 @@ export class LvGitflowPanel extends LitElement {
         color: var(--color-success);
       }
 
+      .item-squash-btn:hover {
+        color: var(--color-accent, var(--color-primary));
+      }
+
       .item-finish-btn svg {
         width: 12px;
         height: 12px;
@@ -212,6 +217,38 @@ export class LvGitflowPanel extends LitElement {
         text-align: center;
       }
 
+      .error-banner {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--spacing-sm);
+        margin: var(--spacing-sm);
+        padding: var(--spacing-sm);
+        background: rgba(var(--color-error-rgb, 239, 68, 68), 0.12);
+        border: 1px solid var(--color-error);
+        border-radius: var(--radius-sm);
+        color: var(--color-error);
+        font-size: var(--font-size-sm);
+      }
+
+      .error-banner-message {
+        flex: 1;
+      }
+
+      .error-banner-dismiss {
+        flex-shrink: 0;
+        border: none;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        padding: 0 4px;
+        font-size: var(--font-size-md);
+        line-height: 1;
+      }
+
+      .error-banner-dismiss:hover {
+        opacity: 0.7;
+      }
+
       .category-icon {
         width: 12px;
         height: 12px;
@@ -245,8 +282,21 @@ export class LvGitflowPanel extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // Conflicted finishes complete inside the shared conflict dialog (branch
+    // deleted / finish re-run there), so reload when the app-level refresh
+    // fires — otherwise the finished item stays listed as active.
+    window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
     await this.loadConfig();
   }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
+  }
+
+  private handleRepositoryRefresh = (): void => {
+    void this.loadConfig();
+  };
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
@@ -310,6 +360,7 @@ export class LvGitflowPanel extends LitElement {
 
   private async handleInitialize(): Promise<void> {
     if (this.operationInProgress) return;
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -335,6 +386,7 @@ export class LvGitflowPanel extends LitElement {
     const name = await showPrompt('Start Feature', 'Enter feature name:');
     if (!name || !name.trim()) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -357,7 +409,8 @@ export class LvGitflowPanel extends LitElement {
     }
   }
 
-  private async handleFinishFeature(item: ActiveItem): Promise<void> {
+  private async handleFinishFeature(item: ActiveItem, squash = false): Promise<void> {
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -365,7 +418,7 @@ export class LvGitflowPanel extends LitElement {
         this.repositoryPath,
         item.name,
         true,
-        false,
+        squash,
       );
       if (result.success) {
         await this.loadActiveItems();
@@ -374,6 +427,18 @@ export class LvGitflowPanel extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else if (result.error?.code === 'MERGE_CONFLICT') {
+        await this.loadActiveItems();
+        // Preserve squash intent: a squash finish that conflicted must complete as
+        // a single-parent squash commit, not a two-parent merge commit. The finish
+        // context lets the dialog complete the finish (delete branch / re-invoke)
+        // once the conflict is resolved.
+        this.openConflictDialog(squash, {
+          kind: 'feature',
+          name: item.name,
+          branchName: item.branch,
+          deleteBranch: true,
+        });
       } else {
         this.error = result.error?.message || 'Failed to finish feature';
       }
@@ -389,6 +454,7 @@ export class LvGitflowPanel extends LitElement {
     const version = await showPrompt('Start Release', 'Enter release version:');
     if (!version || !version.trim()) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -415,6 +481,7 @@ export class LvGitflowPanel extends LitElement {
     const tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
     if (tagMessage === null) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -431,6 +498,18 @@ export class LvGitflowPanel extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else if (result.error?.code === 'MERGE_CONFLICT') {
+        await this.loadActiveItems();
+        this.openConflictDialog(false, {
+          kind: 'release',
+          name: item.name,
+          branchName: item.branch,
+          deleteBranch: true,
+          tagMessage: tagMessage || undefined,
+          // The backend merges+tags master BEFORE the develop merge; a conflict
+          // while HEAD is on develop means that master merge + tag already landed.
+          priorFinishCommitLanded: await this.isOnDevelopBranch(),
+        });
       } else {
         this.error = result.error?.message || 'Failed to finish release';
       }
@@ -446,6 +525,7 @@ export class LvGitflowPanel extends LitElement {
     const version = await showPrompt('Start Hotfix', 'Enter hotfix version:');
     if (!version || !version.trim()) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -472,6 +552,7 @@ export class LvGitflowPanel extends LitElement {
     const tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
     if (tagMessage === null) return;
 
+    this.error = null;
     this.operationInProgress = true;
 
     try {
@@ -488,6 +569,18 @@ export class LvGitflowPanel extends LitElement {
           bubbles: true,
           composed: true,
         }));
+      } else if (result.error?.code === 'MERGE_CONFLICT') {
+        await this.loadActiveItems();
+        this.openConflictDialog(false, {
+          kind: 'hotfix',
+          name: item.name,
+          branchName: item.branch,
+          deleteBranch: true,
+          tagMessage: tagMessage || undefined,
+          // The backend merges+tags master BEFORE the develop merge; a conflict
+          // while HEAD is on develop means that master merge + tag already landed.
+          priorFinishCommitLanded: await this.isOnDevelopBranch(),
+        });
       } else {
         this.error = result.error?.message || 'Failed to finish hotfix';
       }
@@ -497,6 +590,36 @@ export class LvGitflowPanel extends LitElement {
     } finally {
       this.operationInProgress = false;
     }
+  }
+
+  private dismissError(): void {
+    this.error = null;
+  }
+
+  /**
+   * A gitflow finish that hit a merge conflict — open the app-level conflict
+   * resolution dialog so the user can resolve it. The `gitflowFinish` context lets
+   * the dialog COMPLETE the finish (tag / merge develop / delete branch) after the
+   * conflict is resolved, instead of leaving it half-done.
+   */
+  /**
+   * True when HEAD is on the develop branch — after a release/hotfix finish
+   * conflict this means the backend already merged into master and created the
+   * version tag (both happen before the develop merge), so those survive an abort.
+   */
+  private async isOnDevelopBranch(): Promise<boolean> {
+    const develop = this.config?.developBranch ?? 'develop';
+    const result = await gitService.getBranches(this.repositoryPath);
+    if (!result.success || !result.data) return false;
+    return result.data.some((b) => b.isHead && b.name === develop);
+  }
+
+  private openConflictDialog(squash: boolean, gitflowFinish: GitflowFinishContext): void {
+    this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+      bubbles: true,
+      composed: true,
+      detail: { operationType: 'merge', squash, gitflowFinish },
+    }));
   }
 
   private toggleSection(category: GitFlowCategory): void {
@@ -533,6 +656,7 @@ export class LvGitflowPanel extends LitElement {
     onStart: () => void,
     onFinish: (item: ActiveItem) => void,
     colorClass: string,
+    onSquash?: (item: ActiveItem) => void,
   ) {
     const expanded = this.expandedSections.has(category);
 
@@ -563,7 +687,7 @@ export class LvGitflowPanel extends LitElement {
             </button>
           </div>
         </div>
-        ${expanded ? this.renderCategoryItems(category, items, onFinish) : nothing}
+        ${expanded ? this.renderCategoryItems(category, items, onFinish, onSquash) : nothing}
       </div>
     `;
   }
@@ -572,6 +696,7 @@ export class LvGitflowPanel extends LitElement {
     _category: GitFlowCategory,
     items: ActiveItem[],
     onFinish: (item: ActiveItem) => void,
+    onSquash?: (item: ActiveItem) => void,
   ) {
     if (items.length === 0) {
       return html`<div class="empty-section">No active items</div>`;
@@ -588,6 +713,22 @@ export class LvGitflowPanel extends LitElement {
               <path d="M18 9a9 9 0 01-9 9"></path>
             </svg>
             <span class="item-name" title="${item.branch}">${item.name}</span>
+            ${onSquash
+              ? html`
+                  <button
+                    class="item-finish-btn item-squash-btn"
+                    title="Squash and finish ${item.name}"
+                    @click=${() => onSquash(item)}
+                    ?disabled=${this.operationInProgress}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="8 7 12 3 16 7"></polyline>
+                      <polyline points="8 17 12 21 16 17"></polyline>
+                      <line x1="12" y1="3" x2="12" y2="21"></line>
+                    </svg>
+                  </button>
+                `
+              : nothing}
             <button
               class="item-finish-btn"
               title="Finish ${item.name}"
@@ -633,20 +774,35 @@ export class LvGitflowPanel extends LitElement {
     `;
   }
 
+  private renderErrorBanner() {
+    if (!this.error) return nothing;
+    return html`
+      <div class="error-banner">
+        <span class="error-banner-message">${this.error}</span>
+        <button
+          class="error-banner-dismiss"
+          title="Dismiss"
+          aria-label="Dismiss error"
+          @click=${this.dismissError}
+        >✕</button>
+      </div>
+    `;
+  }
+
   render() {
     if (this.loading) {
       return html`<div class="loading">Loading Git Flow...</div>`;
     }
 
-    if (this.error) {
-      return html`<div class="error">${this.error}</div>`;
-    }
-
     if (!this.config || !this.config.initialized) {
-      return this.renderInitSection();
+      return html`
+        ${this.renderErrorBanner()}
+        ${this.renderInitSection()}
+      `;
     }
 
     return html`
+      ${this.renderErrorBanner()}
       <div class="panel">
         ${this.renderCategorySection(
           'feature',
@@ -655,6 +811,7 @@ export class LvGitflowPanel extends LitElement {
           () => this.handleStartFeature(),
           (item) => this.handleFinishFeature(item),
           'feature-color',
+          (item) => this.handleFinishFeature(item, true),
         )}
         ${this.renderCategorySection(
           'release',

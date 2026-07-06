@@ -152,6 +152,10 @@ export class LvStashList extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // Conflicted applies/pops complete inside the shared conflict dialog
+    // (which drops the stash there), so reload when the app-level refresh
+    // fires — otherwise the dropped entry stays listed.
+    window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
     await this.loadStashes();
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
@@ -159,9 +163,14 @@ export class LvStashList extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
   }
+
+  private handleRepositoryRefresh = (): void => {
+    void this.loadStashes();
+  };
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
@@ -313,10 +322,32 @@ export class LvStashList extends LitElement {
       } else {
         console.error('Failed to apply stash:', result.error);
         showToast(result.error?.message ?? 'Failed to apply stash', 'error');
+        // A conflicting apply left the changes in the working tree; open the
+        // conflict resolution dialog. The stash was NOT dropped (apply, not pop),
+        // so completion must keep it.
+        if (this.isConflictError(result.error)) {
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: {
+              operationType: 'stash',
+              stashIndex: stash.index,
+              dropStashOnComplete: false,
+            },
+          }));
+        }
       }
     } finally {
       this.operationInProgress = false;
     }
+  }
+
+  /** True when a stash apply/pop error indicates a merge conflict. */
+  private isConflictError(error: { code?: string; message?: string } | undefined): boolean {
+    if (!error) return false;
+    // Prefer the structured error code; keep the message match as a fallback.
+    if (error.code === 'MERGE_CONFLICT') return true;
+    return !!error.message && error.message.toLowerCase().includes('conflict');
   }
 
   private async handlePopStash(): Promise<void> {
@@ -349,6 +380,20 @@ export class LvStashList extends LitElement {
       } else {
         console.error('Failed to pop stash:', result.error);
         showToast(result.error?.message ?? 'Failed to pop stash', 'error');
+        // A conflicting pop left the changes in the working tree AND left the
+        // stash entry in place. Open the conflict resolution dialog; completion
+        // must drop the stash (pop semantics) once conflicts are resolved.
+        if (this.isConflictError(result.error)) {
+          this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
+            bubbles: true,
+            composed: true,
+            detail: {
+              operationType: 'stash',
+              stashIndex: stash.index,
+              dropStashOnComplete: true,
+            },
+          }));
+        }
       }
     } finally {
       this.operationInProgress = false;

@@ -1000,4 +1000,69 @@ describe('lv-azure-devops-dialog', () => {
       expect(args.user).to.not.be.null;
     });
   });
+
+  describe('Disconnect / delete clear a stale error (regression)', () => {
+    it('handleDisconnect resets a pre-existing error banner', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'ado-acc-1';
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { error: string | null }).error = 'stale error';
+      await el.updateComplete;
+
+      await (el as unknown as { handleDisconnect: () => Promise<void> }).handleDisconnect();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.equal(null);
+    });
+
+    it('handleDeleteIntegration resets a pre-existing error banner', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'ado-acc-1';
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { error: string | null }).error = 'stale error';
+      await el.updateComplete;
+
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command.startsWith('plugin:dialog|')) return 'Ok';
+        return origMock(command, args);
+      };
+
+      await (el as unknown as { handleDeleteIntegration: () => Promise<void> }).handleDeleteIntegration();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.equal(null);
+    });
+  });
+
+  describe('PAT-form Delete Integration button (regression)', () => {
+    it('is disabled while a request is in flight', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockDisconnectedStatus;
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'ado-acc-1';
+      (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
+      (el as unknown as { isLoading: boolean }).isLoading = true;
+      await el.updateComplete;
+
+      const deleteBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Delete Integration'
+      ) as HTMLButtonElement | undefined;
+      expect(deleteBtn, 'Delete Integration button rendered').to.not.be.undefined;
+      expect(deleteBtn!.disabled).to.equal(true);
+    });
+  });
 });

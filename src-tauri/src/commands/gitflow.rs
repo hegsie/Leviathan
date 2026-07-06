@@ -222,26 +222,59 @@ pub async fn gitflow_finish_feature(
     let annotated_commit = repo.find_annotated_commit(feature_commit.id())?;
 
     if squash.unwrap_or(false) {
-        // Squash merge
-        repo.merge(&[&annotated_commit], None, None)?;
+        // Squash merge: the changes must actually be committed (single
+        // parent, no merge commit). Conflicts abort BEFORE any branch
+        // deletion so the user can resolve them.
+        //
+        // Idempotency guard: if develop already contains the feature, skip the
+        // merge+commit so a re-run (e.g. after the squash was completed externally
+        // via the conflict-resolution flow) doesn't re-merge the same divergence
+        // and mint a duplicate commit. It then falls through to branch deletion.
+        let (analysis, _) = repo.merge_analysis(&[&annotated_commit])?;
+        if !analysis.is_up_to_date() {
+            repo.merge(&[&annotated_commit], None, None)?;
+            if repo.index()?.has_conflicts() {
+                return Err(LeviathanError::MergeConflict);
+            }
+            let mut index = repo.index()?;
+            let tree_oid = index.write_tree()?;
+            let tree = repo.find_tree(tree_oid)?;
+            let sig = repo.signature()?;
+            let develop_commit = develop_branch.get().peel_to_commit()?;
+            let message = format!("Squashed branch '{}' into {}", branch_name, develop);
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                &message,
+                &tree,
+                &[&develop_commit],
+            )?;
+            repo.cleanup_state()?;
+        }
     } else {
         // Regular merge (no-ff)
         let (analysis, _) = repo.merge_analysis(&[&annotated_commit])?;
         if analysis.is_fast_forward() || analysis.is_normal() {
             repo.merge(&[&annotated_commit], None, None)?;
 
-            if !repo.index()?.has_conflicts() {
-                // Auto-commit merge
-                let mut index = repo.index()?;
-                let tree_oid = index.write_tree()?;
-                let tree = repo.find_tree(tree_oid)?;
-                let sig = repo.signature()?;
-                let develop_commit = develop_branch.get().peel_to_commit()?;
-                let parents = vec![&develop_commit, &feature_commit];
-                let message = format!("Merge branch '{}' into {}", branch_name, develop);
-                repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
-                repo.cleanup_state()?;
+            // Conflicts must abort the finish (leaving MERGE_HEAD for the
+            // conflict-resolution flow) instead of silently skipping the
+            // commit and deleting the branch below.
+            if repo.index()?.has_conflicts() {
+                return Err(LeviathanError::MergeConflict);
             }
+
+            // Auto-commit merge
+            let mut index = repo.index()?;
+            let tree_oid = index.write_tree()?;
+            let tree = repo.find_tree(tree_oid)?;
+            let sig = repo.signature()?;
+            let develop_commit = develop_branch.get().peel_to_commit()?;
+            let parents = vec![&develop_commit, &feature_commit];
+            let message = format!("Merge branch '{}' into {}", branch_name, develop);
+            repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
+            repo.cleanup_state()?;
         }
     }
 
@@ -306,6 +339,28 @@ pub async fn gitflow_finish_release(
     tag_message: Option<String>,
     delete_branch: Option<bool>,
 ) -> Result<()> {
+    finish_release_like(
+        path,
+        version,
+        tag_message,
+        delete_branch,
+        "gitflow.prefix.release",
+        "release/",
+    )
+    .await
+}
+
+/// Shared implementation for release/hotfix finish: merge into master (with
+/// tag), merge into develop, delete the branch. The two flows differ only in
+/// which branch prefix they use.
+async fn finish_release_like(
+    path: String,
+    version: String,
+    tag_message: Option<String>,
+    delete_branch: Option<bool>,
+    prefix_key: &str,
+    prefix_default: &str,
+) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let config = repo.config()?;
 
@@ -316,8 +371,8 @@ pub async fn gitflow_finish_release(
         .get_string("gitflow.branch.develop")
         .unwrap_or_else(|_| "develop".to_string());
     let prefix = config
-        .get_string("gitflow.prefix.release")
-        .unwrap_or_else(|_| "release/".to_string());
+        .get_string(prefix_key)
+        .unwrap_or_else(|_| prefix_default.to_string());
     let tag_prefix = config
         .get_string("gitflow.prefix.versiontag")
         .unwrap_or_else(|_| "v".to_string());
@@ -341,9 +396,24 @@ pub async fn gitflow_finish_release(
     })?)?;
 
     let annotated = repo.find_annotated_commit(release_commit.id())?;
-    repo.merge(&[&annotated], None, None)?;
+    let (master_analysis, _) = repo.merge_analysis(&[&annotated])?;
 
-    if !repo.index()?.has_conflicts() {
+    // Idempotency: on a re-run after resolving a develop-side conflict, master
+    // already contains the release, so the analysis is up-to-date. Skip the
+    // merge+commit entirely — re-merging would create a junk merge commit and
+    // the subsequent re-tag would fail with "tag already exists", stranding the
+    // branch. We still need a tag target for the (already-existing) tag below.
+    let master_merge_oid = if master_analysis.is_up_to_date() {
+        None
+    } else {
+        repo.merge(&[&annotated], None, None)?;
+
+        // Conflicts must abort the finish here — proceeding would tag nothing,
+        // check out develop over a conflicted tree, and delete the branch.
+        if repo.index()?.has_conflicts() {
+            return Err(LeviathanError::MergeConflict);
+        }
+
         let mut index = repo.index()?;
         let tree_oid = index.write_tree()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -353,11 +423,27 @@ pub async fn gitflow_finish_release(
         let message = format!("Merge branch '{}' into {}", branch_name, master);
         let merge_oid = repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
         repo.cleanup_state()?;
+        Some(merge_oid)
+    };
 
-        // Create tag on master
-        let merge_commit = repo.find_commit(merge_oid)?;
+    // Create the tag on master. Skip when it already exists (re-run after the
+    // develop-side conflict was resolved and tagged on the first pass) so we
+    // don't fail with "tag already exists". When it is MISSING we must still
+    // tag: on a re-run after a MASTER-side conflict was resolved via the dialog,
+    // master is already up-to-date so master_merge_oid is None — tag the current
+    // master tip (HEAD is on master here) so the release/hotfix isn't silently
+    // completed with no version tag.
+    if repo
+        .find_reference(&format!("refs/tags/{}", tag_name))
+        .is_err()
+    {
+        let sig = repo.signature()?;
+        let target_commit = match master_merge_oid {
+            Some(merge_oid) => repo.find_commit(merge_oid)?,
+            None => repo.head()?.peel_to_commit()?,
+        };
         let tag_msg = tag_message.unwrap_or_else(|| format!("Release {}", version));
-        repo.tag(&tag_name, merge_commit.as_object(), &sig, &tag_msg, false)?;
+        repo.tag(&tag_name, target_commit.as_object(), &sig, &tag_msg, false)?;
     }
 
     // Merge into develop
@@ -376,9 +462,20 @@ pub async fn gitflow_finish_release(
         .map_err(|_| LeviathanError::BranchNotFound(branch_name.clone()))?;
     let release_commit2 = release_branch2.get().peel_to_commit()?;
     let annotated2 = repo.find_annotated_commit(release_commit2.id())?;
-    repo.merge(&[&annotated2], None, None)?;
+    let (develop_analysis, _) = repo.merge_analysis(&[&annotated2])?;
 
-    if !repo.index()?.has_conflicts() {
+    // Idempotency: on a re-run after the develop conflict was resolved via
+    // commit_merge, develop already contains the release, so skip the merge to
+    // avoid a duplicate merge commit and let branch deletion proceed.
+    if !develop_analysis.is_up_to_date() {
+        repo.merge(&[&annotated2], None, None)?;
+
+        // Same as the master merge: a conflicted develop merge must be surfaced
+        // (and the branch NOT deleted) so the user can resolve it.
+        if repo.index()?.has_conflicts() {
+            return Err(LeviathanError::MergeConflict);
+        }
+
         let mut index = repo.index()?;
         let tree_oid = index.write_tree()?;
         let tree = repo.find_tree(tree_oid)?;
@@ -451,8 +548,18 @@ pub async fn gitflow_finish_hotfix(
     tag_message: Option<String>,
     delete_branch: Option<bool>,
 ) -> Result<()> {
-    // Hotfix finish is similar to release finish
-    gitflow_finish_release(path, version, tag_message, delete_branch).await
+    // Same flow as release finish, but the branch lives under the hotfix
+    // prefix — delegating with the release prefix made every hotfix finish
+    // fail with BranchNotFound.
+    finish_release_like(
+        path,
+        version,
+        tag_message,
+        delete_branch,
+        "gitflow.prefix.hotfix",
+        "hotfix/",
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -650,5 +757,324 @@ mod tests {
         let git_repo = repo.repo();
         let feature = git_repo.find_branch("feature/keep-feature", git2::BranchType::Local);
         assert!(feature.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_with_conflict_errors_and_keeps_branch() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "conflicting".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+
+        // Conflicting change on develop
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop change", &[("shared.txt", "develop content")]);
+
+        let result =
+            gitflow_finish_feature(repo.path_str(), "conflicting".to_string(), Some(true), None)
+                .await;
+
+        // Must surface the conflict, NOT report success
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        // Branch must NOT have been deleted, and the merge state must be
+        // intact for the conflict-resolution flow
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .find_branch("feature/conflicting", git2::BranchType::Local)
+            .is_ok());
+        assert_eq!(git_repo.state(), git2::RepositoryState::Merge);
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_squash_creates_commit() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "squashed".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature work", &[("squash.txt", "squash content")]);
+
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "squashed".to_string(),
+            Some(true),
+            Some(true), // squash
+        )
+        .await;
+        assert!(result.is_ok(), "squash finish failed: {:?}", result.err());
+
+        // The squashed changes must actually be committed on develop as a
+        // single-parent commit, with no merge state left behind
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert_eq!(repo.current_branch(), "develop");
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.parent_count(), 1);
+        assert!(repo.path.join("squash.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_squash_up_to_date_skips_merge() {
+        // The squash block now guards on merge_analysis: when develop already
+        // contains the feature (here the feature has no commits beyond develop, so
+        // the merge is up-to-date), the squash finish must SKIP the merge+commit —
+        // minting no duplicate commit — and still delete the branch. This prevents
+        // a re-run (after the squash was completed externally) from re-merging.
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "noop".to_string())
+            .await
+            .unwrap();
+        // No commits on the feature — it points at develop's tip (up-to-date).
+
+        let develop_tip_before = repo.repo().refname_to_id("refs/heads/develop").unwrap();
+
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "noop".to_string(),
+            Some(true),
+            Some(true), // squash
+        )
+        .await;
+        assert!(result.is_ok(), "squash finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        // Develop tip unchanged — no junk squash commit was created.
+        let develop_tip_after = git_repo.refname_to_id("refs/heads/develop").unwrap();
+        assert_eq!(
+            develop_tip_before, develop_tip_after,
+            "up-to-date squash finish must not mint a commit"
+        );
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        // Branch still deleted.
+        assert!(git_repo
+            .find_branch("feature/noop", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_hotfix_uses_hotfix_prefix() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_hotfix(repo.path_str(), "1.0.1".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Hotfix work", &[("hotfix.txt", "fix")]);
+
+        // Before the fix this failed with BranchNotFound("release/1.0.1")
+        let result =
+            gitflow_finish_hotfix(repo.path_str(), "1.0.1".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "hotfix finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert!(git_repo.find_reference("refs/tags/v1.0.1").is_ok());
+        assert!(git_repo
+            .find_branch("hotfix/1.0.1", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_with_conflict_keeps_branch() {
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_release(repo.path_str(), "2.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("shared.txt", "release content")]);
+
+        // Conflicting change on master
+        repo.checkout_branch(&master);
+        repo.create_commit("Master change", &[("shared.txt", "master content")]);
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "2.0.0".to_string(), None, Some(true)).await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        // Branch kept, no tag created, merge state intact for resolution
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .find_branch("release/2.0.0", git2::BranchType::Local)
+            .is_ok());
+        assert!(git_repo.find_reference("refs/tags/v2.0.0").is_err());
+        assert_eq!(git_repo.state(), git2::RepositoryState::Merge);
+    }
+
+    fn count_reachable_commits(repo: &TestRepo, branch: &str) -> usize {
+        let git_repo = repo.repo();
+        let reference = git_repo
+            .find_branch(branch, git2::BranchType::Local)
+            .expect("branch should exist");
+        let oid = reference.get().target().expect("branch should have a tip");
+        let mut revwalk = git_repo.revwalk().unwrap();
+        revwalk.push(oid).unwrap();
+        revwalk.count()
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_tags_after_master_conflict_resolved() {
+        // A MASTER-side conflict is resolved via the dialog (resolve_conflict +
+        // commit_merge). On re-run, master is up-to-date (master_merge_oid=None)
+        // but the tag was never created on the first pass — finish must still
+        // create it, pointing at the master tip, exactly once. Before the fix
+        // the tag block was gated on Some(merge_oid) and silently skipped.
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_release(repo.path_str(), "2.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("shared.txt", "release content")]);
+
+        // Conflicting change on master.
+        repo.checkout_branch(&master);
+        repo.create_commit("Master change", &[("shared.txt", "master content")]);
+
+        // First finish: master merge conflicts, no tag yet.
+        let result =
+            gitflow_finish_release(repo.path_str(), "2.0.0".to_string(), None, Some(true)).await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+        assert!(repo.repo().find_reference("refs/tags/v2.0.0").is_err());
+
+        // Resolve the master conflict and complete the merge (HEAD is on master).
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::commands::merge::commit_merge(repo.path_str(), None, None)
+            .await
+            .unwrap();
+
+        let master_tip = repo
+            .repo()
+            .refname_to_id(&format!("refs/heads/{}", master))
+            .unwrap();
+
+        // Re-run finish: must succeed AND create the tag on the master tip.
+        let result =
+            gitflow_finish_release(repo.path_str(), "2.0.0".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "re-run finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        let tag_ref = git_repo.find_reference("refs/tags/v2.0.0");
+        assert!(
+            tag_ref.is_ok(),
+            "version tag must be created after resolving the master conflict"
+        );
+        let tag_commit = tag_ref.unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            tag_commit.id(),
+            master_tip,
+            "tag must point at the master tip"
+        );
+
+        // Branch deleted.
+        assert!(git_repo
+            .find_branch("release/2.0.0", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_idempotent_after_develop_conflict() {
+        // The master merge succeeds and the tag is created, but the develop
+        // merge conflicts. After resolving that conflict and completing the
+        // develop merge, re-running finish must be a clean no-op on master (no
+        // duplicate merge commit, no duplicate/failed tag) and must still
+        // delete the branch.
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        // Give develop a base version of shared.txt, branch the release off it,
+        // change it on the release, then make a DIVERGENT change on develop so
+        // the develop-side merge conflicts (master has no shared.txt so its
+        // merge stays clean).
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop base", &[("shared.txt", "develop base")]);
+        gitflow_start_release(repo.path_str(), "3.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("shared.txt", "release content")]);
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop divergent", &[("shared.txt", "develop divergent")]);
+
+        // First finish: master merges + tags cleanly, develop merge conflicts.
+        let result =
+            gitflow_finish_release(repo.path_str(), "3.0.0".to_string(), None, Some(true)).await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        {
+            let git_repo = repo.repo();
+            assert_eq!(git_repo.state(), git2::RepositoryState::Merge);
+            assert!(
+                git_repo.find_reference("refs/tags/v3.0.0").is_ok(),
+                "tag should have been created during the clean master merge"
+            );
+        }
+
+        let master_commits_before = count_reachable_commits(&repo, &master);
+
+        // Resolve the develop conflict and complete the merge.
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::commands::merge::commit_merge(repo.path_str(), None, None)
+            .await
+            .unwrap();
+
+        // Re-run finish: must succeed and be idempotent.
+        let result =
+            gitflow_finish_release(repo.path_str(), "3.0.0".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "re-run finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+
+        // No duplicate merge commit added to master.
+        let master_commits_after = count_reachable_commits(&repo, &master);
+        assert_eq!(
+            master_commits_before, master_commits_after,
+            "re-run must not add a junk master merge commit"
+        );
+
+        // Tag still exists (exactly once — creating it twice would have errored).
+        assert!(git_repo.find_reference("refs/tags/v3.0.0").is_ok());
+
+        // Branch was deleted.
+        assert!(git_repo
+            .find_branch("release/3.0.0", git2::BranchType::Local)
+            .is_err());
     }
 }

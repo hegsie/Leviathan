@@ -79,6 +79,7 @@ pub struct MaintenanceResult {
 
 /// Repository statistics result
 #[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RepositoryStats {
     /// Total number of objects (commits, trees, blobs, tags)
     pub count: usize,
@@ -90,6 +91,7 @@ pub struct RepositoryStats {
 
 /// Pack file information result
 #[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PackInfo {
     /// Number of pack files
     pub pack_count: usize,
@@ -988,5 +990,33 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         let result = run_prune(repo.path_str(), Some(true)).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_repository_stats_serializes_camel_case() {
+        // The frontend reads sizeKb — snake_case here means the health dialog
+        // shows a zero repository size.
+        let stats = RepositoryStats {
+            count: 10,
+            loose: 2,
+            size_kb: 42,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(json.contains("\"sizeKb\":42"), "got: {json}");
+        assert!(!json.contains("size_kb"), "got: {json}");
+    }
+
+    #[test]
+    fn test_pack_info_serializes_camel_case() {
+        // The frontend reads packCount/packSizeKb — snake_case here disables
+        // the repack recommendation and blanks the pack count.
+        let info = PackInfo {
+            pack_count: 12,
+            pack_size_kb: 2048,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"packCount\":12"), "got: {json}");
+        assert!(json.contains("\"packSizeKb\":2048"), "got: {json}");
+        assert!(!json.contains("pack_count"), "got: {json}");
     }
 }
