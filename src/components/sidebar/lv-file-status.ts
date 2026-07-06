@@ -1002,11 +1002,18 @@ export class LvFileStatus extends LitElement {
     }
   }
 
+  // Monotonic sequence per repo path: a load only applies its result if no
+  // NEWER load for the same path started meanwhile (path equality alone
+  // can't catch A -> B -> A switches reordering two loads for A)
+  private statusLoadSeq = new Map<string, number>();
+
   async loadStatus(): Promise<void> {
     if (!this.repositoryPath) return;
     // Captured before the await so a mid-flight tab switch still writes the
     // result to the repo it was loaded FROM
     const loadedPath = this.repositoryPath;
+    const seq = (this.statusLoadSeq.get(loadedPath) ?? 0) + 1;
+    this.statusLoadSeq.set(loadedPath, seq);
 
     // Only show loading indicator on the very first load
     if (!this.hasInitiallyLoaded) {
@@ -1016,6 +1023,10 @@ export class LvFileStatus extends LitElement {
 
     try {
       const result = await gitService.getStatus(loadedPath);
+      // A newer load for the SAME path supersedes this one entirely (its
+      // result is fresher for both the store and the panel).
+      const isLatestForPath = this.statusLoadSeq.get(loadedPath) === seq;
+      if (!isLatestForPath) return;
       // The tab may have switched while the fetch was in flight. The store
       // write below is path-keyed and always safe; the component's OWN
       // render state belongs to the now-active repo and must not be

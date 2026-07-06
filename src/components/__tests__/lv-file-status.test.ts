@@ -891,6 +891,61 @@ describe('lv-file-status', () => {
       expect(repoA!.status.map((s) => s.path)).to.deep.equal(['stale-repo-file.ts']);
     });
 
+    it('an A -> B -> A switch discards the outdated first A load', async () => {
+      // Regression: path-equality guards let a REORDERED pair of loads for
+      // the same repo apply the older result (reverting a staging change
+      // until the next watcher tick).
+      openRepoInStore(REPO_PATH);
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const outdatedEntries = [
+        { path: 'outdated.ts', status: 'modified', isStaged: false, isConflicted: false },
+      ];
+      const freshEntries = [
+        { path: 'fresh.ts', status: 'modified', isStaged: true, isConflicted: false },
+      ];
+      let statusCalls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_status') {
+          statusCalls++;
+          if (statusCalls === 1) {
+            await firstGate; // A's FIRST load is slow
+            return outdatedEntries;
+          }
+          return freshEntries; // B's load and A's second load are fast
+        }
+        return null;
+      };
+
+      const el = await fixture<LvFileStatus>(
+        html`<lv-file-status .repositoryPath=${REPO_PATH}></lv-file-status>`,
+      );
+      await el.updateComplete;
+
+      // A -> B -> A
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+      el.repositoryPath = REPO_PATH;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Now A's outdated first load finally lands — it must be discarded
+      releaseFirst();
+      await new Promise((r) => setTimeout(r, 20));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const staged = (el as any).stagedFiles as Array<{ path: string }>;
+      expect(staged.map((f) => f.path)).to.deep.equal(['fresh.ts']);
+
+      const repoA = repositoryStore
+        .getState()
+        .openRepositories.find((r) => r.repository.path === REPO_PATH);
+      expect(repoA!.status.map((s) => s.path)).to.deep.equal(['fresh.ts']);
+    });
+
     it('reloads status on watcher events for ITS repo', async () => {
       setupDefaultMocks();
       const el = await renderFileStatus();

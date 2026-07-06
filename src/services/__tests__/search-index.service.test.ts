@@ -238,6 +238,47 @@ describe('SearchIndexService', () => {
       expect(searchIndexService.isReady('/repo/one')).to.be.true;
     });
 
+    it('a LATE pre-drop build must not delete the index a reopen build created', async () => {
+      // Regression: pre-drop build (epoch 0) resolves AFTER the reopen build
+      // (epoch 1) already inserted a fresh index — its compensating drop
+      // used to delete that fresh index while isReady stayed true.
+      let releaseOldBuild!: () => void;
+      pendingBuildGate = new Promise((resolve) => {
+        releaseOldBuild = resolve;
+      });
+      const oldBuild = searchIndexService.buildIndex('/repo/one'); // epoch 0, slow
+      await searchIndexService.drop('/repo/one'); // tab closed
+      pendingBuildGate = null;
+      await searchIndexService.buildIndex('/repo/one'); // reopen build, completes first
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+      invokeCallArgs.length = 0;
+
+      releaseOldBuild();
+      await oldBuild;
+
+      expect(invokeCallArgs.find((c) => c.command === 'drop_search_index')).to.be.undefined;
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+    });
+
+    it("a LATE pre-drop refresh must not delete the reopened repo's index", async () => {
+      await searchIndexService.buildIndex('/repo/one');
+      let releaseRefresh!: () => void;
+      pendingRefreshGate = new Promise((resolve) => {
+        releaseRefresh = resolve;
+      });
+      const staleRefresh = searchIndexService.refresh('/repo/one'); // slow
+      await searchIndexService.drop('/repo/one'); // tab closed
+      await searchIndexService.buildIndex('/repo/one'); // reopened + rebuilt
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+      invokeCallArgs.length = 0;
+
+      releaseRefresh();
+      await staleRefresh;
+
+      expect(invokeCallArgs.find((c) => c.command === 'drop_search_index')).to.be.undefined;
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+    });
+
     it('a refresh finishing AFTER its repo was dropped frees the resurrected backend index', async () => {
       // Regression: handleRefresh fires refresh_search_index; if the tab is
       // closed while it runs, the backend refresh re-inserts an index for a

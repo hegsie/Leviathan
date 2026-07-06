@@ -586,8 +586,12 @@ export class LvGraphCanvas extends LitElement {
       }
     }
 
-    // Reload when search filter changes
-    if (changedProperties.has('searchFilter')) {
+    // Reload when search filter changes. Skip when the repository changed in
+    // the same update (app-shell clears the filter on tab switch): the
+    // repositoryPath branch above already started the right load, and a
+    // second FOREGROUND load here would cancel the instant cached render
+    // with a spinner.
+    if (changedProperties.has('searchFilter') && !changedProperties.has('repositoryPath')) {
       this.loadCommits();
     }
   }
@@ -895,6 +899,10 @@ export class LvGraphCanvas extends LitElement {
         refsByCommit: this.refsByCommit,
         hasMore: this.hasMoreCommits,
       });
+      // Any successful load clears a previous failure — including a queued
+      // background reload succeeding after a failed foreground load, which
+      // would otherwise leave the error panel painted over a healthy graph
+      this.loadError = null;
       this.processLayout();
       const searchInfo = hasSearch ? ` (${this.matchedCommitOids.size} matches highlighted)` : '';
       log.debug(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);

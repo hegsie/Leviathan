@@ -666,6 +666,9 @@ export class AppShell extends LitElement {
   private staleRepoPaths = new Set<string>();
   // Debounce timers for background tab-badge refreshes, keyed by repo path
   private badgeHydrationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Last auto-fetch interval applied to the backend (settings subscription
+  // must only restart timers when THIS value actually changes)
+  private lastAutoFetchInterval = 0;
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
   private shownIntegrationSuggestions: Set<string> = new Set();
@@ -723,11 +726,13 @@ export class AppShell extends LitElement {
       }
       return;
     }
-    // The ACTIVE repo's tab badges must stay live too: lv-file-status only
-    // mirrors status into the store while the right panel is mounted, so
-    // with the panel hidden the active tab's dirty dot would go stale while
-    // background tabs kept updating.
-    this.scheduleBadgeHydration(event.repoPath);
+    // The ACTIVE repo's tab badges must stay live too — but only when the
+    // right panel is hidden: while it's mounted, lv-file-status already
+    // reloads on these events and mirrors into the store, so hydrating here
+    // as well would just double every status query.
+    if (!this.rightPanelVisible) {
+      this.scheduleBadgeHydration(event.repoPath);
+    }
     if (event.eventType === 'refs-changed') {
       this.handleRefsChanged();
     }
@@ -2679,18 +2684,25 @@ export class AppShell extends LitElement {
     // Subscribe to settings changes to start/stop auto-fetch and update tray.
     // Newly OPENED repos get auto-fetch from the store subscription's
     // open-set diff (see connectedCallback); this handles interval changes
-    // for repos that are already open.
+    // for repos that are already open. Only an ACTUAL interval change may
+    // restart the timers — the subscription fires for every settings write
+    // (theme, tray, ...) and each backend restart resets the fetch delay, so
+    // reacting to unrelated changes would defer fetches indefinitely.
+    this.lastAutoFetchInterval = settings.autoFetchInterval;
     this.autoFetchUnsubscribe = settingsStore.subscribe((state) => {
-      const paths = repositoryStore
-        .getState()
-        .openRepositories.map((r) => r.repository.path);
-      if (state.autoFetchInterval > 0) {
-        for (const path of paths) {
-          gitService.startAutoFetch(path, state.autoFetchInterval);
-        }
-      } else {
-        for (const path of paths) {
-          gitService.stopAutoFetch(path);
+      if (state.autoFetchInterval !== this.lastAutoFetchInterval) {
+        this.lastAutoFetchInterval = state.autoFetchInterval;
+        const paths = repositoryStore
+          .getState()
+          .openRepositories.map((r) => r.repository.path);
+        if (state.autoFetchInterval > 0) {
+          for (const path of paths) {
+            gitService.startAutoFetch(path, state.autoFetchInterval);
+          }
+        } else {
+          for (const path of paths) {
+            gitService.stopAutoFetch(path);
+          }
         }
       }
       // Update tray settings

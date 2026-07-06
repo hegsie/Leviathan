@@ -984,11 +984,12 @@ describe('lv-branch-list', () => {
       const names = groups.flatMap((g) => g.branches.map((b) => b.name));
       expect(names).to.deep.equal(['fresh-branch']);
 
-      // ...while the stale result still reached the store for ITS repo
+      // ...and the store keeps the NEWEST result for that repo — the
+      // outdated first load is discarded by the per-path sequence guard
       const repoA = repositoryStore
         .getState()
         .openRepositories.find((r) => r.repository.path === REPO_PATH);
-      expect(repoA!.currentBranch!.name).to.equal('stale-branch');
+      expect(repoA!.currentBranch!.name).to.equal('fresh-branch');
     });
 
     it('mirrors loaded branches and current branch into the repository store', async () => {

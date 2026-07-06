@@ -55,9 +55,15 @@ class SearchIndexService {
     try {
       const result = await invokeCommand<number>('build_search_index', { path: repoPath });
       if ((this.dropEpochs.get(repoPath) ?? 0) !== epoch) {
-        // The repo was closed while this build ran — the backend just
-        // (re)inserted an index for a closed tab; free it and stay not-ready
-        invokeCommand<void>('drop_search_index', { path: repoPath });
+        // The repo was closed while this build ran. Free the index the
+        // backend just (re)inserted — UNLESS the repo was reopened and a
+        // newer build owns the path now (dropping would delete the index
+        // that newer build created while the frontend still reports ready).
+        const newerBuild =
+          this.buildingRepos.has(repoPath) && this.buildingRepos.get(repoPath) !== epoch;
+        if (!newerBuild && !this.readyRepos.has(repoPath)) {
+          invokeCommand<void>('drop_search_index', { path: repoPath });
+        }
         return;
       }
       if (result.success) {
@@ -115,8 +121,11 @@ class SearchIndexService {
     if ((this.dropEpochs.get(repoPath) ?? 0) !== epoch) {
       // The repo was closed while the refresh ran — the backend refresh
       // (or its build-from-scratch fallback) just re-inserted an index for
-      // a closed tab; free it again
-      invokeCommand<void>('drop_search_index', { path: repoPath });
+      // a closed tab; free it again. Skip when the repo was reopened and is
+      // ready (or rebuilding) — the index belongs to the reopened tab then.
+      if (!this.readyRepos.has(repoPath) && !this.buildingRepos.has(repoPath)) {
+        invokeCommand<void>('drop_search_index', { path: repoPath });
+      }
       return;
     }
     if (result.success) {

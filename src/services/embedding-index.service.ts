@@ -90,9 +90,12 @@ class EmbeddingIndexService {
   }
 
   /**
-   * Cancel an in-progress embedding build
+   * Cancel an in-progress embedding build (e.g. the tab was closed).
+   * Clears the in-flight marker immediately so a reopened tab can start a
+   * fresh build instead of being deduped against the cancelled one.
    */
   async cancelBuild(repoPath: string): Promise<void> {
+    this.buildingRepos.delete(repoPath);
     await invoke<void>('cancel_embedding_build', { path: repoPath });
   }
 

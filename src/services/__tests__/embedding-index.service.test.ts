@@ -97,6 +97,28 @@ describe('EmbeddingIndexService', () => {
     expect(buildCalls.length).to.equal(1);
   });
 
+  it('cancelBuild clears the in-flight marker so a reopened tab can rebuild immediately', async () => {
+    // Regression: close-tab cancels the build but the dedup marker stayed
+    // until the cancelled invoke unwound — a quick reopen was deduped
+    // against the cancelled build and never got an index.
+    let releaseOldBuild!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseOldBuild = resolve;
+    });
+    const cancelledBuild = embeddingIndexService.buildIndex('/repo/a');
+    await embeddingIndexService.cancelBuild('/repo/a'); // tab closed
+
+    pendingBuildGate = null;
+    const reopenBuild = embeddingIndexService.buildIndex('/repo/a'); // tab reopened
+    releaseOldBuild();
+    await Promise.all([cancelledBuild, reopenBuild]);
+
+    const buildCalls = invokedCommands.filter((c) => c.command === 'build_embedding_index');
+    expect(buildCalls.length).to.equal(2);
+    const cancelCall = invokedCommands.find((c) => c.command === 'cancel_embedding_build');
+    expect((cancelCall!.args as Record<string, unknown>).path).to.equal('/repo/a');
+  });
+
   it('allows rebuilding a repo after its previous build finished', async () => {
     await embeddingIndexService.buildIndex('/repo/a');
     await embeddingIndexService.buildIndex('/repo/a');

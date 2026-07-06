@@ -854,6 +854,53 @@ describe('lv-graph-canvas', () => {
       expect(findCommands('get_commit_history').length).to.equal(1);
     });
 
+    it('a successful background reload clears a previous load error', async () => {
+      const el = await renderCanvas();
+      // Foreground load fails on a fresh repo -> error panel state
+      mockInvoke = async (command: string) => {
+        if (command === 'get_commit_history') throw new Error('boom');
+        if (command === 'get_refs_by_commit') return defaultRefs;
+        return null;
+      };
+      await switchRepo(el, '/failing/repo');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.contain('boom');
+
+      // The repo recovers; a queued/background reload succeeds
+      setupDefaultMocks();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).loadCommits({ background: true });
+      await new Promise((r) => setTimeout(r, 200));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.be.null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+    });
+
+    it('clearing the search filter during a tab switch keeps the instant cached render', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+      clearHistory();
+
+      // Tab switch back: app-shell clears the filter in the same update
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).searchFilter = null;
+      el.repositoryPath = REPO_PATH;
+      await el.updateComplete;
+
+      // Cached render applied instantly, no foreground spinner
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+
+      // Exactly ONE (background) reload — the filter branch must not fire a
+      // second, cancelling foreground load
+      await new Promise((r) => setTimeout(r, 200));
+      expect(findCommands('get_commit_history').length).to.equal(1);
+    });
+
     it('background revalidation updates the graph when the repo changed', async () => {
       const el = await renderCanvas();
       await switchRepo(el, '/other/repo');

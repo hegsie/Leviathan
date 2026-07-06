@@ -732,6 +732,9 @@ test.describe('Graph Error Handling', () => {
 
     await expect(graph.canvas).toBeVisible();
     expect(await getSortedNodeCount(page)).toBe(nodesBefore);
-    await expect(page.locator('.error-state, .load-error')).toHaveCount(0);
+    // The graph's real error surface is the info panel with "Error" text
+    await expect(
+      page.locator('lv-graph-canvas .info-panel', { hasText: 'Error' })
+    ).toHaveCount(0);
   });
 });

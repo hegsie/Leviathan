@@ -168,6 +168,34 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('does not restart auto-fetch timers on unrelated settings changes', async () => {
+      // Regression: every settings write (theme, tray, ...) restarted every
+      // repo's fetch timer, indefinitely deferring the first fetch for users
+      // who tweak settings often.
+      settingsStore.setState({ autoFetchInterval: 5 });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await new Promise((r) => setTimeout(r, 0));
+        invokeCallArgs.length = 0;
+
+        settingsStore.setState({ minimizeToTray: true });
+        await new Promise((r) => setTimeout(r, 0));
+        expect(invokeCallArgs.find((c) => c.command === 'start_auto_fetch')).to.be.undefined;
+
+        // An ACTUAL interval change does restart
+        settingsStore.setState({ autoFetchInterval: 10 });
+        await new Promise((r) => setTimeout(r, 0));
+        const startCall = invokeCallArgs.find((c) => c.command === 'start_auto_fetch');
+        expect(startCall).to.not.be.undefined;
+        expect(startCall!.args.intervalMinutes).to.equal(10);
+      } finally {
+        el.remove();
+        settingsStore.setState({ autoFetchInterval: 0, minimizeToTray: false });
+      }
+    });
+
     it('stops auto-fetch when a repo tab is closed', async () => {
       settingsStore.setState({ autoFetchInterval: 5 });
       const el = createAppShell();
@@ -302,10 +330,11 @@ describe('app-shell multi-repo behavior', () => {
   });
 
   describe('active repo badge liveness', () => {
-    it('schedules a badge refresh for the ACTIVE repo on workdir events', () => {
+    it('schedules a badge refresh for the ACTIVE repo when the right panel is hidden', () => {
       const el = createAppShell();
       (el as any).activeRepository = { repository: mockRepo('/repo/active', 'active') };
       (el as any).watchedRepoPaths = new Set(['/repo/active']);
+      (el as any).rightPanelVisible = false;
 
       (el as any).handleWatcherEvent({
         repoPath: '/repo/active',
@@ -313,11 +342,24 @@ describe('app-shell multi-repo behavior', () => {
         paths: [],
       });
 
-      // The 1s-debounced hydration is scheduled even though the repo is
-      // active (the status panel may be hidden)
       expect((el as any).badgeHydrationTimers.has('/repo/active')).to.be.true;
       // Cleanup the pending timer
       clearTimeout((el as any).badgeHydrationTimers.get('/repo/active'));
+    });
+
+    it('skips the badge refresh while the right panel is mounted (it already mirrors status)', () => {
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/active', 'active') };
+      (el as any).watchedRepoPaths = new Set(['/repo/active']);
+      (el as any).rightPanelVisible = true;
+
+      (el as any).handleWatcherEvent({
+        repoPath: '/repo/active',
+        eventType: 'workdir-changed',
+        paths: [],
+      });
+
+      expect((el as any).badgeHydrationTimers.has('/repo/active')).to.be.false;
     });
   });
 
