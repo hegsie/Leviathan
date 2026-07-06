@@ -57,9 +57,9 @@ llama-cpp-2 = { version = "0.1", default-features = false }
 
 # Embedding & semantic search
 sqlite-vec = "0.1.8-alpha.1"
-candle-core = "0.10"
-candle-nn = "0.10"
-candle-transformers = "0.10"
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
 hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
