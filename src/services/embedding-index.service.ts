@@ -29,25 +29,27 @@ export interface EmbeddingIndexProgress {
 }
 
 class EmbeddingIndexService {
-  private building = false;
-  private currentRepoPath: string | null = null;
+  // Builds are tracked per repo: concurrent builds for DIFFERENT repos must
+  // both run (a global flag silently dropped every build after the first
+  // when several tabs were opened), only a build for the same repo is
+  // deduplicated.
+  private buildingRepos = new Set<string>();
 
   /**
    * Build the embedding index for a repository.
    * Non-blocking - meant to be called fire-and-forget.
    */
   async buildIndex(repoPath: string): Promise<void> {
-    if (this.building) return;
-    this.building = true;
+    if (this.buildingRepos.has(repoPath)) return;
+    this.buildingRepos.add(repoPath);
 
     try {
       const count = await invoke<number>('build_embedding_index', { path: repoPath });
-      this.currentRepoPath = repoPath;
-      console.log(`[EmbeddingIndex] Built index with ${count} commits`);
+      console.log(`[EmbeddingIndex] Built index for ${repoPath} with ${count} commits`);
     } catch (err) {
       console.warn('[EmbeddingIndex] Failed to build index:', err);
     } finally {
-      this.building = false;
+      this.buildingRepos.delete(repoPath);
     }
   }
 
@@ -119,12 +121,6 @@ class EmbeddingIndexService {
     });
   }
 
-  /**
-   * Invalidate the index (e.g., when switching repos)
-   */
-  invalidate(): void {
-    this.currentRepoPath = null;
-  }
 }
 
 export const embeddingIndexService = new EmbeddingIndexService();

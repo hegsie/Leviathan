@@ -71,13 +71,23 @@ pub async fn start_watching(
 
         thread::spawn(move || {
             loop {
-                // Poll for events; exit when the last watcher is gone
+                // Poll for events; exit when the last watcher is gone.
+                //
+                // The exit flag MUST be flipped while the service lock is
+                // still held: start_watching registers its watcher under this
+                // same lock BEFORE checking the flag, so either it sees the
+                // flag already false (and spawns a replacement poller) or
+                // this thread sees the new watcher and keeps running. Storing
+                // the flag after releasing the lock would open a window where
+                // a watcher is registered but no poller ever serves it.
                 let events = {
                     let Ok(service) = service.lock() else {
                         // Mutex poisoned — nothing sane left to do
+                        poller_running.store(false, Ordering::SeqCst);
                         break;
                     };
                     if service.watcher_count() == 0 {
+                        poller_running.store(false, Ordering::SeqCst);
                         break;
                     }
                     service.poll_events()
@@ -114,7 +124,6 @@ pub async fn start_watching(
                 // Sleep before next poll
                 thread::sleep(Duration::from_millis(500));
             }
-            poller_running.store(false, Ordering::SeqCst);
         });
     }
 

@@ -506,6 +506,7 @@ export class LvGraphCanvas extends LitElement {
   private loadVersion = 0; // Incremented on each load to cancel stale requests
   private statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private lastLoadedRepoPath: string | null = null; // Track the last repo that completed loading
+  private inFlightLoadPath: string | null = null; // Repo whose loadCommits is currently in flight
   private pullRequestsByCommit: Record<string, GraphPullRequest[]> = {};
   private githubRepo: { owner: string; repo: string } | null = null;
   private renderer: CanvasRenderer | null = null;
@@ -735,6 +736,7 @@ export class LvGraphCanvas extends LitElement {
     this.loadVersion++;
     const currentVersion = this.loadVersion;
     const repoPath = this.repositoryPath;
+    this.inFlightLoadPath = repoPath;
 
     // A background revalidation keeps showing the (cached) graph instead of
     // flashing the loading state
@@ -878,6 +880,10 @@ export class LvGraphCanvas extends LitElement {
       this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
     } finally {
       this.isLoading = false;
+      // Only the newest load owns the in-flight marker
+      if (this.loadVersion === currentVersion) {
+        this.inFlightLoadPath = null;
+      }
     }
   }
 
@@ -1830,6 +1836,10 @@ export class LvGraphCanvas extends LitElement {
    * Refresh the commit graph
    */
   public refresh(): void {
+    // A load for this repo is already in flight (e.g. the cache
+    // revalidation kicked off by a tab switch) — starting another would
+    // just cancel it and repeat the same backend walk with a spinner.
+    if (this.inFlightLoadPath === this.repositoryPath) return;
     this.loadCommits();
   }
 

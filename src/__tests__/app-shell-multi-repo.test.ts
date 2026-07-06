@@ -25,7 +25,7 @@ let cbId = 0;
 import { expect, waitUntil } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
-import { uiStore, repositoryStore } from '../stores/index.ts';
+import { uiStore, repositoryStore, settingsStore } from '../stores/index.ts';
 import { searchIndexService } from '../services/search-index.service.ts';
 import type { Repository } from '../types/git.types.ts';
 
@@ -136,6 +136,92 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  describe('auto-fetch lifecycle across open repos', () => {
+    it('starts auto-fetch for newly opened repos when an interval is set', async () => {
+      settingsStore.setState({ autoFetchInterval: 5 });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await new Promise((r) => setTimeout(r, 0));
+
+        const startCall = invokeCallArgs.find((c) => c.command === 'start_auto_fetch');
+        expect(startCall).to.not.be.undefined;
+        expect(startCall!.args.path).to.equal('/repo/one');
+      } finally {
+        el.remove();
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
+
+    it('does not start auto-fetch when the interval is disabled', async () => {
+      settingsStore.setState({ autoFetchInterval: 0 });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(invokeCallArgs.find((c) => c.command === 'start_auto_fetch')).to.be.undefined;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('stops auto-fetch when a repo tab is closed', async () => {
+      settingsStore.setState({ autoFetchInterval: 5 });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        repositoryStore.getState().addRepository(mockRepo('/repo/two', 'two'));
+        await new Promise((r) => setTimeout(r, 0));
+        invokeCallArgs.length = 0;
+
+        repositoryStore.getState().removeRepository('/repo/one');
+        await new Promise((r) => setTimeout(r, 0));
+
+        const stopCall = invokeCallArgs.find((c) => c.command === 'stop_auto_fetch');
+        expect(stopCall).to.not.be.undefined;
+        expect(stopCall!.args.path).to.equal('/repo/one');
+      } finally {
+        el.remove();
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
+  });
+
+  describe('background autofetch results update tab badge data', () => {
+    it("writes a background repo's ahead/behind into the store", () => {
+      const el = createAppShell();
+      repositoryStore.getState().addRepository(mockRepo('/repo/bg', 'bg'));
+      repositoryStore.getState().updateRepoData('/repo/bg', {
+        currentBranch: {
+          name: 'main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: 'origin/main',
+          targetOid: 'abc',
+          isStale: false,
+        },
+      });
+      (el as any).activeRepository = { repository: mockRepo('/repo/active', 'active') };
+
+      (el as any).handleAutoFetchCompleted({
+        repoPath: '/repo/bg',
+        success: true,
+        ahead: 3,
+        behind: 7,
+      });
+
+      const bg = repositoryStore.getState().openRepositories[0];
+      expect(bg.currentBranch?.aheadBehind).to.deep.equal({ ahead: 3, behind: 7 });
+      // The toolbar badge still only follows the ACTIVE repo
+      expect((el as any).remoteStatus).to.be.null;
+    });
+  });
+
   describe('watcher lifecycle across open repos', () => {
     it('starts a watcher for every opened repo, not just the active one', async () => {
       const el = createAppShell();
@@ -213,6 +299,69 @@ describe('app-shell multi-repo behavior', () => {
           .filter((c) => c.command === 'build_search_index')
           .map((c) => c.args.path);
         expect(buildPaths).to.deep.equal(['/repo/three']);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('restores the tab that was active last session', async () => {
+      mockResponses['open_repository'] = (args) => mockRepo(args.path as string, 'restored');
+      repositoryStore.setState({
+        persistedOpenRepos: [
+          { path: '/repo/one', name: 'one' },
+          { path: '/repo/two', name: 'two' },
+          { path: '/repo/three', name: 'three' },
+        ],
+        persistedActivePath: '/repo/two',
+      });
+
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        await waitUntil(
+          () => repositoryStore.getState().openRepositories.length === 3,
+          'expected all three persisted repos to be restored'
+        );
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect(repositoryStore.getState().activeIndex).to.equal(1);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('reports and prunes repos that fail to restore', async () => {
+      mockResponses['open_repository'] = (args) => {
+        if (args.path === '/repo/gone') {
+          throw new Error('repository not found');
+        }
+        return mockRepo(args.path as string, 'restored');
+      };
+      repositoryStore.setState({
+        persistedOpenRepos: [
+          { path: '/repo/one', name: 'one' },
+          { path: '/repo/gone', name: 'gone' },
+        ],
+      });
+
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        await waitUntil(
+          () => repositoryStore.getState().openRepositories.length === 1,
+          'expected the healthy repo to be restored'
+        );
+        await waitUntil(
+          () => uiStore.getState().toasts.length > 0,
+          'expected a toast for the failed restore'
+        );
+
+        const toasts = uiStore.getState().toasts;
+        expect(toasts[0].message).to.contain('gone');
+        expect(toasts[0].type).to.equal('error');
+        // Pruned: the failure is not silently retried on every launch
+        const persisted = repositoryStore.getState().persistedOpenRepos.map((r) => r.path);
+        expect(persisted).to.deep.equal(['/repo/one']);
       } finally {
         el.remove();
       }

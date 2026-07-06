@@ -6,6 +6,7 @@ import { showConfirm, showPrompt } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { dragDropService, type DragItem } from '../../services/drag-drop.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
+import { repositoryStore } from '../../stores/repository.store.ts';
 import { fuzzyScore } from '../../utils/fuzzy-search.ts';
 import '../dialogs/lv-create-branch-dialog.ts';
 import type { LvCreateBranchDialog } from '../dialogs/lv-create-branch-dialog.ts';
@@ -685,14 +686,17 @@ export class LvBranchList extends LitElement {
 
   private async loadBranches(): Promise<void> {
     if (!this.repositoryPath) return;
+    // Captured before the await so a mid-flight tab switch still writes the
+    // result to the repo it was loaded FROM
+    const loadedPath = this.repositoryPath;
 
     this.loading = true;
     this.error = null;
 
     try {
       const [branchesResult] = await Promise.all([
-        gitService.getBranches(this.repositoryPath),
-        gitService.getRemotes(this.repositoryPath),
+        gitService.getBranches(loadedPath),
+        gitService.getRemotes(loadedPath),
       ]);
 
       if (!branchesResult.success) {
@@ -701,6 +705,13 @@ export class LvBranchList extends LitElement {
       }
 
       const branches = branchesResult.data!;
+
+      // Mirror branches into the repository store so path-keyed consumers
+      // (e.g. the tab bar's ahead/behind badge) stay in sync
+      repositoryStore.getState().updateRepoData(loadedPath, {
+        branches,
+        currentBranch: branches.find((b) => b.isHead) ?? null,
+      });
 
       // Separate local and remote branches
       const localBranches = branches.filter((b) => !b.isRemote);

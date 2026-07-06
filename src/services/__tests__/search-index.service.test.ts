@@ -3,12 +3,17 @@ import { expect } from '@open-wc/testing';
 // Track mock calls
 const invokeCallArgs: Array<{ command: string; args: Record<string, unknown> }> = [];
 
+// When set, build_search_index waits on this before resolving — lets tests
+// interleave a drop() with an in-flight build
+let pendingBuildGate: Promise<void> | null = null;
+
 // Mock Tauri API before importing any modules that use it
-const mockInvoke = (command: string, args?: Record<string, unknown>): Promise<unknown> => {
+const mockInvoke = async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   invokeCallArgs.push({ command, args: args || {} });
 
   switch (command) {
     case 'build_search_index':
+      if (pendingBuildGate) await pendingBuildGate;
       return Promise.resolve(500);
     case 'search_index':
       return Promise.resolve([
@@ -41,6 +46,7 @@ import { searchIndexService } from '../search-index.service.ts';
 describe('SearchIndexService', () => {
   beforeEach(() => {
     invokeCallArgs.length = 0;
+    pendingBuildGate = null;
     searchIndexService.invalidate();
   });
 
@@ -184,6 +190,29 @@ describe('SearchIndexService', () => {
   });
 
   describe('drop', () => {
+    it('a build finishing AFTER its repo was dropped must not resurrect readiness', async () => {
+      // Regression: open repo -> slow build starts -> user closes the tab
+      // (drop) -> build completes. Without an epoch guard the completed
+      // build re-marked the closed repo ready and leaked the backend index.
+      let releaseBuild!: () => void;
+      pendingBuildGate = new Promise((resolve) => {
+        releaseBuild = resolve;
+      });
+
+      const building = searchIndexService.buildIndex('/repo/one');
+      await searchIndexService.drop('/repo/one');
+      invokeCallArgs.length = 0;
+
+      releaseBuild();
+      await building;
+
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
+      // The backend index inserted by the late build is freed again
+      const dropCall = invokeCallArgs.find((c) => c.command === 'drop_search_index');
+      expect(dropCall).to.not.be.undefined;
+      expect(dropCall!.args.path).to.equal('/repo/one');
+    });
+
     it('should call drop_search_index and clear readiness for that repo only', async () => {
       await searchIndexService.buildIndex('/repo/one');
       await searchIndexService.buildIndex('/repo/two');

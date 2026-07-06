@@ -68,6 +68,16 @@ describe('lv-toolbar repository tabs', () => {
       expect(tabs(el)[0].title).to.equal('/work/api');
     });
 
+    it('disambiguates duplicate repo names on Windows-style paths', async () => {
+      repositoryStore.getState().addRepository(mockRepo('C:\\work\\client-a\\api', 'api'));
+      repositoryStore.getState().addRepository(mockRepo('C:\\work\\client-b\\api', 'api'));
+      const el = await createToolbar();
+
+      const hints = tabs(el).map((t) => t.querySelector('.tab-hint')?.textContent?.trim() ?? null);
+      expect(hints[0]).to.equal('client-a');
+      expect(hints[1]).to.equal('client-b');
+    });
+
     it('disambiguates duplicate repo names with the parent directory', async () => {
       repositoryStore.getState().addRepository(mockRepo('/client-a/api', 'api'));
       repositoryStore.getState().addRepository(mockRepo('/client-b/api', 'api'));
@@ -263,6 +273,29 @@ describe('lv-toolbar repository tabs', () => {
       const menu = await openContextMenu(el, 2);
 
       expect(menuItem(menu, 'Close Tabs to the Right').disabled).to.be.true;
+    });
+
+    it('closes on Escape without touching any tab', async () => {
+      const el = await createToolbar();
+      await openContextMenu(el, 0);
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.tab-context-menu')).to.not.exist;
+      expect(repositoryStore.getState().openRepositories.length).to.equal(3);
+    });
+
+    it('the all-repositories dropdown also closes on Escape', async () => {
+      const el = await createToolbar();
+      (el.shadowRoot!.querySelector('.tab-list-btn') as HTMLButtonElement).click();
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.tab-list-menu')).to.exist;
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.tab-list-menu')).to.not.exist;
     });
 
     it('closes via the backdrop without touching any tab', async () => {

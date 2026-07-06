@@ -130,6 +130,19 @@ describe('repository.store', () => {
     });
   });
 
+  describe('prunePersistedRepo', () => {
+    it('removes a repo from the persisted list without touching open repos', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/two'));
+
+      repositoryStore.getState().prunePersistedRepo('/repo/one');
+
+      const state = repositoryStore.getState();
+      expect(state.persistedOpenRepos.map((r) => r.path)).to.deep.equal(['/repo/two']);
+      expect(state.openRepositories.length).to.equal(2);
+    });
+  });
+
   describe('removeRepository', () => {
     it('removes a repository from open repositories', () => {
       const repo = createMockRepo('/test/path');

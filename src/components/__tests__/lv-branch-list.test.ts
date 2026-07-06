@@ -27,6 +27,7 @@ import type { LvBranchList } from '../sidebar/lv-branch-list.ts';
 
 // Import the actual component — registers <lv-branch-list> custom element
 import '../sidebar/lv-branch-list.ts';
+import { repositoryStore } from '../../stores/repository.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -919,6 +920,35 @@ describe('lv-branch-list', () => {
       // First attempt without force fails; a force retry follows the confirm.
       expect(deleteCalls.map((c) => c.force)).to.deep.equal([false, true]);
       expect(removed).to.be.true;
+    });
+  });
+
+  // ── Multi-repo store sync ────────────────────────────────────────────
+  describe('repository store sync', () => {
+    beforeEach(() => {
+      repositoryStore.getState().reset();
+      repositoryStore.getState().addRepository({
+        path: REPO_PATH,
+        name: 'test-repo',
+        isValid: true,
+        isBare: false,
+        headRef: 'main',
+        state: 'clean',
+        isShallow: false,
+        isPartialClone: false,
+        cloneFilter: null,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+    });
+
+    it('mirrors loaded branches and current branch into the repository store', async () => {
+      setupDefaultMocks();
+      await renderBranchList();
+
+      const repo = repositoryStore.getState().openRepositories[0];
+      expect(repo.branches.length).to.be.greaterThan(0);
+      expect(repo.currentBranch).to.not.be.null;
+      expect(repo.currentBranch!.isHead).to.be.true;
     });
   });
 });

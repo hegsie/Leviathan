@@ -33,6 +33,9 @@ export interface RepositoryState {
 
   // Persisted open repos (restored on startup)
   persistedOpenRepos: PersistedOpenRepo[];
+  // Path of the tab that was active when the app last persisted — restored
+  // by restorePersistedRepositories so a restart lands on the same tab
+  persistedActivePath: string | null;
 
   // Loading state
   isLoading: boolean;
@@ -44,6 +47,8 @@ export interface RepositoryState {
   // Actions - Repository management
   addRepository: (repo: Repository) => void;
   removeRepository: (path: string) => void;
+  /** Remove a repo from the persisted list only (e.g. it failed to restore) */
+  prunePersistedRepo: (path: string) => void;
   setActiveIndex: (index: number) => void;
   setActiveByPath: (path: string) => void;
 
@@ -78,6 +83,7 @@ const initialState = {
   openRepositories: [] as OpenRepository[],
   activeIndex: -1,
   persistedOpenRepos: [] as PersistedOpenRepo[],
+  persistedActivePath: null as string | null,
   isLoading: false,
   error: null,
   recentRepositories: [] as RecentRepository[],
@@ -168,6 +174,12 @@ export const repositoryStore = createStore<RepositoryState>()(
             activeIndex: newActiveIndex,
           };
         });
+      },
+
+      prunePersistedRepo: (path) => {
+        set((state) => ({
+          persistedOpenRepos: state.persistedOpenRepos.filter((r) => r.path !== path),
+        }));
       },
 
       setActiveIndex: (index) => {
@@ -303,6 +315,13 @@ export const repositoryStore = createStore<RepositoryState>()(
         recentRepositories: state.recentRepositories,
         persistedOpenRepos: state.persistedOpenRepos,
         activeIndex: state.activeIndex,
+        // Derive the active PATH at persist time: activeIndex alone can't be
+        // restored (openRepositories is rebuilt async at startup, so the
+        // rehydrate hook clamps the index). Keep the previous value while no
+        // repo is active (e.g. during the startup window before restore).
+        persistedActivePath:
+          state.openRepositories[state.activeIndex]?.repository.path ??
+          state.persistedActivePath,
       }),
       onRehydrateStorage: () => (state) => {
         // Clamp activeIndex to valid range — openRepositories starts empty

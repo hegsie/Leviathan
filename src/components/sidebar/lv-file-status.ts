@@ -8,6 +8,7 @@ import { showToast } from "../../services/notification.service.ts";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { join } from "@tauri-apps/api/path";
 import type { StatusEntry, FileStatus } from "../../types/git.types.ts";
+import { repositoryStore } from "../../stores/repository.store.ts";
 
 interface FileContextMenuState {
   visible: boolean;
@@ -738,15 +739,7 @@ export class LvFileStatus extends LitElement {
     // Subscribe to file change events with debouncing
     // Note: refs-changed is handled globally by app-shell to ensure it works
     // even when the right panel (and this component) is hidden
-    this.unsubscribeWatcher = watcherService.onFileChange((event) => {
-      // Refresh status on workdir or index changes
-      if (
-        event.eventType === "workdir-changed" ||
-        event.eventType === "index-changed"
-      ) {
-        this.debouncedLoadStatus();
-      }
-    });
+    this.unsubscribeWatcher = watcherService.onFileChange(this.handleWatcherEvent);
 
     // Listen for global stage-all, unstage-all, and refresh events
     this.boundHandleStageAllEvent = () => this.handleStageAll();
@@ -965,6 +958,23 @@ export class LvFileStatus extends LitElement {
   }
 
   /**
+   * Route file-watcher events. Every open repo is watched — only THIS
+   * panel's repo may trigger a status reload here; background repos are
+   * routed to staleness by app-shell and refresh when their tab activates.
+   * (refs-changed stays global in app-shell so it works while this panel is
+   * hidden.)
+   */
+  private handleWatcherEvent = (event: watcherService.FileChangeEvent): void => {
+    if (event.repoPath !== this.repositoryPath) return;
+    if (
+      event.eventType === "workdir-changed" ||
+      event.eventType === "index-changed"
+    ) {
+      this.debouncedLoadStatus();
+    }
+  };
+
+  /**
    * Debounced version of loadStatus to prevent excessive refreshes
    * when multiple file changes occur in rapid succession.
    */
@@ -994,6 +1004,9 @@ export class LvFileStatus extends LitElement {
 
   async loadStatus(): Promise<void> {
     if (!this.repositoryPath) return;
+    // Captured before the await so a mid-flight tab switch still writes the
+    // result to the repo it was loaded FROM
+    const loadedPath = this.repositoryPath;
 
     // Only show loading indicator on the very first load
     if (!this.hasInitiallyLoaded) {
@@ -1002,7 +1015,7 @@ export class LvFileStatus extends LitElement {
     this.error = null;
 
     try {
-      const result = await gitService.getStatus(this.repositoryPath);
+      const result = await gitService.getStatus(loadedPath);
 
       if (!result.success) {
         this.error = result.error?.message ?? "Failed to load status";
@@ -1029,6 +1042,14 @@ export class LvFileStatus extends LitElement {
       if (unstagedChanged) {
         this.unstagedFiles = newUnstagedFiles;
       }
+
+      // Mirror the loaded status into the repository store so path-keyed
+      // consumers (e.g. the tab bar's dirty indicator) stay in sync
+      repositoryStore.getState().updateRepoData(loadedPath, {
+        status: entries,
+        stagedFiles: newStagedFiles,
+        unstagedFiles: newUnstagedFiles,
+      });
 
       // Emit status changed event only if something changed
       if (stagedChanged || unstagedChanged) {

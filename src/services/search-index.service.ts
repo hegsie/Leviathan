@@ -30,6 +30,9 @@ export interface SearchOptions {
 class SearchIndexService {
   private readyRepos = new Set<string>();
   private buildingRepos = new Set<string>();
+  // Bumped by drop(); a build that finishes after its repo was dropped must
+  // not resurrect readiness (or leak the backend index) for a closed tab
+  private dropEpochs = new Map<string, number>();
 
   /**
    * Build the search index for a repository.
@@ -40,9 +43,16 @@ class SearchIndexService {
   async buildIndex(repoPath: string): Promise<void> {
     if (this.buildingRepos.has(repoPath)) return;
     this.buildingRepos.add(repoPath);
+    const epoch = this.dropEpochs.get(repoPath) ?? 0;
 
     try {
       const result = await invokeCommand<number>('build_search_index', { path: repoPath });
+      if ((this.dropEpochs.get(repoPath) ?? 0) !== epoch) {
+        // The repo was closed while this build ran — the backend just
+        // (re)inserted an index for a closed tab; free it and stay not-ready
+        invokeCommand<void>('drop_search_index', { path: repoPath });
+        return;
+      }
       if (result.success) {
         this.readyRepos.add(repoPath);
         console.log(`[SearchIndex] Built index for ${repoPath} with ${result.data} commits`);
@@ -103,6 +113,7 @@ class SearchIndexService {
    * backend releases the memory.
    */
   async drop(repoPath: string): Promise<void> {
+    this.dropEpochs.set(repoPath, (this.dropEpochs.get(repoPath) ?? 0) + 1);
     this.readyRepos.delete(repoPath);
     searchResultCache.clear();
     const result = await invokeCommand<void>('drop_search_index', { path: repoPath });

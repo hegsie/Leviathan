@@ -407,6 +407,10 @@ export class LvToolbar extends LitElement {
     super.disconnectedCallback();
     this.unsubscribe?.();
     this._resizeObserver?.disconnect();
+    if (this.menuEscapeListenerAttached) {
+      document.removeEventListener('keydown', this.handleMenuEscape, { capture: true });
+      this.menuEscapeListenerAttached = false;
+    }
   }
 
   private async handleOpenRepo(): Promise<void> {
@@ -546,7 +550,8 @@ export class LvToolbar extends LitElement {
     const name = repo.repository.name;
     const sameName = this.openRepositories.filter((r) => r.repository.name === name);
     if (sameName.length < 2) return null;
-    const parts = repo.repository.path.split('/').filter(Boolean);
+    // Split on both separators — Windows paths use backslashes
+    const parts = repo.repository.path.split(/[\\/]/).filter(Boolean);
     return parts.length >= 2 ? parts[parts.length - 2] : null;
   }
 
@@ -690,8 +695,32 @@ export class LvToolbar extends LitElement {
     this.updateScrollButtons();
   }
 
+  // Close the tab menus on Escape, matching the other context menus in the
+  // app (e.g. lv-file-status). Registered only while a menu is open.
+  private handleMenuEscape = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      this.tabListAnchor = null;
+      this.tabContextMenu = null;
+    }
+  };
+
+  private menuEscapeListenerAttached = false;
+
+  private syncMenuEscapeListener(): void {
+    const menuOpen = this.tabListAnchor !== null || this.tabContextMenu !== null;
+    if (menuOpen && !this.menuEscapeListenerAttached) {
+      document.addEventListener('keydown', this.handleMenuEscape, { capture: true });
+      this.menuEscapeListenerAttached = true;
+    } else if (!menuOpen && this.menuEscapeListenerAttached) {
+      document.removeEventListener('keydown', this.handleMenuEscape, { capture: true });
+      this.menuEscapeListenerAttached = false;
+    }
+  }
+
   protected updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
+    this.syncMenuEscapeListener();
     if (changedProperties.has('openRepositories')) {
       this.updateComplete.then(() => this.updateScrollButtons());
     }

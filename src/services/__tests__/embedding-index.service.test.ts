@@ -9,11 +9,16 @@ const invokedCommands: Array<{ command: string; args?: unknown }> = [];
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
+// When set, build_embedding_index waits on this before resolving — lets
+// tests overlap builds for different repos
+let pendingBuildGate: Promise<void> | null = null;
+
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   invokedCommands.push({ command, args });
 
   switch (command) {
     case 'build_embedding_index':
+      if (pendingBuildGate) await pendingBuildGate;
       return 42;
     case 'refresh_embedding_index':
       return 5;
@@ -54,6 +59,50 @@ import { embeddingIndexService } from '../embedding-index.service.ts';
 describe('EmbeddingIndexService', () => {
   beforeEach(() => {
     invokedCommands.length = 0;
+    pendingBuildGate = null;
+  });
+
+  it('builds indexes for DIFFERENT repos concurrently without dropping any', async () => {
+    // Regression: a single global "building" flag silently skipped repo B's
+    // build while repo A's (slow ONNX) build was in flight, so activating a
+    // second tab never got a semantic index.
+    let releaseBuilds!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseBuilds = resolve;
+    });
+
+    const buildA = embeddingIndexService.buildIndex('/repo/a');
+    const buildB = embeddingIndexService.buildIndex('/repo/b');
+    releaseBuilds();
+    await Promise.all([buildA, buildB]);
+
+    const buildPaths = invokedCommands
+      .filter((c) => c.command === 'build_embedding_index')
+      .map((c) => (c.args as Record<string, unknown>).path);
+    expect(buildPaths).to.have.members(['/repo/a', '/repo/b']);
+  });
+
+  it('deduplicates concurrent builds for the SAME repo', async () => {
+    let releaseBuilds!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseBuilds = resolve;
+    });
+
+    const first = embeddingIndexService.buildIndex('/repo/a');
+    const second = embeddingIndexService.buildIndex('/repo/a');
+    releaseBuilds();
+    await Promise.all([first, second]);
+
+    const buildCalls = invokedCommands.filter((c) => c.command === 'build_embedding_index');
+    expect(buildCalls.length).to.equal(1);
+  });
+
+  it('allows rebuilding a repo after its previous build finished', async () => {
+    await embeddingIndexService.buildIndex('/repo/a');
+    await embeddingIndexService.buildIndex('/repo/a');
+
+    const buildCalls = invokedCommands.filter((c) => c.command === 'build_embedding_index');
+    expect(buildCalls.length).to.equal(2);
   });
 
   it('buildIndex invokes build_embedding_index command', async () => {

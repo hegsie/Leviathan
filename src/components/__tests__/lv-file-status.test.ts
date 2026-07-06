@@ -25,6 +25,8 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvFileStatus } from '../sidebar/lv-file-status.ts';
 import '../sidebar/lv-file-status.ts';
+import { repositoryStore } from '../../stores/repository.store.ts';
+import type { Repository } from '../../types/git.types.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -780,6 +782,71 @@ describe('lv-file-status', () => {
       expect(events.length).to.be.greaterThan(1);
       const lastEvent = events[events.length - 1];
       expect(lastEvent.stagedCount).to.equal(5); // 5 staged files now
+    });
+  });
+
+  // ── Multi-repo behavior ──────────────────────────────────────────────
+  describe('multi-repo behavior', () => {
+    function openRepoInStore(path: string): void {
+      repositoryStore.getState().addRepository({
+        path,
+        name: path.split('/').pop() ?? path,
+        isValid: true,
+        isBare: false,
+        headRef: 'main',
+        state: 'clean',
+        isShallow: false,
+        isPartialClone: false,
+        cloneFilter: null,
+      } as Repository);
+    }
+
+    beforeEach(() => {
+      repositoryStore.getState().reset();
+    });
+
+    it('mirrors loaded status into the repository store for the tab dirty badge', async () => {
+      openRepoInStore(REPO_PATH);
+      setupDefaultMocks();
+      const el = await renderFileStatus();
+      await el.updateComplete;
+
+      const repo = repositoryStore.getState().openRepositories[0];
+      expect(repo.status.length).to.equal(mockStatusEntries.length);
+      expect(repo.stagedFiles.length).to.equal(4);
+      expect(repo.unstagedFiles.length).to.equal(4);
+    });
+
+    it('ignores watcher events from OTHER repos', async () => {
+      setupDefaultMocks();
+      const el = await renderFileStatus();
+      clearHistory();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleWatcherEvent({
+        repoPath: '/some/other/repo',
+        eventType: 'workdir-changed',
+        paths: [],
+      });
+      await new Promise((r) => setTimeout(r, 400)); // past the 300ms debounce
+
+      expect(findCommands('get_status').length).to.equal(0);
+    });
+
+    it('reloads status on watcher events for ITS repo', async () => {
+      setupDefaultMocks();
+      const el = await renderFileStatus();
+      clearHistory();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleWatcherEvent({
+        repoPath: REPO_PATH,
+        eventType: 'workdir-changed',
+        paths: [],
+      });
+      await new Promise((r) => setTimeout(r, 400));
+
+      expect(findCommands('get_status').length).to.equal(1);
     });
   });
 });

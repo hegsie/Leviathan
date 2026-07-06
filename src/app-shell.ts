@@ -810,6 +810,10 @@ export class AppShell extends LitElement {
           watcherService.startWatching(path).catch((err) => {
             log.warn('Failed to start file watcher:', err);
           });
+          const autoFetchInterval = settingsStore.getState().autoFetchInterval;
+          if (autoFetchInterval > 0) {
+            gitService.startAutoFetch(path, autoFetchInterval);
+          }
         }
       }
       for (const path of this.watchedRepoPaths) {
@@ -818,6 +822,9 @@ export class AppShell extends LitElement {
             /* backend watcher already gone */
           });
           searchIndexService.drop(path);
+          // Without this the backend keeps fetching (and toasting about) the
+          // closed repo forever
+          gitService.stopAutoFetch(path);
           this.staleRepoPaths.delete(path);
         }
       }
@@ -2444,28 +2451,48 @@ export class AppShell extends LitElement {
       // sequential open blocks startup for the sum of every repo's open
       // time. Results are added in the original order so tab order is
       // stable regardless of which open finishes first.
-      const opened = await Promise.all(
+      const results = await Promise.all(
         persistedRepos.map(async (persisted) => {
           try {
             const result = await gitService.openRepository({ path: persisted.path });
-            return result.success && result.data ? result.data : null;
+            return { persisted, repo: result.success && result.data ? result.data : null };
           } catch (error) {
             console.warn(`Failed to restore repository: ${persisted.path}`, error);
-            return null;
+            return { persisted, repo: null };
           }
         })
       );
 
-      for (const repo of opened) {
+      for (const { repo } of results) {
         if (repo) {
           repositoryStore.getState().addRepository(repo);
         }
       }
 
+      // A repo that failed to restore (moved, deleted, corrupted) must be
+      // reported — a silently missing tab that silently fails again on every
+      // launch looks like data loss. Prune it so it isn't retried forever;
+      // it stays available in the Recent list.
+      for (const { persisted, repo } of results) {
+        if (!repo) {
+          repositoryStore.getState().prunePersistedRepo(persisted.path);
+          showToast(`Could not restore repository "${persisted.name}" (${persisted.path})`, 'error');
+        }
+      }
+
       // Remotes load in parallel too (path-keyed store update, order-free).
       await Promise.all(
-        opened.filter((r) => r !== null).map((r) => this.loadRepositoryRemotes(r.path))
+        results
+          .filter((r) => r.repo !== null)
+          .map((r) => this.loadRepositoryRemotes(r.persisted.path))
       );
+
+      // Land on the tab the user had active last session, not just the last
+      // one restored
+      const lastActivePath = repositoryStore.getState().persistedActivePath;
+      if (lastActivePath) {
+        repositoryStore.getState().setActiveByPath(lastActivePath);
+      }
 
       this.isRestoringRepositories = false;
 
@@ -2522,32 +2549,26 @@ export class AppShell extends LitElement {
     // Send initial tray settings to backend
     emit('update-tray-settings', { minimizeToTray: settings.minimizeToTray });
 
-    // Subscribe to settings changes to start/stop auto-fetch and update tray
+    // Subscribe to settings changes to start/stop auto-fetch and update tray.
+    // Newly OPENED repos get auto-fetch from the store subscription's
+    // open-set diff (see connectedCallback); this handles interval changes
+    // for repos that are already open.
     this.autoFetchUnsubscribe = settingsStore.subscribe((state) => {
-      const repos = repositoryStore.getState().getPersistedOpenRepos();
+      const paths = repositoryStore
+        .getState()
+        .openRepositories.map((r) => r.repository.path);
       if (state.autoFetchInterval > 0) {
-        for (const repo of repos) {
-          gitService.startAutoFetch(repo.path, state.autoFetchInterval);
+        for (const path of paths) {
+          gitService.startAutoFetch(path, state.autoFetchInterval);
         }
       } else {
-        for (const repo of repos) {
-          gitService.stopAutoFetch(repo.path);
+        for (const path of paths) {
+          gitService.stopAutoFetch(path);
         }
       }
       // Update tray settings
       emit('update-tray-settings', { minimizeToTray: state.minimizeToTray });
     });
-
-    // Start auto-fetch for any already-open repos if interval is set
-    if (settings.autoFetchInterval > 0) {
-      // Wait a bit for repos to be restored before starting auto-fetch
-      setTimeout(() => {
-        const repos = repositoryStore.getState().getPersistedOpenRepos();
-        for (const repo of repos) {
-          gitService.startAutoFetch(repo.path, settings.autoFetchInterval);
-        }
-      }, 3000);
-    }
   }
 
   /**
@@ -2571,8 +2592,10 @@ export class AppShell extends LitElement {
     this.updateUnlisteners.push(unlistenUpdates);
   }
 
-  // Auto-fetch runs for every open repo; only the ACTIVE repo's result may
-  // drive the toolbar ahead/behind badge.
+  // Auto-fetch runs for every open repo. Every successful result updates
+  // that repo's ahead/behind in the store (so tab badges stay fresh even for
+  // background tabs), but only the ACTIVE repo's result may drive the
+  // toolbar badge.
   private handleAutoFetchCompleted = (event: {
     repoPath: string;
     success: boolean;
@@ -2580,19 +2603,33 @@ export class AppShell extends LitElement {
     ahead: number;
     message?: string;
   }): void => {
-    if (event.success && event.repoPath === this.activeRepository?.repository.path) {
+    if (!event.success) return;
+
+    const store = repositoryStore.getState();
+    const repo = store.openRepositories.find((r) => r.repository.path === event.repoPath);
+    if (repo?.currentBranch) {
+      store.updateRepoData(event.repoPath, {
+        currentBranch: {
+          ...repo.currentBranch,
+          aheadBehind: { ahead: event.ahead, behind: event.behind },
+        },
+      });
+    }
+
+    if (event.repoPath === this.activeRepository?.repository.path) {
       this.remoteStatus = { ahead: event.ahead, behind: event.behind };
     }
   };
 
   // With several repos auto-fetching, an unattributed toast is noise — name
-  // the repo the commits arrived in.
+  // the repo the commits arrived in. Split on both separators: Windows is a
+  // shipped target and its paths use backslashes.
   private handleRemoteUpdatesAvailable = (event: {
     repoPath: string;
     behind: number;
     ahead: number;
   }): void => {
-    const repoName = event.repoPath.split('/').pop() || event.repoPath;
+    const repoName = event.repoPath.split(/[\\/]/).filter(Boolean).pop() || event.repoPath;
     showToast(
       `${repoName}: remote has ${event.behind} new commit${event.behind !== 1 ? 's' : ''} available`,
       'info',
