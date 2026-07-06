@@ -139,6 +139,16 @@ impl CommitIndex {
 
     /// Incrementally update the index with new commits
     pub fn update_incremental(&mut self, repo_path: &str) -> Result<usize> {
+        // An incremental walk stops at the first already-known commit. If this
+        // index was built from a DIFFERENT repository, no commit ever matches
+        // and the entire other history would be prepended into this index.
+        // Rebuild from scratch instead.
+        if self.repo_path != repo_path {
+            let rebuilt = Self::build(repo_path)?;
+            let count = rebuilt.len();
+            *self = rebuilt;
+            return Ok(count);
+        }
         let repo = git2::Repository::open(repo_path)?;
         let mut revwalk = repo.revwalk()?;
 
@@ -215,8 +225,9 @@ impl CommitIndex {
     }
 }
 
-/// Shared commit index state
-pub type SharedCommitIndex = Arc<RwLock<Option<CommitIndex>>>;
+/// Shared commit index state, keyed by repository path so that every open
+/// repository keeps its own independent index.
+pub type SharedCommitIndex = Arc<RwLock<HashMap<String, CommitIndex>>>;
 
 #[cfg(test)]
 mod tests {
@@ -289,6 +300,33 @@ mod tests {
 
         let new_count = index.update_incremental(&repo.path_str()).unwrap();
         assert_eq!(new_count, 0);
+    }
+
+    #[test]
+    fn test_incremental_update_different_repo_rebuilds_instead_of_merging() {
+        let repo_a = TestRepo::with_initial_commit();
+        repo_a.create_commit("Repo A feature", &[("a.txt", "a")]);
+        let repo_b = TestRepo::with_initial_commit();
+        repo_b.create_commit("Repo B feature", &[("b.txt", "b")]);
+
+        let mut index = CommitIndex::build(&repo_a.path_str()).unwrap();
+        assert!(!index
+            .search(Some("Repo A feature"), None, None, None, None)
+            .is_empty());
+
+        // Refreshing against a DIFFERENT repo must rebuild for that repo,
+        // never prepend its whole history into the existing index.
+        index.update_incremental(&repo_b.path_str()).unwrap();
+
+        assert!(!index
+            .search(Some("Repo B feature"), None, None, None, None)
+            .is_empty());
+        assert!(
+            index
+                .search(Some("Repo A feature"), None, None, None, None)
+                .is_empty(),
+            "index must not contain commits from a different repository"
+        );
     }
 
     #[test]

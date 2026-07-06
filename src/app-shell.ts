@@ -659,6 +659,10 @@ export class AppShell extends LitElement {
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
   private unsubscribeWatcher?: () => void;
+  // Repo paths that currently have a backend file watcher (i.e., all open tabs)
+  private watchedRepoPaths = new Set<string>();
+  // Background repos that received watcher events and need a refresh when activated
+  private staleRepoPaths = new Set<string>();
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
   private shownIntegrationSuggestions: Set<string> = new Set();
@@ -693,6 +697,21 @@ export class AppShell extends LitElement {
     const detail = (e as CustomEvent).detail as { source?: string } | undefined;
     if (detail?.source === 'app-shell') return;
     this.handleRefresh();
+  };
+
+  // Route file-watcher events. Events for the active repo trigger a
+  // (debounced) refresh; events for background repos only mark them stale so
+  // they refresh when their tab becomes active again.
+  private handleWatcherEvent = (event: watcherService.FileChangeEvent): void => {
+    if (event.repoPath !== this.activeRepository?.repository.path) {
+      if (this.watchedRepoPaths.has(event.repoPath)) {
+        this.staleRepoPaths.add(event.repoPath);
+      }
+      return;
+    }
+    if (event.eventType === 'refs-changed') {
+      this.handleRefsChanged();
+    }
   };
 
   // Handle refs-changed from file watcher (debounced)
@@ -773,6 +792,28 @@ export class AppShell extends LitElement {
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
 
+      // Start/stop per-repo services as tabs open and close. Every OPEN repo
+      // gets a watcher (not just the active one) so background repos don't go
+      // silently stale; closed repos release their watcher and search index.
+      const openPaths = new Set(state.openRepositories.map((r) => r.repository.path));
+      for (const path of openPaths) {
+        if (!this.watchedRepoPaths.has(path)) {
+          watcherService.startWatching(path).catch((err) => {
+            log.warn('Failed to start file watcher:', err);
+          });
+        }
+      }
+      for (const path of this.watchedRepoPaths) {
+        if (!openPaths.has(path)) {
+          watcherService.stopWatching(path).catch(() => {
+            /* backend watcher already gone */
+          });
+          searchIndexService.drop(path);
+          this.staleRepoPaths.delete(path);
+        }
+      }
+      this.watchedRepoPaths = openPaths;
+
       // Clear view state when switching repositories
       if (repoChanged) {
         // Clear selected commit and refs
@@ -803,10 +844,11 @@ export class AppShell extends LitElement {
           if (!newActiveRepo.remotes || newActiveRepo.remotes.length === 0) {
             this.loadRepositoryRemotes(newActiveRepo.repository.path);
           }
-          // Start file watcher for the new repository
-          watcherService.startWatching(newActiveRepo.repository.path).catch((err) => {
-            log.warn('Failed to start file watcher:', err);
-          });
+          // If this repo changed while it was a background tab, its store
+          // data and graph are stale — refresh now that it's visible.
+          if (this.staleRepoPaths.delete(newActiveRepo.repository.path)) {
+            this.handleRefresh();
+          }
         }
       }
     });
@@ -815,12 +857,8 @@ export class AppShell extends LitElement {
       this.rightPanelVisible = state.panels.right.isVisible;
       this.globalLoading = state.globalLoading;
     });
-    // Subscribe to file watcher for refs-changed events (e.g., external pull/fetch)
-    this.unsubscribeWatcher = watcherService.onFileChange((event) => {
-      if (event.eventType === 'refs-changed') {
-        this.handleRefsChanged();
-      }
-    });
+    // Subscribe to file watcher events (routing logic in handleWatcherEvent)
+    this.unsubscribeWatcher = watcherService.onFileChange(this.handleWatcherEvent);
     document.addEventListener('keydown', this.boundHandleKeyDown);
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('contextmenu', this.handleContextMenu);
@@ -2471,26 +2509,45 @@ export class AppShell extends LitElement {
       behind: number;
       ahead: number;
       message?: string;
-    }>('autofetch-completed', (event) => {
-      if (event.success) {
-        this.remoteStatus = { ahead: event.ahead, behind: event.behind };
-      }
-    });
+    }>('autofetch-completed', this.handleAutoFetchCompleted);
     this.updateUnlisteners.push(unlistenFetch);
 
     const unlistenUpdates = await listenToEvent<{
       repoPath: string;
       behind: number;
       ahead: number;
-    }>('remote-updates-available', (event) => {
-      showToast(
-        `Remote has ${event.behind} new commit${event.behind !== 1 ? 's' : ''} available`,
-        'info',
-        5000,
-      );
-    });
+    }>('remote-updates-available', this.handleRemoteUpdatesAvailable);
     this.updateUnlisteners.push(unlistenUpdates);
   }
+
+  // Auto-fetch runs for every open repo; only the ACTIVE repo's result may
+  // drive the toolbar ahead/behind badge.
+  private handleAutoFetchCompleted = (event: {
+    repoPath: string;
+    success: boolean;
+    behind: number;
+    ahead: number;
+    message?: string;
+  }): void => {
+    if (event.success && event.repoPath === this.activeRepository?.repository.path) {
+      this.remoteStatus = { ahead: event.ahead, behind: event.behind };
+    }
+  };
+
+  // With several repos auto-fetching, an unattributed toast is noise — name
+  // the repo the commits arrived in.
+  private handleRemoteUpdatesAvailable = (event: {
+    repoPath: string;
+    behind: number;
+    ahead: number;
+  }): void => {
+    const repoName = event.repoPath.split('/').pop() || event.repoPath;
+    showToast(
+      `${repoName}: remote has ${event.behind} new commit${event.behind !== 1 ? 's' : ''} available`,
+      'info',
+      5000,
+    );
+  };
 
   /**
    * Load remotes for a repository and update the store
@@ -2499,18 +2556,7 @@ export class AppShell extends LitElement {
     try {
       const remotesResult = await gitService.getRemotes(repoPath);
       if (remotesResult.success && remotesResult.data) {
-        // Need to set active index to the repo first, then set remotes
-        const store = repositoryStore.getState();
-        const repoIndex = store.openRepositories.findIndex(r => r.repository.path === repoPath);
-        if (repoIndex >= 0) {
-          const currentIndex = store.activeIndex;
-          store.setActiveIndex(repoIndex);
-          store.setRemotes(remotesResult.data);
-          // Restore active index if different
-          if (currentIndex !== repoIndex && currentIndex >= 0) {
-            store.setActiveIndex(currentIndex);
-          }
-        }
+        repositoryStore.getState().updateRepoData(repoPath, { remotes: remotesResult.data });
       }
     } catch (error) {
       console.warn(`Failed to load remotes for ${repoPath}:`, error);

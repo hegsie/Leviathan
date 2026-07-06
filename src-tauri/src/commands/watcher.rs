@@ -1,6 +1,13 @@
 //! File system watcher commands
+//!
+//! Any number of repositories can be watched at once (one per open tab).
+//! Events emitted to the frontend carry the repository path they belong to.
+//! A single poller thread serves all watchers; it exits when the last
+//! watcher is removed and is restarted on demand, so threads never
+//! accumulate no matter how often watching starts and stops.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -13,14 +20,16 @@ use crate::services::WatcherService;
 /// Managed state for the file watcher
 pub struct WatcherState {
     pub service: Arc<Mutex<WatcherService>>,
-    pub watching_path: Arc<Mutex<Option<String>>>,
+    /// True while the poller thread is alive. Guards against spawning more
+    /// than one poller.
+    pub poller_running: Arc<AtomicBool>,
 }
 
 impl Default for WatcherState {
     fn default() -> Self {
         Self {
             service: Arc::new(Mutex::new(WatcherService::new())),
-            watching_path: Arc::new(Mutex::new(None)),
+            poller_running: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -29,113 +38,103 @@ impl Default for WatcherState {
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileChangeEvent {
+    pub repo_path: String,
     pub event_type: String,
     pub paths: Vec<String>,
 }
 
-/// Start watching a repository for file changes
+/// Start watching a repository for file changes. Repositories already being
+/// watched are unaffected; watching the same repository twice is a no-op.
 #[command]
 pub async fn start_watching(
     app: AppHandle,
     state: State<'_, WatcherState>,
     path: String,
 ) -> Result<()> {
-    let repo_path = Path::new(&path);
-
-    // Stop any existing watcher
     {
         let mut service = state.service.lock().map_err(|_| {
             crate::error::LeviathanError::OperationFailed("Watcher lock poisoned".to_string())
         })?;
-        let mut watching = state.watching_path.lock().map_err(|_| {
-            crate::error::LeviathanError::OperationFailed("Watcher lock poisoned".to_string())
-        })?;
-
-        if let Some(ref old_path) = *watching {
-            let _ = service.unwatch(Path::new(old_path));
-        }
-
-        // Start watching the new path
-        service.watch(repo_path)?;
-        *watching = Some(path.clone());
+        service.watch(Path::new(&path))?;
     }
 
-    // Spawn a thread to poll for events and emit them to the frontend
-    let service = Arc::clone(&state.service);
-    let watching_path = Arc::clone(&state.watching_path);
+    // Spawn the shared poller thread if it isn't already running. The
+    // compare_exchange guarantees at most one poller exists regardless of how
+    // many repos are watched or how often watching is toggled.
+    if state
+        .poller_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let service = Arc::clone(&state.service);
+        let poller_running = Arc::clone(&state.poller_running);
 
-    thread::spawn(move || {
-        loop {
-            // Check if we're still watching
-            {
-                let Ok(watching) = watching_path.lock() else {
-                    break;
+        thread::spawn(move || {
+            loop {
+                // Poll for events; exit when the last watcher is gone
+                let events = {
+                    let Ok(service) = service.lock() else {
+                        // Mutex poisoned — nothing sane left to do
+                        break;
+                    };
+                    if service.watcher_count() == 0 {
+                        break;
+                    }
+                    service.poll_events()
                 };
-                if watching.is_none() {
-                    break;
+
+                // Emit events to frontend
+                for (repo_path, event) in events {
+                    let (event_type, paths) = match event {
+                        crate::services::watcher_service::WatcherEvent::WorkdirChanged(p) => (
+                            "workdir-changed",
+                            p.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+                        ),
+                        crate::services::watcher_service::WatcherEvent::IndexChanged => {
+                            ("index-changed", vec![])
+                        }
+                        crate::services::watcher_service::WatcherEvent::RefsChanged => {
+                            ("refs-changed", vec![])
+                        }
+                        crate::services::watcher_service::WatcherEvent::ConfigChanged => {
+                            ("config-changed", vec![])
+                        }
+                    };
+
+                    let _ = app.emit(
+                        "file-change",
+                        FileChangeEvent {
+                            repo_path: repo_path.clone(),
+                            event_type: event_type.to_string(),
+                            paths,
+                        },
+                    );
                 }
+
+                // Sleep before next poll
+                thread::sleep(Duration::from_millis(500));
             }
-
-            // Poll for events
-            let events = {
-                let Ok(service) = service.lock() else {
-                    // Mutex poisoned — sleep to avoid CPU spin, then retry
-                    thread::sleep(Duration::from_millis(500));
-                    continue;
-                };
-                service.poll_events()
-            };
-
-            // Emit events to frontend
-            for event in events {
-                let (event_type, paths) = match event {
-                    crate::services::watcher_service::WatcherEvent::WorkdirChanged(p) => (
-                        "workdir-changed",
-                        p.iter().map(|p| p.to_string_lossy().to_string()).collect(),
-                    ),
-                    crate::services::watcher_service::WatcherEvent::IndexChanged => {
-                        ("index-changed", vec![])
-                    }
-                    crate::services::watcher_service::WatcherEvent::RefsChanged => {
-                        ("refs-changed", vec![])
-                    }
-                    crate::services::watcher_service::WatcherEvent::ConfigChanged => {
-                        ("config-changed", vec![])
-                    }
-                };
-
-                let _ = app.emit(
-                    "file-change",
-                    FileChangeEvent {
-                        event_type: event_type.to_string(),
-                        paths,
-                    },
-                );
-            }
-
-            // Sleep before next poll
-            thread::sleep(Duration::from_millis(500));
-        }
-    });
+            poller_running.store(false, Ordering::SeqCst);
+        });
+    }
 
     Ok(())
 }
 
-/// Stop watching the current repository
+/// Stop watching a repository. With no path, stop watching all repositories
+/// (used on app shutdown).
 #[command]
-pub async fn stop_watching(state: State<'_, WatcherState>) -> Result<()> {
+pub async fn stop_watching(state: State<'_, WatcherState>, path: Option<String>) -> Result<()> {
     let mut service = state.service.lock().map_err(|_| {
         crate::error::LeviathanError::OperationFailed("Watcher lock poisoned".to_string())
     })?;
-    let mut watching = state.watching_path.lock().map_err(|_| {
-        crate::error::LeviathanError::OperationFailed("Watcher lock poisoned".to_string())
-    })?;
 
-    if let Some(ref path) = *watching {
-        service.unwatch(Path::new(path))?;
+    match path {
+        Some(p) => service.unwatch(Path::new(&p))?,
+        None => service.unwatch_all(),
     }
-
-    *watching = None;
+    // When the last watcher is removed the poller thread notices
+    // watcher_count() == 0 on its next tick and exits.
     Ok(())
 }
 
@@ -152,26 +151,16 @@ mod tests {
         // Should have an empty watcher service
         let service = state.service.lock().unwrap();
         assert!(service.poll_events().is_empty());
+        assert_eq!(service.watcher_count(), 0);
 
-        // Should have no watching path
-        let watching = state.watching_path.lock().unwrap();
-        assert!(watching.is_none());
-    }
-
-    #[test]
-    fn test_watcher_state_new() {
-        let state = WatcherState {
-            service: Arc::new(Mutex::new(WatcherService::new())),
-            watching_path: Arc::new(Mutex::new(None)),
-        };
-
-        let watching = state.watching_path.lock().unwrap();
-        assert!(watching.is_none());
+        // No poller thread yet
+        assert!(!state.poller_running.load(Ordering::SeqCst));
     }
 
     #[test]
     fn test_file_change_event_serialization() {
         let event = FileChangeEvent {
+            repo_path: "/repo/one".to_string(),
             event_type: "workdir-changed".to_string(),
             paths: vec![
                 "/path/to/file.txt".to_string(),
@@ -182,6 +171,8 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
 
         // Check camelCase serialization
+        assert!(json.contains("repoPath"));
+        assert!(json.contains("/repo/one"));
         assert!(json.contains("eventType"));
         assert!(json.contains("workdir-changed"));
         assert!(json.contains("paths"));
@@ -191,6 +182,7 @@ mod tests {
     #[test]
     fn test_file_change_event_empty_paths() {
         let event = FileChangeEvent {
+            repo_path: "/repo/one".to_string(),
             event_type: "index-changed".to_string(),
             paths: vec![],
         };
@@ -207,10 +199,52 @@ mod tests {
 
         let result = service.watch(&repo.path);
         assert!(result.is_ok());
+        assert_eq!(service.watcher_count(), 1);
 
         // Should be able to unwatch
         let unwatch_result = service.unwatch(&repo.path);
         assert!(unwatch_result.is_ok());
+        assert_eq!(service.watcher_count(), 0);
+    }
+
+    #[test]
+    fn test_watcher_service_watch_multiple_repos_concurrently() {
+        let repo1 = TestRepo::with_initial_commit();
+        let repo2 = TestRepo::with_initial_commit();
+        let mut service = WatcherService::new();
+
+        service.watch(&repo1.path).unwrap();
+        service.watch(&repo2.path).unwrap();
+        assert_eq!(service.watcher_count(), 2);
+
+        // Unwatching one repo must not affect the other
+        service.unwatch(&repo1.path).unwrap();
+        assert_eq!(service.watcher_count(), 1);
+
+        service.unwatch(&repo2.path).unwrap();
+        assert_eq!(service.watcher_count(), 0);
+    }
+
+    #[test]
+    fn test_watcher_service_watch_same_repo_twice_is_noop() {
+        let repo = TestRepo::with_initial_commit();
+        let mut service = WatcherService::new();
+
+        service.watch(&repo.path).unwrap();
+        service.watch(&repo.path).unwrap();
+        assert_eq!(service.watcher_count(), 1);
+    }
+
+    #[test]
+    fn test_watcher_service_unwatch_all() {
+        let repo1 = TestRepo::with_initial_commit();
+        let repo2 = TestRepo::with_initial_commit();
+        let mut service = WatcherService::new();
+
+        service.watch(&repo1.path).unwrap();
+        service.watch(&repo2.path).unwrap();
+        service.unwatch_all();
+        assert_eq!(service.watcher_count(), 0);
     }
 
     #[test]
@@ -239,10 +273,9 @@ mod tests {
         let mut service = WatcherService::new();
         let path = Path::new("/some/path");
 
-        // Unwatching when not watching should work (no-op or error, but not panic)
+        // Unwatching when not watching should be a no-op, not a panic
         let result = service.unwatch(path);
-        // Result can be Ok or Err depending on implementation, just ensure no panic
-        let _ = result;
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -267,6 +300,32 @@ mod tests {
 
         // Unwatch again
         service.unwatch(&repo.path).unwrap();
+    }
+
+    #[test]
+    fn test_watcher_events_are_tagged_with_repo_path() {
+        let repo = TestRepo::with_initial_commit();
+        let mut service = WatcherService::new();
+        service.watch(&repo.path).unwrap();
+
+        // Touch a file in the working directory
+        std::fs::write(repo.path.join("watched-file.txt"), "hello").unwrap();
+
+        // The notify backend delivers asynchronously; poll with a deadline
+        let expected_key = repo.path.to_string_lossy().to_string();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut tagged_correctly = false;
+        while std::time::Instant::now() < deadline {
+            for (repo_path, _event) in service.poll_events() {
+                assert_eq!(repo_path, expected_key);
+                tagged_correctly = true;
+            }
+            if tagged_correctly {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(tagged_correctly, "expected at least one tagged event");
     }
 
     #[test]
@@ -325,15 +384,12 @@ mod tests {
 
         let state = WatcherState::default();
         let service_clone = Arc::clone(&state.service);
-        let watching_clone = Arc::clone(&state.watching_path);
 
         // Spawn a thread that reads the state
         let handle = thread::spawn(move || {
             let service = service_clone.lock().unwrap();
-            let _events = service.poll_events();
-
-            let watching = watching_clone.lock().unwrap();
-            watching.is_none()
+            let events = service.poll_events();
+            events.is_empty()
         });
 
         // Main thread also reads
@@ -346,124 +402,8 @@ mod tests {
         assert!(result);
     }
 
-    #[test]
-    fn test_watcher_state_set_watching_path() {
-        let state = WatcherState::default();
-
-        // Set a watching path
-        {
-            let mut watching = state.watching_path.lock().unwrap();
-            *watching = Some("/test/path".to_string());
-        }
-
-        // Verify it was set
-        {
-            let watching = state.watching_path.lock().unwrap();
-            assert_eq!(watching.as_ref().unwrap(), "/test/path");
-        }
-
-        // Clear it
-        {
-            let mut watching = state.watching_path.lock().unwrap();
-            *watching = None;
-        }
-
-        // Verify it was cleared
-        {
-            let watching = state.watching_path.lock().unwrap();
-            assert!(watching.is_none());
-        }
-    }
-
     // Note: Testing the actual start_watching and stop_watching commands requires
     // a Tauri State wrapper which is only available in a running Tauri application context.
     // These functions are better tested through integration tests.
     // However, we can test the underlying WatcherService functionality directly.
-
-    #[test]
-    fn test_watcher_state_concurrent_read_write() {
-        use std::thread;
-
-        let state = WatcherState::default();
-        let watching_clone = Arc::clone(&state.watching_path);
-
-        // Writer thread sets a path
-        let writer = thread::spawn(move || {
-            let mut watching = watching_clone.lock().unwrap();
-            *watching = Some("/test/concurrent".to_string());
-        });
-
-        writer.join().unwrap();
-
-        // Verify the write was visible
-        let watching = state.watching_path.lock().unwrap();
-        assert_eq!(watching.as_ref().unwrap(), "/test/concurrent");
-    }
-
-    #[test]
-    fn test_watcher_state_multiple_path_transitions() {
-        let state = WatcherState::default();
-
-        // Simulate a sequence of watch path changes
-        let paths = vec!["/repo/one", "/repo/two", "/repo/three"];
-        for p in &paths {
-            let mut watching = state.watching_path.lock().unwrap();
-            *watching = Some(p.to_string());
-        }
-
-        // Final state should be the last path
-        let watching = state.watching_path.lock().unwrap();
-        assert_eq!(watching.as_ref().unwrap(), "/repo/three");
-    }
-
-    #[test]
-    fn test_file_change_event_all_event_types() {
-        let event_types = vec![
-            "workdir-changed",
-            "index-changed",
-            "refs-changed",
-            "config-changed",
-        ];
-
-        for event_type in event_types {
-            let event = FileChangeEvent {
-                event_type: event_type.to_string(),
-                paths: vec![],
-            };
-
-            let json = serde_json::to_string(&event).unwrap();
-            assert!(json.contains(event_type));
-        }
-    }
-
-    #[test]
-    fn test_watcher_service_watch_unwatch_different_paths() {
-        let repo1 = TestRepo::with_initial_commit();
-        let repo2 = TestRepo::with_initial_commit();
-        let mut service = WatcherService::new();
-
-        // Watch first path
-        assert!(service.watch(&repo1.path).is_ok());
-        assert!(service.unwatch(&repo1.path).is_ok());
-
-        // Watch second path
-        assert!(service.watch(&repo2.path).is_ok());
-        assert!(service.unwatch(&repo2.path).is_ok());
-    }
-
-    #[test]
-    fn test_watcher_state_service_and_path_independent() {
-        // Verify that service and watching_path are independent Arcs
-        let state = WatcherState::default();
-
-        let service_ptr = Arc::as_ptr(&state.service);
-        let path_ptr = Arc::as_ptr(&state.watching_path);
-
-        // They should be different allocations
-        assert_ne!(service_ptr as *const u8, path_ptr as *const u8);
-
-        // Each should have reference count of 1
-        assert_eq!(Arc::strong_count(&state.service), 1);
-        assert_eq!(Arc::strong_count(&state.watching_path), 1);
-    }
 }

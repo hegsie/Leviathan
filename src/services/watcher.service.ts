@@ -1,12 +1,14 @@
 /**
  * File Watcher Service
- * Watches for file system changes in the repository and emits events
+ * Watches for file system changes across all open repositories and emits
+ * events tagged with the repository they came from.
  */
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invokeCommand } from './tauri-api.ts';
 
 export interface FileChangeEvent {
+  repoPath: string;
   eventType: 'workdir-changed' | 'index-changed' | 'refs-changed' | 'config-changed';
   paths: string[];
 }
@@ -17,7 +19,8 @@ let unlisten: UnlistenFn | null = null;
 const handlers: Set<FileChangeHandler> = new Set();
 
 /**
- * Start watching a repository for file changes
+ * Start watching a repository for file changes. Other repositories already
+ * being watched are unaffected.
  */
 export async function startWatching(path: string): Promise<void> {
   // Set up event listener if not already done
@@ -42,10 +45,10 @@ export async function startWatching(path: string): Promise<void> {
 }
 
 /**
- * Stop watching the current repository
+ * Stop watching a repository. With no path, stop watching all repositories.
  */
-export async function stopWatching(): Promise<void> {
-  const result = await invokeCommand<void>('stop_watching');
+export async function stopWatching(path?: string): Promise<void> {
+  const result = await invokeCommand<void>('stop_watching', { path: path ?? null });
   if (!result.success) {
     throw new Error(result.error?.message ?? 'Failed to stop watching');
   }

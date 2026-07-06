@@ -72,6 +72,64 @@ describe('repository.store', () => {
     });
   });
 
+  describe('updateRepoData', () => {
+    const branch = {
+      name: 'feature/x',
+      shorthand: 'feature/x',
+      isHead: false,
+      isRemote: false,
+      upstream: null,
+      targetOid: 'abc123',
+      isStale: false,
+    };
+
+    it('updates a BACKGROUND repo without touching activeIndex', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/two'));
+      // repo two is active; update repo one by path
+      expect(repositoryStore.getState().activeIndex).to.equal(1);
+
+      repositoryStore.getState().updateRepoData('/repo/one', { branches: [branch] });
+
+      const state = repositoryStore.getState();
+      expect(state.activeIndex).to.equal(1);
+      expect(state.openRepositories[0].branches).to.deep.equal([branch]);
+      expect(state.openRepositories[1].branches).to.deep.equal([]);
+    });
+
+    it('is a no-op for a path that is not open', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      const before = repositoryStore.getState().openRepositories;
+
+      repositoryStore.getState().updateRepoData('/not/open', { branches: [branch] });
+
+      expect(repositoryStore.getState().openRepositories).to.deep.equal(before);
+    });
+
+    it('active-repo setters delegate to the active repo only', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/two'));
+
+      repositoryStore.getState().setBranches([branch]);
+
+      const state = repositoryStore.getState();
+      expect(state.openRepositories[1].branches).to.deep.equal([branch]);
+      expect(state.openRepositories[0].branches).to.deep.equal([]);
+    });
+
+    it('setStatus computes staged/unstaged for the active repo', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      const staged = { path: 'a.txt', status: 'modified', isStaged: true } as never;
+      const unstaged = { path: 'b.txt', status: 'modified', isStaged: false } as never;
+
+      repositoryStore.getState().setStatus([staged, unstaged]);
+
+      const repo = repositoryStore.getState().openRepositories[0];
+      expect(repo.stagedFiles).to.deep.equal([staged]);
+      expect(repo.unstagedFiles).to.deep.equal([unstaged]);
+    });
+  });
+
   describe('removeRepository', () => {
     it('removes a repository from open repositories', () => {
       const repo = createMockRepo('/test/path');

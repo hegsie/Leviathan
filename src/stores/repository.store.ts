@@ -47,9 +47,12 @@ export interface RepositoryState {
   setActiveIndex: (index: number) => void;
   setActiveByPath: (path: string) => void;
 
-  // Actions - Update active repo data
+  // Actions - Update repo data
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
+  /** Update any open repo's data by path — works for background tabs too */
+  updateRepoData: (path: string, data: Partial<Omit<OpenRepository, 'repository'>>) => void;
+  // Convenience setters for the ACTIVE repo
   setBranches: (branches: Branch[]) => void;
   setCurrentBranch: (branch: Branch | null) => void;
   setRemotes: (remotes: Remote[]) => void;
@@ -191,79 +194,55 @@ export const repositoryStore = createStore<RepositoryState>()(
 
       setError: (error) => set({ error, isLoading: false }),
 
-      // Update active repo data
-      setBranches: (branches) => {
+      // Update repo data. All setters funnel through updateRepoData so any
+      // open repo (active or background) can be updated by path without
+      // touching activeIndex.
+      updateRepoData: (path, data) => {
         set((state) => {
-          if (!isActiveIndexValid(state)) return state;
+          const index = state.openRepositories.findIndex(
+            (r) => r.repository.path === path
+          );
+          if (index < 0) return state;
           const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            branches,
-          };
+          newRepos[index] = { ...newRepos[index], ...data };
           return { openRepositories: newRepos };
         });
+      },
+
+      setBranches: (branches) => {
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { branches });
       },
 
       setCurrentBranch: (currentBranch) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            currentBranch,
-          };
-          return { openRepositories: newRepos };
-        });
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { currentBranch });
       },
 
       setRemotes: (remotes) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            remotes,
-          };
-          return { openRepositories: newRepos };
-        });
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { remotes });
       },
 
       setTags: (tags) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            tags,
-          };
-          return { openRepositories: newRepos };
-        });
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { tags });
       },
 
       setStashes: (stashes) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            stashes,
-          };
-          return { openRepositories: newRepos };
-        });
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { stashes });
       },
 
       setStatus: (status) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) {
+          get().updateRepoData(path, {
             status,
             stagedFiles: status.filter((s) => s.isStaged),
             unstagedFiles: status.filter((s) => !s.isStaged),
-          };
-          return { openRepositories: newRepos };
-        });
+          });
+        }
       },
 
       updateActiveRepository: (repo) => {

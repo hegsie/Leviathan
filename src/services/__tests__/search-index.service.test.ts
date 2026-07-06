@@ -53,6 +53,34 @@ describe('SearchIndexService', () => {
       expect(buildCall!.args.path).to.equal('/path/to/repo');
     });
 
+    it('should build indexes for multiple repos concurrently without dropping any', async () => {
+      // Regression: a global "building" flag used to silently skip every
+      // build after the first when several repos were restored at startup.
+      await Promise.all([
+        searchIndexService.buildIndex('/repo/one'),
+        searchIndexService.buildIndex('/repo/two'),
+        searchIndexService.buildIndex('/repo/three'),
+      ]);
+
+      const buildPaths = invokeCallArgs
+        .filter((c) => c.command === 'build_search_index')
+        .map((c) => c.args.path);
+      expect(buildPaths).to.have.members(['/repo/one', '/repo/two', '/repo/three']);
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+      expect(searchIndexService.isReady('/repo/two')).to.be.true;
+      expect(searchIndexService.isReady('/repo/three')).to.be.true;
+    });
+
+    it('should deduplicate concurrent builds for the SAME repo', async () => {
+      await Promise.all([
+        searchIndexService.buildIndex('/repo/one'),
+        searchIndexService.buildIndex('/repo/one'),
+      ]);
+
+      const buildCalls = invokeCallArgs.filter((c) => c.command === 'build_search_index');
+      expect(buildCalls.length).to.equal(1);
+    });
+
     it('should set index as ready after building', async () => {
       expect(searchIndexService.isReady()).to.be.false;
       await searchIndexService.buildIndex('/path/to/repo');
@@ -83,6 +111,25 @@ describe('SearchIndexService', () => {
 
       const searchCall = invokeCallArgs.find((c) => c.command === 'search_index');
       expect(searchCall).to.not.be.undefined;
+    });
+
+    it('should pass the repo path to the backend so results come from the right repo', async () => {
+      await searchIndexService.buildIndex('/path/to/repo');
+      invokeCallArgs.length = 0;
+
+      await searchIndexService.search('/path/to/repo', { query: 'test' });
+
+      const searchCall = invokeCallArgs.find((c) => c.command === 'search_index');
+      expect(searchCall!.args.path).to.equal('/path/to/repo');
+    });
+
+    it('should return null for a repo whose index is not built, even when another repo is ready', async () => {
+      // Regression: with a single global index, searching repo B used to
+      // return repo A's commits.
+      await searchIndexService.buildIndex('/repo/one');
+
+      const result = await searchIndexService.search('/repo/two', { query: 'test' });
+      expect(result).to.be.null;
     });
 
     it('should cache search results', async () => {
@@ -121,6 +168,34 @@ describe('SearchIndexService', () => {
       // After invalidate, search should return null (not from cache)
       const result = await searchIndexService.search('/path/to/repo', { query: 'test' });
       expect(result).to.be.null;
+    });
+  });
+
+  describe('invalidate with a path', () => {
+    it('should only invalidate the given repo', async () => {
+      await searchIndexService.buildIndex('/repo/one');
+      await searchIndexService.buildIndex('/repo/two');
+
+      searchIndexService.invalidate('/repo/one');
+
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
+      expect(searchIndexService.isReady('/repo/two')).to.be.true;
+    });
+  });
+
+  describe('drop', () => {
+    it('should call drop_search_index and clear readiness for that repo only', async () => {
+      await searchIndexService.buildIndex('/repo/one');
+      await searchIndexService.buildIndex('/repo/two');
+      invokeCallArgs.length = 0;
+
+      await searchIndexService.drop('/repo/one');
+
+      const dropCall = invokeCallArgs.find((c) => c.command === 'drop_search_index');
+      expect(dropCall).to.not.be.undefined;
+      expect(dropCall!.args.path).to.equal('/repo/one');
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
+      expect(searchIndexService.isReady('/repo/two')).to.be.true;
     });
   });
 
