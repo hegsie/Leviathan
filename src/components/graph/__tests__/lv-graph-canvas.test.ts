@@ -32,6 +32,7 @@ import type { Commit, RefsByCommit } from '../../../types/git.types.ts';
 // Import the actual component — registers <lv-graph-canvas> custom element
 import '../lv-graph-canvas.ts';
 import type { LvGraphCanvas } from '../lv-graph-canvas.ts';
+import { clearGraphCacheForTests } from '../lv-graph-canvas.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -703,6 +704,79 @@ describe('lv-graph-canvas', () => {
       expect(result).to.be.true;
       expect(selectedEvent).to.not.be.null;
       expect(selectedEvent!.detail.commit.oid).to.equal(commit2.oid);
+    });
+  });
+
+  // ── Per-repo graph cache ─────────────────────────────────────────────
+  describe('per-repo graph cache', () => {
+    beforeEach(() => {
+      clearGraphCacheForTests();
+    });
+
+    async function switchRepo(el: LvGraphCanvas, path: string): Promise<void> {
+      el.repositoryPath = path;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+    }
+
+    it('renders a previously-visited repo from cache without the loading state', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+      clearHistory();
+
+      // Switch back — cached page must be applied synchronously
+      el.repositoryPath = REPO_PATH;
+      await el.updateComplete;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+    });
+
+    it('still revalidates a cached repo in the background', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+      clearHistory();
+
+      await switchRepo(el, REPO_PATH);
+
+      // The cached render is instant, but a background reload still hits the
+      // backend so external changes are picked up
+      expect(findCommands('get_commit_history').length).to.equal(1);
+    });
+
+    it('a repo seen for the first time takes the normal loading path', async () => {
+      const el = await renderCanvas();
+      clearHistory();
+
+      await switchRepo(el, '/never/seen');
+
+      expect(findCommands('get_commit_history').length).to.equal(1);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+    });
+
+    it('background revalidation updates the graph when the repo changed', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+
+      // The repo gains a commit while its tab is in the background
+      const newCommit = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'New commit',
+        message: 'New commit',
+        timestamp: 1700003000,
+        parentIds: [commit3.oid],
+      });
+      setupDefaultMocks({ commits: [newCommit, ...defaultCommits] });
+
+      await switchRepo(el, REPO_PATH);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length + 1);
     });
   });
 });

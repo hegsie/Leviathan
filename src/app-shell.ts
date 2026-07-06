@@ -845,9 +845,12 @@ export class AppShell extends LitElement {
         // Load profile for new repository and check integration
         if (newActiveRepo) {
           gitService.loadProfileForRepository(newActiveRepo.repository.path);
-          // Only check integration if not restoring repos on startup
+          // Only check integration / build indexes if not restoring repos on
+          // startup (restore handles the final active repo itself)
           if (!this.isRestoringRepositories) {
             this.checkRepositoryIntegration(newActiveRepo.repository.path);
+            // Indexes build lazily on first activation of a tab
+            this.ensureRepoIndexes(newActiveRepo.repository.path);
           }
           // Load remotes if not already loaded
           if (!newActiveRepo.remotes || newActiveRepo.remotes.length === 0) {
@@ -2437,34 +2440,70 @@ export class AppShell extends LitElement {
     uiStore.getState().setGlobalLoading(true);
 
     try {
-      // Open each persisted repository
-      for (const persisted of persistedRepos) {
-        try {
-          const result = await gitService.openRepository({ path: persisted.path });
-          if (result.success && result.data) {
-            repositoryStore.getState().addRepository(result.data);
-            // Build search indexes in background (non-blocking)
-            searchIndexService.buildIndex(persisted.path);
-            embeddingIndexService.buildIndex(persisted.path);
-            // Load remotes for this repository
-            await this.loadRepositoryRemotes(persisted.path);
+      // Open all persisted repositories in PARALLEL — with many repos a
+      // sequential open blocks startup for the sum of every repo's open
+      // time. Results are added in the original order so tab order is
+      // stable regardless of which open finishes first.
+      const opened = await Promise.all(
+        persistedRepos.map(async (persisted) => {
+          try {
+            const result = await gitService.openRepository({ path: persisted.path });
+            return result.success && result.data ? result.data : null;
+          } catch (error) {
+            console.warn(`Failed to restore repository: ${persisted.path}`, error);
+            return null;
           }
-        } catch (error) {
-          console.warn(`Failed to restore repository: ${persisted.path}`, error);
+        })
+      );
+
+      for (const repo of opened) {
+        if (repo) {
+          repositoryStore.getState().addRepository(repo);
         }
       }
 
-      // Restore active index (already persisted, will be set from storage)
+      // Remotes load in parallel too (path-keyed store update, order-free).
+      await Promise.all(
+        opened.filter((r) => r !== null).map((r) => this.loadRepositoryRemotes(r.path))
+      );
+
       this.isRestoringRepositories = false;
 
-      // Check integration for the final active repo only
+      // Index builds are deliberately NOT started for every restored repo —
+      // a search index walk plus an embedding-model inference pass per repo
+      // makes startup CPU-bound with many tabs, and background repos may
+      // never be used. The active repo gets its indexes here; the others
+      // build lazily when their tab is first activated.
       const activeRepo = repositoryStore.getState().getActiveRepository();
       if (activeRepo) {
+        this.ensureRepoIndexes(activeRepo.repository.path);
         this.checkRepositoryIntegration(activeRepo.repository.path);
       }
     } finally {
       uiStore.getState().setGlobalLoading(false);
     }
+  }
+
+  /**
+   * Kick off background search/embedding index builds for a repo if they
+   * aren't ready yet. Safe to call repeatedly — build deduplication and
+   * readiness tracking are per repo.
+   */
+  private ensureRepoIndexes(repoPath: string): void {
+    if (!searchIndexService.isReady(repoPath)) {
+      searchIndexService.buildIndex(repoPath);
+    }
+    embeddingIndexService
+      .getStatus(repoPath)
+      .then((status) => {
+        if (!status.isReady) {
+          return embeddingIndexService.buildIndex(repoPath).then(() => undefined);
+        }
+        return undefined;
+      })
+      .catch(() => {
+        /* semantic search is optional — missing model/status is not an error */
+      });
   }
 
   private async loadWorkspaces(): Promise<void> {

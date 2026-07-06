@@ -8,21 +8,25 @@
 
 // ── Tauri mock (must be set before any imports) ────────────────────────────
 const invokeCallArgs: Array<{ command: string; args: Record<string, unknown> }> = [];
+// Per-command mock responses; commands without a handler resolve to null
+const mockResponses: Record<string, (args: Record<string, unknown>) => unknown> = {};
 
 let cbId = 0;
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
   invoke: (command: string, args?: Record<string, unknown>) => {
     invokeCallArgs.push({ command, args: args || {} });
-    return Promise.resolve(null);
+    const handler = mockResponses[command];
+    return Promise.resolve(handler ? handler(args || {}) : null);
   },
   transformCallback: () => cbId++,
 };
 
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
-import { expect } from '@open-wc/testing';
+import { expect, waitUntil } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
 import { uiStore, repositoryStore } from '../stores/index.ts';
+import { searchIndexService } from '../services/search-index.service.ts';
 import type { Repository } from '../types/git.types.ts';
 
 function createAppShell(): AppShell {
@@ -48,8 +52,12 @@ function mockRepo(path: string, name: string): Repository {
 describe('app-shell multi-repo behavior', () => {
   beforeEach(() => {
     invokeCallArgs.length = 0;
+    for (const key of Object.keys(mockResponses)) {
+      delete mockResponses[key];
+    }
     uiStore.setState({ toasts: [] });
     repositoryStore.getState().reset();
+    searchIndexService.invalidate();
   });
 
   describe('autofetch badge scoping', () => {
@@ -166,6 +174,69 @@ describe('app-shell multi-repo behavior', () => {
         const dropCall = invokeCallArgs.find((c) => c.command === 'drop_search_index');
         expect(dropCall).to.not.be.undefined;
         expect(dropCall!.args.path).to.equal('/repo/one');
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
+  describe('startup restore', () => {
+    it('opens every persisted repo but builds indexes only for the active one', async () => {
+      mockResponses['open_repository'] = (args) => mockRepo(args.path as string, 'restored');
+      repositoryStore.setState({
+        persistedOpenRepos: [
+          { path: '/repo/one', name: 'one' },
+          { path: '/repo/two', name: 'two' },
+          { path: '/repo/three', name: 'three' },
+        ],
+      });
+
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        await waitUntil(
+          () => repositoryStore.getState().openRepositories.length === 3,
+          'expected all three persisted repos to be restored'
+        );
+        // Allow post-restore async work (remotes, index kick-off) to settle
+        await new Promise((r) => setTimeout(r, 50));
+
+        const openedPaths = invokeCallArgs
+          .filter((c) => c.command === 'open_repository')
+          .map((c) => c.args.path);
+        expect(openedPaths).to.have.members(['/repo/one', '/repo/two', '/repo/three']);
+
+        // Index builds are lazy: only the ACTIVE repo (last restored) gets
+        // one at startup — a search-index walk plus an embedding pass per
+        // background repo made startup CPU-bound with many tabs.
+        const buildPaths = invokeCallArgs
+          .filter((c) => c.command === 'build_search_index')
+          .map((c) => c.args.path);
+        expect(buildPaths).to.deep.equal(['/repo/three']);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('builds a repo index lazily when its tab is first activated', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        repositoryStore.getState().addRepository(mockRepo('/repo/two', 'two'));
+        await new Promise((r) => setTimeout(r, 0));
+        // Simulate repos restored without indexes (the startup path skips
+        // background repos' builds)
+        searchIndexService.invalidate();
+        invokeCallArgs.length = 0;
+
+        repositoryStore.getState().setActiveIndex(0);
+        await new Promise((r) => setTimeout(r, 0));
+
+        const buildPaths = invokeCallArgs
+          .filter((c) => c.command === 'build_search_index')
+          .map((c) => c.args.path);
+        expect(buildPaths).to.deep.equal(['/repo/one']);
       } finally {
         el.remove();
       }

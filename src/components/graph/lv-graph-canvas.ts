@@ -33,6 +33,39 @@ import type { GraphPullRequest } from '../../graph/virtual-scroll.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
 import { embeddingIndexService } from '../../services/embedding-index.service.ts';
 
+/**
+ * Per-repository cache of the last loaded commit page. Switching back to an
+ * already-visited tab renders instantly from this cache while a background
+ * reload revalidates it — without it every tab switch pays a full backend
+ * history walk. Bounded LRU so many open repos can't grow memory unbounded.
+ */
+interface GraphCacheEntry {
+  commits: Commit[];
+  refsByCommit: RefsByCommit;
+  hasMore: boolean;
+}
+
+const GRAPH_CACHE_MAX_REPOS = 8;
+// Map iteration order is insertion order; re-inserting on write keeps the
+// oldest entry first for LRU eviction.
+const graphCache = new Map<string, GraphCacheEntry>();
+
+function cacheGraphPage(path: string, entry: GraphCacheEntry): void {
+  graphCache.delete(path);
+  graphCache.set(path, entry);
+  if (graphCache.size > GRAPH_CACHE_MAX_REPOS) {
+    const oldest = graphCache.keys().next().value;
+    if (oldest !== undefined) {
+      graphCache.delete(oldest);
+    }
+  }
+}
+
+/** Test hook: clear the module-level graph cache */
+export function clearGraphCacheForTests(): void {
+  graphCache.clear();
+}
+
 export interface CommitSelectedEvent {
   commit: Commit | null;
   commits: Commit[]; // All selected commits for multi-select
@@ -524,8 +557,16 @@ export class LvGraphCanvas extends LitElement {
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
 
-      // Reload commits for the new repository
-      this.loadCommits();
+      // Render instantly from the per-repo cache when switching back to a
+      // visited tab, then revalidate in the background (no spinner). A repo
+      // seen for the first time takes the normal loading path.
+      const cached = graphCache.get(this.repositoryPath);
+      if (cached) {
+        this.applyCachedGraph(cached);
+        this.loadCommits({ background: true });
+      } else {
+        this.loadCommits();
+      }
     }
 
     // Reload when search filter changes
@@ -669,7 +710,22 @@ export class LvGraphCanvas extends LitElement {
     );
   }
 
-  private async loadCommits(): Promise<void> {
+  /** Populate the graph synchronously from a cached page (no spinner) */
+  private applyCachedGraph(cached: GraphCacheEntry): void {
+    this.realCommits.clear();
+    for (const commit of cached.commits) {
+      this.realCommits.set(commit.oid, commit);
+    }
+    this.refsByCommit = cached.refsByCommit;
+    this.commits = cached.commits.map(commitToGraphCommit);
+    this.totalLoadedCommits = cached.commits.length;
+    this.hasMoreCommits = cached.hasMore;
+    this.isLoading = false;
+    this.loadError = null;
+    this.processLayout();
+  }
+
+  private async loadCommits(options: { background?: boolean } = {}): Promise<void> {
     if (!this.repositoryPath) {
       this.loadError = 'No repository path specified';
       return;
@@ -680,7 +736,11 @@ export class LvGraphCanvas extends LitElement {
     const currentVersion = this.loadVersion;
     const repoPath = this.repositoryPath;
 
-    this.isLoading = true;
+    // A background revalidation keeps showing the (cached) graph instead of
+    // flashing the loading state
+    if (!options.background) {
+      this.isLoading = true;
+    }
     this.loadError = null;
     const startTime = performance.now();
 
@@ -805,6 +865,12 @@ export class LvGraphCanvas extends LitElement {
       this.commits = commitsResult.data.map(commitToGraphCommit);
       this.totalLoadedCommits = commitsResult.data.length;
       this.hasMoreCommits = commitsResult.data.length >= this.commitCount;
+      // Cache this page so switching back to the tab renders instantly
+      cacheGraphPage(repoPath, {
+        commits: commitsResult.data,
+        refsByCommit: this.refsByCommit,
+        hasMore: this.hasMoreCommits,
+      });
       this.processLayout();
       const searchInfo = hasSearch ? ` (${this.matchedCommitOids.size} matches highlighted)` : '';
       log.debug(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
