@@ -742,6 +742,35 @@ export class AppShell extends LitElement {
   // (an older watcher tick's) must not overwrite a newer one's store write.
   private badgeHydrationSeq = new Map<string, number>();
 
+  /**
+   * Tear down every per-repo backend service and client-side cache for a
+   * path. Called both when a tab is closed and when the shell itself
+   * disconnects, so the two paths can never drift out of sync (a leak the
+   * closed-tab path fixed must not silently reappear on remount).
+   */
+  private teardownRepoServices(path: string): void {
+    watcherService.stopWatching(path).catch(() => {
+      /* backend watcher already gone */
+    });
+    searchIndexService.drop(path);
+    // Without this the backend keeps fetching (and toasting about) the
+    // closed repo forever
+    this.stopAutoFetchLogged(path);
+    // An ONNX embedding build can run for minutes — don't keep burning CPU
+    // for a tab that no longer exists (no-op when nothing builds)
+    embeddingIndexService.cancelBuild(path).catch(() => {
+      /* nothing to cancel */
+    });
+    // A later repo at the same path must not flash this repo's graph
+    evictGraphCache(path);
+    this.staleRepoPaths.delete(path);
+    const pendingHydration = this.badgeHydrationTimers.get(path);
+    if (pendingHydration) {
+      clearTimeout(pendingHydration);
+      this.badgeHydrationTimers.delete(path);
+    }
+  }
+
   // Auto-fetch start/stop are fire-and-forget, but a failure must not be
   // fully silent — log it (matching the watcher-start error handling) so a
   // repo silently not auto-fetching is diagnosable.
@@ -950,26 +979,7 @@ export class AppShell extends LitElement {
       }
       for (const path of this.watchedRepoPaths) {
         if (!openPaths.has(path)) {
-          watcherService.stopWatching(path).catch(() => {
-            /* backend watcher already gone */
-          });
-          searchIndexService.drop(path);
-          // Without this the backend keeps fetching (and toasting about) the
-          // closed repo forever
-          this.stopAutoFetchLogged(path);
-          // An ONNX embedding build can run for minutes — don't keep burning
-          // CPU for a tab that no longer exists (no-op when nothing builds)
-          embeddingIndexService.cancelBuild(path).catch(() => {
-            /* nothing to cancel */
-          });
-          // A later repo at the same path must not flash this repo's graph
-          evictGraphCache(path);
-          this.staleRepoPaths.delete(path);
-          const pendingHydration = this.badgeHydrationTimers.get(path);
-          if (pendingHydration) {
-            clearTimeout(pendingHydration);
-            this.badgeHydrationTimers.delete(path);
-          }
+          this.teardownRepoServices(path);
         }
       }
       this.watchedRepoPaths = openPaths;
@@ -1145,14 +1155,11 @@ export class AppShell extends LitElement {
     }
     this.badgeHydrationTimers.clear();
     // Tear down per-repo backend services so a remount (hot reload, tests)
-    // doesn't leave orphaned watchers/auto-fetch tasks running. The normal
-    // process-exit path cleans up implicitly, but explicit teardown keeps
-    // remounts leak-free.
+    // doesn't leave orphaned watchers, auto-fetch tasks, commit indexes, or
+    // in-flight embedding builds running. Uses the exact same teardown as
+    // closing a tab so the two paths can't drift.
     for (const path of this.watchedRepoPaths) {
-      watcherService.stopWatching(path).catch(() => {
-        /* backend watcher already gone */
-      });
-      this.stopAutoFetchLogged(path);
+      this.teardownRepoServices(path);
     }
     this.watchedRepoPaths.clear();
     this.staleRepoPaths.clear();
@@ -2701,7 +2708,13 @@ export class AppShell extends LitElement {
     embeddingIndexService
       .getStatus(repoPath)
       .then((status) => {
-        if (!status.isReady) {
+        // The tab may have been closed during the status round-trip — don't
+        // launch a multi-minute ONNX build for a repo that's gone (the
+        // close-time cancelBuild can't cancel a build that hadn't started).
+        const stillOpen = repositoryStore
+          .getState()
+          .openRepositories.some((r) => r.repository.path === repoPath);
+        if (!status.isReady && stillOpen) {
           return embeddingIndexService.buildIndex(repoPath).then(() => undefined);
         }
         return undefined;

@@ -327,6 +327,50 @@ describe('app-shell multi-repo behavior', () => {
         el.remove();
       }
     });
+
+    it('disconnect tears down the SAME per-repo services as closing a tab', async () => {
+      // Regression: disconnectedCallback used to stop only the watcher and
+      // auto-fetch, leaking commit indexes and in-flight embedding builds on
+      // remount. It now runs the same teardown as a tab close.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+      await new Promise((r) => setTimeout(r, 0));
+      invokeCallArgs.length = 0;
+
+      el.remove(); // triggers disconnectedCallback
+      await new Promise((r) => setTimeout(r, 0));
+
+      const cmds = invokeCallArgs.map((c) => c.command);
+      expect(cmds).to.include('stop_watching');
+      expect(cmds).to.include('cancel_embedding_build');
+      expect(cmds).to.include('stop_auto_fetch');
+    });
+  });
+
+  describe('lazy embedding build guard', () => {
+    it('does not start an embedding build for a repo closed during getStatus', async () => {
+      // Regression: a close landing during ensureRepoIndexes' getStatus
+      // round-trip could still launch a multi-minute ONNX build for a gone
+      // repo (cancelBuild can't cancel a build that hadn't started).
+      let releaseStatus!: (v: unknown) => void;
+      mockResponses['get_embedding_index_status'] = () =>
+        new Promise((resolve) => {
+          releaseStatus = resolve;
+        });
+
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/one', 'one') };
+      // repo is NOT in the store → treated as closed when status resolves
+      (el as any).ensureRepoIndexes('/repo/one');
+      await new Promise((r) => setTimeout(r, 0));
+      invokeCallArgs.length = 0;
+
+      releaseStatus({ isReady: false, isBuilding: false, indexedCommits: 0, totalCommits: 0 });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeCallArgs.find((c) => c.command === 'build_embedding_index')).to.be.undefined;
+    });
   });
 
   describe('active repo badge liveness', () => {

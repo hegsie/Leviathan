@@ -918,10 +918,15 @@ export class LvGraphCanvas extends LitElement {
       if (this.loadVersion === currentVersion) {
         this.inFlightLoadPath = null;
         if (this.reloadQueued) {
-          // A refresh was requested mid-load; run it now (background — the
-          // graph is already showing data, no spinner flash needed)
+          // A refresh was requested mid-load. reloadQueued is only ever set
+          // by refresh() — i.e. a user/mutation-triggered reload (commit,
+          // pull, merge, watcher refs-changed) — so run it in the FOREGROUND
+          // so its failures surface (a silent background reload would hide
+          // errors the user expects to see after acting). Tab-switch cache
+          // revalidation uses a separate direct background load, not this
+          // queue.
           this.reloadQueued = false;
-          this.loadCommits({ background: true });
+          this.loadCommits();
         }
       }
     }

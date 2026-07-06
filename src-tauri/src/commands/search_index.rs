@@ -30,7 +30,15 @@ pub async fn build_search_index(
 
     let count = index.len();
     let mut guard = index_state.write().await;
-    guard.insert_if_current(path, index, start_generation);
+    if !guard.insert_if_current(path, index, start_generation) {
+        // A drop (tab close) bumped the generation while we were building, so
+        // this index was NOT stored. Report it so the frontend leaves the
+        // repo un-ready instead of marking it ready over an empty backend
+        // slot — it will rebuild on next activation.
+        return Err(LeviathanError::OperationFailed(
+            "Search index build superseded by a newer generation".to_string(),
+        ));
+    }
     Ok(count)
 }
 
@@ -87,7 +95,11 @@ pub async fn refresh_search_index(
 
         let count = updated.len();
         let mut guard = index_state.write().await;
-        guard.insert_if_current(path, updated, start_generation);
+        if !guard.insert_if_current(path, updated, start_generation) {
+            return Err(LeviathanError::OperationFailed(
+                "Search index refresh superseded by a newer generation".to_string(),
+            ));
+        }
         Ok(count)
     } else {
         // No index exists, build from scratch
