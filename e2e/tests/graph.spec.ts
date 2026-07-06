@@ -676,16 +676,15 @@ test.describe('Graph Error Handling', () => {
     // Inject an error so the next call to get_commit_history will fail
     await injectCommandError(page, 'get_commit_history', 'Failed to read commit history: corrupt object');
 
-    // Force the graph to re-fetch commit history by resetting repositoryPath
+    // Switch the graph to a NEVER-loaded repo so the failing load runs in
+    // the foreground. (Re-setting the same path would serve the per-repo
+    // graph cache and retry in the background, which deliberately does not
+    // surface an error state over the still-valid cached graph.)
     const handle = await getGraphCanvasHandle(page);
     await page.evaluate(
       (el) => {
         const canvas = el as HTMLElement & { repositoryPath: string };
-        if (canvas) {
-          const path = canvas.repositoryPath;
-          canvas.repositoryPath = '';
-          canvas.repositoryPath = path;
-        }
+        canvas.repositoryPath = '/tmp/never-loaded-repo';
       },
       handle
     );
@@ -704,5 +703,35 @@ test.describe('Graph Error Handling', () => {
         page.locator('.info-panel, .toast.error, .toast, .error, .error-banner').first()
       ).toBeVisible({ timeout: 5000 });
     }
+  });
+
+  test('keeps showing the cached graph when a background refetch fails', async ({ page }) => {
+    // The repo is already loaded (and cached) from beforeEach
+    const handle = await getGraphCanvasHandle(page);
+    const nodesBefore = await getSortedNodeCount(page);
+    expect(nodesBefore).toBeGreaterThan(0);
+
+    await startCommandCapture(page);
+    await injectCommandError(page, 'get_commit_history', 'repository temporarily unavailable');
+
+    // Re-setting the same path serves the cache and revalidates in the
+    // background; the failing revalidation must not blank the graph or
+    // paint an error banner over it
+    await page.evaluate(
+      (el) => {
+        const canvas = el as HTMLElement & { repositoryPath: string };
+        const path = canvas.repositoryPath;
+        canvas.repositoryPath = '';
+        canvas.repositoryPath = path;
+      },
+      handle
+    );
+
+    // Wait until the (failing) background reload actually ran
+    await waitForCommand(page, 'get_commit_history');
+
+    await expect(graph.canvas).toBeVisible();
+    expect(await getSortedNodeCount(page)).toBe(nodesBefore);
+    await expect(page.locator('.error-state, .load-error')).toHaveCount(0);
   });
 });
