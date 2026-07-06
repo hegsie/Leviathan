@@ -58,8 +58,8 @@ impl CommitIndex {
 
             let oid_str = oid.to_string();
             let short_oid = oid_str[..7.min(oid_str.len())].to_string();
-            let summary = commit.summary().unwrap_or("").to_string();
-            let message = commit.message().unwrap_or("").to_lowercase();
+            let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
+            let message = commit.message().ok().unwrap_or("").to_lowercase();
             let author = commit.author();
 
             let indexed = IndexedCommit {
@@ -67,8 +67,8 @@ impl CommitIndex {
                 short_oid,
                 summary,
                 message_lower: message,
-                author_name: author.name().unwrap_or("").to_string(),
-                author_email: author.email().unwrap_or("").to_string(),
+                author_name: author.name().ok().unwrap_or("").to_string(),
+                author_email: author.email().ok().unwrap_or("").to_string(),
                 author_date: author.when().seconds(),
                 parent_count: commit.parent_count(),
             };
@@ -166,8 +166,8 @@ impl CommitIndex {
             };
 
             let short_oid = oid_str[..7.min(oid_str.len())].to_string();
-            let summary = commit.summary().unwrap_or("").to_string();
-            let message = commit.message().unwrap_or("").to_lowercase();
+            let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
+            let message = commit.message().ok().unwrap_or("").to_lowercase();
             let author = commit.author();
 
             new_commits.push(IndexedCommit {
@@ -175,8 +175,8 @@ impl CommitIndex {
                 short_oid,
                 summary,
                 message_lower: message,
-                author_name: author.name().unwrap_or("").to_string(),
-                author_email: author.email().unwrap_or("").to_string(),
+                author_name: author.name().ok().unwrap_or("").to_string(),
+                author_email: author.email().ok().unwrap_or("").to_string(),
                 author_date: author.when().seconds(),
                 parent_count: commit.parent_count(),
             });

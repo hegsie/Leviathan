@@ -47,11 +47,14 @@ pub async fn open_repository(path: String) -> Result<Repository> {
         .unwrap_or_else(|| "Unknown".to_string());
 
     let head_ref = repo.head().ok().map(|h| {
-        h.shorthand().map(|s| s.to_string()).unwrap_or_else(|| {
-            h.target()
-                .map(|t| t.to_string()[..7].to_string())
-                .unwrap_or_default()
-        })
+        h.shorthand()
+            .ok()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                h.target()
+                    .map(|t| t.to_string()[..7].to_string())
+                    .unwrap_or_default()
+            })
     });
 
     // Detect shallow and partial clone status
@@ -273,10 +276,12 @@ pub async fn clone_repository(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let head_ref = repo
-                .head()
-                .ok()
-                .map(|h| h.shorthand().map(|s| s.to_string()).unwrap_or_default());
+            let head_ref = repo.head().ok().map(|h| {
+                h.shorthand()
+                    .ok()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            });
 
             // Emit completion
             let _ = app.emit(
@@ -386,10 +391,12 @@ pub async fn clone_repository(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let head_ref = repo
-                .head()
-                .ok()
-                .map(|h| h.shorthand().map(|s| s.to_string()).unwrap_or_default());
+            let head_ref = repo.head().ok().map(|h| {
+                h.shorthand()
+                    .ok()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            });
 
             // Emit completion
             let _ = app.emit(

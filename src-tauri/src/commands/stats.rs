@@ -183,8 +183,8 @@ pub async fn get_repo_stats(path: String, max_commits: Option<usize>) -> Result<
 
         let time_secs = commit.time().seconds();
         let author = commit.author();
-        let author_name = author.name().unwrap_or("Unknown").to_string();
-        let author_email = author.email().unwrap_or("unknown").to_string();
+        let author_name = author.name().ok().unwrap_or("Unknown").to_string();
+        let author_email = author.email().ok().unwrap_or("unknown").to_string();
 
         // Track first and latest commit
         match first_commit_date {
@@ -344,8 +344,8 @@ pub async fn get_contributor_stats(
         let commit = repo.find_commit(oid)?;
         let time_secs = commit.time().seconds();
         let author = commit.author();
-        let author_name = author.name().unwrap_or("Unknown").to_string();
-        let author_email = author.email().unwrap_or("unknown").to_string();
+        let author_name = author.name().ok().unwrap_or("Unknown").to_string();
+        let author_email = author.email().ok().unwrap_or("unknown").to_string();
 
         // Get diff stats for this commit
         let (added, deleted) = if commit.parent_count() > 0 {
@@ -556,8 +556,8 @@ pub async fn get_repo_statistics(
         total_commits += 1;
 
         let author = commit.author();
-        let author_name = author.name().unwrap_or("Unknown").to_string();
-        let author_email = author.email().unwrap_or("unknown").to_string();
+        let author_name = author.name().ok().unwrap_or("Unknown").to_string();
+        let author_email = author.email().ok().unwrap_or("unknown").to_string();
 
         // Track first and last commit
         match first_commit_date {
@@ -662,7 +662,7 @@ pub async fn get_repo_statistics(
                     total_files += 1;
 
                     if include_file_types {
-                        let name = entry.name().unwrap_or("");
+                        let name = entry.name().ok().unwrap_or("");
                         let ext = if let Some(pos) = name.rfind('.') {
                             name[pos..].to_lowercase()
                         } else {
@@ -816,7 +816,7 @@ pub async fn get_repo_statistics(
                         continue;
                     }
                 }
-                if let Some(email) = commit.author().email() {
+                if let Ok(email) = commit.author().email() {
                     unique_authors.insert(email.to_string());
                 }
             }

@@ -224,7 +224,7 @@ pub async fn validate_workspace_repositories(
                 let current_branch = repo
                     .head()
                     .ok()
-                    .and_then(|head| head.shorthand().map(String::from));
+                    .and_then(|head| head.shorthand().ok().map(String::from));
 
                 let changed_files_count = repo
                     .statuses(Some(
@@ -411,7 +411,7 @@ fn compute_ahead_behind(repo: &Repository) -> (usize, usize) {
         None => return (0, 0),
     };
 
-    let branch_name = match head.shorthand() {
+    let branch_name = match head.shorthand().ok() {
         Some(name) => name.to_string(),
         None => return (0, 0),
     };

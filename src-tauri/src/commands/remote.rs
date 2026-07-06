@@ -30,7 +30,7 @@ pub async fn add_remote(path: String, name: String, url: String) -> Result<Remot
     Ok(Remote {
         name,
         url: remote.url().unwrap_or("").to_string(),
-        push_url: remote.pushurl().map(|s| s.to_string()),
+        push_url: remote.pushurl().ok().flatten().map(|s| s.to_string()),
     })
 }
 
@@ -59,7 +59,7 @@ pub async fn rename_remote(path: String, old_name: String, new_name: String) -> 
         .map_err(|_| LeviathanError::RemoteNotFound(old_name.clone()))?;
 
     let url = old_remote.url().unwrap_or("").to_string();
-    let push_url = old_remote.pushurl().map(|s| s.to_string());
+    let push_url = old_remote.pushurl().ok().flatten().map(|s| s.to_string());
 
     // Check if new name already exists
     if repo.find_remote(&new_name).is_ok() {
@@ -73,7 +73,7 @@ pub async fn rename_remote(path: String, old_name: String, new_name: String) -> 
     let problems = repo.remote_rename(&old_name, &new_name)?;
 
     if !problems.is_empty() {
-        let problem_list: Vec<&str> = problems.iter().flatten().collect();
+        let problem_list: Vec<&str> = problems.iter().filter_map(|s| s.ok().flatten()).collect();
         if !problem_list.is_empty() {
             tracing::warn!("Remote rename had issues: {:?}", problem_list);
         }
@@ -112,7 +112,7 @@ pub async fn set_remote_url(
     Ok(Remote {
         name,
         url: remote.url().unwrap_or("").to_string(),
-        push_url: remote.pushurl().map(|s| s.to_string()),
+        push_url: remote.pushurl().ok().flatten().map(|s| s.to_string()),
     })
 }
 
@@ -124,12 +124,12 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
 
     let mut result = Vec::new();
 
-    for name in remotes.iter().flatten() {
+    for name in remotes.iter().filter_map(|s| s.ok().flatten()) {
         if let Ok(remote) = repo.find_remote(name) {
             result.push(Remote {
                 name: name.to_string(),
                 url: remote.url().unwrap_or("").to_string(),
-                push_url: remote.pushurl().map(|s| s.to_string()),
+                push_url: remote.pushurl().ok().flatten().map(|s| s.to_string()),
             });
         }
     }
@@ -170,7 +170,7 @@ pub async fn fetch(
             let refspecs: Vec<String> = git_remote
                 .fetch_refspecs()?
                 .iter()
-                .filter_map(|s| s.map(|s| s.to_string()))
+                .filter_map(|s| s.ok().flatten().map(|s| s.to_string()))
                 .collect();
             let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
 
@@ -401,7 +401,7 @@ fn fetch_internal(path: &str, remote_name: &str, prune: bool, token: Option<Stri
     let refspecs: Vec<String> = git_remote
         .fetch_refspecs()?
         .iter()
-        .filter_map(|s| s.map(|s| s.to_string()))
+        .filter_map(|s| s.ok().flatten().map(|s| s.to_string()))
         .collect();
 
     let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
@@ -801,7 +801,7 @@ pub async fn fetch_all_remotes(
             let mut total_fetched: u32 = 0;
             let mut total_failed: u32 = 0;
 
-            for remote_name in remote_names.iter().flatten() {
+            for remote_name in remote_names.iter().filter_map(|s| s.ok().flatten()) {
                 let fetch_result = fetch_single_remote(
                     &path_for_task,
                     remote_name,
@@ -879,7 +879,7 @@ fn fetch_single_remote(
     let mut refspecs: Vec<String> = git_remote
         .fetch_refspecs()?
         .iter()
-        .filter_map(|s| s.map(|s| s.to_string()))
+        .filter_map(|s| s.ok().flatten().map(|s| s.to_string()))
         .collect();
 
     // Add tag refspec if requested
@@ -921,7 +921,7 @@ pub async fn get_fetch_status(path: String) -> Result<Vec<RemoteFetchStatus>> {
     let remote_names = repo.remotes()?;
     let mut statuses: Vec<RemoteFetchStatus> = Vec::new();
 
-    for remote_name in remote_names.iter().flatten() {
+    for remote_name in remote_names.iter().filter_map(|s| s.ok().flatten()) {
         if let Ok(remote) = repo.find_remote(remote_name) {
             let url = remote.url().unwrap_or("").to_string();
 

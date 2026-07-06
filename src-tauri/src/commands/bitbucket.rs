@@ -350,9 +350,9 @@ pub async fn detect_bitbucket_repo(path: String) -> Result<Option<DetectedBitbuc
         .remotes()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to get remotes: {}", e)))?;
 
-    for remote_name in remotes.iter().flatten() {
+    for remote_name in remotes.iter().flatten().flatten() {
         if let Ok(remote) = repo.find_remote(remote_name) {
-            if let Some(url) = remote.url() {
+            if let Ok(url) = remote.url() {
                 if let Some(repo_info) = parse_bitbucket_url(url) {
                     return Ok(Some(DetectedBitbucketRepo {
                         workspace: repo_info.0,

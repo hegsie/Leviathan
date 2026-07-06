@@ -51,7 +51,7 @@ pub async fn get_remote_status(path: String) -> Result<RemoteStatus> {
 
         let branch_name = head
             .shorthand()
-            .ok_or_else(|| LeviathanError::OperationFailed("Invalid branch name".to_string()))?;
+            .map_err(|_| LeviathanError::OperationFailed("Invalid branch name".to_string()))?;
 
         // Try to find upstream
         let local_branch = repo

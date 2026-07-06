@@ -40,7 +40,7 @@ pub async fn get_reflog(path: String, limit: Option<usize>) -> Result<Vec<Reflog
         }
 
         let oid = entry.id_new();
-        let message = entry.message().unwrap_or("").to_string();
+        let message = entry.message().ok().flatten().unwrap_or("").to_string();
 
         // Parse action from message (format is usually "action: details")
         let action = message
@@ -57,7 +57,12 @@ pub async fn get_reflog(path: String, limit: Option<usize>) -> Result<Vec<Reflog
             action,
             message,
             timestamp: entry.committer().when().seconds(),
-            author: entry.committer().name().unwrap_or("Unknown").to_string(),
+            author: entry
+                .committer()
+                .name()
+                .ok()
+                .unwrap_or("Unknown")
+                .to_string(),
         });
     }
 
@@ -84,10 +89,10 @@ pub async fn reset_to_reflog(
         })?;
 
         let oid_str = entry.id_new().to_string();
-        let msg = entry.message().unwrap_or("").to_string();
+        let msg = entry.message().ok().flatten().unwrap_or("").to_string();
         let committer = entry.committer();
         let ts = committer.when().seconds();
-        let auth = committer.name().unwrap_or("Unknown").to_string();
+        let auth = committer.name().ok().unwrap_or("Unknown").to_string();
 
         (oid_str, msg, ts, auth)
     };

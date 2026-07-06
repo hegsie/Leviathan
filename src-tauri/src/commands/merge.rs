@@ -50,6 +50,7 @@ pub async fn merge(
         let head = repo.head()?;
         let refname = head
             .name()
+            .ok()
             .ok_or_else(|| LeviathanError::InvalidReference)?;
 
         let mut reference = repo.find_reference(refname)?;
@@ -598,7 +599,7 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
         commits.push(RebaseCommit {
             oid: oid.to_string(),
             short_id: oid.to_string()[..7].to_string(),
-            summary: commit.summary().unwrap_or("").to_string(),
+            summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
             action: "pick".to_string(),
         });
     }
