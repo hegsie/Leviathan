@@ -1016,15 +1016,33 @@ export class LvFileStatus extends LitElement {
 
     try {
       const result = await gitService.getStatus(loadedPath);
+      // The tab may have switched while the fetch was in flight. The store
+      // write below is path-keyed and always safe; the component's OWN
+      // render state belongs to the now-active repo and must not be
+      // overwritten with a stale result (showing repo A's files under repo
+      // B's tab risks destructive actions on files the user never saw).
+      const isCurrent = this.repositoryPath === loadedPath;
 
       if (!result.success) {
-        this.error = result.error?.message ?? "Failed to load status";
+        if (isCurrent) {
+          this.error = result.error?.message ?? "Failed to load status";
+        }
         return;
       }
 
       const entries = result.data!;
       const newStagedFiles = entries.filter((e) => e.isStaged);
       const newUnstagedFiles = entries.filter((e) => !e.isStaged);
+
+      // Mirror the loaded status into the repository store so path-keyed
+      // consumers (e.g. the tab bar's dirty indicator) stay in sync
+      repositoryStore.getState().updateRepoData(loadedPath, {
+        status: entries,
+        stagedFiles: newStagedFiles,
+        unstagedFiles: newUnstagedFiles,
+      });
+
+      if (!isCurrent) return;
 
       // Only update if there are actual changes (delta update)
       const stagedChanged = !this.areStatusEntriesEqual(
@@ -1043,14 +1061,6 @@ export class LvFileStatus extends LitElement {
         this.unstagedFiles = newUnstagedFiles;
       }
 
-      // Mirror the loaded status into the repository store so path-keyed
-      // consumers (e.g. the tab bar's dirty indicator) stay in sync
-      repositoryStore.getState().updateRepoData(loadedPath, {
-        status: entries,
-        stagedFiles: newStagedFiles,
-        unstagedFiles: newUnstagedFiles,
-      });
-
       // Emit status changed event only if something changed
       if (stagedChanged || unstagedChanged) {
         this.dispatchEvent(
@@ -1065,10 +1075,16 @@ export class LvFileStatus extends LitElement {
         );
       }
     } catch (err) {
-      this.error = err instanceof Error ? err.message : "Unknown error";
+      if (this.repositoryPath === loadedPath) {
+        this.error = err instanceof Error ? err.message : "Unknown error";
+      }
     } finally {
-      this.loading = false;
-      this.hasInitiallyLoaded = true;
+      // A stale load must not stomp the loading state of the load that the
+      // now-active repo owns
+      if (this.repositoryPath === loadedPath) {
+        this.loading = false;
+        this.hasInitiallyLoaded = true;
+      }
     }
   }
 

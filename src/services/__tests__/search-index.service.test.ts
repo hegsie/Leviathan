@@ -6,6 +6,7 @@ const invokeCallArgs: Array<{ command: string; args: Record<string, unknown> }> 
 // When set, build_search_index waits on this before resolving — lets tests
 // interleave a drop() with an in-flight build
 let pendingBuildGate: Promise<void> | null = null;
+let pendingRefreshGate: Promise<void> | null = null;
 
 // Mock Tauri API before importing any modules that use it
 const mockInvoke = async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
@@ -15,6 +16,9 @@ const mockInvoke = async (command: string, args?: Record<string, unknown>): Prom
     case 'build_search_index':
       if (pendingBuildGate) await pendingBuildGate;
       return Promise.resolve(500);
+    case 'refresh_search_index':
+      if (pendingRefreshGate) await pendingRefreshGate;
+      return Promise.resolve(502);
     case 'search_index':
       return Promise.resolve([
         {
@@ -28,8 +32,6 @@ const mockInvoke = async (command: string, args?: Record<string, unknown>): Prom
           parentCount: 1,
         },
       ]);
-    case 'refresh_search_index':
-      return Promise.resolve(502);
     default:
       return Promise.resolve(null);
   }
@@ -47,6 +49,7 @@ describe('SearchIndexService', () => {
   beforeEach(() => {
     invokeCallArgs.length = 0;
     pendingBuildGate = null;
+    pendingRefreshGate = null;
     searchIndexService.invalidate();
   });
 
@@ -211,6 +214,29 @@ describe('SearchIndexService', () => {
       const dropCall = invokeCallArgs.find((c) => c.command === 'drop_search_index');
       expect(dropCall).to.not.be.undefined;
       expect(dropCall!.args.path).to.equal('/repo/one');
+    });
+
+    it('a refresh finishing AFTER its repo was dropped frees the resurrected backend index', async () => {
+      // Regression: handleRefresh fires refresh_search_index; if the tab is
+      // closed while it runs, the backend refresh re-inserts an index for a
+      // closed repo (or falls back to a full rebuild) — leaking it.
+      await searchIndexService.buildIndex('/repo/one');
+      let releaseRefresh!: () => void;
+      pendingRefreshGate = new Promise((resolve) => {
+        releaseRefresh = resolve;
+      });
+
+      const refreshing = searchIndexService.refresh('/repo/one');
+      await searchIndexService.drop('/repo/one');
+      invokeCallArgs.length = 0;
+
+      releaseRefresh();
+      await refreshing;
+
+      const dropCall = invokeCallArgs.find((c) => c.command === 'drop_search_index');
+      expect(dropCall).to.not.be.undefined;
+      expect(dropCall!.args.path).to.equal('/repo/one');
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
     });
 
     it('should call drop_search_index and clear readiness for that repo only', async () => {

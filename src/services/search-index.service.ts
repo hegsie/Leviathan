@@ -98,8 +98,16 @@ class SearchIndexService {
    */
   async refresh(repoPath: string): Promise<void> {
     if (!this.readyRepos.has(repoPath)) return;
+    const epoch = this.dropEpochs.get(repoPath) ?? 0;
 
     const result = await invokeCommand<number>('refresh_search_index', { path: repoPath });
+    if ((this.dropEpochs.get(repoPath) ?? 0) !== epoch) {
+      // The repo was closed while the refresh ran — the backend refresh
+      // (or its build-from-scratch fallback) just re-inserted an index for
+      // a closed tab; free it again
+      invokeCommand<void>('drop_search_index', { path: repoPath });
+      return;
+    }
     if (result.success) {
       // Invalidate search cache since results may have changed
       searchResultCache.clear();

@@ -418,7 +418,11 @@ export class LvWelcome extends LitElement {
       const result = await openRepository({ path: repo.path });
       if (result.success && result.data) {
         store.addRepository(result.data);
-        searchIndexService.buildIndex(repo.path);
+        // Index builds are deliberately NOT started here: opening a
+        // workspace with many repos would kick off that many concurrent
+        // history walks at once. The repo that ends up active gets its
+        // indexes from app-shell's activation hook; the rest build lazily
+        // when their tab is first activated.
       }
     }
 

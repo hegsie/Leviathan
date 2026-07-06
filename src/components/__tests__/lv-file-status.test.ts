@@ -833,6 +833,64 @@ describe('lv-file-status', () => {
       expect(findCommands('get_status').length).to.equal(0);
     });
 
+    it('a stale status result must not overwrite the newly active repo panel', async () => {
+      // Regression: switch tabs while a slow get_status for the OLD repo is
+      // in flight; its late result used to overwrite the panel now showing
+      // the NEW repo (destructive-action risk on same-named files).
+      openRepoInStore(REPO_PATH);
+      let releaseSlow!: () => void;
+      const slowGate = new Promise<void>((resolve) => {
+        releaseSlow = resolve;
+      });
+      const slowEntries = [
+        { path: 'stale-repo-file.ts', status: 'modified', isStaged: false, isConflicted: false },
+      ];
+      const fastEntries = [
+        { path: 'fresh-repo-file.ts', status: 'modified', isStaged: true, isConflicted: false },
+      ];
+      let statusCalls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_status') {
+          statusCalls++;
+          if (statusCalls === 1) {
+            await slowGate;
+            return slowEntries;
+          }
+          return fastEntries;
+        }
+        return null;
+      };
+
+      // First load (for REPO_PATH) hangs on the gate
+      const el = await fixture<LvFileStatus>(
+        html`<lv-file-status .repositoryPath=${REPO_PATH}></lv-file-status>`,
+      );
+      await el.updateComplete;
+
+      // Switch tabs; the second load resolves immediately
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Now the stale first load lands
+      releaseSlow();
+      await new Promise((r) => setTimeout(r, 20));
+
+      // The visible panel keeps the ACTIVE repo's data
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const staged = (el as any).stagedFiles as Array<{ path: string }>;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const unstaged = (el as any).unstagedFiles as Array<{ path: string }>;
+      expect(staged.map((f) => f.path)).to.deep.equal(['fresh-repo-file.ts']);
+      expect(unstaged).to.deep.equal([]);
+
+      // ...while the stale result still reached the store for ITS repo
+      const repoA = repositoryStore
+        .getState()
+        .openRepositories.find((r) => r.repository.path === REPO_PATH);
+      expect(repoA!.status.map((s) => s.path)).to.deep.equal(['stale-repo-file.ts']);
+    });
+
     it('reloads status on watcher events for ITS repo', async () => {
       setupDefaultMocks();
       const el = await renderFileStatus();

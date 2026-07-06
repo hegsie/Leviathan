@@ -507,6 +507,10 @@ export class LvGraphCanvas extends LitElement {
   private statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private lastLoadedRepoPath: string | null = null; // Track the last repo that completed loading
   private inFlightLoadPath: string | null = null; // Repo whose loadCommits is currently in flight
+  // A refresh arrived while a load was in flight; that load's snapshot may
+  // predate the mutation the refresh was for, so one follow-up load runs
+  // when it finishes
+  private reloadQueued = false;
   private pullRequestsByCommit: Record<string, GraphPullRequest[]> = {};
   private githubRepo: { owner: string; repo: string } | null = null;
   private renderer: CanvasRenderer | null = null;
@@ -557,6 +561,9 @@ export class LvGraphCanvas extends LitElement {
 
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
+
+      // A reload queued for the PREVIOUS repo must not leak into this one
+      this.reloadQueued = false;
 
       // Render instantly from the per-repo cache when switching back to a
       // visited tab, then revalidate in the background (no spinner). A repo
@@ -883,6 +890,12 @@ export class LvGraphCanvas extends LitElement {
       // Only the newest load owns the in-flight marker
       if (this.loadVersion === currentVersion) {
         this.inFlightLoadPath = null;
+        if (this.reloadQueued) {
+          // A refresh was requested mid-load; run it now (background — the
+          // graph is already showing data, no spinner flash needed)
+          this.reloadQueued = false;
+          this.loadCommits({ background: true });
+        }
       }
     }
   }
@@ -1837,9 +1850,15 @@ export class LvGraphCanvas extends LitElement {
    */
   public refresh(): void {
     // A load for this repo is already in flight (e.g. the cache
-    // revalidation kicked off by a tab switch) — starting another would
-    // just cancel it and repeat the same backend walk with a spinner.
-    if (this.inFlightLoadPath === this.repositoryPath) return;
+    // revalidation kicked off by a tab switch) — starting another now would
+    // just cancel it and repeat the same backend walk with a spinner. But
+    // the in-flight snapshot may predate whatever this refresh is about
+    // (a commit, a pull), so queue exactly one follow-up load instead of
+    // dropping the request.
+    if (this.inFlightLoadPath === this.repositoryPath) {
+      this.reloadQueued = true;
+      return;
+    }
     this.loadCommits();
   }
 

@@ -12,7 +12,6 @@ import { openRepositoryDialog, openDialog, saveDialog } from '../../services/dia
 import { showToast } from '../../services/notification.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { workspaceStore } from '../../stores/workspace.store.ts';
-import { searchIndexService } from '../../services/search-index.service.ts';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../../types/git.types.ts';
 
@@ -903,7 +902,11 @@ export class LvWorkspaceManagerDialog extends LitElement {
       const result = await gitService.openRepository({ path: repo.path });
       if (result.success && result.data) {
         store.addRepository(result.data);
-        searchIndexService.buildIndex(repo.path);
+        // Index builds are deliberately NOT started here: opening a
+        // workspace with many repos would kick off that many concurrent
+        // history walks at once. The repo that ends up active gets its
+        // indexes from app-shell's activation hook; the rest build lazily
+        // when their tab is first activated.
       }
     }
 

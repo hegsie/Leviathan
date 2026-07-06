@@ -758,6 +758,47 @@ describe('lv-graph-canvas', () => {
       expect((el as any).commits.length).to.equal(defaultCommits.length);
     });
 
+    it('a refresh during an in-flight load queues exactly one follow-up load', async () => {
+      // Regression: refresh() used to silently no-op while a load was in
+      // flight — a commit made right after a tab switch never appeared
+      // because the in-flight snapshot predated it.
+      const el = await renderCanvas();
+      clearHistory();
+
+      let releaseLoad!: () => void;
+      const loadGate = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      let gated = true;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_commit_history':
+            if (gated) {
+              gated = false; // only the first call blocks
+              await loadGate;
+            }
+            return defaultCommits;
+          case 'get_refs_by_commit':
+            return defaultRefs;
+          default:
+            return null;
+        }
+      };
+
+      // Start a slow load, then refresh twice while it's in flight
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).loadCommits();
+      await new Promise((r) => setTimeout(r, 10));
+      el.refresh();
+      el.refresh();
+
+      releaseLoad();
+      await new Promise((r) => setTimeout(r, 250));
+
+      // The in-flight load plus exactly ONE queued follow-up
+      expect(findCommands('get_commit_history').length).to.equal(2);
+    });
+
     it('background revalidation updates the graph when the repo changed', async () => {
       const el = await renderCanvas();
       await switchRepo(el, '/other/repo');

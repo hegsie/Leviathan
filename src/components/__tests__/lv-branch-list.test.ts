@@ -941,6 +941,56 @@ describe('lv-branch-list', () => {
       } as any);
     });
 
+    it('a stale branches result must not overwrite the newly active repo panel', async () => {
+      // Regression: switch tabs while a slow get_branches for the OLD repo
+      // is in flight; its late result used to render the old repo's
+      // branches under the new repo's tab (checkout/delete would then run
+      // against the wrong names).
+      let releaseSlow!: () => void;
+      const slowGate = new Promise<void>((resolve) => {
+        releaseSlow = resolve;
+      });
+      const slowBranches = [makeBranch({ name: 'stale-branch', shorthand: 'stale-branch', isHead: true })];
+      const fastBranches = [makeBranch({ name: 'fresh-branch', shorthand: 'fresh-branch', isHead: true })];
+      let branchCalls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_branches') {
+          branchCalls++;
+          if (branchCalls === 1) {
+            await slowGate;
+            return slowBranches;
+          }
+          return fastBranches;
+        }
+        return null;
+      };
+
+      const el = await fixture<LvBranchList>(
+        html`<lv-branch-list .repositoryPath=${REPO_PATH}></lv-branch-list>`
+      );
+      await el.updateComplete;
+
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+
+      releaseSlow();
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      // The visible panel keeps the ACTIVE repo's branches
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const groups = (el as any).localBranchGroups as Array<{ branches: Branch[] }>;
+      const names = groups.flatMap((g) => g.branches.map((b) => b.name));
+      expect(names).to.deep.equal(['fresh-branch']);
+
+      // ...while the stale result still reached the store for ITS repo
+      const repoA = repositoryStore
+        .getState()
+        .openRepositories.find((r) => r.repository.path === REPO_PATH);
+      expect(repoA!.currentBranch!.name).to.equal('stale-branch');
+    });
+
     it('mirrors loaded branches and current branch into the repository store', async () => {
       setupDefaultMocks();
       await renderBranchList();

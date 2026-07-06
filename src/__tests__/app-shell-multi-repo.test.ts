@@ -222,6 +222,79 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  describe('footer ahead/behind badge on tab switch', () => {
+    it("resets to the newly active repo's last-known counts", async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().updateRepoData('/repo/a', {
+          currentBranch: {
+            name: 'main',
+            shorthand: 'main',
+            isHead: true,
+            isRemote: false,
+            upstream: 'origin/main',
+            targetOid: 'abc',
+            isStale: false,
+            aheadBehind: { ahead: 0, behind: 3 },
+          },
+        });
+        // Simulate a badge left over from the previously active repo
+        (el as any).remoteStatus = { ahead: 9, behind: 9 };
+
+        repositoryStore.getState().setActiveIndex(0);
+        await new Promise((r) => setTimeout(r, 0));
+        expect((el as any).remoteStatus).to.deep.equal({ ahead: 0, behind: 3 });
+
+        // Switching to a repo with no known counts clears the badge instead
+        // of showing the previous repo's numbers
+        repositoryStore.getState().setActiveIndex(1);
+        await new Promise((r) => setTimeout(r, 0));
+        expect((el as any).remoteStatus).to.be.null;
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
+  describe('tab badge hydration', () => {
+    it('loads status and branches into the store for newly opened repos', async () => {
+      mockResponses['get_status'] = () => [
+        { path: 'a.txt', status: 'modified', isStaged: false, isConflicted: false },
+      ];
+      mockResponses['get_branches'] = () => [
+        {
+          name: 'main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: 'origin/main',
+          targetOid: 'abc',
+          isStale: false,
+        },
+      ];
+
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await waitUntil(
+          () => repositoryStore.getState().openRepositories[0]?.status.length > 0,
+          'expected status to be hydrated into the store'
+        );
+
+        const repo = repositoryStore.getState().openRepositories[0];
+        expect(repo.status.length).to.equal(1);
+        expect(repo.unstagedFiles.length).to.equal(1);
+        expect(repo.currentBranch?.name).to.equal('main');
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
   describe('watcher lifecycle across open repos', () => {
     it('starts a watcher for every opened repo, not just the active one', async () => {
       const el = createAppShell();

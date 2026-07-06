@@ -663,6 +663,8 @@ export class AppShell extends LitElement {
   private watchedRepoPaths = new Set<string>();
   // Background repos that received watcher events and need a refresh when activated
   private staleRepoPaths = new Set<string>();
+  // Debounce timers for background tab-badge refreshes, keyed by repo path
+  private badgeHydrationTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
   private shownIntegrationSuggestions: Set<string> = new Set();
@@ -709,12 +711,14 @@ export class AppShell extends LitElement {
   }
 
   // Route file-watcher events. Events for the active repo trigger a
-  // (debounced) refresh; events for background repos only mark them stale so
-  // they refresh when their tab becomes active again.
+  // (debounced) refresh; events for background repos mark them stale (full
+  // refresh happens when their tab activates) and refresh just their tab
+  // badge data so the dirty dot / ahead-behind stay live.
   private handleWatcherEvent = (event: watcherService.FileChangeEvent): void => {
     if (event.repoPath !== this.activeRepository?.repository.path) {
       if (this.watchedRepoPaths.has(event.repoPath)) {
         this.staleRepoPaths.add(event.repoPath);
+        this.scheduleBadgeHydration(event.repoPath);
       }
       return;
     }
@@ -722,6 +726,52 @@ export class AppShell extends LitElement {
       this.handleRefsChanged();
     }
   };
+
+  /**
+   * Load a repo's status + branches into the path-keyed store so its tab
+   * badges (dirty dot, ahead/behind) render without the repo ever having
+   * been activated. Deliberately light: two cheap queries, no graph or
+   * index work.
+   */
+  private async hydrateRepoBadges(repoPath: string): Promise<void> {
+    try {
+      const [statusResult, branchesResult] = await Promise.all([
+        gitService.getStatus(repoPath),
+        gitService.getBranches(repoPath),
+      ]);
+      const data: Partial<Omit<OpenRepository, 'repository'>> = {};
+      if (statusResult.success && statusResult.data) {
+        data.status = statusResult.data;
+        data.stagedFiles = statusResult.data.filter((s) => s.isStaged);
+        data.unstagedFiles = statusResult.data.filter((s) => !s.isStaged);
+      }
+      if (branchesResult.success && branchesResult.data) {
+        data.branches = branchesResult.data;
+        data.currentBranch = branchesResult.data.find((b) => b.isHead) ?? null;
+      }
+      if (Object.keys(data).length > 0) {
+        repositoryStore.getState().updateRepoData(repoPath, data);
+      }
+    } catch (err) {
+      log.warn('Failed to hydrate tab badges for', repoPath, err);
+    }
+  }
+
+  // Debounced badge refresh for background repos — watcher events can fire
+  // in bursts (builds, npm install), one status query per second per repo
+  // is plenty
+  private scheduleBadgeHydration(repoPath: string): void {
+    if (this.badgeHydrationTimers.has(repoPath)) return;
+    this.badgeHydrationTimers.set(
+      repoPath,
+      setTimeout(() => {
+        this.badgeHydrationTimers.delete(repoPath);
+        if (this.watchedRepoPaths.has(repoPath)) {
+          this.hydrateRepoBadges(repoPath);
+        }
+      }, 1000)
+    );
+  }
 
   // Handle refs-changed from file watcher (debounced)
   private handleRefsChanged = (): void => {
@@ -814,6 +864,10 @@ export class AppShell extends LitElement {
           if (autoFetchInterval > 0) {
             gitService.startAutoFetch(path, autoFetchInterval);
           }
+          // Populate tab badge data (dirty dot, ahead/behind) — background
+          // tabs are never rendered by the status/branch panels, so without
+          // this a restored-but-never-activated tab shows no badges at all
+          this.hydrateRepoBadges(path);
         }
       }
       for (const path of this.watchedRepoPaths) {
@@ -826,6 +880,11 @@ export class AppShell extends LitElement {
           // closed repo forever
           gitService.stopAutoFetch(path);
           this.staleRepoPaths.delete(path);
+          const pendingHydration = this.badgeHydrationTimers.get(path);
+          if (pendingHydration) {
+            clearTimeout(pendingHydration);
+            this.badgeHydrationTimers.delete(path);
+          }
         }
       }
       this.watchedRepoPaths = openPaths;
@@ -848,6 +907,16 @@ export class AppShell extends LitElement {
 
         // Clear search filter
         this.searchFilter = null;
+
+        // The footer ahead/behind badge belongs to the previous repo —
+        // repopulate from the new repo's last-known counts (autofetch keeps
+        // these fresh) instead of showing repo A's counts under repo B
+        this.remoteStatus = newActiveRepo?.currentBranch?.aheadBehind
+          ? {
+              ahead: newActiveRepo.currentBranch.aheadBehind.ahead,
+              behind: newActiveRepo.currentBranch.aheadBehind.behind,
+            }
+          : null;
 
         // Load profile for new repository and check integration
         if (newActiveRepo) {
@@ -986,6 +1055,10 @@ export class AppShell extends LitElement {
     if (this.refsChangedDebounceTimer) {
       clearTimeout(this.refsChangedDebounceTimer);
     }
+    for (const timer of this.badgeHydrationTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.badgeHydrationTimers.clear();
     document.removeEventListener('mousemove', this.boundHandleMouseMove);
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
     document.removeEventListener('keydown', this.boundHandleKeyDown);

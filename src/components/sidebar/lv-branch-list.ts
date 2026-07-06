@@ -699,8 +699,17 @@ export class LvBranchList extends LitElement {
         gitService.getRemotes(loadedPath),
       ]);
 
+      // The tab may have switched while the fetch was in flight. The store
+      // write below is path-keyed and always safe; the component's OWN
+      // render state belongs to the now-active repo and must not be
+      // overwritten with a stale result (showing repo A's branches under
+      // repo B's tab would run checkout/delete against the wrong names).
+      const isCurrent = this.repositoryPath === loadedPath;
+
       if (!branchesResult.success) {
-        this.error = branchesResult.error?.message ?? 'Failed to load branches';
+        if (isCurrent) {
+          this.error = branchesResult.error?.message ?? 'Failed to load branches';
+        }
         return;
       }
 
@@ -712,6 +721,8 @@ export class LvBranchList extends LitElement {
         branches,
         currentBranch: branches.find((b) => b.isHead) ?? null,
       });
+
+      if (!isCurrent) return;
 
       // Separate local and remote branches
       const localBranches = branches.filter((b) => !b.isRemote);
@@ -820,9 +831,15 @@ export class LvBranchList extends LitElement {
       });
 
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Unknown error';
+      if (this.repositoryPath === loadedPath) {
+        this.error = err instanceof Error ? err.message : 'Unknown error';
+      }
     } finally {
-      this.loading = false;
+      // A stale load must not stomp the loading state of the load that the
+      // now-active repo owns
+      if (this.repositoryPath === loadedPath) {
+        this.loading = false;
+      }
     }
   }
 
