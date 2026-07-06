@@ -61,6 +61,15 @@ function cacheGraphPage(path: string, entry: GraphCacheEntry): void {
   }
 }
 
+/**
+ * Evict a repo's cached graph page — called when its tab closes so a
+ * different repository later opened at the same path can't flash the old
+ * repo's graph before revalidation.
+ */
+export function evictGraphCache(path: string): void {
+  graphCache.delete(path);
+}
+
 /** Test hook: clear the module-level graph cache */
 export function clearGraphCacheForTests(): void {
   graphCache.clear();
@@ -746,11 +755,13 @@ export class LvGraphCanvas extends LitElement {
     this.inFlightLoadPath = repoPath;
 
     // A background revalidation keeps showing the (cached) graph instead of
-    // flashing the loading state
+    // flashing the loading state — and its failure must not paint an error
+    // banner over a perfectly good cached graph, so loadError is only
+    // touched by foreground loads.
     if (!options.background) {
       this.isLoading = true;
+      this.loadError = null;
     }
-    this.loadError = null;
     const startTime = performance.now();
 
     try {
@@ -784,7 +795,11 @@ export class LvGraphCanvas extends LitElement {
       }
 
       if (!commitsResult.success || !commitsResult.data) {
-        this.loadError = commitsResult.error?.message ?? 'Failed to load commits';
+        if (options.background) {
+          log.warn('Background graph revalidation failed:', commitsResult.error?.message);
+        } else {
+          this.loadError = commitsResult.error?.message ?? 'Failed to load commits';
+        }
         this.isLoading = false;
         return;
       }
@@ -884,7 +899,11 @@ export class LvGraphCanvas extends LitElement {
       const searchInfo = hasSearch ? ` (${this.matchedCommitOids.size} matches highlighted)` : '';
       log.debug(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
     } catch (err) {
-      this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
+      if (options.background) {
+        log.warn('Background graph revalidation failed:', err);
+      } else {
+        this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
+      }
     } finally {
       this.isLoading = false;
       // Only the newest load owns the in-flight marker

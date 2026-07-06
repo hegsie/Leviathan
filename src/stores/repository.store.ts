@@ -45,7 +45,13 @@ export interface RepositoryState {
   recentRepositories: RecentRepository[];
 
   // Actions - Repository management
-  addRepository: (repo: Repository) => void;
+  /**
+   * Open a repo as a tab. By default it becomes the active tab; pass
+   * `{ activate: false }` when opening several repos in a batch (workspace
+   * open) so each add doesn't fire the activation side effects (index
+   * builds, integration checks) — activate the final one explicitly.
+   */
+  addRepository: (repo: Repository, options?: { activate?: boolean }) => void;
   removeRepository: (path: string) => void;
   /** Remove a repo from the persisted list only (e.g. it failed to restore) */
   prunePersistedRepo: (path: string) => void;
@@ -112,8 +118,9 @@ export const repositoryStore = createStore<RepositoryState>()(
       ...initialState,
 
       // Repository management
-      addRepository: (repo) => {
+      addRepository: (repo, options) => {
         const name = repo.name || repo.path.split('/').pop() || repo.path;
+        const activate = options?.activate ?? true;
 
         set((state) => {
           const existingIndex = state.openRepositories.findIndex(
@@ -121,7 +128,7 @@ export const repositoryStore = createStore<RepositoryState>()(
           );
 
           if (existingIndex >= 0) {
-            return { activeIndex: existingIndex };
+            return activate ? { activeIndex: existingIndex } : state;
           }
 
           const newRepos = [...state.openRepositories, createEmptyRepoData(repo)];
@@ -131,7 +138,7 @@ export const repositoryStore = createStore<RepositoryState>()(
 
           return {
             openRepositories: newRepos,
-            activeIndex: newRepos.length - 1,
+            activeIndex: activate ? newRepos.length - 1 : state.activeIndex,
             persistedOpenRepos: newPersistedRepos,
             error: null,
           };

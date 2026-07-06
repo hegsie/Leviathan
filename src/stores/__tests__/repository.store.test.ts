@@ -72,6 +72,34 @@ describe('repository.store', () => {
     });
   });
 
+  describe('addRepository with activate: false', () => {
+    it('adds the repo without changing the active tab', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/active'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/bg'), { activate: false });
+
+      const state = repositoryStore.getState();
+      expect(state.openRepositories.length).to.equal(2);
+      expect(state.activeIndex).to.equal(0);
+    });
+
+    it('does not steal focus for an already-open repo either', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/two'));
+
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'), { activate: false });
+
+      expect(repositoryStore.getState().activeIndex).to.equal(1);
+    });
+
+    it('keeps activeIndex -1 when batch-adding into an empty store', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'), { activate: false });
+      expect(repositoryStore.getState().activeIndex).to.equal(-1);
+
+      repositoryStore.getState().setActiveByPath('/repo/one');
+      expect(repositoryStore.getState().activeIndex).to.equal(0);
+    });
+  });
+
   describe('updateRepoData', () => {
     const branch = {
       name: 'feature/x',

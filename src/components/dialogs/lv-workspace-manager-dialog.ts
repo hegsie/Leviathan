@@ -895,19 +895,24 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
     const store = repositoryStore.getState();
 
+    // Open WITHOUT activating each repo: addRepository's default activation
+    // would fire the per-activation side effects (index builds, integration
+    // checks) once per repo — a 10-repo workspace would still kick off 10
+    // concurrent history walks. Activate only the final repo; the rest get
+    // their indexes lazily when their tab is first activated.
+    let lastOpenedPath: string | null = null;
     for (const repo of ws.repositories) {
       const status = this.repoStatuses.get(repo.path);
       if (status && (!status.exists || !status.isValidRepo)) continue;
 
       const result = await gitService.openRepository({ path: repo.path });
       if (result.success && result.data) {
-        store.addRepository(result.data);
-        // Index builds are deliberately NOT started here: opening a
-        // workspace with many repos would kick off that many concurrent
-        // history walks at once. The repo that ends up active gets its
-        // indexes from app-shell's activation hook; the rest build lazily
-        // when their tab is first activated.
+        store.addRepository(result.data, { activate: false });
+        lastOpenedPath = result.data.path;
       }
+    }
+    if (lastOpenedPath) {
+      store.setActiveByPath(lastOpenedPath);
     }
 
     workspaceStore.getState().setActiveWorkspaceId(ws.id);

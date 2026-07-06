@@ -32,7 +32,7 @@ import type { Commit, RefsByCommit } from '../../../types/git.types.ts';
 // Import the actual component — registers <lv-graph-canvas> custom element
 import '../lv-graph-canvas.ts';
 import type { LvGraphCanvas } from '../lv-graph-canvas.ts';
-import { clearGraphCacheForTests } from '../lv-graph-canvas.ts';
+import { clearGraphCacheForTests, evictGraphCache } from '../lv-graph-canvas.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -797,6 +797,61 @@ describe('lv-graph-canvas', () => {
 
       // The in-flight load plus exactly ONE queued follow-up
       expect(findCommands('get_commit_history').length).to.equal(2);
+    });
+
+    it('a failed background revalidation does not paint an error over the cached graph', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+
+      // The repo becomes temporarily unreachable for the background reload
+      mockInvoke = async (command: string) => {
+        if (command === 'get_commit_history') {
+          throw new Error('repository temporarily unavailable');
+        }
+        if (command === 'get_refs_by_commit') return defaultRefs;
+        return null;
+      };
+
+      await switchRepo(el, REPO_PATH);
+
+      // The cached graph still shows; no error banner over working content
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.be.null;
+    });
+
+    it('a failed FOREGROUND load still surfaces the error', async () => {
+      const el = await renderCanvas();
+      mockInvoke = async (command: string) => {
+        if (command === 'get_commit_history') {
+          throw new Error('boom');
+        }
+        if (command === 'get_refs_by_commit') return defaultRefs;
+        return null;
+      };
+
+      await switchRepo(el, '/never/visited');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.contain('boom');
+    });
+
+    it('evictGraphCache removes a repo so reopening takes the loading path', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+
+      evictGraphCache(REPO_PATH);
+      clearHistory();
+
+      // Switching back is NOT served from cache: the loading path runs
+      el.repositoryPath = REPO_PATH;
+      await el.updateComplete;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.true;
+
+      await new Promise((r) => setTimeout(r, 200));
+      expect(findCommands('get_commit_history').length).to.equal(1);
     });
 
     it('background revalidation updates the graph when the repo changed', async () => {

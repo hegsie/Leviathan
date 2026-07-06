@@ -222,6 +222,105 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  describe('badge hydration throttling', () => {
+    it('caps concurrent hydrations instead of firing one per repo at once', async () => {
+      let releaseStatuses!: () => void;
+      const statusGate = new Promise<void>((resolve) => {
+        releaseStatuses = resolve;
+      });
+      mockResponses['get_status'] = () => statusGate.then(() => []);
+      mockResponses['get_branches'] = () => statusGate.then(() => []);
+
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        for (let i = 0; i < 5; i++) {
+          repositoryStore
+            .getState()
+            .addRepository(mockRepo(`/repo/${i}`, `r${i}`), { activate: false });
+        }
+        await new Promise((r) => setTimeout(r, 10));
+
+        // Only 2 hydrations (one get_status each) may be in flight at once
+        const inFlight = invokeCallArgs.filter((c) => c.command === 'get_status').length;
+        expect(inFlight).to.equal(2);
+
+        releaseStatuses();
+        await waitUntil(
+          () => invokeCallArgs.filter((c) => c.command === 'get_status').length === 5,
+          'expected the queue to drain all five hydrations'
+        );
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
+  describe('batch tab open (workspace-style)', () => {
+    it('runs activation work only for the repo activated at the end', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        searchIndexService.invalidate();
+        // Open three repos the way workspace-open now does
+        for (const p of ['/ws/one', '/ws/two', '/ws/three']) {
+          repositoryStore.getState().addRepository(mockRepo(p, p), { activate: false });
+        }
+        repositoryStore.getState().setActiveByPath('/ws/three');
+        await new Promise((r) => setTimeout(r, 10));
+
+        const buildPaths = invokeCallArgs
+          .filter((c) => c.command === 'build_search_index')
+          .map((c) => c.args.path);
+        expect(buildPaths).to.deep.equal(['/ws/three']);
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
+  describe('tab close teardown extras', () => {
+    it('cancels an in-flight embedding build for the closed repo', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        repositoryStore.getState().addRepository(mockRepo('/repo/two', 'two'));
+        await new Promise((r) => setTimeout(r, 0));
+        invokeCallArgs.length = 0;
+
+        repositoryStore.getState().removeRepository('/repo/one');
+        await new Promise((r) => setTimeout(r, 0));
+
+        const cancelCall = invokeCallArgs.find((c) => c.command === 'cancel_embedding_build');
+        expect(cancelCall).to.not.be.undefined;
+        expect(cancelCall!.args.path).to.equal('/repo/one');
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
+  describe('active repo badge liveness', () => {
+    it('schedules a badge refresh for the ACTIVE repo on workdir events', () => {
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/active', 'active') };
+      (el as any).watchedRepoPaths = new Set(['/repo/active']);
+
+      (el as any).handleWatcherEvent({
+        repoPath: '/repo/active',
+        eventType: 'workdir-changed',
+        paths: [],
+      });
+
+      // The 1s-debounced hydration is scheduled even though the repo is
+      // active (the status panel may be hidden)
+      expect((el as any).badgeHydrationTimers.has('/repo/active')).to.be.true;
+      // Cleanup the pending timer
+      clearTimeout((el as any).badgeHydrationTimers.get('/repo/active'));
+    });
+  });
+
   describe('footer ahead/behind badge on tab switch', () => {
     it("resets to the newly active repo's last-known counts", async () => {
       const el = createAppShell();

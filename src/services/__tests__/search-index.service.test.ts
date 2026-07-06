@@ -216,6 +216,28 @@ describe('SearchIndexService', () => {
       expect(dropCall!.args.path).to.equal('/repo/one');
     });
 
+    it('reopening a repo during an in-flight pre-drop build starts a fresh build', async () => {
+      // Regression: buildIndex deduped purely on "a build is in flight", so
+      // close-then-reopen during a slow build left the reopened tab with no
+      // index at all (the old build self-dropped, nothing rebuilt).
+      let releaseBuilds!: () => void;
+      pendingBuildGate = new Promise((resolve) => {
+        releaseBuilds = resolve;
+      });
+
+      const preDropBuild = searchIndexService.buildIndex('/repo/one');
+      await searchIndexService.drop('/repo/one'); // tab closed mid-build
+      const reopenBuild = searchIndexService.buildIndex('/repo/one'); // tab reopened
+
+      releaseBuilds();
+      await Promise.all([preDropBuild, reopenBuild]);
+
+      const buildCalls = invokeCallArgs.filter((c) => c.command === 'build_search_index');
+      expect(buildCalls.length).to.equal(2);
+      // The reopened tab ends up READY (the post-drop build won)
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+    });
+
     it('a refresh finishing AFTER its repo was dropped frees the resurrected backend index', async () => {
       // Regression: handleRefresh fires refresh_search_index; if the tab is
       // closed while it runs, the backend refresh re-inserts an index for a

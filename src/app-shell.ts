@@ -54,6 +54,7 @@ import { progressService } from './services/progress.service.ts';
 import type { ProgressOperation } from './components/common/lv-progress-indicator.ts';
 import './components/dashboard/lv-context-dashboard.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
+import { evictGraphCache } from './components/graph/lv-graph-canvas.ts';
 import type { LvCreateTagDialog } from './components/dialogs/lv-create-tag-dialog.ts';
 import type { LvCreateBranchDialog } from './components/dialogs/lv-create-branch-dialog.ts';
 import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dialog.ts';
@@ -722,6 +723,11 @@ export class AppShell extends LitElement {
       }
       return;
     }
+    // The ACTIVE repo's tab badges must stay live too: lv-file-status only
+    // mirrors status into the store while the right panel is mounted, so
+    // with the panel hidden the active tab's dirty dot would go stale while
+    // background tabs kept updating.
+    this.scheduleBadgeHydration(event.repoPath);
     if (event.eventType === 'refs-changed') {
       this.handleRefsChanged();
     }
@@ -757,9 +763,42 @@ export class AppShell extends LitElement {
     }
   }
 
-  // Debounced badge refresh for background repos — watcher events can fire
-  // in bursts (builds, npm install), one status query per second per repo
-  // is plenty
+  // Badge hydrations run through a small queue: restoring N tabs must not
+  // fire 2×N git walks into the IPC pool at the same instant (the same
+  // stampede lazy indexes and staggered auto-fetch exist to avoid).
+  private badgeHydrationQueue: string[] = [];
+  private badgeHydrationActive = 0;
+  private static readonly BADGE_HYDRATION_CONCURRENCY = 2;
+
+  private enqueueBadgeHydration(repoPath: string): void {
+    if (this.badgeHydrationQueue.includes(repoPath)) return;
+    this.badgeHydrationQueue.push(repoPath);
+    this.pumpBadgeHydration();
+  }
+
+  private pumpBadgeHydration(): void {
+    while (
+      this.badgeHydrationActive < AppShell.BADGE_HYDRATION_CONCURRENCY &&
+      this.badgeHydrationQueue.length > 0
+    ) {
+      const repoPath = this.badgeHydrationQueue.shift()!;
+      // The repo may have been closed while queued. Checked against the
+      // store (not watchedRepoPaths, which the subscription only updates
+      // AFTER enqueueing newly opened repos).
+      const stillOpen = repositoryStore
+        .getState()
+        .openRepositories.some((r) => r.repository.path === repoPath);
+      if (!stillOpen) continue;
+      this.badgeHydrationActive++;
+      this.hydrateRepoBadges(repoPath).finally(() => {
+        this.badgeHydrationActive--;
+        this.pumpBadgeHydration();
+      });
+    }
+  }
+
+  // Debounced badge refresh for watcher events — they can fire in bursts
+  // (builds, npm install), one status query per second per repo is plenty
   private scheduleBadgeHydration(repoPath: string): void {
     if (this.badgeHydrationTimers.has(repoPath)) return;
     this.badgeHydrationTimers.set(
@@ -767,7 +806,7 @@ export class AppShell extends LitElement {
       setTimeout(() => {
         this.badgeHydrationTimers.delete(repoPath);
         if (this.watchedRepoPaths.has(repoPath)) {
-          this.hydrateRepoBadges(repoPath);
+          this.enqueueBadgeHydration(repoPath);
         }
       }, 1000)
     );
@@ -867,7 +906,7 @@ export class AppShell extends LitElement {
           // Populate tab badge data (dirty dot, ahead/behind) — background
           // tabs are never rendered by the status/branch panels, so without
           // this a restored-but-never-activated tab shows no badges at all
-          this.hydrateRepoBadges(path);
+          this.enqueueBadgeHydration(path);
         }
       }
       for (const path of this.watchedRepoPaths) {
@@ -879,6 +918,13 @@ export class AppShell extends LitElement {
           // Without this the backend keeps fetching (and toasting about) the
           // closed repo forever
           gitService.stopAutoFetch(path);
+          // An ONNX embedding build can run for minutes — don't keep burning
+          // CPU for a tab that no longer exists (no-op when nothing builds)
+          embeddingIndexService.cancelBuild(path).catch(() => {
+            /* nothing to cancel */
+          });
+          // A later repo at the same path must not flash this repo's graph
+          evictGraphCache(path);
           this.staleRepoPaths.delete(path);
           const pendingHydration = this.badgeHydrationTimers.get(path);
           if (pendingHydration) {
@@ -2536,9 +2582,12 @@ export class AppShell extends LitElement {
         })
       );
 
+      // Add without activating each one — activation side effects (index
+      // builds, profile/integration loads) belong to the single tab that
+      // ends up active, chosen below.
       for (const { repo } of results) {
         if (repo) {
-          repositoryStore.getState().addRepository(repo);
+          repositoryStore.getState().addRepository(repo, { activate: false });
         }
       }
 
@@ -2560,11 +2609,16 @@ export class AppShell extends LitElement {
           .map((r) => this.loadRepositoryRemotes(r.persisted.path))
       );
 
-      // Land on the tab the user had active last session, not just the last
-      // one restored
+      // Land on the tab the user had active last session; fall back to the
+      // last successfully restored repo when that one is gone
+      const restoredPaths = results.filter((r) => r.repo !== null).map((r) => r.persisted.path);
       const lastActivePath = repositoryStore.getState().persistedActivePath;
-      if (lastActivePath) {
-        repositoryStore.getState().setActiveByPath(lastActivePath);
+      const targetPath =
+        lastActivePath && restoredPaths.includes(lastActivePath)
+          ? lastActivePath
+          : restoredPaths[restoredPaths.length - 1];
+      if (targetPath) {
+        repositoryStore.getState().setActiveByPath(targetPath);
       }
 
       this.isRestoringRepositories = false;

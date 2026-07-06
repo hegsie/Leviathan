@@ -29,9 +29,13 @@ export interface SearchOptions {
 
 class SearchIndexService {
   private readyRepos = new Set<string>();
-  private buildingRepos = new Set<string>();
-  // Bumped by drop(); a build that finishes after its repo was dropped must
-  // not resurrect readiness (or leak the backend index) for a closed tab
+  // In-flight builds, keyed by path, storing the drop epoch each build
+  // started under. Deduplication is epoch-aware: a build started BEFORE the
+  // repo was dropped must not block a rebuild after the repo is reopened.
+  private buildingRepos = new Map<string, number>();
+  // Bumped by drop(); a build/refresh that finishes after its repo was
+  // dropped must not resurrect readiness (or leak the backend index) for a
+  // closed tab
   private dropEpochs = new Map<string, number>();
 
   /**
@@ -41,9 +45,12 @@ class SearchIndexService {
    * the SAME repository is deduplicated.
    */
   async buildIndex(repoPath: string): Promise<void> {
-    if (this.buildingRepos.has(repoPath)) return;
-    this.buildingRepos.add(repoPath);
     const epoch = this.dropEpochs.get(repoPath) ?? 0;
+    // Dedupe only builds from the SAME epoch: a pre-drop build still in
+    // flight must not block the rebuild for a reopened tab (it will discard
+    // itself on completion via the epoch check below).
+    if (this.buildingRepos.get(repoPath) === epoch) return;
+    this.buildingRepos.set(repoPath, epoch);
 
     try {
       const result = await invokeCommand<number>('build_search_index', { path: repoPath });
@@ -61,7 +68,11 @@ class SearchIndexService {
         console.warn('[SearchIndex] Failed to build index:', result.error?.message);
       }
     } finally {
-      this.buildingRepos.delete(repoPath);
+      // Only remove the marker if it still belongs to THIS build — a newer
+      // (post-drop) build may have replaced it
+      if (this.buildingRepos.get(repoPath) === epoch) {
+        this.buildingRepos.delete(repoPath);
+      }
     }
   }
 
