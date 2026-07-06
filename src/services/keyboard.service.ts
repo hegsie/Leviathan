@@ -648,6 +648,9 @@ export function registerDefaultShortcuts(actions: {
   createBranch?: () => void;
   createStash?: () => void;
   closeDiff?: () => void;
+  nextTab?: () => void;
+  previousTab?: () => void;
+  selectTab?: (index: number) => void;
 }): void {
   // Set vim actions
   keyboardService.setVimActions({
@@ -860,5 +863,40 @@ export function registerDefaultShortcuts(actions: {
       description: 'Close diff/panel',
       category: 'View',
     });
+  }
+
+  // Repository tabs
+  if (actions.nextTab) {
+    keyboardService.register('next-tab', {
+      key: 'Tab',
+      ctrl: true,
+      action: actions.nextTab,
+      description: 'Next repository tab',
+      category: 'View',
+    });
+  }
+
+  if (actions.previousTab) {
+    keyboardService.register('previous-tab', {
+      key: 'Tab',
+      ctrl: true,
+      shift: true,
+      action: actions.previousTab,
+      description: 'Previous repository tab',
+      category: 'View',
+    });
+  }
+
+  if (actions.selectTab) {
+    const selectTab = actions.selectTab;
+    for (let n = 1; n <= 9; n++) {
+      keyboardService.register(`select-tab-${n}`, {
+        key: String(n),
+        ctrl: true,
+        action: () => selectTab(n - 1),
+        description: `Go to repository tab ${n}`,
+        category: 'View',
+      });
+    }
   }
 }

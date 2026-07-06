@@ -54,6 +54,7 @@ import { progressService } from './services/progress.service.ts';
 import type { ProgressOperation } from './components/common/lv-progress-indicator.ts';
 import './components/dashboard/lv-context-dashboard.ts';
 import type { CommitSelectedEvent, LvGraphCanvas } from './components/graph/lv-graph-canvas.ts';
+import { evictGraphCache } from './components/graph/lv-graph-canvas.ts';
 import type { LvCreateTagDialog } from './components/dialogs/lv-create-tag-dialog.ts';
 import type { LvCreateBranchDialog } from './components/dialogs/lv-create-branch-dialog.ts';
 import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dialog.ts';
@@ -659,6 +660,15 @@ export class AppShell extends LitElement {
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
   private unsubscribeWatcher?: () => void;
+  // Repo paths that currently have a backend file watcher (i.e., all open tabs)
+  private watchedRepoPaths = new Set<string>();
+  // Background repos that received watcher events and need a refresh when activated
+  private staleRepoPaths = new Set<string>();
+  // Debounce timers for background tab-badge refreshes, keyed by repo path
+  private badgeHydrationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Last auto-fetch interval applied to the backend (settings subscription
+  // must only restart timers when THIS value actually changes)
+  private lastAutoFetchInterval = 0;
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
   private shownIntegrationSuggestions: Set<string> = new Set();
@@ -694,6 +704,181 @@ export class AppShell extends LitElement {
     if (detail?.source === 'app-shell') return;
     this.handleRefresh();
   };
+
+  // Cycle the active repository tab by offset (wraps around both ends)
+  private cycleRepositoryTab(offset: number): void {
+    const state = repositoryStore.getState();
+    const count = state.openRepositories.length;
+    if (count < 2) return;
+    const next = (state.activeIndex + offset + count) % count;
+    state.setActiveIndex(next);
+  }
+
+  // Route file-watcher events. Events for the active repo trigger a
+  // (debounced) refresh; events for background repos mark them stale (full
+  // refresh happens when their tab activates) and refresh just their tab
+  // badge data so the dirty dot / ahead-behind stay live.
+  private handleWatcherEvent = (event: watcherService.FileChangeEvent): void => {
+    if (event.repoPath !== this.activeRepository?.repository.path) {
+      if (this.watchedRepoPaths.has(event.repoPath)) {
+        this.staleRepoPaths.add(event.repoPath);
+        this.scheduleBadgeHydration(event.repoPath);
+      }
+      return;
+    }
+    // The ACTIVE repo's tab badges must stay live too — but only when the
+    // right panel is hidden: while it's mounted, lv-file-status already
+    // reloads on these events and mirrors into the store, so hydrating here
+    // as well would just double every status query.
+    if (!this.rightPanelVisible) {
+      this.scheduleBadgeHydration(event.repoPath);
+    }
+    if (event.eventType === 'refs-changed') {
+      this.handleRefsChanged();
+    }
+  };
+
+  // Per-path monotonic sequence for badge hydration: a superseded hydration
+  // (an older watcher tick's) must not overwrite a newer one's store write.
+  private badgeHydrationSeq = new Map<string, number>();
+
+  /**
+   * Tear down every per-repo backend service and client-side cache for a
+   * path. Called both when a tab is closed and when the shell itself
+   * disconnects, so the two paths can never drift out of sync (a leak the
+   * closed-tab path fixed must not silently reappear on remount).
+   */
+  private teardownRepoServices(path: string): void {
+    watcherService.stopWatching(path).catch(() => {
+      /* backend watcher already gone */
+    });
+    searchIndexService.drop(path);
+    // Without this the backend keeps fetching (and toasting about) the
+    // closed repo forever
+    this.stopAutoFetchLogged(path);
+    // An ONNX embedding build can run for minutes — don't keep burning CPU
+    // for a tab that no longer exists (no-op when nothing builds)
+    embeddingIndexService.cancelBuild(path).catch(() => {
+      /* nothing to cancel */
+    });
+    // A later repo at the same path must not flash this repo's graph
+    evictGraphCache(path);
+    this.staleRepoPaths.delete(path);
+    const pendingHydration = this.badgeHydrationTimers.get(path);
+    if (pendingHydration) {
+      clearTimeout(pendingHydration);
+      this.badgeHydrationTimers.delete(path);
+    }
+  }
+
+  // Auto-fetch start/stop are fire-and-forget, but a failure must not be
+  // fully silent — log it (matching the watcher-start error handling) so a
+  // repo silently not auto-fetching is diagnosable.
+  private startAutoFetchLogged(path: string, intervalMinutes: number): void {
+    gitService
+      .startAutoFetch(path, intervalMinutes)
+      .then((r) => {
+        if (!r.success) log.warn('Failed to start auto-fetch for', path, r.error?.message);
+      })
+      .catch((err) => log.warn('Failed to start auto-fetch for', path, err));
+  }
+
+  private stopAutoFetchLogged(path: string): void {
+    gitService
+      .stopAutoFetch(path)
+      .then((r) => {
+        if (!r.success) log.warn('Failed to stop auto-fetch for', path, r.error?.message);
+      })
+      .catch((err) => log.warn('Failed to stop auto-fetch for', path, err));
+  }
+
+  /**
+   * Load a repo's status (and, for background repos, branches) into the
+   * path-keyed store so its tab badges (dirty dot, ahead/behind) render
+   * without the repo ever having been activated. Deliberately light: cheap
+   * queries, no graph or index work.
+   *
+   * For the ACTIVE repo the always-mounted branch list already mirrors
+   * branches into the store, so hydrating branches here too would race that
+   * (guarded) writer — hydrate only status for the active repo.
+   */
+  private async hydrateRepoBadges(repoPath: string): Promise<void> {
+    const seq = (this.badgeHydrationSeq.get(repoPath) ?? 0) + 1;
+    this.badgeHydrationSeq.set(repoPath, seq);
+    const isActive = repoPath === this.activeRepository?.repository.path;
+    try {
+      const [statusResult, branchesResult] = await Promise.all([
+        gitService.getStatus(repoPath),
+        isActive ? Promise.resolve(null) : gitService.getBranches(repoPath),
+      ]);
+      // A newer hydration for this path superseded us while we were loading
+      if (this.badgeHydrationSeq.get(repoPath) !== seq) return;
+      const data: Partial<Omit<OpenRepository, 'repository'>> = {};
+      if (statusResult.success && statusResult.data) {
+        data.status = statusResult.data;
+        data.stagedFiles = statusResult.data.filter((s) => s.isStaged);
+        data.unstagedFiles = statusResult.data.filter((s) => !s.isStaged);
+      }
+      if (branchesResult && branchesResult.success && branchesResult.data) {
+        data.branches = branchesResult.data;
+        data.currentBranch = branchesResult.data.find((b) => b.isHead) ?? null;
+      }
+      if (Object.keys(data).length > 0) {
+        repositoryStore.getState().updateRepoData(repoPath, data);
+      }
+    } catch (err) {
+      log.warn('Failed to hydrate tab badges for', repoPath, err);
+    }
+  }
+
+  // Badge hydrations run through a small queue: restoring N tabs must not
+  // fire 2×N git walks into the IPC pool at the same instant (the same
+  // stampede lazy indexes and staggered auto-fetch exist to avoid).
+  private badgeHydrationQueue: string[] = [];
+  private badgeHydrationActive = 0;
+  private static readonly BADGE_HYDRATION_CONCURRENCY = 2;
+
+  private enqueueBadgeHydration(repoPath: string): void {
+    if (this.badgeHydrationQueue.includes(repoPath)) return;
+    this.badgeHydrationQueue.push(repoPath);
+    this.pumpBadgeHydration();
+  }
+
+  private pumpBadgeHydration(): void {
+    while (
+      this.badgeHydrationActive < AppShell.BADGE_HYDRATION_CONCURRENCY &&
+      this.badgeHydrationQueue.length > 0
+    ) {
+      const repoPath = this.badgeHydrationQueue.shift()!;
+      // The repo may have been closed while queued. Checked against the
+      // store (not watchedRepoPaths, which the subscription only updates
+      // AFTER enqueueing newly opened repos).
+      const stillOpen = repositoryStore
+        .getState()
+        .openRepositories.some((r) => r.repository.path === repoPath);
+      if (!stillOpen) continue;
+      this.badgeHydrationActive++;
+      this.hydrateRepoBadges(repoPath).finally(() => {
+        this.badgeHydrationActive--;
+        this.pumpBadgeHydration();
+      });
+    }
+  }
+
+  // Debounced badge refresh for watcher events — they can fire in bursts
+  // (builds, npm install), one status query per second per repo is plenty
+  private scheduleBadgeHydration(repoPath: string): void {
+    if (this.badgeHydrationTimers.has(repoPath)) return;
+    this.badgeHydrationTimers.set(
+      repoPath,
+      setTimeout(() => {
+        this.badgeHydrationTimers.delete(repoPath);
+        if (this.watchedRepoPaths.has(repoPath)) {
+          this.enqueueBadgeHydration(repoPath);
+        }
+      }, 1000)
+    );
+  }
 
   // Handle refs-changed from file watcher (debounced)
   private handleRefsChanged = (): void => {
@@ -773,6 +958,32 @@ export class AppShell extends LitElement {
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
 
+      // Start/stop per-repo services as tabs open and close. Every OPEN repo
+      // gets a watcher (not just the active one) so background repos don't go
+      // silently stale; closed repos release their watcher and search index.
+      const openPaths = new Set(state.openRepositories.map((r) => r.repository.path));
+      for (const path of openPaths) {
+        if (!this.watchedRepoPaths.has(path)) {
+          watcherService.startWatching(path).catch((err) => {
+            log.warn('Failed to start file watcher:', err);
+          });
+          const autoFetchInterval = settingsStore.getState().autoFetchInterval;
+          if (autoFetchInterval > 0) {
+            this.startAutoFetchLogged(path, autoFetchInterval);
+          }
+          // Populate tab badge data (dirty dot, ahead/behind) — background
+          // tabs are never rendered by the status/branch panels, so without
+          // this a restored-but-never-activated tab shows no badges at all
+          this.enqueueBadgeHydration(path);
+        }
+      }
+      for (const path of this.watchedRepoPaths) {
+        if (!openPaths.has(path)) {
+          this.teardownRepoServices(path);
+        }
+      }
+      this.watchedRepoPaths = openPaths;
+
       // Clear view state when switching repositories
       if (repoChanged) {
         // Clear selected commit and refs
@@ -792,21 +1003,35 @@ export class AppShell extends LitElement {
         // Clear search filter
         this.searchFilter = null;
 
+        // The footer ahead/behind badge belongs to the previous repo —
+        // repopulate from the new repo's last-known counts (autofetch keeps
+        // these fresh) instead of showing repo A's counts under repo B
+        this.remoteStatus = newActiveRepo?.currentBranch?.aheadBehind
+          ? {
+              ahead: newActiveRepo.currentBranch.aheadBehind.ahead,
+              behind: newActiveRepo.currentBranch.aheadBehind.behind,
+            }
+          : null;
+
         // Load profile for new repository and check integration
         if (newActiveRepo) {
           gitService.loadProfileForRepository(newActiveRepo.repository.path);
-          // Only check integration if not restoring repos on startup
+          // Only check integration / build indexes if not restoring repos on
+          // startup (restore handles the final active repo itself)
           if (!this.isRestoringRepositories) {
             this.checkRepositoryIntegration(newActiveRepo.repository.path);
+            // Indexes build lazily on first activation of a tab
+            this.ensureRepoIndexes(newActiveRepo.repository.path);
           }
           // Load remotes if not already loaded
           if (!newActiveRepo.remotes || newActiveRepo.remotes.length === 0) {
             this.loadRepositoryRemotes(newActiveRepo.repository.path);
           }
-          // Start file watcher for the new repository
-          watcherService.startWatching(newActiveRepo.repository.path).catch((err) => {
-            log.warn('Failed to start file watcher:', err);
-          });
+          // If this repo changed while it was a background tab, its store
+          // data and graph are stale — refresh now that it's visible.
+          if (this.staleRepoPaths.delete(newActiveRepo.repository.path)) {
+            this.handleRefresh();
+          }
         }
       }
     });
@@ -815,12 +1040,8 @@ export class AppShell extends LitElement {
       this.rightPanelVisible = state.panels.right.isVisible;
       this.globalLoading = state.globalLoading;
     });
-    // Subscribe to file watcher for refs-changed events (e.g., external pull/fetch)
-    this.unsubscribeWatcher = watcherService.onFileChange((event) => {
-      if (event.eventType === 'refs-changed') {
-        this.handleRefsChanged();
-      }
-    });
+    // Subscribe to file watcher events (routing logic in handleWatcherEvent)
+    this.unsubscribeWatcher = watcherService.onFileChange(this.handleWatcherEvent);
     document.addEventListener('keydown', this.boundHandleKeyDown);
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('contextmenu', this.handleContextMenu);
@@ -908,6 +1129,9 @@ export class AppShell extends LitElement {
       push: () => this.handlePush(),
       createStash: () => this.handleCreateStash(),
       closeDiff: () => this.handleCloseOverlay(),
+      nextTab: () => this.cycleRepositoryTab(1),
+      previousTab: () => this.cycleRepositoryTab(-1),
+      selectTab: (index) => repositoryStore.getState().setActiveIndex(index),
     });
 
     // Subscribe to progress updates
@@ -926,6 +1150,19 @@ export class AppShell extends LitElement {
     if (this.refsChangedDebounceTimer) {
       clearTimeout(this.refsChangedDebounceTimer);
     }
+    for (const timer of this.badgeHydrationTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.badgeHydrationTimers.clear();
+    // Tear down per-repo backend services so a remount (hot reload, tests)
+    // doesn't leave orphaned watchers, auto-fetch tasks, commit indexes, or
+    // in-flight embedding builds running. Uses the exact same teardown as
+    // closing a tab so the two paths can't drift.
+    for (const path of this.watchedRepoPaths) {
+      this.teardownRepoServices(path);
+    }
+    this.watchedRepoPaths.clear();
+    this.staleRepoPaths.clear();
     document.removeEventListener('mousemove', this.boundHandleMouseMove);
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
     document.removeEventListener('keydown', this.boundHandleKeyDown);
@@ -2016,11 +2253,13 @@ export class AppShell extends LitElement {
   }
 
   private handleSearchChange(e: CustomEvent<{ filter: SearchFilter }>): void {
+    // The graph canvas receives this via the reactive `.searchFilter`
+    // template binding, so it stays in sync automatically — including being
+    // cleared to null when the active repo changes (tab switch). Pushing it
+    // imperatively here instead would leave the canvas holding the previous
+    // repo's filter on switch, dimming the new repo's graph for a query the
+    // user never applied to it.
     this.searchFilter = e.detail.filter;
-    // Pass filter to graph canvas
-    if (this.graphCanvas) {
-      this.graphCanvas.searchFilter = this.searchFilter;
-    }
   }
 
   private async openCommandPalette(): Promise<void> {
@@ -2387,34 +2626,104 @@ export class AppShell extends LitElement {
     uiStore.getState().setGlobalLoading(true);
 
     try {
-      // Open each persisted repository
-      for (const persisted of persistedRepos) {
-        try {
-          const result = await gitService.openRepository({ path: persisted.path });
-          if (result.success && result.data) {
-            repositoryStore.getState().addRepository(result.data);
-            // Build search indexes in background (non-blocking)
-            searchIndexService.buildIndex(persisted.path);
-            embeddingIndexService.buildIndex(persisted.path);
-            // Load remotes for this repository
-            await this.loadRepositoryRemotes(persisted.path);
+      // Open all persisted repositories in PARALLEL — with many repos a
+      // sequential open blocks startup for the sum of every repo's open
+      // time. Results are added in the original order so tab order is
+      // stable regardless of which open finishes first.
+      const results = await Promise.all(
+        persistedRepos.map(async (persisted) => {
+          try {
+            const result = await gitService.openRepository({ path: persisted.path });
+            return { persisted, repo: result.success && result.data ? result.data : null };
+          } catch (error) {
+            console.warn(`Failed to restore repository: ${persisted.path}`, error);
+            return { persisted, repo: null };
           }
-        } catch (error) {
-          console.warn(`Failed to restore repository: ${persisted.path}`, error);
+        })
+      );
+
+      // Add without activating each one — activation side effects (index
+      // builds, profile/integration loads) belong to the single tab that
+      // ends up active, chosen below.
+      for (const { repo } of results) {
+        if (repo) {
+          repositoryStore.getState().addRepository(repo, { activate: false });
         }
       }
 
-      // Restore active index (already persisted, will be set from storage)
+      // A repo that failed to restore (moved, deleted, corrupted) must be
+      // reported — a silently missing tab that silently fails again on every
+      // launch looks like data loss. Prune it so it isn't retried forever;
+      // it stays available in the Recent list.
+      for (const { persisted, repo } of results) {
+        if (!repo) {
+          repositoryStore.getState().prunePersistedRepo(persisted.path);
+          showToast(`Could not restore repository "${persisted.name}" (${persisted.path})`, 'error');
+        }
+      }
+
+      // Remotes load in parallel too (path-keyed store update, order-free).
+      await Promise.all(
+        results
+          .filter((r) => r.repo !== null)
+          .map((r) => this.loadRepositoryRemotes(r.persisted.path))
+      );
+
+      // Land on the tab the user had active last session; fall back to the
+      // last successfully restored repo when that one is gone
+      const restoredPaths = results.filter((r) => r.repo !== null).map((r) => r.persisted.path);
+      const lastActivePath = repositoryStore.getState().persistedActivePath;
+      const targetPath =
+        lastActivePath && restoredPaths.includes(lastActivePath)
+          ? lastActivePath
+          : restoredPaths[restoredPaths.length - 1];
+      if (targetPath) {
+        repositoryStore.getState().setActiveByPath(targetPath);
+      }
+
       this.isRestoringRepositories = false;
 
-      // Check integration for the final active repo only
+      // Index builds are deliberately NOT started for every restored repo —
+      // a search index walk plus an embedding-model inference pass per repo
+      // makes startup CPU-bound with many tabs, and background repos may
+      // never be used. The active repo gets its indexes here; the others
+      // build lazily when their tab is first activated.
       const activeRepo = repositoryStore.getState().getActiveRepository();
       if (activeRepo) {
+        this.ensureRepoIndexes(activeRepo.repository.path);
         this.checkRepositoryIntegration(activeRepo.repository.path);
       }
     } finally {
       uiStore.getState().setGlobalLoading(false);
     }
+  }
+
+  /**
+   * Kick off background search/embedding index builds for a repo if they
+   * aren't ready yet. Safe to call repeatedly — build deduplication and
+   * readiness tracking are per repo.
+   */
+  private ensureRepoIndexes(repoPath: string): void {
+    if (!searchIndexService.isReady(repoPath)) {
+      searchIndexService.buildIndex(repoPath);
+    }
+    embeddingIndexService
+      .getStatus(repoPath)
+      .then((status) => {
+        // The tab may have been closed during the status round-trip — don't
+        // launch a multi-minute ONNX build for a repo that's gone (the
+        // close-time cancelBuild can't cancel a build that hadn't started).
+        const stillOpen = repositoryStore
+          .getState()
+          .openRepositories.some((r) => r.repository.path === repoPath);
+        if (!status.isReady && stillOpen) {
+          return embeddingIndexService.buildIndex(repoPath).then(() => undefined);
+        }
+        return undefined;
+      })
+      .catch(() => {
+        /* semantic search is optional — missing model/status is not an error */
+      });
   }
 
   private async loadWorkspaces(): Promise<void> {
@@ -2433,32 +2742,33 @@ export class AppShell extends LitElement {
     // Send initial tray settings to backend
     emit('update-tray-settings', { minimizeToTray: settings.minimizeToTray });
 
-    // Subscribe to settings changes to start/stop auto-fetch and update tray
+    // Subscribe to settings changes to start/stop auto-fetch and update tray.
+    // Newly OPENED repos get auto-fetch from the store subscription's
+    // open-set diff (see connectedCallback); this handles interval changes
+    // for repos that are already open. Only an ACTUAL interval change may
+    // restart the timers — the subscription fires for every settings write
+    // (theme, tray, ...) and each backend restart resets the fetch delay, so
+    // reacting to unrelated changes would defer fetches indefinitely.
+    this.lastAutoFetchInterval = settings.autoFetchInterval;
     this.autoFetchUnsubscribe = settingsStore.subscribe((state) => {
-      const repos = repositoryStore.getState().getPersistedOpenRepos();
-      if (state.autoFetchInterval > 0) {
-        for (const repo of repos) {
-          gitService.startAutoFetch(repo.path, state.autoFetchInterval);
-        }
-      } else {
-        for (const repo of repos) {
-          gitService.stopAutoFetch(repo.path);
+      if (state.autoFetchInterval !== this.lastAutoFetchInterval) {
+        this.lastAutoFetchInterval = state.autoFetchInterval;
+        const paths = repositoryStore
+          .getState()
+          .openRepositories.map((r) => r.repository.path);
+        if (state.autoFetchInterval > 0) {
+          for (const path of paths) {
+            this.startAutoFetchLogged(path, state.autoFetchInterval);
+          }
+        } else {
+          for (const path of paths) {
+            this.stopAutoFetchLogged(path);
+          }
         }
       }
       // Update tray settings
       emit('update-tray-settings', { minimizeToTray: state.minimizeToTray });
     });
-
-    // Start auto-fetch for any already-open repos if interval is set
-    if (settings.autoFetchInterval > 0) {
-      // Wait a bit for repos to be restored before starting auto-fetch
-      setTimeout(() => {
-        const repos = repositoryStore.getState().getPersistedOpenRepos();
-        for (const repo of repos) {
-          gitService.startAutoFetch(repo.path, settings.autoFetchInterval);
-        }
-      }, 3000);
-    }
   }
 
   /**
@@ -2471,26 +2781,61 @@ export class AppShell extends LitElement {
       behind: number;
       ahead: number;
       message?: string;
-    }>('autofetch-completed', (event) => {
-      if (event.success) {
-        this.remoteStatus = { ahead: event.ahead, behind: event.behind };
-      }
-    });
+    }>('autofetch-completed', this.handleAutoFetchCompleted);
     this.updateUnlisteners.push(unlistenFetch);
 
     const unlistenUpdates = await listenToEvent<{
       repoPath: string;
       behind: number;
       ahead: number;
-    }>('remote-updates-available', (event) => {
-      showToast(
-        `Remote has ${event.behind} new commit${event.behind !== 1 ? 's' : ''} available`,
-        'info',
-        5000,
-      );
-    });
+    }>('remote-updates-available', this.handleRemoteUpdatesAvailable);
     this.updateUnlisteners.push(unlistenUpdates);
   }
+
+  // Auto-fetch runs for every open repo. Every successful result updates
+  // that repo's ahead/behind in the store (so tab badges stay fresh even for
+  // background tabs), but only the ACTIVE repo's result may drive the
+  // toolbar badge.
+  private handleAutoFetchCompleted = (event: {
+    repoPath: string;
+    success: boolean;
+    behind: number;
+    ahead: number;
+    message?: string;
+  }): void => {
+    if (!event.success) return;
+
+    const store = repositoryStore.getState();
+    const repo = store.openRepositories.find((r) => r.repository.path === event.repoPath);
+    if (repo?.currentBranch) {
+      store.updateRepoData(event.repoPath, {
+        currentBranch: {
+          ...repo.currentBranch,
+          aheadBehind: { ahead: event.ahead, behind: event.behind },
+        },
+      });
+    }
+
+    if (event.repoPath === this.activeRepository?.repository.path) {
+      this.remoteStatus = { ahead: event.ahead, behind: event.behind };
+    }
+  };
+
+  // With several repos auto-fetching, an unattributed toast is noise — name
+  // the repo the commits arrived in. Split on both separators: Windows is a
+  // shipped target and its paths use backslashes.
+  private handleRemoteUpdatesAvailable = (event: {
+    repoPath: string;
+    behind: number;
+    ahead: number;
+  }): void => {
+    const repoName = event.repoPath.split(/[\\/]/).filter(Boolean).pop() || event.repoPath;
+    showToast(
+      `${repoName}: remote has ${event.behind} new commit${event.behind !== 1 ? 's' : ''} available`,
+      'info',
+      5000,
+    );
+  };
 
   /**
    * Load remotes for a repository and update the store
@@ -2499,18 +2844,7 @@ export class AppShell extends LitElement {
     try {
       const remotesResult = await gitService.getRemotes(repoPath);
       if (remotesResult.success && remotesResult.data) {
-        // Need to set active index to the repo first, then set remotes
-        const store = repositoryStore.getState();
-        const repoIndex = store.openRepositories.findIndex(r => r.repository.path === repoPath);
-        if (repoIndex >= 0) {
-          const currentIndex = store.activeIndex;
-          store.setActiveIndex(repoIndex);
-          store.setRemotes(remotesResult.data);
-          // Restore active index if different
-          if (currentIndex !== repoIndex && currentIndex >= 0) {
-            store.setActiveIndex(currentIndex);
-          }
-        }
+        repositoryStore.getState().updateRepoData(repoPath, { remotes: remotesResult.data });
       }
     } catch (error) {
       console.warn(`Failed to load remotes for ${repoPath}:`, error);
@@ -2794,6 +3128,7 @@ export class AppShell extends LitElement {
                 <div class="graph-area">
                   <lv-graph-canvas
                     repositoryPath=${this.activeRepository.repository.path}
+                    .searchFilter=${this.searchFilter}
                     @commit-selected=${this.handleCommitSelected}
                     @commit-context-menu=${this.handleCommitContextMenu}
                     @ref-context-menu=${this.handleRefContextMenu}

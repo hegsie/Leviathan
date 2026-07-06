@@ -42,11 +42,14 @@ impl AutoFetchService {
 
         let path = repo_path.clone();
         let interval = Duration::from_secs(interval_minutes as u64 * 60);
+        let initial_delay = interval + stagger_offset(&repo_path, interval);
 
         let task = tokio::spawn(async move {
+            // The first tick is staggered per repo so that many open repos
+            // don't all fetch at the same instant (thundering herd on every
+            // interval boundary); afterwards each repo keeps its own cadence.
+            tokio::time::sleep(initial_delay).await;
             loop {
-                tokio::time::sleep(interval).await;
-
                 // Perform fetch
                 tracing::info!("Auto-fetching repository: {}", path);
 
@@ -93,6 +96,8 @@ impl AutoFetchService {
                         );
                     }
                 }
+
+                tokio::time::sleep(interval).await;
             }
         });
 
@@ -147,6 +152,22 @@ struct RemoteUpdatesEvent {
     repo_path: String,
     behind: usize,
     ahead: usize,
+}
+
+/// Deterministic per-repo stagger within [0, interval/2), derived from the
+/// repo path. Keeps simultaneous fetches for many open repos spread out
+/// without needing shared state or randomness.
+fn stagger_offset(repo_path: &str, interval: Duration) -> Duration {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let half = interval.as_secs() / 2;
+    if half == 0 {
+        return Duration::ZERO;
+    }
+    let mut hasher = DefaultHasher::new();
+    repo_path.hash(&mut hasher);
+    Duration::from_secs(hasher.finish() % half)
 }
 
 /// Perform a fetch operation
@@ -232,4 +253,50 @@ pub type AutoFetchState = Arc<RwLock<AutoFetchService>>;
 /// Create default auto-fetch state
 pub fn create_autofetch_state() -> AutoFetchState {
     Arc::new(RwLock::new(AutoFetchService::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stagger_offset_is_deterministic() {
+        let interval = Duration::from_secs(300);
+        assert_eq!(
+            stagger_offset("/repo/one", interval),
+            stagger_offset("/repo/one", interval)
+        );
+    }
+
+    #[test]
+    fn test_stagger_offset_within_half_interval() {
+        let interval = Duration::from_secs(300);
+        for path in ["/a", "/b", "/c/deep/path", "/repo with spaces"] {
+            let offset = stagger_offset(path, interval);
+            assert!(
+                offset < Duration::from_secs(150),
+                "offset {offset:?} for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stagger_offset_spreads_different_repos() {
+        let interval = Duration::from_secs(600);
+        let offsets: std::collections::HashSet<u64> = (0..20)
+            .map(|i| stagger_offset(&format!("/repo/{i}"), interval).as_secs())
+            .collect();
+        // 20 repos over a 300s window: requiring at least a few distinct
+        // slots keeps the test robust while catching a constant offset.
+        assert!(offsets.len() > 5, "expected spread, got {offsets:?}");
+    }
+
+    #[test]
+    fn test_stagger_offset_zero_interval() {
+        assert_eq!(stagger_offset("/repo", Duration::ZERO), Duration::ZERO);
+        assert_eq!(
+            stagger_offset("/repo", Duration::from_secs(1)),
+            Duration::ZERO
+        );
+    }
 }

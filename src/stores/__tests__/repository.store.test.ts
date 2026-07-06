@@ -72,6 +72,105 @@ describe('repository.store', () => {
     });
   });
 
+  describe('addRepository with activate: false', () => {
+    it('adds the repo without changing the active tab', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/active'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/bg'), { activate: false });
+
+      const state = repositoryStore.getState();
+      expect(state.openRepositories.length).to.equal(2);
+      expect(state.activeIndex).to.equal(0);
+    });
+
+    it('does not steal focus for an already-open repo either', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/two'));
+
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'), { activate: false });
+
+      expect(repositoryStore.getState().activeIndex).to.equal(1);
+    });
+
+    it('keeps activeIndex -1 when batch-adding into an empty store', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'), { activate: false });
+      expect(repositoryStore.getState().activeIndex).to.equal(-1);
+
+      repositoryStore.getState().setActiveByPath('/repo/one');
+      expect(repositoryStore.getState().activeIndex).to.equal(0);
+    });
+  });
+
+  describe('updateRepoData', () => {
+    const branch = {
+      name: 'feature/x',
+      shorthand: 'feature/x',
+      isHead: false,
+      isRemote: false,
+      upstream: null,
+      targetOid: 'abc123',
+      isStale: false,
+    };
+
+    it('updates a BACKGROUND repo without touching activeIndex', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/two'));
+      // repo two is active; update repo one by path
+      expect(repositoryStore.getState().activeIndex).to.equal(1);
+
+      repositoryStore.getState().updateRepoData('/repo/one', { branches: [branch] });
+
+      const state = repositoryStore.getState();
+      expect(state.activeIndex).to.equal(1);
+      expect(state.openRepositories[0].branches).to.deep.equal([branch]);
+      expect(state.openRepositories[1].branches).to.deep.equal([]);
+    });
+
+    it('is a no-op for a path that is not open', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      const before = repositoryStore.getState().openRepositories;
+
+      repositoryStore.getState().updateRepoData('/not/open', { branches: [branch] });
+
+      expect(repositoryStore.getState().openRepositories).to.deep.equal(before);
+    });
+
+    it('active-repo setters delegate to the active repo only', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/two'));
+
+      repositoryStore.getState().setBranches([branch]);
+
+      const state = repositoryStore.getState();
+      expect(state.openRepositories[1].branches).to.deep.equal([branch]);
+      expect(state.openRepositories[0].branches).to.deep.equal([]);
+    });
+
+    it('setStatus computes staged/unstaged for the active repo', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      const staged = { path: 'a.txt', status: 'modified', isStaged: true } as never;
+      const unstaged = { path: 'b.txt', status: 'modified', isStaged: false } as never;
+
+      repositoryStore.getState().setStatus([staged, unstaged]);
+
+      const repo = repositoryStore.getState().openRepositories[0];
+      expect(repo.stagedFiles).to.deep.equal([staged]);
+      expect(repo.unstagedFiles).to.deep.equal([unstaged]);
+    });
+  });
+
+  describe('prunePersistedRepo', () => {
+    it('removes a repo from the persisted list without touching open repos', () => {
+      repositoryStore.getState().addRepository(createMockRepo('/repo/one'));
+      repositoryStore.getState().addRepository(createMockRepo('/repo/two'));
+
+      repositoryStore.getState().prunePersistedRepo('/repo/one');
+
+      const state = repositoryStore.getState();
+      expect(state.persistedOpenRepos.map((r) => r.path)).to.deep.equal(['/repo/two']);
+      expect(state.openRepositories.length).to.equal(2);
+    });
+  });
+
   describe('removeRepository', () => {
     it('removes a repository from open repositories', () => {
       const repo = createMockRepo('/test/path');

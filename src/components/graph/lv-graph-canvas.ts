@@ -33,6 +33,48 @@ import type { GraphPullRequest } from '../../graph/virtual-scroll.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
 import { embeddingIndexService } from '../../services/embedding-index.service.ts';
 
+/**
+ * Per-repository cache of the last loaded commit page. Switching back to an
+ * already-visited tab renders instantly from this cache while a background
+ * reload revalidates it — without it every tab switch pays a full backend
+ * history walk. Bounded LRU so many open repos can't grow memory unbounded.
+ */
+interface GraphCacheEntry {
+  commits: Commit[];
+  refsByCommit: RefsByCommit;
+  hasMore: boolean;
+}
+
+const GRAPH_CACHE_MAX_REPOS = 8;
+// Map iteration order is insertion order; re-inserting on write keeps the
+// oldest entry first for LRU eviction.
+const graphCache = new Map<string, GraphCacheEntry>();
+
+function cacheGraphPage(path: string, entry: GraphCacheEntry): void {
+  graphCache.delete(path);
+  graphCache.set(path, entry);
+  if (graphCache.size > GRAPH_CACHE_MAX_REPOS) {
+    const oldest = graphCache.keys().next().value;
+    if (oldest !== undefined) {
+      graphCache.delete(oldest);
+    }
+  }
+}
+
+/**
+ * Evict a repo's cached graph page — called when its tab closes so a
+ * different repository later opened at the same path can't flash the old
+ * repo's graph before revalidation.
+ */
+export function evictGraphCache(path: string): void {
+  graphCache.delete(path);
+}
+
+/** Test hook: clear the module-level graph cache */
+export function clearGraphCacheForTests(): void {
+  graphCache.clear();
+}
+
 export interface CommitSelectedEvent {
   commit: Commit | null;
   commits: Commit[]; // All selected commits for multi-select
@@ -473,6 +515,11 @@ export class LvGraphCanvas extends LitElement {
   private loadVersion = 0; // Incremented on each load to cancel stale requests
   private statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private lastLoadedRepoPath: string | null = null; // Track the last repo that completed loading
+  private inFlightLoadPath: string | null = null; // Repo whose loadCommits is currently in flight
+  // A refresh arrived while a load was in flight; that load's snapshot may
+  // predate the mutation the refresh was for, so one follow-up load runs
+  // when it finishes
+  private reloadQueued = false;
   private pullRequestsByCommit: Record<string, GraphPullRequest[]> = {};
   private githubRepo: { owner: string; repo: string } | null = null;
   private renderer: CanvasRenderer | null = null;
@@ -524,12 +571,31 @@ export class LvGraphCanvas extends LitElement {
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
 
-      // Reload commits for the new repository
-      this.loadCommits();
+      // A reload queued for the PREVIOUS repo must not leak into this one
+      this.reloadQueued = false;
+      // Clear any stats spinner owned by the previous repo — the new repo's
+      // fetch (if any) will set it again; a repo with no stats to fetch must
+      // not inherit the old spinner
+      this.isLoadingStats = false;
+
+      // Render instantly from the per-repo cache when switching back to a
+      // visited tab, then revalidate in the background (no spinner). A repo
+      // seen for the first time takes the normal loading path.
+      const cached = graphCache.get(this.repositoryPath);
+      if (cached) {
+        this.applyCachedGraph(cached);
+        this.loadCommits({ background: true });
+      } else {
+        this.loadCommits();
+      }
     }
 
-    // Reload when search filter changes
-    if (changedProperties.has('searchFilter')) {
+    // Reload when search filter changes. Skip when the repository changed in
+    // the same update (app-shell clears the filter on tab switch): the
+    // repositoryPath branch above already started the right load, and a
+    // second FOREGROUND load here would cancel the instant cached render
+    // with a spinner.
+    if (changedProperties.has('searchFilter') && !changedProperties.has('repositoryPath')) {
       this.loadCommits();
     }
   }
@@ -669,7 +735,22 @@ export class LvGraphCanvas extends LitElement {
     );
   }
 
-  private async loadCommits(): Promise<void> {
+  /** Populate the graph synchronously from a cached page (no spinner) */
+  private applyCachedGraph(cached: GraphCacheEntry): void {
+    this.realCommits.clear();
+    for (const commit of cached.commits) {
+      this.realCommits.set(commit.oid, commit);
+    }
+    this.refsByCommit = cached.refsByCommit;
+    this.commits = cached.commits.map(commitToGraphCommit);
+    this.totalLoadedCommits = cached.commits.length;
+    this.hasMoreCommits = cached.hasMore;
+    this.isLoading = false;
+    this.loadError = null;
+    this.processLayout();
+  }
+
+  private async loadCommits(options: { background?: boolean } = {}): Promise<void> {
     if (!this.repositoryPath) {
       this.loadError = 'No repository path specified';
       return;
@@ -679,9 +760,16 @@ export class LvGraphCanvas extends LitElement {
     this.loadVersion++;
     const currentVersion = this.loadVersion;
     const repoPath = this.repositoryPath;
+    this.inFlightLoadPath = repoPath;
 
-    this.isLoading = true;
-    this.loadError = null;
+    // A background revalidation keeps showing the (cached) graph instead of
+    // flashing the loading state — and its failure must not paint an error
+    // banner over a perfectly good cached graph, so loadError is only
+    // touched by foreground loads.
+    if (!options.background) {
+      this.isLoading = true;
+      this.loadError = null;
+    }
     const startTime = performance.now();
 
     try {
@@ -715,7 +803,11 @@ export class LvGraphCanvas extends LitElement {
       }
 
       if (!commitsResult.success || !commitsResult.data) {
-        this.loadError = commitsResult.error?.message ?? 'Failed to load commits';
+        if (options.background) {
+          log.warn('Background graph revalidation failed:', commitsResult.error?.message);
+        } else {
+          this.loadError = commitsResult.error?.message ?? 'Failed to load commits';
+        }
         this.isLoading = false;
         return;
       }
@@ -805,13 +897,45 @@ export class LvGraphCanvas extends LitElement {
       this.commits = commitsResult.data.map(commitToGraphCommit);
       this.totalLoadedCommits = commitsResult.data.length;
       this.hasMoreCommits = commitsResult.data.length >= this.commitCount;
+      // Cache this page so switching back to the tab renders instantly
+      cacheGraphPage(repoPath, {
+        commits: commitsResult.data,
+        refsByCommit: this.refsByCommit,
+        hasMore: this.hasMoreCommits,
+      });
+      // Any successful load clears a previous failure — including a queued
+      // background reload succeeding after a failed foreground load, which
+      // would otherwise leave the error panel painted over a healthy graph
+      this.loadError = null;
       this.processLayout();
       const searchInfo = hasSearch ? ` (${this.matchedCommitOids.size} matches highlighted)` : '';
       log.debug(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
     } catch (err) {
-      this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
+      if (options.background) {
+        log.warn('Background graph revalidation failed:', err);
+      } else {
+        this.loadError = err instanceof Error ? err.message : 'Unknown error loading commits';
+      }
     } finally {
-      this.isLoading = false;
+      // Only the NEWEST load owns the shared state. A superseded load (the
+      // user switched tabs again before this one resolved) must not clear
+      // isLoading — that would drop the spinner while the newest load is
+      // still running, flashing a stale/empty graph under the new tab.
+      if (this.loadVersion === currentVersion) {
+        this.isLoading = false;
+        this.inFlightLoadPath = null;
+        if (this.reloadQueued) {
+          // A refresh was requested mid-load. reloadQueued is only ever set
+          // by refresh() — i.e. a user/mutation-triggered reload (commit,
+          // pull, merge, watcher refs-changed) — so run it in the FOREGROUND
+          // so its failures surface (a silent background reload would hide
+          // errors the user expects to see after acting). Tab-switch cache
+          // revalidation uses a separate direct background load, not this
+          // queue.
+          this.reloadQueued = false;
+          this.loadCommits();
+        }
+      }
     }
   }
 
@@ -1069,13 +1193,19 @@ export class LvGraphCanvas extends LitElement {
         log.debug(`fetchCommitStats: discarding stats for ${repoPath}, now on ${this.repositoryPath}`);
       }
     } finally {
-      // Only clear loading state if we're still on the same repo
+      // Enforce the minimum-visible delay only while still on the same repo.
       if (this.repositoryPath === repoPath) {
-        // Ensure loading indicator is visible for minimum time
         const elapsed = Date.now() - startTime;
         if (elapsed < MIN_LOADING_DISPLAY_MS) {
           await new Promise(resolve => setTimeout(resolve, MIN_LOADING_DISPLAY_MS - elapsed));
         }
+      }
+      // Clear the stats spinner only for the CURRENT load. A superseded
+      // fetch (the user switched repos while it ran) must not clear a newer
+      // repo's spinner; the repo switch itself resets the flag (willUpdate)
+      // and the new repo's own fetch manages it from there — so switching
+      // away mid-fetch never leaves the spinner stuck on.
+      if (this.loadVersion === version) {
         this.isLoadingStats = false;
       }
     }
@@ -1764,6 +1894,16 @@ export class LvGraphCanvas extends LitElement {
    * Refresh the commit graph
    */
   public refresh(): void {
+    // A load for this repo is already in flight (e.g. the cache
+    // revalidation kicked off by a tab switch) — starting another now would
+    // just cancel it and repeat the same backend walk with a spinner. But
+    // the in-flight snapshot may predate whatever this refresh is about
+    // (a commit, a pull), so queue exactly one follow-up load instead of
+    // dropping the request.
+    if (this.inFlightLoadPath === this.repositoryPath) {
+      this.reloadQueued = true;
+      return;
+    }
     this.loadCommits();
   }
 

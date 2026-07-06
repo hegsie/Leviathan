@@ -1,6 +1,8 @@
 /**
  * Search Index Service
- * Provides fast commit searching via a Rust-side background index
+ * Provides fast commit searching via a Rust-side background index.
+ * Indexes are per-repository: every open repo can have its own index at the
+ * same time, and searching one repo never returns another repo's commits.
  */
 
 import { invokeCommand } from './tauri-api.ts';
@@ -26,32 +28,61 @@ export interface SearchOptions {
 }
 
 class SearchIndexService {
-  private indexReady = false;
-  private building = false;
-  private currentRepoPath: string | null = null;
+  private readyRepos = new Set<string>();
+  // In-flight builds, keyed by path, storing the drop epoch each build
+  // started under. Deduplication is epoch-aware: a build started BEFORE the
+  // repo was dropped must not block a rebuild after the repo is reopened.
+  private buildingRepos = new Map<string, number>();
+  // Bumped by drop(); a build/refresh that finishes after its repo was
+  // dropped must not resurrect readiness (or leak the backend index) for a
+  // closed tab
+  private dropEpochs = new Map<string, number>();
+  // Paths with an in-flight refresh, to dedupe overlapping refreshes (the
+  // backend takes the index out first, so a concurrent refresh would trigger
+  // a redundant full rebuild)
+  private refreshingRepos = new Set<string>();
 
   /**
    * Build the search index for a repository.
    * Non-blocking - meant to be called fire-and-forget.
+   * Builds for different repositories can run concurrently; only a build for
+   * the SAME repository is deduplicated.
    */
   async buildIndex(repoPath: string): Promise<void> {
-    if (this.building) return;
-    this.building = true;
+    const epoch = this.dropEpochs.get(repoPath) ?? 0;
+    // Dedupe only builds from the SAME epoch: a pre-drop build still in
+    // flight must not block the rebuild for a reopened tab (it will discard
+    // itself on completion via the epoch check below).
+    if (this.buildingRepos.get(repoPath) === epoch) return;
+    this.buildingRepos.set(repoPath, epoch);
 
-    const result = await invokeCommand<number>('build_search_index', { path: repoPath });
-    if (result.success) {
-      this.indexReady = true;
-      this.currentRepoPath = repoPath;
-      console.log(`[SearchIndex] Built index with ${result.data} commits`);
-    } else {
-      console.warn('[SearchIndex] Failed to build index:', result.error?.message);
-      this.indexReady = false;
+    try {
+      const result = await invokeCommand<number>('build_search_index', { path: repoPath });
+      if ((this.dropEpochs.get(repoPath) ?? 0) !== epoch) {
+        // The repo was closed while this build ran. The BACKEND guards its
+        // own insert by generation, so it already discarded this stale
+        // build (and a reopen build's fresh index is untouched) — nothing to
+        // clean up here; just don't mark this closed epoch as ready.
+        return;
+      }
+      if (result.success) {
+        this.readyRepos.add(repoPath);
+        console.log(`[SearchIndex] Built index for ${repoPath} with ${result.data} commits`);
+      } else {
+        this.readyRepos.delete(repoPath);
+        console.warn('[SearchIndex] Failed to build index:', result.error?.message);
+      }
+    } finally {
+      // Only remove the marker if it still belongs to THIS build — a newer
+      // (post-drop) build may have replaced it
+      if (this.buildingRepos.get(repoPath) === epoch) {
+        this.buildingRepos.delete(repoPath);
+      }
     }
-    this.building = false;
   }
 
   /**
-   * Search commits using the index if available, otherwise return null
+   * Search commits using the repo's index if available, otherwise return null
    * to signal the caller should use the fallback.
    */
   async search(repoPath: string, options: SearchOptions): Promise<IndexedCommit[] | null> {
@@ -60,9 +91,10 @@ class SearchIndexService {
     const cached = searchResultCache.get(cacheKey) as IndexedCommit[] | undefined;
     if (cached) return cached;
 
-    if (!this.indexReady) return null;
+    if (!this.readyRepos.has(repoPath)) return null;
 
     const result = await invokeCommand<IndexedCommit[]>('search_index', {
+      path: repoPath,
       query: options.query || null,
       author: options.author || null,
       dateFrom: options.dateFrom || null,
@@ -78,36 +110,77 @@ class SearchIndexService {
   }
 
   /**
-   * Refresh the index incrementally after repo-mutating operations
+   * Refresh a repo's index incrementally after repo-mutating operations
    */
   async refresh(repoPath: string): Promise<void> {
-    if (!this.indexReady) return;
+    if (!this.readyRepos.has(repoPath)) return;
+    // Dedupe overlapping refreshes for the same repo: the backend's refresh
+    // takes the index out before its incremental walk, so a second
+    // concurrent refresh would find nothing and fall through to a full
+    // (up to 100k-commit) rebuild running alongside the first.
+    if (this.refreshingRepos.has(repoPath)) return;
+    this.refreshingRepos.add(repoPath);
+    const epoch = this.dropEpochs.get(repoPath) ?? 0;
 
-    const result = await invokeCommand<number>('refresh_search_index', { path: repoPath });
-    if (result.success) {
-      // Invalidate search cache since results may have changed
-      searchResultCache.clear();
-    } else {
-      console.warn('[SearchIndex] Failed to refresh index:', result.error?.message);
+    try {
+      const result = await invokeCommand<number>('refresh_search_index', { path: repoPath });
+      if ((this.dropEpochs.get(repoPath) ?? 0) !== epoch) {
+        // The repo was closed while the refresh ran. The backend guards its
+        // reinsert by generation (and discards the stale result), so there is
+        // nothing to clean up here.
+        return;
+      }
+      if (result.success) {
+        // Invalidate search cache since results may have changed
+        searchResultCache.clear();
+      } else {
+        // A genuine refresh failure (e.g. corrupt/locked repo) means the
+        // backend took the index out and never reinserted it — the path is no
+        // longer searchable. Clear readiness so the next activation rebuilds
+        // from scratch instead of leaving the repo "ready" with no index.
+        this.readyRepos.delete(repoPath);
+        console.warn('[SearchIndex] Failed to refresh index:', result.error?.message);
+      }
+    } finally {
+      this.refreshingRepos.delete(repoPath);
     }
   }
 
   /**
-   * Invalidate the index (e.g., when switching repos)
+   * Drop a repo's index entirely (e.g., when its tab is closed) so the
+   * backend releases the memory.
    */
-  invalidate(): void {
-    this.indexReady = false;
-    this.currentRepoPath = null;
+  async drop(repoPath: string): Promise<void> {
+    this.dropEpochs.set(repoPath, (this.dropEpochs.get(repoPath) ?? 0) + 1);
+    this.readyRepos.delete(repoPath);
+    searchResultCache.clear();
+    const result = await invokeCommand<void>('drop_search_index', { path: repoPath });
+    if (!result.success) {
+      console.warn('[SearchIndex] Failed to drop index:', result.error?.message);
+    }
+  }
+
+  /**
+   * Invalidate readiness state — for one repo if a path is given, for all
+   * repos otherwise. The backend index is kept; a later search simply won't
+   * use it until buildIndex marks it ready again.
+   */
+  invalidate(repoPath?: string): void {
+    if (repoPath) {
+      this.readyRepos.delete(repoPath);
+    } else {
+      this.readyRepos.clear();
+    }
     searchResultCache.clear();
   }
 
   /**
-   * Check if the index is ready for the given repo
+   * Check if the index is ready — for a specific repo if a path is given,
+   * for any repo otherwise.
    */
   isReady(repoPath?: string): boolean {
-    if (!this.indexReady) return false;
-    if (repoPath && this.currentRepoPath !== repoPath) return false;
-    return true;
+    if (repoPath) return this.readyRepos.has(repoPath);
+    return this.readyRepos.size > 0;
   }
 }
 

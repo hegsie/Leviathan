@@ -27,6 +27,7 @@ import type { LvBranchList } from '../sidebar/lv-branch-list.ts';
 
 // Import the actual component — registers <lv-branch-list> custom element
 import '../sidebar/lv-branch-list.ts';
+import { repositoryStore } from '../../stores/repository.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -919,6 +920,86 @@ describe('lv-branch-list', () => {
       // First attempt without force fails; a force retry follows the confirm.
       expect(deleteCalls.map((c) => c.force)).to.deep.equal([false, true]);
       expect(removed).to.be.true;
+    });
+  });
+
+  // ── Multi-repo store sync ────────────────────────────────────────────
+  describe('repository store sync', () => {
+    beforeEach(() => {
+      repositoryStore.getState().reset();
+      repositoryStore.getState().addRepository({
+        path: REPO_PATH,
+        name: 'test-repo',
+        isValid: true,
+        isBare: false,
+        headRef: 'main',
+        state: 'clean',
+        isShallow: false,
+        isPartialClone: false,
+        cloneFilter: null,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+    });
+
+    it('a stale branches result must not overwrite the newly active repo panel', async () => {
+      // Regression: switch tabs while a slow get_branches for the OLD repo
+      // is in flight; its late result used to render the old repo's
+      // branches under the new repo's tab (checkout/delete would then run
+      // against the wrong names).
+      let releaseSlow!: () => void;
+      const slowGate = new Promise<void>((resolve) => {
+        releaseSlow = resolve;
+      });
+      const slowBranches = [makeBranch({ name: 'stale-branch', shorthand: 'stale-branch', isHead: true })];
+      const fastBranches = [makeBranch({ name: 'fresh-branch', shorthand: 'fresh-branch', isHead: true })];
+      let branchCalls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_branches') {
+          branchCalls++;
+          if (branchCalls === 1) {
+            await slowGate;
+            return slowBranches;
+          }
+          return fastBranches;
+        }
+        return null;
+      };
+
+      const el = await fixture<LvBranchList>(
+        html`<lv-branch-list .repositoryPath=${REPO_PATH}></lv-branch-list>`
+      );
+      await el.updateComplete;
+
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+
+      releaseSlow();
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      // The visible panel keeps the ACTIVE repo's branches
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const groups = (el as any).localBranchGroups as Array<{ branches: Branch[] }>;
+      const names = groups.flatMap((g) => g.branches.map((b) => b.name));
+      expect(names).to.deep.equal(['fresh-branch']);
+
+      // ...and the store keeps the NEWEST result for that repo — the
+      // outdated first load is discarded by the per-path sequence guard
+      const repoA = repositoryStore
+        .getState()
+        .openRepositories.find((r) => r.repository.path === REPO_PATH);
+      expect(repoA!.currentBranch!.name).to.equal('fresh-branch');
+    });
+
+    it('mirrors loaded branches and current branch into the repository store', async () => {
+      setupDefaultMocks();
+      await renderBranchList();
+
+      const repo = repositoryStore.getState().openRepositories[0];
+      expect(repo.branches.length).to.be.greaterThan(0);
+      expect(repo.currentBranch).to.not.be.null;
+      expect(repo.currentBranch!.isHead).to.be.true;
     });
   });
 });

@@ -3,13 +3,26 @@ import { expect } from '@open-wc/testing';
 // Track mock calls
 const invokeCallArgs: Array<{ command: string; args: Record<string, unknown> }> = [];
 
+// When set, build_search_index waits on this before resolving — lets tests
+// interleave a drop() with an in-flight build
+let pendingBuildGate: Promise<void> | null = null;
+let pendingRefreshGate: Promise<void> | null = null;
+// When true, refresh_search_index rejects (simulating a genuine backend
+// failure — corrupt/locked repo mid-session)
+let refreshShouldFail = false;
+
 // Mock Tauri API before importing any modules that use it
-const mockInvoke = (command: string, args?: Record<string, unknown>): Promise<unknown> => {
+const mockInvoke = async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   invokeCallArgs.push({ command, args: args || {} });
 
   switch (command) {
     case 'build_search_index':
+      if (pendingBuildGate) await pendingBuildGate;
       return Promise.resolve(500);
+    case 'refresh_search_index':
+      if (pendingRefreshGate) await pendingRefreshGate;
+      if (refreshShouldFail) return Promise.reject(new Error('corrupt repo'));
+      return Promise.resolve(502);
     case 'search_index':
       return Promise.resolve([
         {
@@ -23,8 +36,6 @@ const mockInvoke = (command: string, args?: Record<string, unknown>): Promise<un
           parentCount: 1,
         },
       ]);
-    case 'refresh_search_index':
-      return Promise.resolve(502);
     default:
       return Promise.resolve(null);
   }
@@ -41,6 +52,9 @@ import { searchIndexService } from '../search-index.service.ts';
 describe('SearchIndexService', () => {
   beforeEach(() => {
     invokeCallArgs.length = 0;
+    pendingBuildGate = null;
+    pendingRefreshGate = null;
+    refreshShouldFail = false;
     searchIndexService.invalidate();
   });
 
@@ -51,6 +65,34 @@ describe('SearchIndexService', () => {
       const buildCall = invokeCallArgs.find((c) => c.command === 'build_search_index');
       expect(buildCall).to.not.be.undefined;
       expect(buildCall!.args.path).to.equal('/path/to/repo');
+    });
+
+    it('should build indexes for multiple repos concurrently without dropping any', async () => {
+      // Regression: a global "building" flag used to silently skip every
+      // build after the first when several repos were restored at startup.
+      await Promise.all([
+        searchIndexService.buildIndex('/repo/one'),
+        searchIndexService.buildIndex('/repo/two'),
+        searchIndexService.buildIndex('/repo/three'),
+      ]);
+
+      const buildPaths = invokeCallArgs
+        .filter((c) => c.command === 'build_search_index')
+        .map((c) => c.args.path);
+      expect(buildPaths).to.have.members(['/repo/one', '/repo/two', '/repo/three']);
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+      expect(searchIndexService.isReady('/repo/two')).to.be.true;
+      expect(searchIndexService.isReady('/repo/three')).to.be.true;
+    });
+
+    it('should deduplicate concurrent builds for the SAME repo', async () => {
+      await Promise.all([
+        searchIndexService.buildIndex('/repo/one'),
+        searchIndexService.buildIndex('/repo/one'),
+      ]);
+
+      const buildCalls = invokeCallArgs.filter((c) => c.command === 'build_search_index');
+      expect(buildCalls.length).to.equal(1);
     });
 
     it('should set index as ready after building', async () => {
@@ -85,6 +127,25 @@ describe('SearchIndexService', () => {
       expect(searchCall).to.not.be.undefined;
     });
 
+    it('should pass the repo path to the backend so results come from the right repo', async () => {
+      await searchIndexService.buildIndex('/path/to/repo');
+      invokeCallArgs.length = 0;
+
+      await searchIndexService.search('/path/to/repo', { query: 'test' });
+
+      const searchCall = invokeCallArgs.find((c) => c.command === 'search_index');
+      expect(searchCall!.args.path).to.equal('/path/to/repo');
+    });
+
+    it('should return null for a repo whose index is not built, even when another repo is ready', async () => {
+      // Regression: with a single global index, searching repo B used to
+      // return repo A's commits.
+      await searchIndexService.buildIndex('/repo/one');
+
+      const result = await searchIndexService.search('/repo/two', { query: 'test' });
+      expect(result).to.be.null;
+    });
+
     it('should cache search results', async () => {
       await searchIndexService.buildIndex('/path/to/repo');
       invokeCallArgs.length = 0;
@@ -98,6 +159,54 @@ describe('SearchIndexService', () => {
       await searchIndexService.search('/path/to/repo', { query: 'test' });
       const secondCallCount = invokeCallArgs.filter((c) => c.command === 'search_index').length;
       expect(secondCallCount).to.equal(1); // Should not increase
+    });
+  });
+
+  describe('refresh dedup', () => {
+    it('dedupes overlapping refreshes for the same repo (no redundant rebuild)', async () => {
+      // Regression: the backend refresh takes the index out first, so a
+      // second concurrent refresh would fall through to a full rebuild.
+      await searchIndexService.buildIndex('/repo/one');
+      invokeCallArgs.length = 0;
+
+      let releaseRefresh!: () => void;
+      pendingRefreshGate = new Promise((resolve) => {
+        releaseRefresh = resolve;
+      });
+
+      const first = searchIndexService.refresh('/repo/one');
+      const second = searchIndexService.refresh('/repo/one'); // overlaps — must no-op
+      releaseRefresh();
+      await Promise.all([first, second]);
+
+      const refreshCalls = invokeCallArgs.filter((c) => c.command === 'refresh_search_index');
+      expect(refreshCalls.length).to.equal(1);
+    });
+
+    it('allows a fresh refresh after the previous one settled', async () => {
+      await searchIndexService.buildIndex('/repo/one');
+      invokeCallArgs.length = 0;
+
+      await searchIndexService.refresh('/repo/one');
+      await searchIndexService.refresh('/repo/one');
+
+      const refreshCalls = invokeCallArgs.filter((c) => c.command === 'refresh_search_index');
+      expect(refreshCalls.length).to.equal(2);
+    });
+  });
+
+  describe('refresh failure', () => {
+    it('clears readiness on a genuine refresh failure so the next activation rebuilds', async () => {
+      // Regression: the backend takes the index out before the incremental
+      // walk; a genuine failure leaves no index, but readiness stayed true —
+      // the repo was stuck searchable-but-empty for the session.
+      await searchIndexService.buildIndex('/repo/one');
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+
+      refreshShouldFail = true;
+      await searchIndexService.refresh('/repo/one');
+
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
     });
   });
 
@@ -121,6 +230,143 @@ describe('SearchIndexService', () => {
       // After invalidate, search should return null (not from cache)
       const result = await searchIndexService.search('/path/to/repo', { query: 'test' });
       expect(result).to.be.null;
+    });
+  });
+
+  describe('invalidate with a path', () => {
+    it('should only invalidate the given repo', async () => {
+      await searchIndexService.buildIndex('/repo/one');
+      await searchIndexService.buildIndex('/repo/two');
+
+      searchIndexService.invalidate('/repo/one');
+
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
+      expect(searchIndexService.isReady('/repo/two')).to.be.true;
+    });
+  });
+
+  describe('drop', () => {
+    it('a build finishing AFTER its repo was dropped must not resurrect readiness', async () => {
+      // Regression: open repo -> slow build starts -> user closes the tab
+      // (drop) -> build completes. Without an epoch guard the completed
+      // build re-marked the closed repo ready. (The backend discards the
+      // stale build via its own generation guard, so the frontend no longer
+      // issues a compensating drop.)
+      let releaseBuild!: () => void;
+      pendingBuildGate = new Promise((resolve) => {
+        releaseBuild = resolve;
+      });
+
+      const building = searchIndexService.buildIndex('/repo/one');
+      await searchIndexService.drop('/repo/one');
+      invokeCallArgs.length = 0;
+
+      releaseBuild();
+      await building;
+
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
+      // The backend generation guard owns cleanup — the frontend must NOT
+      // issue a redundant drop that could clobber a reopened tab's index
+      expect(invokeCallArgs.find((c) => c.command === 'drop_search_index')).to.be.undefined;
+    });
+
+    it('reopening a repo during an in-flight pre-drop build starts a fresh build', async () => {
+      // Regression: buildIndex deduped purely on "a build is in flight", so
+      // close-then-reopen during a slow build left the reopened tab with no
+      // index at all (the old build self-dropped, nothing rebuilt).
+      let releaseBuilds!: () => void;
+      pendingBuildGate = new Promise((resolve) => {
+        releaseBuilds = resolve;
+      });
+
+      const preDropBuild = searchIndexService.buildIndex('/repo/one');
+      await searchIndexService.drop('/repo/one'); // tab closed mid-build
+      const reopenBuild = searchIndexService.buildIndex('/repo/one'); // tab reopened
+
+      releaseBuilds();
+      await Promise.all([preDropBuild, reopenBuild]);
+
+      const buildCalls = invokeCallArgs.filter((c) => c.command === 'build_search_index');
+      expect(buildCalls.length).to.equal(2);
+      // The reopened tab ends up READY (the post-drop build won)
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+    });
+
+    it('a LATE pre-drop build must not delete the index a reopen build created', async () => {
+      // Regression: pre-drop build (epoch 0) resolves AFTER the reopen build
+      // (epoch 1) already inserted a fresh index — its compensating drop
+      // used to delete that fresh index while isReady stayed true.
+      let releaseOldBuild!: () => void;
+      pendingBuildGate = new Promise((resolve) => {
+        releaseOldBuild = resolve;
+      });
+      const oldBuild = searchIndexService.buildIndex('/repo/one'); // epoch 0, slow
+      await searchIndexService.drop('/repo/one'); // tab closed
+      pendingBuildGate = null;
+      await searchIndexService.buildIndex('/repo/one'); // reopen build, completes first
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+      invokeCallArgs.length = 0;
+
+      releaseOldBuild();
+      await oldBuild;
+
+      expect(invokeCallArgs.find((c) => c.command === 'drop_search_index')).to.be.undefined;
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+    });
+
+    it("a LATE pre-drop refresh must not delete the reopened repo's index", async () => {
+      await searchIndexService.buildIndex('/repo/one');
+      let releaseRefresh!: () => void;
+      pendingRefreshGate = new Promise((resolve) => {
+        releaseRefresh = resolve;
+      });
+      const staleRefresh = searchIndexService.refresh('/repo/one'); // slow
+      await searchIndexService.drop('/repo/one'); // tab closed
+      await searchIndexService.buildIndex('/repo/one'); // reopened + rebuilt
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+      invokeCallArgs.length = 0;
+
+      releaseRefresh();
+      await staleRefresh;
+
+      expect(invokeCallArgs.find((c) => c.command === 'drop_search_index')).to.be.undefined;
+      expect(searchIndexService.isReady('/repo/one')).to.be.true;
+    });
+
+    it('a refresh finishing AFTER its repo was dropped must not resurrect readiness', async () => {
+      // Regression: handleRefresh fires refresh_search_index; if the tab is
+      // closed while it runs, readiness must not come back. (The backend
+      // generation guard discards the stale reinsert, so the frontend no
+      // longer issues a compensating drop.)
+      await searchIndexService.buildIndex('/repo/one');
+      let releaseRefresh!: () => void;
+      pendingRefreshGate = new Promise((resolve) => {
+        releaseRefresh = resolve;
+      });
+
+      const refreshing = searchIndexService.refresh('/repo/one');
+      await searchIndexService.drop('/repo/one');
+      invokeCallArgs.length = 0;
+
+      releaseRefresh();
+      await refreshing;
+
+      expect(invokeCallArgs.find((c) => c.command === 'drop_search_index')).to.be.undefined;
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
+    });
+
+    it('should call drop_search_index and clear readiness for that repo only', async () => {
+      await searchIndexService.buildIndex('/repo/one');
+      await searchIndexService.buildIndex('/repo/two');
+      invokeCallArgs.length = 0;
+
+      await searchIndexService.drop('/repo/one');
+
+      const dropCall = invokeCallArgs.find((c) => c.command === 'drop_search_index');
+      expect(dropCall).to.not.be.undefined;
+      expect(dropCall!.args.path).to.equal('/repo/one');
+      expect(searchIndexService.isReady('/repo/one')).to.be.false;
+      expect(searchIndexService.isReady('/repo/two')).to.be.true;
     });
   });
 

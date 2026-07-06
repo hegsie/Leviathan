@@ -8,6 +8,7 @@ import { showToast } from "../../services/notification.service.ts";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { join } from "@tauri-apps/api/path";
 import type { StatusEntry, FileStatus } from "../../types/git.types.ts";
+import { repositoryStore } from "../../stores/repository.store.ts";
 
 interface FileContextMenuState {
   visible: boolean;
@@ -738,15 +739,7 @@ export class LvFileStatus extends LitElement {
     // Subscribe to file change events with debouncing
     // Note: refs-changed is handled globally by app-shell to ensure it works
     // even when the right panel (and this component) is hidden
-    this.unsubscribeWatcher = watcherService.onFileChange((event) => {
-      // Refresh status on workdir or index changes
-      if (
-        event.eventType === "workdir-changed" ||
-        event.eventType === "index-changed"
-      ) {
-        this.debouncedLoadStatus();
-      }
-    });
+    this.unsubscribeWatcher = watcherService.onFileChange(this.handleWatcherEvent);
 
     // Listen for global stage-all, unstage-all, and refresh events
     this.boundHandleStageAllEvent = () => this.handleStageAll();
@@ -965,6 +958,23 @@ export class LvFileStatus extends LitElement {
   }
 
   /**
+   * Route file-watcher events. Every open repo is watched — only THIS
+   * panel's repo may trigger a status reload here; background repos are
+   * routed to staleness by app-shell and refresh when their tab activates.
+   * (refs-changed stays global in app-shell so it works while this panel is
+   * hidden.)
+   */
+  private handleWatcherEvent = (event: watcherService.FileChangeEvent): void => {
+    if (event.repoPath !== this.repositoryPath) return;
+    if (
+      event.eventType === "workdir-changed" ||
+      event.eventType === "index-changed"
+    ) {
+      this.debouncedLoadStatus();
+    }
+  };
+
+  /**
    * Debounced version of loadStatus to prevent excessive refreshes
    * when multiple file changes occur in rapid succession.
    */
@@ -992,8 +1002,18 @@ export class LvFileStatus extends LitElement {
     }
   }
 
+  // Monotonic sequence per repo path: a load only applies its result if no
+  // NEWER load for the same path started meanwhile (path equality alone
+  // can't catch A -> B -> A switches reordering two loads for A)
+  private statusLoadSeq = new Map<string, number>();
+
   async loadStatus(): Promise<void> {
     if (!this.repositoryPath) return;
+    // Captured before the await so a mid-flight tab switch still writes the
+    // result to the repo it was loaded FROM
+    const loadedPath = this.repositoryPath;
+    const seq = (this.statusLoadSeq.get(loadedPath) ?? 0) + 1;
+    this.statusLoadSeq.set(loadedPath, seq);
 
     // Only show loading indicator on the very first load
     if (!this.hasInitiallyLoaded) {
@@ -1002,16 +1022,38 @@ export class LvFileStatus extends LitElement {
     this.error = null;
 
     try {
-      const result = await gitService.getStatus(this.repositoryPath);
+      const result = await gitService.getStatus(loadedPath);
+      // A newer load for the SAME path supersedes this one entirely (its
+      // result is fresher for both the store and the panel).
+      const isLatestForPath = this.statusLoadSeq.get(loadedPath) === seq;
+      if (!isLatestForPath) return;
+      // The tab may have switched while the fetch was in flight. The store
+      // write below is path-keyed and always safe; the component's OWN
+      // render state belongs to the now-active repo and must not be
+      // overwritten with a stale result (showing repo A's files under repo
+      // B's tab risks destructive actions on files the user never saw).
+      const isCurrent = this.repositoryPath === loadedPath;
 
       if (!result.success) {
-        this.error = result.error?.message ?? "Failed to load status";
+        if (isCurrent) {
+          this.error = result.error?.message ?? "Failed to load status";
+        }
         return;
       }
 
       const entries = result.data!;
       const newStagedFiles = entries.filter((e) => e.isStaged);
       const newUnstagedFiles = entries.filter((e) => !e.isStaged);
+
+      // Mirror the loaded status into the repository store so path-keyed
+      // consumers (e.g. the tab bar's dirty indicator) stay in sync
+      repositoryStore.getState().updateRepoData(loadedPath, {
+        status: entries,
+        stagedFiles: newStagedFiles,
+        unstagedFiles: newUnstagedFiles,
+      });
+
+      if (!isCurrent) return;
 
       // Only update if there are actual changes (delta update)
       const stagedChanged = !this.areStatusEntriesEqual(
@@ -1044,10 +1086,16 @@ export class LvFileStatus extends LitElement {
         );
       }
     } catch (err) {
-      this.error = err instanceof Error ? err.message : "Unknown error";
+      if (this.repositoryPath === loadedPath) {
+        this.error = err instanceof Error ? err.message : "Unknown error";
+      }
     } finally {
-      this.loading = false;
-      this.hasInitiallyLoaded = true;
+      // A stale load must not stomp the loading state of the load that the
+      // now-active repo owns
+      if (this.repositoryPath === loadedPath) {
+        this.loading = false;
+        this.hasInitiallyLoaded = true;
+      }
     }
   }
 
