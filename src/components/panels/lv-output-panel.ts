@@ -203,8 +203,9 @@ export class LvOutputPanel extends LitElement {
   }
 
   willUpdate(changed: Map<string, unknown>): void {
-    // Expansion indexes are positions within the filtered list — reset them
-    // when switching repositories so stale indexes don't expand wrong rows
+    // Collapse all rows when switching repositories — a different repo shows a
+    // different set of entries, so carrying expansion state (keyed by entry id)
+    // across the switch would be meaningless.
     if (changed.has('repositoryPath')) {
       this.expandedEntries = new Set();
     }

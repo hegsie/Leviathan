@@ -782,6 +782,7 @@ export class LvGitflowPanel extends LitElement {
         <button
           class="error-banner-dismiss"
           title="Dismiss"
+          aria-label="Dismiss error"
           @click=${this.dismissError}
         >✕</button>
       </div>

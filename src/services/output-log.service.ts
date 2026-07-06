@@ -67,10 +67,12 @@ export function logGitCommand(
 }
 
 /**
- * Get current log entries (read-only snapshot).
+ * Get current log entries as a read-only snapshot. Returns a shallow copy so
+ * callers cannot mutate the store behind the listeners' backs or hold a live
+ * reference that changes underneath them.
  */
 export function getLogEntries(): ReadonlyArray<OutputLogEntry> {
-  return logEntries;
+  return [...logEntries];
 }
 
 /**
