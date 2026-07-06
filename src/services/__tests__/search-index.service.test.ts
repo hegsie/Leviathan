@@ -196,7 +196,9 @@ describe('SearchIndexService', () => {
     it('a build finishing AFTER its repo was dropped must not resurrect readiness', async () => {
       // Regression: open repo -> slow build starts -> user closes the tab
       // (drop) -> build completes. Without an epoch guard the completed
-      // build re-marked the closed repo ready and leaked the backend index.
+      // build re-marked the closed repo ready. (The backend discards the
+      // stale build via its own generation guard, so the frontend no longer
+      // issues a compensating drop.)
       let releaseBuild!: () => void;
       pendingBuildGate = new Promise((resolve) => {
         releaseBuild = resolve;
@@ -210,10 +212,9 @@ describe('SearchIndexService', () => {
       await building;
 
       expect(searchIndexService.isReady('/repo/one')).to.be.false;
-      // The backend index inserted by the late build is freed again
-      const dropCall = invokeCallArgs.find((c) => c.command === 'drop_search_index');
-      expect(dropCall).to.not.be.undefined;
-      expect(dropCall!.args.path).to.equal('/repo/one');
+      // The backend generation guard owns cleanup — the frontend must NOT
+      // issue a redundant drop that could clobber a reopened tab's index
+      expect(invokeCallArgs.find((c) => c.command === 'drop_search_index')).to.be.undefined;
     });
 
     it('reopening a repo during an in-flight pre-drop build starts a fresh build', async () => {
@@ -279,10 +280,11 @@ describe('SearchIndexService', () => {
       expect(searchIndexService.isReady('/repo/one')).to.be.true;
     });
 
-    it('a refresh finishing AFTER its repo was dropped frees the resurrected backend index', async () => {
+    it('a refresh finishing AFTER its repo was dropped must not resurrect readiness', async () => {
       // Regression: handleRefresh fires refresh_search_index; if the tab is
-      // closed while it runs, the backend refresh re-inserts an index for a
-      // closed repo (or falls back to a full rebuild) — leaking it.
+      // closed while it runs, readiness must not come back. (The backend
+      // generation guard discards the stale reinsert, so the frontend no
+      // longer issues a compensating drop.)
       await searchIndexService.buildIndex('/repo/one');
       let releaseRefresh!: () => void;
       pendingRefreshGate = new Promise((resolve) => {
@@ -296,9 +298,7 @@ describe('SearchIndexService', () => {
       releaseRefresh();
       await refreshing;
 
-      const dropCall = invokeCallArgs.find((c) => c.command === 'drop_search_index');
-      expect(dropCall).to.not.be.undefined;
-      expect(dropCall!.args.path).to.equal('/repo/one');
+      expect(invokeCallArgs.find((c) => c.command === 'drop_search_index')).to.be.undefined;
       expect(searchIndexService.isReady('/repo/one')).to.be.false;
     });
 

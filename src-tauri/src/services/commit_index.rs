@@ -225,9 +225,60 @@ impl CommitIndex {
     }
 }
 
+/// Commit index store: the per-path indexes plus a per-path generation
+/// counter. The generation is bumped whenever a path is dropped, so a build
+/// or refresh that started before a drop can detect (on completion) that its
+/// result is stale and must not overwrite a fresher index inserted after the
+/// drop (e.g. by a rebuild for a reopened tab).
+#[derive(Default)]
+pub struct CommitIndexStore {
+    indexes: HashMap<String, CommitIndex>,
+    generations: HashMap<String, u64>,
+}
+
+impl CommitIndexStore {
+    /// Current generation for a path (0 if never dropped).
+    pub fn generation(&self, path: &str) -> u64 {
+        self.generations.get(path).copied().unwrap_or(0)
+    }
+
+    /// Insert an index for a path only if `expected_generation` still matches
+    /// the current generation — i.e. the path was not dropped while this
+    /// index was being built. Returns true if the index was stored.
+    pub fn insert_if_current(
+        &mut self,
+        path: String,
+        index: CommitIndex,
+        expected_generation: u64,
+    ) -> bool {
+        if self.generation(&path) != expected_generation {
+            return false;
+        }
+        self.indexes.insert(path, index);
+        true
+    }
+
+    /// Take a path's index out for updating (used by incremental refresh).
+    pub fn take(&mut self, path: &str) -> Option<CommitIndex> {
+        self.indexes.remove(path)
+    }
+
+    /// Look up a path's index (for searching).
+    pub fn get(&self, path: &str) -> Option<&CommitIndex> {
+        self.indexes.get(path)
+    }
+
+    /// Drop a path's index and bump its generation so any in-flight build or
+    /// refresh for that path discards its result on completion.
+    pub fn drop_index(&mut self, path: &str) {
+        self.indexes.remove(path);
+        *self.generations.entry(path.to_string()).or_insert(0) += 1;
+    }
+}
+
 /// Shared commit index state, keyed by repository path so that every open
 /// repository keeps its own independent index.
-pub type SharedCommitIndex = Arc<RwLock<HashMap<String, CommitIndex>>>;
+pub type SharedCommitIndex = Arc<RwLock<CommitIndexStore>>;
 
 #[cfg(test)]
 mod tests {
@@ -239,6 +290,36 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         let index = CommitIndex::build(&repo.path_str()).unwrap();
         assert!(index.len() >= 1);
+    }
+
+    #[test]
+    fn test_store_insert_if_current_respects_generation() {
+        let repo = TestRepo::with_initial_commit();
+        let mut store = CommitIndexStore::default();
+
+        // A build that captured generation 0 and finished normally is stored
+        let idx0 = CommitIndex::build(&repo.path_str()).unwrap();
+        assert!(store.insert_if_current(repo.path_str(), idx0, 0));
+        assert!(store.get(&repo.path_str()).is_some());
+
+        // Tab closed: drop bumps the generation to 1
+        store.drop_index(&repo.path_str());
+        assert!(store.get(&repo.path_str()).is_none());
+        assert_eq!(store.generation(&repo.path_str()), 1);
+
+        // Reopen build (started at generation 1) inserts fine
+        let reopen = CommitIndex::build(&repo.path_str()).unwrap();
+        assert!(store.insert_if_current(repo.path_str(), reopen, 1));
+        assert!(store.get(&repo.path_str()).is_some());
+
+        // A STALE pre-drop build (generation 0) finishing late must NOT
+        // overwrite the reopened tab's fresh index
+        let stale = CommitIndex::build(&repo.path_str()).unwrap();
+        assert!(!store.insert_if_current(repo.path_str(), stale, 0));
+        assert!(
+            store.get(&repo.path_str()).is_some(),
+            "the reopen index must survive the stale build's late completion"
+        );
     }
 
     #[test]

@@ -401,38 +401,77 @@ describe('app-shell multi-repo behavior', () => {
   });
 
   describe('tab badge hydration', () => {
-    it('loads status and branches into the store for newly opened repos', async () => {
+    const oneBranch = [
+      {
+        name: 'main',
+        shorthand: 'main',
+        isHead: true,
+        isRemote: false,
+        upstream: 'origin/main',
+        targetOid: 'abc',
+        isStale: false,
+      },
+    ];
+
+    it('hydrates BOTH status and branches for a background repo', async () => {
       mockResponses['get_status'] = () => [
         { path: 'a.txt', status: 'modified', isStaged: false, isConflicted: false },
       ];
-      mockResponses['get_branches'] = () => [
-        {
-          name: 'main',
-          shorthand: 'main',
-          isHead: true,
-          isRemote: false,
-          upstream: 'origin/main',
-          targetOid: 'abc',
-          isStale: false,
-        },
-      ];
+      mockResponses['get_branches'] = () => oneBranch;
 
       const el = createAppShell();
       document.body.appendChild(el);
       try {
-        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        // Open the way restore/workspace does: activate: false keeps /repo/bg
+        // a background tab that is never transiently active.
+        repositoryStore.getState().addRepository(mockRepo('/repo/active', 'active'));
+        repositoryStore.getState().addRepository(mockRepo('/repo/bg', 'bg'), { activate: false });
         await waitUntil(
-          () => repositoryStore.getState().openRepositories[0]?.status.length > 0,
-          'expected status to be hydrated into the store'
+          () => {
+            const bg = repositoryStore
+              .getState()
+              .openRepositories.find((r) => r.repository.path === '/repo/bg');
+            return !!bg && bg.status.length > 0;
+          },
+          'expected the background repo status to be hydrated'
         );
 
-        const repo = repositoryStore.getState().openRepositories[0];
-        expect(repo.status.length).to.equal(1);
-        expect(repo.unstagedFiles.length).to.equal(1);
-        expect(repo.currentBranch?.name).to.equal('main');
+        const bg = repositoryStore
+          .getState()
+          .openRepositories.find((r) => r.repository.path === '/repo/bg')!;
+        expect(bg.status.length).to.equal(1);
+        expect(bg.unstagedFiles.length).to.equal(1);
+        // Background repos have no mounted branch list — hydration supplies it
+        expect(bg.currentBranch?.name).to.equal('main');
       } finally {
         el.remove();
       }
+    });
+
+    it('hydrates status but NOT branches for the active repo (the branch list owns branches)', async () => {
+      // Drive hydrateRepoBadges directly on a disconnected shell so only the
+      // hydration path runs (a mounted branch list would also call
+      // get_branches, masking whether hydration itself skips it).
+      let branchCalls = 0;
+      mockResponses['get_status'] = () => [
+        { path: 'a.txt', status: 'modified', isStaged: false, isConflicted: false },
+      ];
+      mockResponses['get_branches'] = () => {
+        branchCalls++;
+        return oneBranch;
+      };
+
+      repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/one', 'one') };
+
+      await (el as any).hydrateRepoBadges('/repo/one');
+
+      const repo = repositoryStore.getState().openRepositories[0];
+      expect(repo.status.length).to.equal(1);
+      // Active repo's branches come from the branch list, not hydration
+      expect(branchCalls).to.equal(0);
+      expect(invokeCallArgs.some((c) => c.command === 'get_status')).to.be.true;
     });
   });
 

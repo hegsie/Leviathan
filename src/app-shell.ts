@@ -738,25 +738,59 @@ export class AppShell extends LitElement {
     }
   };
 
+  // Per-path monotonic sequence for badge hydration: a superseded hydration
+  // (an older watcher tick's) must not overwrite a newer one's store write.
+  private badgeHydrationSeq = new Map<string, number>();
+
+  // Auto-fetch start/stop are fire-and-forget, but a failure must not be
+  // fully silent — log it (matching the watcher-start error handling) so a
+  // repo silently not auto-fetching is diagnosable.
+  private startAutoFetchLogged(path: string, intervalMinutes: number): void {
+    gitService
+      .startAutoFetch(path, intervalMinutes)
+      .then((r) => {
+        if (!r.success) log.warn('Failed to start auto-fetch for', path, r.error?.message);
+      })
+      .catch((err) => log.warn('Failed to start auto-fetch for', path, err));
+  }
+
+  private stopAutoFetchLogged(path: string): void {
+    gitService
+      .stopAutoFetch(path)
+      .then((r) => {
+        if (!r.success) log.warn('Failed to stop auto-fetch for', path, r.error?.message);
+      })
+      .catch((err) => log.warn('Failed to stop auto-fetch for', path, err));
+  }
+
   /**
-   * Load a repo's status + branches into the path-keyed store so its tab
-   * badges (dirty dot, ahead/behind) render without the repo ever having
-   * been activated. Deliberately light: two cheap queries, no graph or
-   * index work.
+   * Load a repo's status (and, for background repos, branches) into the
+   * path-keyed store so its tab badges (dirty dot, ahead/behind) render
+   * without the repo ever having been activated. Deliberately light: cheap
+   * queries, no graph or index work.
+   *
+   * For the ACTIVE repo the always-mounted branch list already mirrors
+   * branches into the store, so hydrating branches here too would race that
+   * (guarded) writer — hydrate only status for the active repo.
    */
   private async hydrateRepoBadges(repoPath: string): Promise<void> {
+    const seq = (this.badgeHydrationSeq.get(repoPath) ?? 0) + 1;
+    this.badgeHydrationSeq.set(repoPath, seq);
+    const isActive = repoPath === this.activeRepository?.repository.path;
     try {
       const [statusResult, branchesResult] = await Promise.all([
         gitService.getStatus(repoPath),
-        gitService.getBranches(repoPath),
+        isActive ? Promise.resolve(null) : gitService.getBranches(repoPath),
       ]);
+      // A newer hydration for this path superseded us while we were loading
+      if (this.badgeHydrationSeq.get(repoPath) !== seq) return;
       const data: Partial<Omit<OpenRepository, 'repository'>> = {};
       if (statusResult.success && statusResult.data) {
         data.status = statusResult.data;
         data.stagedFiles = statusResult.data.filter((s) => s.isStaged);
         data.unstagedFiles = statusResult.data.filter((s) => !s.isStaged);
       }
-      if (branchesResult.success && branchesResult.data) {
+      if (branchesResult && branchesResult.success && branchesResult.data) {
         data.branches = branchesResult.data;
         data.currentBranch = branchesResult.data.find((b) => b.isHead) ?? null;
       }
@@ -906,7 +940,7 @@ export class AppShell extends LitElement {
           });
           const autoFetchInterval = settingsStore.getState().autoFetchInterval;
           if (autoFetchInterval > 0) {
-            gitService.startAutoFetch(path, autoFetchInterval);
+            this.startAutoFetchLogged(path, autoFetchInterval);
           }
           // Populate tab badge data (dirty dot, ahead/behind) — background
           // tabs are never rendered by the status/branch panels, so without
@@ -922,7 +956,7 @@ export class AppShell extends LitElement {
           searchIndexService.drop(path);
           // Without this the backend keeps fetching (and toasting about) the
           // closed repo forever
-          gitService.stopAutoFetch(path);
+          this.stopAutoFetchLogged(path);
           // An ONNX embedding build can run for minutes — don't keep burning
           // CPU for a tab that no longer exists (no-op when nothing builds)
           embeddingIndexService.cancelBuild(path).catch(() => {
@@ -1110,6 +1144,18 @@ export class AppShell extends LitElement {
       clearTimeout(timer);
     }
     this.badgeHydrationTimers.clear();
+    // Tear down per-repo backend services so a remount (hot reload, tests)
+    // doesn't leave orphaned watchers/auto-fetch tasks running. The normal
+    // process-exit path cleans up implicitly, but explicit teardown keeps
+    // remounts leak-free.
+    for (const path of this.watchedRepoPaths) {
+      watcherService.stopWatching(path).catch(() => {
+        /* backend watcher already gone */
+      });
+      this.stopAutoFetchLogged(path);
+    }
+    this.watchedRepoPaths.clear();
+    this.staleRepoPaths.clear();
     document.removeEventListener('mousemove', this.boundHandleMouseMove);
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
     document.removeEventListener('keydown', this.boundHandleKeyDown);
@@ -2697,11 +2743,11 @@ export class AppShell extends LitElement {
           .openRepositories.map((r) => r.repository.path);
         if (state.autoFetchInterval > 0) {
           for (const path of paths) {
-            gitService.startAutoFetch(path, state.autoFetchInterval);
+            this.startAutoFetchLogged(path, state.autoFetchInterval);
           }
         } else {
           for (const path of paths) {
-            gitService.stopAutoFetch(path);
+            this.stopAutoFetchLogged(path);
           }
         }
       }

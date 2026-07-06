@@ -14,6 +14,15 @@ pub async fn build_search_index(
     index_state: tauri::State<'_, SharedCommitIndex>,
     path: String,
 ) -> Result<usize> {
+    // Capture the path's generation BEFORE the (slow) blocking build. If the
+    // tab is closed while we build, drop_search_index bumps the generation
+    // and our result is discarded on insert — so a build that started before
+    // a close-then-reopen can't clobber the index the reopen build created.
+    let start_generation = {
+        let guard = index_state.read().await;
+        guard.generation(&path)
+    };
+
     let path_clone = path.clone();
     let index = tokio::task::spawn_blocking(move || CommitIndex::build(&path_clone))
         .await
@@ -21,7 +30,7 @@ pub async fn build_search_index(
 
     let count = index.len();
     let mut guard = index_state.write().await;
-    guard.insert(path, index);
+    guard.insert_if_current(path, index, start_generation);
     Ok(count)
 }
 
@@ -60,9 +69,11 @@ pub async fn refresh_search_index(
 ) -> Result<usize> {
     // Take this repo's index out for updating so the lock isn't held across
     // the blocking revwalk; other repos' indexes stay available meanwhile.
-    let existing = {
+    // Capture the generation with it so a close during the walk discards the
+    // reinsert (same guard as build_search_index).
+    let (existing, start_generation) = {
         let mut guard = index_state.write().await;
-        guard.remove(&path)
+        (guard.take(&path), guard.generation(&path))
     };
 
     if let Some(mut index) = existing {
@@ -76,7 +87,7 @@ pub async fn refresh_search_index(
 
         let count = updated.len();
         let mut guard = index_state.write().await;
-        guard.insert(path, updated);
+        guard.insert_if_current(path, updated, start_generation);
         Ok(count)
     } else {
         // No index exists, build from scratch
@@ -91,6 +102,6 @@ pub async fn drop_search_index(
     path: String,
 ) -> Result<()> {
     let mut guard = index_state.write().await;
-    guard.remove(&path);
+    guard.drop_index(&path);
     Ok(())
 }
