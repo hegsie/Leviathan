@@ -2970,6 +2970,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_cherry_pick_merge_with_mainline_is_accepted() {
+        // With an explicit, in-range mainline the merge-commit guard must NOT
+        // block the operation — the frontend now always supplies one for merge
+        // commits, so this contract must hold (any later empty/conflict outcome
+        // is fine; what must not happen is the "no mainline" refusal).
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feat = test_repo.create_commit("Feature", &[("feat.txt", "f")]);
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main", &[("main.txt", "m")]);
+        let merge_oid = make_merge_commit(&test_repo, feat);
+
+        let result = cherry_pick(test_repo.path_str(), merge_oid.to_string(), None, Some(1)).await;
+        if let Err(e) = &result {
+            assert!(
+                !e.to_string()
+                    .to_lowercase()
+                    .contains("no mainline parent was given"),
+                "an explicit mainline must satisfy the merge-commit guard, got: {e}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revert_merge_with_mainline_is_accepted() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feat = test_repo.create_commit("Feature", &[("feat.txt", "f")]);
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main", &[("main.txt", "m")]);
+        let merge_oid = make_merge_commit(&test_repo, feat);
+
+        let result = revert(test_repo.path_str(), merge_oid.to_string(), Some(1)).await;
+        if let Err(e) = &result {
+            assert!(
+                !e.to_string()
+                    .to_lowercase()
+                    .contains("no mainline parent was given"),
+                "an explicit mainline must satisfy the merge-commit guard, got: {e}"
+            );
+        }
+    }
+
     // ---- Finding 40: aborting must preserve unrelated uncommitted work ----
 
     #[tokio::test]

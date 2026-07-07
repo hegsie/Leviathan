@@ -294,6 +294,13 @@ export class LvCommitDetails extends LitElement {
         text-align: left;
       }
 
+      .file-renamed-from {
+        margin-left: var(--spacing-sm);
+        color: var(--color-text-secondary);
+        font-size: 10px;
+        opacity: 0.85;
+      }
+
       .file-stats {
         display: flex;
         gap: var(--spacing-sm);
@@ -768,16 +775,26 @@ export class LvCommitDetails extends LitElement {
   private renderFileItem(file: CommitFileEntry) {
     const filename = file.path.split('/').pop() || file.path;
     const canBlame = file.status !== 'deleted';
+    // For a rename/copy, show where the file came from (git shows "old -> new").
+    const renamedFrom =
+      (file.status === 'renamed' || file.status === 'copied') && file.oldPath
+        ? file.oldPath
+        : null;
 
     return html`
       <li
         class="file-item ${this.selectedFilePath === file.path ? 'selected' : ''}"
         @click=${() => this.handleFileClick(file)}
         @contextmenu=${(e: MouseEvent) => this.handleFileContextMenu(e, file)}
-        title="${file.path}"
+        title="${renamedFrom ? `${renamedFrom} → ${file.path}` : file.path}"
       >
         <span class="file-status ${file.status}">${this.getStatusLabel(file.status)}</span>
-        <span class="file-name">${filename}</span>
+        <span class="file-name">
+          ${filename}
+          ${renamedFrom
+            ? html`<span class="file-renamed-from">from ${renamedFrom}</span>`
+            : nothing}
+        </span>
         <span class="file-stats">
           ${file.additions > 0 ? html`<span class="additions">+${file.additions}</span>` : nothing}
           ${file.deletions > 0 ? html`<span class="deletions">-${file.deletions}</span>` : nothing}

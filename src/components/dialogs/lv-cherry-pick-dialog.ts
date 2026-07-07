@@ -201,6 +201,7 @@ export class LvCherryPickDialog extends LitElement {
 
   @state() private commit: Commit | null = null;
   @state() private noCommit = false;
+  @state() private mainline = 1;
   @state() private isExecuting = false;
   @state() private error = '';
   @state() private isOpen = false;
@@ -218,14 +219,24 @@ export class LvCherryPickDialog extends LitElement {
   private reset(): void {
     this.commit = null;
     this.noCommit = false;
+    this.mainline = 1;
     this.isExecuting = false;
     this.error = '';
     this.isOpen = false;
   }
 
+  private get isMergeCommit(): boolean {
+    return (this.commit?.parentIds.length ?? 0) > 1;
+  }
+
   private handleNoCommitChange(e: Event): void {
     const input = e.target as HTMLInputElement;
     this.noCommit = input.checked;
+  }
+
+  private handleMainlineChange(e: Event): void {
+    const select = e.target as HTMLSelectElement;
+    this.mainline = Number(select.value);
   }
 
   private async handleCherryPick(): Promise<void> {
@@ -239,6 +250,9 @@ export class LvCherryPickDialog extends LitElement {
         path: this.repositoryPath,
         commitOid: this.commit.oid,
         noCommit: this.noCommit || undefined,
+        // A merge commit needs an explicit mainline parent (like
+        // `git cherry-pick -m`); the backend refuses otherwise.
+        mainline: this.isMergeCommit ? this.mainline : undefined,
       });
 
       if (result.success) {
@@ -335,6 +349,31 @@ export class LvCherryPickDialog extends LitElement {
           <!-- Options -->
           <div class="options-section">
             <div class="options-header">Options</div>
+
+            ${this.isMergeCommit ? html`
+              <div class="option-row">
+                <label class="option-label" for="mainline-select">
+                  <span class="option-label-main">Mainline parent</span>
+                  <span class="option-label-hint">
+                    This is a merge commit — choose which parent's changes to keep as
+                    the baseline (like <code>git cherry-pick -m</code>).
+                  </span>
+                </label>
+                <select
+                  id="mainline-select"
+                  class="mainline-select"
+                  .value=${String(this.mainline)}
+                  @change=${this.handleMainlineChange}
+                  ?disabled=${this.isExecuting}
+                >
+                  ${this.commit!.parentIds.map((parentId, i) => html`
+                    <option value=${i + 1}>
+                      Parent ${i + 1}${i === 0 ? ' (mainline)' : ''} — ${parentId.substring(0, 7)}
+                    </option>
+                  `)}
+                </select>
+              </div>
+            ` : nothing}
 
             <div class="option-row">
               <input
