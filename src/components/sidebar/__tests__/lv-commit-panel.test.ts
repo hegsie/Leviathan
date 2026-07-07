@@ -798,29 +798,34 @@ describe('lv-commit-panel', () => {
       expect(internal.cachedAuthor).to.equal('New Identity');
     });
 
-    it('handleStageGroup isolates the group by unstaging the other groups', async () => {
+    it('handleStageGroup isolates the group by unstaging every other staged file', async () => {
       const el = await renderCommitPanel();
       const internal = el as unknown as {
         handleStageGroup: (files: string[]) => Promise<void>;
-        splitSuggestion: unknown;
       };
-      internal.splitSuggestion = {
-        shouldSplit: true,
-        explanation: 'x',
-        groups: [
-          { files: ['a.ts', 'b.ts'], message: 'group a' },
-          { files: ['c.ts'], message: 'group b' },
-        ],
+      // The index has the group's files, another group's file (c.ts), AND a
+      // staged file in no suggested group (z.ts). All non-group files must be
+      // unstaged so the commit is truly isolated.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_status') {
+          return [
+            { path: 'a.ts', status: 'modified', isStaged: true, isConflicted: false },
+            { path: 'b.ts', status: 'modified', isStaged: true, isConflicted: false },
+            { path: 'c.ts', status: 'modified', isStaged: true, isConflicted: false },
+            { path: 'z.ts', status: 'modified', isStaged: true, isConflicted: false },
+            { path: 'u.ts', status: 'modified', isStaged: false, isConflicted: false },
+          ];
+        }
+        return null;
       };
-      mockInvoke = async () => null; // all commands succeed
 
       invokeHistory.length = 0;
       await internal.handleStageGroup(['a.ts', 'b.ts']);
 
       const unstage = invokeHistory.find(h => h.command === 'unstage_files');
       const stage = invokeHistory.find(h => h.command === 'stage_files');
-      expect(unstage, 'unstages other group files').to.exist;
-      expect((unstage!.args as { paths: string[] }).paths).to.deep.equal(['c.ts']);
+      expect(unstage, 'unstages all other staged files').to.exist;
+      expect((unstage!.args as { paths: string[] }).paths).to.deep.equal(['c.ts', 'z.ts']);
       expect(stage, 'stages this group').to.exist;
       expect((stage!.args as { paths: string[] }).paths).to.deep.equal(['a.ts', 'b.ts']);
     });

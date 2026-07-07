@@ -954,9 +954,11 @@ export class LvGitLabDialog extends LitElement {
 
       if (result.success && result.data) {
         this.issues = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load issues';
       }
-    } catch {
-      // Silent fail
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load issues';
     }
   }
 
@@ -974,9 +976,11 @@ export class LvGitLabDialog extends LitElement {
 
       if (result.success && result.data) {
         this.pipelines = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load pipelines';
       }
-    } catch {
-      // Silent fail
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load pipelines';
     }
   }
 
@@ -993,9 +997,11 @@ export class LvGitLabDialog extends LitElement {
 
       if (result.success && result.data) {
         this.labels = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load labels';
       }
-    } catch {
-      // Silent fail
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load labels';
     }
   }
 

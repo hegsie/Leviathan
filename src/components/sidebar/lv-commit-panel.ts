@@ -1187,15 +1187,22 @@ export class LvCommitPanel extends LitElement {
   private async handleStageGroup(files: string[]): Promise<void> {
     if (!this.repositoryPath) return;
 
-    // Isolate this group so the next commit contains only its files: unstage the
-    // files belonging to the OTHER suggested groups, then stage this group.
+    // Isolate this group so the next commit contains ONLY its files. Unstage
+    // every currently-staged file that isn't in this group — deriving the set
+    // from the real index (not just the other AI-suggested groups, which may
+    // not cover every staged file when the diff was truncated for the model).
     const groupSet = new Set(files);
-    const otherFiles = (this.splitSuggestion?.groups ?? [])
-      .flatMap(g => g.files)
-      .filter(f => !groupSet.has(f));
+    const status = await gitService.getStatus(this.repositoryPath);
+    if (!status.success) {
+      showToast(status.error?.message ?? 'Failed to isolate group', 'error');
+      return;
+    }
+    const otherStaged = (status.data ?? [])
+      .filter(e => e.isStaged && !groupSet.has(e.path))
+      .map(e => e.path);
 
-    if (otherFiles.length > 0) {
-      const unstage = await gitService.unstageFiles(this.repositoryPath, { paths: otherFiles });
+    if (otherStaged.length > 0) {
+      const unstage = await gitService.unstageFiles(this.repositoryPath, { paths: otherStaged });
       if (!unstage.success) {
         showToast(unstage.error?.message ?? 'Failed to isolate group', 'error');
         return;

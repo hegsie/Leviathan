@@ -568,13 +568,17 @@ pub async fn unassign_unified_profile_from_repository(path: String) -> Result<()
 
 /// Detect the `gpg.format` git should use for a given signing key.
 ///
-/// Returns `Some("ssh")` when the key looks like an SSH signing key — either an
-/// inline OpenSSH public key (e.g. `ssh-ed25519 ...`, `ssh-rsa ...`) or a path
-/// to a `.pub` file. Returns `None` otherwise, meaning git's default `openpgp`
-/// format should be used (and any stale local `gpg.format` cleared).
+/// Returns `Some("ssh")` when the key looks like an SSH signing key — an inline
+/// OpenSSH public key of any type (`ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-*`,
+/// FIDO2 `sk-ssh-*`/`sk-ecdsa-*`), git's `key::<literal>` form, or a path to a
+/// `.pub` file. Returns `None` otherwise, meaning git's default `openpgp` format
+/// should be used (and any stale local `gpg.format` cleared).
 fn detect_gpg_format(signing_key: &str) -> Option<&'static str> {
     let key = signing_key.trim();
-    if key.starts_with("ssh-") || key.ends_with(".pub") {
+    // Mirrors the SSH key-shape prefixes git accepts for `user.signingkey`
+    // when `gpg.format=ssh`. Keep in sync with gpg.rs::ssh_key_is_usable.
+    const SSH_PREFIXES: &[&str] = &["ssh-", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-", "key::"];
+    if SSH_PREFIXES.iter().any(|p| key.starts_with(p)) || key.ends_with(".pub") {
         Some("ssh")
     } else {
         None
@@ -1264,6 +1268,20 @@ mod tests {
             Some("ssh")
         );
         assert_eq!(detect_gpg_format("  ssh-ed25519 key  "), Some("ssh"));
+        // ECDSA, FIDO2/security-key, and git's key:: literal forms are all SSH.
+        assert_eq!(
+            detect_gpg_format("ecdsa-sha2-nistp256 AAAAE2..."),
+            Some("ssh")
+        );
+        assert_eq!(
+            detect_gpg_format("sk-ssh-ed25519@openssh.com AAAA..."),
+            Some("ssh")
+        );
+        assert_eq!(
+            detect_gpg_format("sk-ecdsa-sha2-nistp256@openssh.com AAAA..."),
+            Some("ssh")
+        );
+        assert_eq!(detect_gpg_format("key::ssh-ed25519 AAAA..."), Some("ssh"));
         // OpenPGP-style key IDs are not SSH.
         assert_eq!(detect_gpg_format("ABCDEF1234567890"), None);
         assert_eq!(detect_gpg_format(""), None);
