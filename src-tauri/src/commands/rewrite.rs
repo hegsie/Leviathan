@@ -1228,6 +1228,13 @@ pub async fn drop_commit(path: String, commit_oid: String) -> Result<DropCommitR
     // Checkout to update working directory
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
 
+    // git's rebase sequencer runs post-commit for each replayed commit; we
+    // replay them as a batch and move the ref once, so fire the hook the same
+    // number of times now that HEAD is at the final commit.
+    for _ in 0..commits_after_drop.len() {
+        crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
+    }
+
     Ok(DropCommitResult {
         success: true,
         new_tip: current_base_oid.to_string(),
@@ -1394,6 +1401,13 @@ pub async fn reorder_commits(
 
     // Checkout the new commit to update working directory
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+
+    // git's rebase sequencer runs post-commit for each replayed commit; we
+    // replay them as a batch and move the ref once, so fire the hook the same
+    // number of times now that HEAD is at the final commit.
+    for _ in 0..commits_in_order.len() {
+        crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
+    }
 
     Ok(ReorderResult {
         success: true,

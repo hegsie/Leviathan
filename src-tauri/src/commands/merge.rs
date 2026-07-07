@@ -194,7 +194,7 @@ pub async fn merge(
 /// with '#' comment lines stripped the way `git commit` cleans messages.
 /// Falls back to git's canonical subject if MERGE_MSG is missing or empty.
 fn default_merge_message(repo: &git2::Repository, source_ref: &str) -> String {
-    std::fs::read_to_string(repo.path().join("MERGE_MSG"))
+    let base = std::fs::read_to_string(repo.path().join("MERGE_MSG"))
         .ok()
         .map(|m| {
             m.lines()
@@ -205,7 +205,29 @@ fn default_merge_message(repo: &git2::Repository, source_ref: &str) -> String {
                 .to_string()
         })
         .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| format!("Merge branch '{}'", source_ref))
+        .unwrap_or_else(|| format!("Merge branch '{}'", source_ref));
+
+    // git appends " into <branch>" to the merge subject unless the current
+    // branch is "master" or "main" (see fmt-merge-msg / builtin/merge.c).
+    // libgit2's MERGE_MSG never adds this suffix, so apply git's rule here so
+    // teams whose integration branch is develop/trunk/release get the canonical
+    // subject ("Merge branch 'feature' into develop").
+    let current: Option<String> = match repo.head() {
+        Ok(h) => h.shorthand().map(|s| s.to_string()).ok(),
+        Err(_) => None,
+    };
+    match current.as_deref() {
+        Some(branch) if branch != "master" && branch != "main" && branch != "HEAD" => {
+            let mut lines: Vec<String> = base.lines().map(|s| s.to_string()).collect();
+            if let Some(first) = lines.first_mut() {
+                if !first.contains(" into ") {
+                    *first = format!("{first} into {branch}");
+                }
+            }
+            lines.join("\n")
+        }
+        _ => base,
+    }
 }
 
 /// Abort an in-progress merge.
@@ -1807,6 +1829,37 @@ mod tests {
         let git_repo = repo.repo();
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(head.summary().unwrap(), Some("Merge branch 'feature'"));
+    }
+
+    #[tokio::test]
+    async fn test_merge_default_message_into_nondefault_branch() {
+        // git appends " into <branch>" to the merge subject for any branch
+        // other than master/main. Merging feature into "develop" must yield
+        // "Merge branch 'feature' into develop".
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("develop");
+        repo.checkout_branch("develop");
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature commit", &[("feature.txt", "content")]);
+        repo.checkout_branch("develop");
+
+        merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.summary().unwrap(),
+            Some("Merge branch 'feature' into develop")
+        );
     }
 
     #[tokio::test]

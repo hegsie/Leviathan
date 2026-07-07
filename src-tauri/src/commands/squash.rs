@@ -181,6 +181,15 @@ pub async fn squash_commits(
     // Checkout the new commit to update working directory
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
 
+    // git's rebase sequencer runs post-commit once for every commit it writes
+    // (the squashed commit plus each replayed descendant). We build the new
+    // history as a batch and move the ref once, so fire the hook the same
+    // number of times now that HEAD points at the final commit.
+    let commits_created = 1 + commits_after.len();
+    for _ in 0..commits_created {
+        crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
+    }
+
     Ok(SquashResult {
         new_oid: new_head_oid.to_string(),
         squashed_count,
@@ -605,6 +614,43 @@ mod tests {
         assert!(repo.path.join("f1.txt").exists());
         assert!(repo.path.join("f2.txt").exists());
         assert!(repo.path.join("f3.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_squash_runs_post_commit_per_created_commit() {
+        // `git rebase -i` runs post-commit once for every commit it writes.
+        // Squashing C1+C2 in C0-C1-C2-C3 writes the squashed commit and
+        // replays C3 => 2 commits => post-commit must fire twice.
+        let repo = TestRepo::with_initial_commit();
+        let counter = repo.path.join("pc-count");
+        repo.install_hook(
+            "post-commit",
+            &format!("#!/bin/sh\necho x >> \"{}\"\n", counter.display()),
+        );
+
+        let c0 = repo.head_oid();
+        let _c1 = repo.create_commit("Commit 1", &[("f1.txt", "1")]);
+        let c2 = repo.create_commit("Commit 2", &[("f2.txt", "2")]);
+        let _c3 = repo.create_commit("Commit 3", &[("f3.txt", "3")]);
+
+        squash_commits(
+            repo.path_str(),
+            c0.to_string(),
+            c2.to_string(),
+            "Squashed".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let count = std::fs::read_to_string(&counter)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(
+            count, 2,
+            "post-commit should fire once per created commit (squashed + replayed C3)"
+        );
     }
 
     #[tokio::test]
