@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_parse_log_line_valid() {
-        let line = "abc123def456abc123def456abc123def456abc123\0abc123d\0feat: add feature\0John Doe\0john@example.com\01700000000\0John Doe\01700000000\0parent1 parent2";
+        let line = "abc123def456abc123def456abc123def456abc123\x00abc123d\x00feat: add feature\x00John Doe\x00john@example.com\x001700000000\x00John Doe\x001700000000\x00parent1 parent2";
         let commit = parse_log_line(line);
         assert!(commit.is_some());
         let commit = commit.unwrap();
@@ -748,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_parse_log_line_no_parents() {
-        let line = "abc123\0abc1\0initial\0Author\0a@b.com\01000\0Author\01000\0";
+        let line = "abc123\x00abc1\x00initial\x00Author\x00a@b.com\x001000\x00Author\x001000\x00";
         let commit = parse_log_line(line);
         assert!(commit.is_some());
         let commit = commit.unwrap();
@@ -758,7 +758,8 @@ mod tests {
 
     #[test]
     fn test_parse_log_line_single_parent() {
-        let line = "abc123\0abc1\0second\0Author\0a@b.com\01000\0Author\01000\0deadbeef";
+        let line =
+            "abc123\x00abc1\x00second\x00Author\x00a@b.com\x001000\x00Author\x001000\x00deadbeef";
         let commit = parse_log_line(line);
         assert!(commit.is_some());
         let commit = commit.unwrap();
@@ -778,7 +779,7 @@ mod tests {
         // Regression: a commit subject (%s) containing '|' must NOT corrupt any
         // downstream field. With NUL separators the pipe is preserved verbatim in
         // the message and every other field parses correctly.
-        let line = "abc123\0abc1\0feat: support a|b syntax in parser\0Dev One\0dev@example.com\01783335269\0Dev One\01783335269\0p1 p2 p3";
+        let line = "abc123\x00abc1\x00feat: support a|b syntax in parser\x00Dev One\x00dev@example.com\x001783335269\x00Dev One\x001783335269\x00p1 p2 p3";
         let commit = parse_log_line(line);
         assert!(commit.is_some());
         let commit = commit.unwrap();

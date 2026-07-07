@@ -498,7 +498,7 @@ mod tests {
         let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
 
         assert!(
-            paths.iter().any(|p| *p == "loose.txt"),
+            paths.contains(&"loose.txt"),
             "loose untracked file should be listed, got {:?}",
             paths
         );
