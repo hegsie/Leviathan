@@ -181,14 +181,14 @@ pub async fn squash_commits(
     // Checkout the new commit to update working directory
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
 
-    // git's rebase sequencer runs post-commit once for every commit it writes
-    // (the squashed commit plus each replayed descendant). We build the new
-    // history as a batch and move the ref once, so fire the hook the same
-    // number of times now that HEAD points at the final commit.
-    let commits_created = 1 + commits_after.len();
-    for _ in 0..commits_created {
-        crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
-    }
+    // git's rebase sequencer fires post-commit per replayed commit as HEAD
+    // advances. This app replays as an ATOMIC batch — nothing is moved until
+    // the whole sequence succeeds, so a mid-replay conflict leaves the repo
+    // untouched. Advancing HEAD per commit to fire the hook accurately would
+    // break that atomicity, and firing N times with HEAD already at the final
+    // commit would feed every invocation the same (wrong) SHA. So fire
+    // post-commit once, for the final rewritten HEAD.
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
 
     Ok(SquashResult {
         new_oid: new_head_oid.to_string(),
@@ -618,10 +618,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_squash_runs_post_commit_per_created_commit() {
-        // `git rebase -i` runs post-commit once for every commit it writes.
-        // Squashing C1+C2 in C0-C1-C2-C3 writes the squashed commit and
-        // replays C3 => 2 commits => post-commit must fire twice.
+    async fn test_squash_runs_post_commit_hook() {
+        // The squash replays history as an atomic batch (nothing is moved until
+        // the whole sequence succeeds), so post-commit fires once for the final
+        // rewritten HEAD — firing per replayed commit would either break that
+        // atomicity or feed every invocation the same, already-final SHA.
         let repo = TestRepo::with_initial_commit();
         let counter = repo.path.join("pc-count");
         repo.install_hook(
@@ -647,10 +648,7 @@ mod tests {
             .unwrap_or_default()
             .lines()
             .count();
-        assert_eq!(
-            count, 2,
-            "post-commit should fire once per created commit (squashed + replayed C3)"
-        );
+        assert_eq!(count, 1, "post-commit fires once for the rewritten HEAD");
     }
 
     #[tokio::test]

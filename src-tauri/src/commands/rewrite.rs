@@ -1237,10 +1237,11 @@ pub async fn drop_commit(path: String, commit_oid: String) -> Result<DropCommitR
     // Checkout to update working directory
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
 
-    // git's rebase sequencer runs post-commit for each replayed commit; we
-    // replay them as a batch and move the ref once, so fire the hook the same
-    // number of times now that HEAD is at the final commit.
-    for _ in 0..commits_after_drop.len() {
+    // git's rebase sequencer fires post-commit per replayed commit as HEAD
+    // advances; we replay atomically (nothing moved until success) and move the
+    // ref once, so fire post-commit a single time for the final rewritten HEAD
+    // when the drop actually rewrote commits (dropping the tip rewrites none).
+    if !commits_after_drop.is_empty() {
         crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
     }
 
@@ -1411,10 +1412,10 @@ pub async fn reorder_commits(
     // Checkout the new commit to update working directory
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
 
-    // git's rebase sequencer runs post-commit for each replayed commit; we
-    // replay them as a batch and move the ref once, so fire the hook the same
-    // number of times now that HEAD is at the final commit.
-    for _ in 0..commits_in_order.len() {
+    // git's rebase sequencer fires post-commit per replayed commit as HEAD
+    // advances; we replay atomically (nothing moved until success) and move the
+    // ref once, so fire post-commit a single time for the final rewritten HEAD.
+    if !commits_in_order.is_empty() {
         crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
     }
 
