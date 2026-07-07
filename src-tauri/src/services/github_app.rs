@@ -34,7 +34,11 @@ pub struct InstallationToken {
 pub struct AppInstallation {
     pub id: u64,
     pub account: AppInstallationAccount,
+    // GitHub's API returns snake_case; keep camelCase for the FE (Serialize) but
+    // accept the API's snake_case on deserialize via aliases, or parsing fails.
+    #[serde(alias = "app_id")]
     pub app_id: u64,
+    #[serde(alias = "target_type")]
     pub target_type: String,
     pub permissions: serde_json::Value,
 }
@@ -47,6 +51,7 @@ pub struct AppInstallationAccount {
     pub id: u64,
     #[serde(rename = "type")]
     pub account_type: String,
+    #[serde(alias = "avatar_url")]
     pub avatar_url: Option<String>,
 }
 
@@ -247,6 +252,30 @@ mod tests {
         assert!(json.contains("12345"));
         assert!(json.contains("1000"));
         assert!(json.contains("1600"));
+    }
+
+    #[test]
+    fn test_app_installation_parses_github_snake_case() {
+        // GitHub's REST API returns snake_case; deserialization must accept it.
+        let body = r#"{
+            "id": 42,
+            "account": {"login": "octocat", "id": 1, "type": "User", "avatar_url": "https://x/y.png"},
+            "app_id": 99,
+            "target_type": "Organization",
+            "permissions": {"contents": "read"}
+        }"#;
+        let install: AppInstallation = serde_json::from_str(body).unwrap();
+        assert_eq!(install.app_id, 99);
+        assert_eq!(install.target_type, "Organization");
+        assert_eq!(
+            install.account.avatar_url.as_deref(),
+            Some("https://x/y.png")
+        );
+
+        // And it still serializes to camelCase for the frontend.
+        let json = serde_json::to_string(&install).unwrap();
+        assert!(json.contains("appId"));
+        assert!(json.contains("targetType"));
     }
 
     #[test]

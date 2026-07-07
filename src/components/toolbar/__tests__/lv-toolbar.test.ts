@@ -6,16 +6,21 @@
 
 // ── Tauri mock (must be set before any imports) ────────────────────────────
 let cbId = 0;
+let mockInvoke: (command: string, args?: unknown) => Promise<unknown> = () => Promise.resolve(null);
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
-  invoke: () => Promise.resolve(null),
+  invoke: (command: string, args?: unknown) => mockInvoke(command, args),
   transformCallback: () => cbId++,
+};
+(globalThis as Record<string, unknown>).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+  convertCallback: () => 0,
+  unregisterListener: () => {},
 };
 
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvToolbar } from '../lv-toolbar.ts';
 import '../lv-toolbar.ts';
-import { repositoryStore } from '../../../stores/index.ts';
+import { repositoryStore, uiStore } from '../../../stores/index.ts';
 import type { Repository, Branch, StatusEntry } from '../../../types/git.types.ts';
 
 function mockRepo(path: string, name: string): Repository {
@@ -58,6 +63,7 @@ function tabs(el: LvToolbar): HTMLButtonElement[] {
 describe('lv-toolbar repository tabs', () => {
   beforeEach(() => {
     repositoryStore.getState().reset();
+    mockInvoke = () => Promise.resolve(null);
   });
 
   describe('tab rendering', () => {
@@ -307,6 +313,30 @@ describe('lv-toolbar repository tabs', () => {
 
       expect(el.shadowRoot!.querySelector('.tab-context-menu')).to.not.exist;
       expect(repositoryStore.getState().openRepositories.length).to.equal(3);
+    });
+  });
+
+  describe('open repository failures', () => {
+    it('shows a toast (not just a silent store error) when opening fails', async () => {
+      // Dialog returns a folder; the open then fails (e.g. not a git repo).
+      mockInvoke = (command: string) => {
+        if (command === 'plugin:dialog|open') return Promise.resolve('/not/a/repo');
+        if (command === 'open_repository') {
+          return Promise.reject({ message: 'not a git repository' });
+        }
+        return Promise.resolve(null);
+      };
+      uiStore.setState({ toasts: [] });
+
+      const el = await createToolbar();
+      await (el as unknown as { handleOpenRepo: () => Promise<void> }).handleOpenRepo();
+
+      const toasts = uiStore.getState().toasts;
+      const errorToast = toasts.find(t => t.type === 'error');
+      expect(errorToast, 'an error toast is surfaced to the user').to.exist;
+      expect(errorToast!.message).to.contain('not a git repository');
+      // And the store error is still set for any listener.
+      expect(repositoryStore.getState().error).to.contain('not a git repository');
     });
   });
 });

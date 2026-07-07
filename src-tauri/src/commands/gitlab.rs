@@ -194,6 +194,19 @@ fn url_encode(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
 
+/// Build the `&state=<x>` query fragment for a MR/issue state filter.
+///
+/// GitLab's REST API returns items in *all* states when the `state` query
+/// parameter is omitted. A `None` state therefore means "All" and must not
+/// append any `state` param (previously this defaulted to `opened`, hiding
+/// closed/merged items from the "All" filter).
+fn state_query_param(state: Option<&str>) -> String {
+    match state {
+        Some(s) => format!("&state={}", s),
+        None => String::new(),
+    }
+}
+
 // ============================================================================
 // Connection Commands
 // ============================================================================
@@ -368,14 +381,13 @@ pub async fn list_gitlab_merge_requests(
     let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
-    let state_param = state.unwrap_or_else(|| "opened".to_string());
     let url = format!(
-        "{}?state={}&per_page=30",
+        "{}?per_page=30{}",
         build_api_url(
             &instance_url,
             &format!("projects/{}/merge_requests", encoded_path)
         ),
-        state_param
+        state_query_param(state.as_deref())
     );
 
     let response = gitlab_get(&url, &token).await?;
@@ -630,11 +642,10 @@ pub async fn list_gitlab_issues(
     let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
-    let state_param = state.unwrap_or_else(|| "opened".to_string());
     let mut url = format!(
-        "{}?state={}&per_page=30",
+        "{}?per_page=30{}",
         build_api_url(&instance_url, &format!("projects/{}/issues", encoded_path)),
-        state_param
+        state_query_param(state.as_deref())
     );
 
     if let Some(label_str) = labels {
@@ -928,6 +939,16 @@ mod tests {
             build_api_url("https://gitlab.example.com", "projects/123"),
             "https://gitlab.example.com/api/v4/projects/123"
         );
+    }
+
+    #[test]
+    fn test_state_query_param() {
+        // A concrete state appends the filter.
+        assert_eq!(state_query_param(Some("opened")), "&state=opened");
+        assert_eq!(state_query_param(Some("closed")), "&state=closed");
+        assert_eq!(state_query_param(Some("merged")), "&state=merged");
+        // "All" (None) omits the param entirely so GitLab returns every state.
+        assert_eq!(state_query_param(None), "");
     }
 
     #[test]

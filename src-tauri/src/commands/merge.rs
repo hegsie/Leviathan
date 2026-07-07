@@ -462,6 +462,27 @@ async fn commit_merge_signed(path: &str, message: &str, is_squash: bool) -> Resu
 pub async fn rebase(path: String, onto: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
+    // Like canonical `git rebase`, refuse up front if another operation is in
+    // progress or the working tree is dirty, instead of starting the rebase
+    // and failing partway through with a misleading libgit2 error.
+    if repo.state() != git2::RepositoryState::Clean {
+        return Err(LeviathanError::OperationFailed(
+            "Another operation is in progress".to_string(),
+        ));
+    }
+    let statuses = repo.statuses(None)?;
+    if !statuses.is_empty() {
+        let has_changes = statuses
+            .iter()
+            .any(|s| s.status() != git2::Status::IGNORED && s.status() != git2::Status::CURRENT);
+        if has_changes {
+            return Err(LeviathanError::OperationFailed(
+                "Working directory has uncommitted changes. Commit or stash them first."
+                    .to_string(),
+            ));
+        }
+    }
+
     // Find the onto commit
     let onto_ref = repo
         .find_reference(&format!("refs/heads/{}", onto))
@@ -1540,6 +1561,39 @@ mod tests {
 
         assert_eq!(parent.id(), main_oid);
         assert_ne!(parent.id(), initial_oid);
+    }
+
+    // Like `git rebase`, a dirty working tree must abort the rebase up front,
+    // leaving no in-progress rebase state behind.
+    #[tokio::test]
+    async fn test_rebase_dirty_working_tree_rejected() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Create a feature branch that diverges so a real rebase would run.
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature commit", &[("feature.txt", "feature")]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main commit", &[("main.txt", "main")]);
+
+        repo.checkout_branch("feature");
+
+        // Introduce an uncommitted change.
+        repo.create_file("dirty.txt", "uncommitted");
+
+        let result = rebase(repo.path_str(), initial_branch.clone()).await;
+        assert!(
+            result.is_err(),
+            "rebase must be rejected when the working tree is dirty"
+        );
+
+        // No rebase state should have been created.
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert!(!repo.path.join(".git/rebase-merge").exists());
+        assert!(!repo.path.join(".git/rebase-apply").exists());
     }
 
     #[tokio::test]

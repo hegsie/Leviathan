@@ -1131,15 +1131,22 @@ export class LvCommitPanel extends LitElement {
 
     this.isAnalyzing = true;
     this.vibeCheckResult = null;
+    this.generationError = null;
 
-    const result = await aiService.analyzeStagedChanges(this.repositoryPath);
+    try {
+      const result = await aiService.analyzeStagedChanges(this.repositoryPath);
 
-    if (result.success && result.data) {
-      this.vibeCheckResult = result.data;
-      this.showVibeDetails = result.data.findings.length > 0;
+      if (result.success && result.data) {
+        this.vibeCheckResult = result.data;
+        this.showVibeDetails = result.data.findings.length > 0;
+      } else {
+        this.generationError = result.error?.message ?? 'Vibe check failed';
+      }
+    } catch (err) {
+      this.generationError = err instanceof Error ? err.message : 'Vibe check failed';
+    } finally {
+      this.isAnalyzing = false;
     }
-
-    this.isAnalyzing = false;
   }
 
   private async handleSuggestSplits(): Promise<void> {
@@ -1147,21 +1154,46 @@ export class LvCommitPanel extends LitElement {
 
     this.isAnalyzingSplit = true;
     this.splitSuggestion = null;
+    this.generationError = null;
 
-    const result = await aiService.suggestCommitSplits(this.repositoryPath);
+    try {
+      const result = await aiService.suggestCommitSplits(this.repositoryPath);
 
-    if (result.success && result.data) {
-      this.splitSuggestion = result.data;
-      this.showSplitDetails = result.data.shouldSplit;
+      if (result.success && result.data) {
+        this.splitSuggestion = result.data;
+        this.showSplitDetails = result.data.shouldSplit;
+        if (!result.data.shouldSplit) {
+          // Success path with nothing to render otherwise — give explicit feedback.
+          showToast('Staged changes look cohesive — no split needed', 'info');
+        }
+      } else {
+        this.generationError = result.error?.message ?? 'Split check failed';
+      }
+    } catch (err) {
+      this.generationError = err instanceof Error ? err.message : 'Split check failed';
+    } finally {
+      this.isAnalyzingSplit = false;
     }
-
-    this.isAnalyzingSplit = false;
   }
 
   private async handleStageGroup(files: string[]): Promise<void> {
     if (!this.repositoryPath) return;
 
-    // Unstage everything first, then stage only this group
+    // Isolate this group so the next commit contains only its files: unstage the
+    // files belonging to the OTHER suggested groups, then stage this group.
+    const groupSet = new Set(files);
+    const otherFiles = (this.splitSuggestion?.groups ?? [])
+      .flatMap(g => g.files)
+      .filter(f => !groupSet.has(f));
+
+    if (otherFiles.length > 0) {
+      const unstage = await gitService.unstageFiles(this.repositoryPath, { paths: otherFiles });
+      if (!unstage.success) {
+        showToast(unstage.error?.message ?? 'Failed to isolate group', 'error');
+        return;
+      }
+    }
+
     const result = await gitService.stageFiles(this.repositoryPath, { paths: files });
     if (result.success) {
       showToast(`Staged ${files.length} files`, 'success');

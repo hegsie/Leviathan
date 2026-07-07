@@ -174,7 +174,6 @@ pub async fn open_in_editor(file_path: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::TestRepo;
 
     #[tokio::test]
     async fn test_open_terminal_invalid_path() {

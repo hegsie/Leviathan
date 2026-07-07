@@ -2125,9 +2125,17 @@ export class AppShell extends LitElement {
     try {
       // Refresh the repository state (e.g., after cherry-pick, merge, rebase)
       if (this.activeRepository) {
-        const result = await gitService.openRepository({ path: this.activeRepository.repository.path });
+        // Capture the path before awaiting: if the user switches tabs during the
+        // IPC round-trip, updateActiveRepository would otherwise write repo A's
+        // data into repo B's (now-active) tab slot, corrupting its identity.
+        const refreshingPath = this.activeRepository.repository.path;
+        const result = await gitService.openRepository({ path: refreshingPath });
         if (result.success && result.data) {
-          repositoryStore.getState().updateActiveRepository(result.data);
+          if (
+            repositoryStore.getState().getActiveRepository()?.repository.path === refreshingPath
+          ) {
+            repositoryStore.getState().updateActiveRepository(result.data);
+          }
         } else if (!result.success) {
           showToast(result.error?.message ?? 'Failed to refresh repository', 'error');
         }

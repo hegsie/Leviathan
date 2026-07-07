@@ -719,4 +719,92 @@ describe('lv-commit-panel', () => {
       }
     });
   });
+
+  // ── AI vibe-check / split analysis feedback ─────────────────────────────
+  describe('AI analysis feedback', () => {
+    it('handleVibeCheck surfaces an error and resets loading on failure', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as {
+        handleVibeCheck: () => Promise<void>;
+        isAnalyzing: boolean;
+        generationError: string | null;
+      };
+      mockInvoke = async (command: string) => {
+        if (command === 'analyze_staged_changes') throw new Error('vibe boom');
+        return null;
+      };
+
+      await internal.handleVibeCheck();
+
+      expect(internal.isAnalyzing).to.be.false; // not stuck
+      expect(internal.generationError).to.contain('vibe boom');
+    });
+
+    it('handleSuggestSplits surfaces an error and resets loading on failure', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as {
+        handleSuggestSplits: () => Promise<void>;
+        isAnalyzingSplit: boolean;
+        generationError: string | null;
+      };
+      mockInvoke = async (command: string) => {
+        if (command === 'suggest_commit_splits') throw new Error('split boom');
+        return null;
+      };
+
+      await internal.handleSuggestSplits();
+
+      expect(internal.isAnalyzingSplit).to.be.false; // not stuck
+      expect(internal.generationError).to.contain('split boom');
+    });
+
+    it('handleSuggestSplits gives feedback when no split is needed', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as {
+        handleSuggestSplits: () => Promise<void>;
+        isAnalyzingSplit: boolean;
+        generationError: string | null;
+      };
+      mockInvoke = async (command: string) => {
+        if (command === 'suggest_commit_splits') {
+          return { shouldSplit: false, groups: [], explanation: 'cohesive' };
+        }
+        return null;
+      };
+
+      await internal.handleSuggestSplits();
+
+      // Success path: no error, loading cleared. (Toast feedback is emitted for
+      // the "no split needed" case.)
+      expect(internal.isAnalyzingSplit).to.be.false;
+      expect(internal.generationError).to.be.null;
+    });
+
+    it('handleStageGroup isolates the group by unstaging the other groups', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as {
+        handleStageGroup: (files: string[]) => Promise<void>;
+        splitSuggestion: unknown;
+      };
+      internal.splitSuggestion = {
+        shouldSplit: true,
+        explanation: 'x',
+        groups: [
+          { files: ['a.ts', 'b.ts'], message: 'group a' },
+          { files: ['c.ts'], message: 'group b' },
+        ],
+      };
+      mockInvoke = async () => null; // all commands succeed
+
+      invokeHistory.length = 0;
+      await internal.handleStageGroup(['a.ts', 'b.ts']);
+
+      const unstage = invokeHistory.find(h => h.command === 'unstage_files');
+      const stage = invokeHistory.find(h => h.command === 'stage_files');
+      expect(unstage, 'unstages other group files').to.exist;
+      expect((unstage!.args as { paths: string[] }).paths).to.deep.equal(['c.ts']);
+      expect(stage, 'stages this group').to.exist;
+      expect((stage!.args as { paths: string[] }).paths).to.deep.equal(['a.ts', 'b.ts']);
+    });
+  });
 });

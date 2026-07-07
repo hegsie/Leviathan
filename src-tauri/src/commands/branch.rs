@@ -161,7 +161,11 @@ pub async fn delete_branch(path: String, name: String, force: Option<bool>) -> R
         // Check if branch is merged before deleting
         let head = repo.head()?;
         if let (Some(head_oid), Some(branch_oid)) = (head.target(), branch.get().target()) {
-            if repo.graph_descendant_of(head_oid, branch_oid)? {
+            // A branch is fully merged into HEAD when HEAD is at or descends
+            // from the branch tip. The equality case matters: `git branch -d`
+            // deletes a branch that points at the same commit as HEAD, but
+            // graph_descendant_of returns false for equal oids.
+            if head_oid == branch_oid || repo.graph_descendant_of(head_oid, branch_oid)? {
                 branch.delete()?;
             } else {
                 return Err(LeviathanError::OperationFailed(
@@ -1018,6 +1022,26 @@ mod tests {
         let git_repo = repo.repo();
         let branch = git_repo.find_branch("to-delete", git2::BranchType::Local);
         assert!(branch.is_err());
+    }
+
+    // A branch pointing at the same commit as HEAD is fully merged, so a
+    // non-force delete must succeed (matching `git branch -d`).
+    #[tokio::test]
+    async fn test_delete_branch_at_head_non_force_succeeds() {
+        let repo = TestRepo::with_initial_commit();
+        // Branch created at HEAD points to the same commit as HEAD.
+        repo.create_branch("at-head");
+
+        let result = delete_branch(repo.path_str(), "at-head".to_string(), Some(false)).await;
+        assert!(
+            result.is_ok(),
+            "deleting a branch at HEAD should succeed without force"
+        );
+
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .find_branch("at-head", git2::BranchType::Local)
+            .is_err());
     }
 
     #[tokio::test]

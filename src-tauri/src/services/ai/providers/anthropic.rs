@@ -38,12 +38,7 @@ struct ContentBlock {
 }
 
 /// Available Anthropic models
-const ANTHROPIC_MODELS: &[&str] = &[
-    "claude-sonnet-4-20250514",
-    "claude-3-5-sonnet-20241022",
-    "claude-3-5-haiku-20241022",
-    "claude-3-opus-20240229",
-];
+const ANTHROPIC_MODELS: &[&str] = &["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"];
 
 /// Anthropic Claude provider implementation
 pub struct AnthropicProvider {
@@ -261,8 +256,19 @@ mod tests {
 
     #[test]
     fn test_anthropic_models() {
-        assert!(ANTHROPIC_MODELS.contains(&"claude-sonnet-4-20250514"));
-        assert!(ANTHROPIC_MODELS.contains(&"claude-3-5-sonnet-20241022"));
+        assert!(ANTHROPIC_MODELS.contains(&"claude-sonnet-5"));
+        assert!(ANTHROPIC_MODELS.contains(&"claude-opus-4-8"));
+        // Guard against regressions to retired model ids that 404 at the API.
+        assert!(!ANTHROPIC_MODELS.contains(&"claude-sonnet-4-20250514"));
+    }
+
+    #[test]
+    fn test_default_model_is_current() {
+        // The default must be a non-retired id, since there is no model-selection UI.
+        assert_eq!(
+            AiProviderType::Anthropic.default_model(),
+            "claude-haiku-4-5"
+        );
     }
 
     #[test]

@@ -119,13 +119,21 @@ fn generate_branch_name(issue_key: &str, summary: &str, branch_type: Option<&str
     }
     let result = result.trim_matches('-');
 
-    // Truncate to reasonable length
+    // Truncate to reasonable length. `result` may contain multi-byte Unicode
+    // (CJK/accented letters survive `is_alphanumeric`), so we must cut on a char
+    // boundary — slicing at a raw byte index would panic mid-codepoint.
     let max_summary_len = 50;
     let truncated = if result.len() > max_summary_len {
-        // Try to cut at a dash boundary
-        match result[..max_summary_len].rfind('-') {
+        // Largest char boundary <= max_summary_len (equals max_summary_len for ASCII).
+        let byte_limit = (0..=max_summary_len)
+            .rev()
+            .find(|&i| result.is_char_boundary(i))
+            .unwrap_or(0);
+        let head = &result[..byte_limit];
+        // Prefer cutting at a dash boundary, mirroring the original ASCII behavior.
+        match head.rfind('-') {
             Some(pos) if pos > 10 => &result[..pos],
-            _ => &result[..max_summary_len],
+            _ => head,
         }
     } else {
         result
@@ -682,6 +690,26 @@ mod tests {
         assert!(name.starts_with("feature/PROJ-100-"));
         // Total length should be reasonable (prefix + key + truncated summary)
         assert!(name.len() < 80);
+    }
+
+    #[test]
+    fn test_generate_branch_name_unicode_no_panic() {
+        // CJK characters are alphanumeric and survive sanitization as multi-byte
+        // codepoints; truncation must not panic on a non-char-boundary byte index.
+        let long_cjk = "件".repeat(40); // 40 chars * 3 bytes = 120 bytes, well over 50
+        let name = generate_branch_name("PROJ-999", &long_cjk, None);
+        assert!(name.starts_with("feature/PROJ-999-"));
+        // The multi-byte summary was preserved (not stripped) and truncated safely.
+        assert!(name.contains('件'));
+    }
+
+    #[test]
+    fn test_generate_branch_name_mixed_unicode_boundary() {
+        // A summary whose 50th byte lands in the middle of a multi-byte char.
+        let summary = "café ".repeat(15); // 'é' is 2 bytes, shifts boundaries
+        let name = generate_branch_name("PROJ-1", &summary, None);
+        assert!(name.starts_with("feature/PROJ-1-"));
+        assert!(name.contains("caf"));
     }
 
     #[test]

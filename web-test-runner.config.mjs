@@ -8,7 +8,15 @@ export default {
     esbuildPlugin({ ts: true, target: 'auto', tsconfig: 'tsconfig.json', loaders: { '.png': 'dataurl' } }),
   ],
   browsers: [
-    playwrightLauncher({ product: 'chromium' }),
+    playwrightLauncher({
+      product: 'chromium',
+      // Allow pointing at a preinstalled Chromium (e.g. in CI/sandbox images
+      // where the bundled download is skipped). Falls back to Playwright's
+      // default resolution when the env var is unset.
+      ...(process.env.PW_CHROMIUM_PATH
+        ? { launchOptions: { executablePath: process.env.PW_CHROMIUM_PATH } }
+        : {}),
+    }),
   ],
   testFramework: {
     config: {

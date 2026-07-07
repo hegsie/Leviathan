@@ -566,18 +566,34 @@ pub async fn unassign_unified_profile_from_repository(path: String) -> Result<()
     Ok(())
 }
 
-/// Apply a profile to a repository (set git config)
-#[command]
-pub async fn apply_unified_profile(path: String, profile_id: String) -> Result<()> {
-    let mut config = load_unified_profiles_config()?;
+/// Detect the `gpg.format` git should use for a given signing key.
+///
+/// Returns `Some("ssh")` when the key looks like an SSH signing key — either an
+/// inline OpenSSH public key (e.g. `ssh-ed25519 ...`, `ssh-rsa ...`) or a path
+/// to a `.pub` file. Returns `None` otherwise, meaning git's default `openpgp`
+/// format should be used (and any stale local `gpg.format` cleared).
+fn detect_gpg_format(signing_key: &str) -> Option<&'static str> {
+    let key = signing_key.trim();
+    if key.starts_with("ssh-") || key.ends_with(".pub") {
+        Some("ssh")
+    } else {
+        None
+    }
+}
 
-    let profile = config
-        .get_profile(&profile_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Profile not found".to_string()))?
-        .clone();
-
-    let repo_path = Path::new(&path);
-
+/// Apply a profile's git identity (name, email, signing config) to a
+/// repository's local git config.
+///
+/// Signing behaviour:
+/// - With a non-empty signing key: sets `user.signingkey`, sets `gpg.format`
+///   locally to match the key type (`ssh` for SSH keys, otherwise `openpgp`),
+///   and enables `commit.gpgsign`. Without setting `gpg.format=ssh`, an SSH
+///   signing key would apply `gpgsign=true` while the format stayed `openpgp`,
+///   making subsequent commits fail to sign.
+/// - Without a signing key: clears the local `user.signingkey`/`gpg.format`
+///   and explicitly sets `commit.gpgsign=false` so a globally-enabled
+///   `commit.gpgsign=true` cannot force commits to sign with a missing key.
+fn apply_profile_git_config(repo_path: &Path, profile: &UnifiedProfile) -> Result<()> {
     // Set user.name
     run_git_config(
         Some(repo_path),
@@ -590,20 +606,47 @@ pub async fn apply_unified_profile(path: String, profile_id: String) -> Result<(
         &["--local", "user.email", &profile.git_email],
     )?;
 
-    // Set signing key if specified
-    if let Some(ref signing_key) = profile.signing_key {
-        if !signing_key.is_empty() {
+    match profile.signing_key.as_deref() {
+        Some(signing_key) if !signing_key.is_empty() => {
             run_git_config(
                 Some(repo_path),
                 &["--local", "user.signingkey", signing_key],
             )?;
+            // Set gpg.format explicitly so the key signs correctly. Git's
+            // default is openpgp, so an SSH key with gpgsign=true would fail to
+            // sign without gpg.format=ssh. We write it locally in both cases so
+            // a globally-configured gpg.format cannot mismatch the profile's
+            // key (e.g. a global gpg.format=ssh would break an OpenPGP key).
+            let fmt = detect_gpg_format(signing_key).unwrap_or("openpgp");
+            run_git_config(Some(repo_path), &["--local", "gpg.format", fmt])?;
             run_git_config(Some(repo_path), &["--local", "commit.gpgsign", "true"])?;
         }
-    } else {
-        // Unset signing key if not specified
-        let _ = run_git_config(Some(repo_path), &["--local", "--unset", "user.signingkey"]);
-        let _ = run_git_config(Some(repo_path), &["--local", "--unset", "commit.gpgsign"]);
+        _ => {
+            // No signing key: unset the local key/format and explicitly disable
+            // signing so a globally-enabled commit.gpgsign=true does not force
+            // commits to sign with a missing local key.
+            let _ = run_git_config(Some(repo_path), &["--local", "--unset", "user.signingkey"]);
+            let _ = run_git_config(Some(repo_path), &["--local", "--unset", "gpg.format"]);
+            run_git_config(Some(repo_path), &["--local", "commit.gpgsign", "false"])?;
+        }
     }
+
+    Ok(())
+}
+
+/// Apply a profile to a repository (set git config)
+#[command]
+pub async fn apply_unified_profile(path: String, profile_id: String) -> Result<()> {
+    let mut config = load_unified_profiles_config()?;
+
+    let profile = config
+        .get_profile(&profile_id)
+        .ok_or_else(|| LeviathanError::OperationFailed("Profile not found".to_string()))?
+        .clone();
+
+    let repo_path = Path::new(&path);
+
+    apply_profile_git_config(repo_path, &profile)?;
 
     // Save the assignment
     config.assign_profile(path, profile_id);
@@ -1206,6 +1249,204 @@ mod tests {
     use crate::models::{
         workflow::GitProfile, IntegrationAccountsConfig, IntegrationConfig, ProfilesConfig,
     };
+    use crate::test_utils::TestRepo;
+
+    // =========================================================================
+    // Signing config application (gpg.format / commit.gpgsign)
+    // =========================================================================
+
+    #[test]
+    fn test_detect_gpg_format() {
+        assert_eq!(detect_gpg_format("ssh-ed25519 AAAAC3..."), Some("ssh"));
+        assert_eq!(detect_gpg_format("ssh-rsa AAAAB3..."), Some("ssh"));
+        assert_eq!(
+            detect_gpg_format("/home/me/.ssh/id_ed25519.pub"),
+            Some("ssh")
+        );
+        assert_eq!(detect_gpg_format("  ssh-ed25519 key  "), Some("ssh"));
+        // OpenPGP-style key IDs are not SSH.
+        assert_eq!(detect_gpg_format("ABCDEF1234567890"), None);
+        assert_eq!(detect_gpg_format(""), None);
+    }
+
+    #[test]
+    fn test_apply_profile_ssh_signing_sets_gpg_format_ssh() {
+        let repo = TestRepo::with_initial_commit();
+        let mut profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice".to_string(),
+            "alice@work.com".to_string(),
+        );
+        profile.signing_key = Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAExampleKey".to_string());
+
+        apply_profile_git_config(repo.path.as_path(), &profile).expect("apply should succeed");
+
+        // SSH key -> gpg.format=ssh and gpgsign enabled.
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "gpg.format"]
+            )
+            .unwrap(),
+            "ssh"
+        );
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "commit.gpgsign"]
+            )
+            .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "user.signingkey"]
+            )
+            .unwrap(),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAExampleKey"
+        );
+    }
+
+    #[test]
+    fn test_apply_profile_pub_path_sets_gpg_format_ssh() {
+        let repo = TestRepo::with_initial_commit();
+        let mut profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice".to_string(),
+            "alice@work.com".to_string(),
+        );
+        profile.signing_key = Some("/home/alice/.ssh/id_ed25519.pub".to_string());
+
+        apply_profile_git_config(repo.path.as_path(), &profile).expect("apply should succeed");
+
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "gpg.format"]
+            )
+            .unwrap(),
+            "ssh"
+        );
+    }
+
+    #[test]
+    fn test_apply_profile_openpgp_key_leaves_format_default() {
+        let repo = TestRepo::with_initial_commit();
+        let mut profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice".to_string(),
+            "alice@work.com".to_string(),
+        );
+        profile.signing_key = Some("ABCDEF1234567890".to_string());
+
+        apply_profile_git_config(repo.path.as_path(), &profile).expect("apply should succeed");
+
+        // Non-SSH key -> gpg.format set explicitly to openpgp locally, signing on.
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "gpg.format"]
+            )
+            .unwrap(),
+            "openpgp"
+        );
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "commit.gpgsign"]
+            )
+            .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn test_apply_profile_no_signing_disables_gpgsign() {
+        let repo = TestRepo::with_initial_commit();
+        let profile = UnifiedProfile::new(
+            "Personal".to_string(),
+            "Alice".to_string(),
+            "alice@home.com".to_string(),
+        );
+        // No signing key on this profile.
+        assert!(profile.signing_key.is_none());
+
+        apply_profile_git_config(repo.path.as_path(), &profile).expect("apply should succeed");
+
+        // Explicit local override so a globally-enabled gpgsign cannot sign.
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "commit.gpgsign"]
+            )
+            .unwrap(),
+            "false"
+        );
+        // Local signing key and format cleared.
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "user.signingkey"]
+            )
+            .unwrap(),
+            ""
+        );
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "gpg.format"]
+            )
+            .unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_apply_profile_switch_ssh_to_none_clears_ssh_format() {
+        // Applying an SSH profile then a no-signing profile must clear the
+        // stale gpg.format=ssh and disable signing.
+        let repo = TestRepo::with_initial_commit();
+
+        let mut ssh_profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice".to_string(),
+            "alice@work.com".to_string(),
+        );
+        ssh_profile.signing_key = Some("ssh-ed25519 AAAAExampleKey".to_string());
+        apply_profile_git_config(repo.path.as_path(), &ssh_profile).unwrap();
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "gpg.format"]
+            )
+            .unwrap(),
+            "ssh"
+        );
+
+        let none_profile = UnifiedProfile::new(
+            "Personal".to_string(),
+            "Alice".to_string(),
+            "alice@home.com".to_string(),
+        );
+        apply_profile_git_config(repo.path.as_path(), &none_profile).unwrap();
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "gpg.format"]
+            )
+            .unwrap(),
+            ""
+        );
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "commit.gpgsign"]
+            )
+            .unwrap(),
+            "false"
+        );
+    }
 
     // Helper: build a minimal GitProfile for use in migration tests.
     fn make_git_profile(id: &str, name: &str) -> GitProfile {

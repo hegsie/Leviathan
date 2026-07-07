@@ -99,10 +99,14 @@ fn keyring_get(service: &str, account: &str) -> Option<String> {
 }
 
 /// Store a password in the keyring.
-/// On macOS uses the `security` CLI with `-A` to allow any application to access
-/// the item without triggering authorization prompts. The password is sent on
-/// stdin (via `-w` with no value) so it does NOT appear in the process argv,
-/// where any other process under the same user could read it via `ps`.
+/// On macOS uses the `security` CLI. In **debug** builds `-A` (allow any
+/// application) is added for development convenience so frequent rebuilds don't
+/// trigger authorization prompts; in **release** builds it is omitted so the
+/// keychain entry is scoped to the signed application bundle (per-app
+/// isolation), mirroring `credentials::build_security_add_args`. The password
+/// is sent on stdin (via `-w` with no value) so it does NOT appear in the
+/// process argv, where any other process under the same user could read it via
+/// `ps`.
 fn keyring_set(service: &str, account: &str, password: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -114,18 +118,32 @@ fn keyring_set(service: &str, account: &str, password: &str) -> bool {
             .args(["delete-generic-password", "-s", service, "-a", account])
             .output();
 
+        // `-A` allows any application without a prompt — debug builds only.
+        #[cfg(debug_assertions)]
+        let args: &[&str] = &[
+            "add-generic-password",
+            "-s",
+            service,
+            "-a",
+            account,
+            "-A",
+            "-U",
+            "-w",
+        ];
+        #[cfg(not(debug_assertions))]
+        let args: &[&str] = &[
+            "add-generic-password",
+            "-s",
+            service,
+            "-a",
+            account,
+            "-U",
+            "-w",
+        ];
+
         // `-w` last with no argument => read password from stdin.
         let mut child = match std::process::Command::new("security")
-            .args([
-                "add-generic-password",
-                "-s",
-                service,
-                "-a",
-                account,
-                "-A", // Allow any application to access without prompt
-                "-U",
-                "-w",
-            ])
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

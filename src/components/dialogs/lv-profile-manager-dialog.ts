@@ -1067,6 +1067,10 @@ export class LvProfileManagerDialog extends LitElement {
     try {
       await unifiedProfileService.applyUnifiedProfile(this.repoPath, profile.id);
       showToast(`Applied profile "${profile.name}"`, 'success');
+      // The applied git identity (footer/commit panel) is sourced from
+      // get_current_git_identity — refresh so it reflects the change now
+      // instead of only after the tab is re-switched.
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
     } catch (error) {
       showToast(`Failed to apply profile: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     }

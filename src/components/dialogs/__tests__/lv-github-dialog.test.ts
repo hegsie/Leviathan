@@ -1071,4 +1071,32 @@ describe('lv-github-dialog', () => {
       expect((el as unknown as { isAddingAccount: boolean }).isAddingAccount).to.equal(false);
     });
   });
+
+  describe('load-failure feedback', () => {
+    it('surfaces a toast when loading issues fails instead of silently swallowing it', async () => {
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      dialog.detectedRepo = { owner: 'octocat', repo: 'hello' };
+      dialog.connectionStatus = { connected: true };
+
+      mockInvoke = async (command: string) => {
+        if (command === 'list_issues' || command === 'list_github_issues') {
+          throw new Error('rate limit exceeded');
+        }
+        return null;
+      };
+      uiStore.setState({ toasts: [] });
+
+      await dialog.loadIssues('tok');
+
+      const errorToast = uiStore.getState().toasts.find((t) => t.type === 'error');
+      expect(errorToast, 'a failed issues load is surfaced').to.exist;
+      expect(errorToast!.message).to.contain('rate limit exceeded');
+    });
+  });
 });
