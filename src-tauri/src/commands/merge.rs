@@ -470,17 +470,26 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
             "Another operation is in progress".to_string(),
         ));
     }
-    let statuses = repo.statuses(None)?;
-    if !statuses.is_empty() {
-        let has_changes = statuses
-            .iter()
-            .any(|s| s.status() != git2::Status::IGNORED && s.status() != git2::Status::CURRENT);
-        if has_changes {
-            return Err(LeviathanError::OperationFailed(
-                "Working directory has uncommitted changes. Commit or stash them first."
-                    .to_string(),
-            ));
-        }
+    // Match canonical `git rebase`: staged changes and modifications to tracked
+    // files abort the rebase, but untracked (WT_NEW) and ignored files do not.
+    let blocking = git2::Status::INDEX_NEW
+        | git2::Status::INDEX_MODIFIED
+        | git2::Status::INDEX_DELETED
+        | git2::Status::INDEX_RENAMED
+        | git2::Status::INDEX_TYPECHANGE
+        | git2::Status::WT_MODIFIED
+        | git2::Status::WT_DELETED
+        | git2::Status::WT_TYPECHANGE
+        | git2::Status::WT_RENAMED
+        | git2::Status::CONFLICTED;
+    let has_changes = repo
+        .statuses(None)?
+        .iter()
+        .any(|s| s.status().intersects(blocking));
+    if has_changes {
+        return Err(LeviathanError::OperationFailed(
+            "Working directory has uncommitted changes. Commit or stash them first.".to_string(),
+        ));
     }
 
     // Find the onto commit
@@ -1563,8 +1572,8 @@ mod tests {
         assert_ne!(parent.id(), initial_oid);
     }
 
-    // Like `git rebase`, a dirty working tree must abort the rebase up front,
-    // leaving no in-progress rebase state behind.
+    // Like `git rebase`, a modification to a tracked file must abort the rebase
+    // up front, leaving no in-progress rebase state behind.
     #[tokio::test]
     async fn test_rebase_dirty_working_tree_rejected() {
         let repo = TestRepo::with_initial_commit();
@@ -1580,13 +1589,13 @@ mod tests {
 
         repo.checkout_branch("feature");
 
-        // Introduce an uncommitted change.
-        repo.create_file("dirty.txt", "uncommitted");
+        // Modify a TRACKED file (feature.txt) — canonical git refuses this.
+        repo.create_file("feature.txt", "uncommitted change");
 
         let result = rebase(repo.path_str(), initial_branch.clone()).await;
         assert!(
             result.is_err(),
-            "rebase must be rejected when the working tree is dirty"
+            "rebase must be rejected when a tracked file has uncommitted changes"
         );
 
         // No rebase state should have been created.
@@ -1594,6 +1603,34 @@ mod tests {
         assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
         assert!(!repo.path.join(".git/rebase-merge").exists());
         assert!(!repo.path.join(".git/rebase-apply").exists());
+    }
+
+    // Canonical `git rebase` proceeds when only untracked files are present — the
+    // dirty-tree guard must not block on them.
+    #[tokio::test]
+    async fn test_rebase_allows_untracked_files() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature commit", &[("feature.txt", "feature")]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main commit", &[("main.txt", "main")]);
+
+        repo.checkout_branch("feature");
+
+        // A brand-new untracked file must NOT block the rebase.
+        repo.create_file("scratch.txt", "untracked");
+
+        let result = rebase(repo.path_str(), initial_branch.clone()).await;
+        assert!(
+            result.is_ok(),
+            "rebase must not be blocked by an untracked file: {result:?}"
+        );
+        // The untracked file survives the rebase.
+        assert!(repo.path.join("scratch.txt").exists());
     }
 
     #[tokio::test]
