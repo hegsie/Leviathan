@@ -780,6 +780,24 @@ describe('lv-commit-panel', () => {
       expect(internal.generationError).to.be.null;
     });
 
+    it('reloads the author identity on repository-refresh (e.g. after a profile is applied)', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as { cachedAuthor: string };
+
+      // Simulate applying a profile that rewrote the repo git identity.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_user_identity') {
+          return { name: 'New Identity', email: 'new@example.com' };
+        }
+        return null;
+      };
+
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(internal.cachedAuthor).to.equal('New Identity');
+    });
+
     it('handleStageGroup isolates the group by unstaging the other groups', async () => {
       const el = await renderCommitPanel();
       const internal = el as unknown as {

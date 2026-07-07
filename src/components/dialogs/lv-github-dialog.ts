@@ -1131,10 +1131,13 @@ export class LvGitHubDialog extends LitElement {
       if (result.success && result.data) {
         this.workflowRuns = result.data;
       } else if (!result.success) {
-        showToast(result.error?.message ?? 'Failed to load workflow runs', 'error');
+        // Use the shared error banner (like loadPullRequests) rather than a
+        // toast, so a shared failure across the batched loads doesn't stack
+        // four near-identical toasts on open.
+        this.error = result.error?.message ?? 'Failed to load workflow runs';
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load workflow runs', 'error');
+      this.error = err instanceof Error ? err.message : 'Failed to load workflow runs';
     }
   }
 
@@ -1155,10 +1158,10 @@ export class LvGitHubDialog extends LitElement {
       if (result.success && result.data) {
         this.issues = result.data;
       } else if (!result.success) {
-        showToast(result.error?.message ?? 'Failed to load issues', 'error');
+        this.error = result.error?.message ?? 'Failed to load issues';
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load issues', 'error');
+      this.error = err instanceof Error ? err.message : 'Failed to load issues';
     }
   }
 
@@ -1177,10 +1180,10 @@ export class LvGitHubDialog extends LitElement {
       if (result.success && result.data) {
         this.repoLabels = result.data;
       } else if (!result.success) {
-        showToast(result.error?.message ?? 'Failed to load labels', 'error');
+        this.error = result.error?.message ?? 'Failed to load labels';
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load labels', 'error');
+      this.error = err instanceof Error ? err.message : 'Failed to load labels';
     }
   }
 
@@ -1199,10 +1202,10 @@ export class LvGitHubDialog extends LitElement {
       if (result.success && result.data) {
         this.releases = result.data;
       } else if (!result.success) {
-        showToast(result.error?.message ?? 'Failed to load releases', 'error');
+        this.error = result.error?.message ?? 'Failed to load releases';
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load releases', 'error');
+      this.error = err instanceof Error ? err.message : 'Failed to load releases';
     }
   }
 

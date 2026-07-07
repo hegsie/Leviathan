@@ -690,6 +690,10 @@ export class LvCommitPanel extends LitElement {
 
   private boundHandleTriggerAmend = this.handleTriggerAmend.bind(this);
   private boundHandleAiSettingsChanged = () => this.checkAiAvailability();
+  // Reload the author identity when the repo refreshes (e.g. after applying a
+  // profile that rewrote user.name/user.email in the repo's git config), so the
+  // {{author}} template placeholder reflects the new identity.
+  private boundHandleRepositoryRefresh = () => this.loadAuthorName();
   private unsubscribeStore?: () => void;
   private aiRetryTimer?: ReturnType<typeof setTimeout>;
   private modelCompleteUnlisten?: UnlistenFn;
@@ -718,6 +722,9 @@ export class LvCommitPanel extends LitElement {
     // Re-check AI availability when settings change (browser event from settings dialog)
     window.addEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
 
+    // Reload author identity after a repository refresh (e.g. profile applied).
+    window.addEventListener('repository-refresh', this.boundHandleRepositoryRefresh);
+
     // Also listen for Tauri backend event when a model download completes and auto-loads
     listen<{ modelId: string; loaded?: boolean }>('model-download-complete', (event) => {
       if (event.payload.loaded) {
@@ -737,6 +744,7 @@ export class LvCommitPanel extends LitElement {
     document.removeEventListener('click', this._onDocumentClick);
     window.removeEventListener('trigger-amend', this.boundHandleTriggerAmend);
     window.removeEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
+    window.removeEventListener('repository-refresh', this.boundHandleRepositoryRefresh);
     this.modelCompleteUnlisten?.();
     if (this.aiRetryTimer) clearTimeout(this.aiRetryTimer);
     this.unsubscribeStore?.();

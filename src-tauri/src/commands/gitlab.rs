@@ -907,7 +907,17 @@ pub async fn get_gitlab_labels(
     let response = gitlab_get(&url, &token).await?;
 
     if !response.status().is_success() {
-        return Ok(vec![]);
+        // Only a missing project means "no labels"; a bad token or server error
+        // must surface, not silently render an empty labels dropdown.
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(vec![]);
+        }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "GitLab API error {}: {}",
+            status, body
+        )));
     }
 
     #[derive(Deserialize)]

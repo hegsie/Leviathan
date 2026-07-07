@@ -1073,7 +1073,7 @@ describe('lv-github-dialog', () => {
   });
 
   describe('load-failure feedback', () => {
-    it('surfaces a toast when loading issues fails instead of silently swallowing it', async () => {
+    it('surfaces an error banner when loading issues fails instead of silently swallowing it', async () => {
       const el = await fixture<LvGitHubDialog>(html`
         <lv-github-dialog .open=${true}></lv-github-dialog>
       `);
@@ -1083,6 +1083,7 @@ describe('lv-github-dialog', () => {
       const dialog = el as any;
       dialog.detectedRepo = { owner: 'octocat', repo: 'hello' };
       dialog.connectionStatus = { connected: true };
+      dialog.error = null;
 
       mockInvoke = async (command: string) => {
         if (command === 'list_issues' || command === 'list_github_issues') {
@@ -1090,13 +1091,12 @@ describe('lv-github-dialog', () => {
         }
         return null;
       };
-      uiStore.setState({ toasts: [] });
 
       await dialog.loadIssues('tok');
 
-      const errorToast = uiStore.getState().toasts.find((t) => t.type === 'error');
-      expect(errorToast, 'a failed issues load is surfaced').to.exist;
-      expect(errorToast!.message).to.contain('rate limit exceeded');
+      // Surfaced via the shared error banner (not a toast), so batched load
+      // failures collapse to a single message rather than stacking.
+      expect(dialog.error, 'a failed issues load is surfaced').to.contain('rate limit exceeded');
     });
   });
 });
