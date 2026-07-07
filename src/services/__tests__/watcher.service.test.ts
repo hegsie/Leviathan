@@ -49,6 +49,41 @@ describe('watcher.service', () => {
     // Don't clean up here to avoid double-invoke issues in tests
   });
 
+  // NOTE: this block must run FIRST — the module registers its (single)
+  // Tauri listener on the first successful startWatching, so listener-count
+  // assertions are only meaningful before other tests trigger it.
+  describe('shared listener registration', () => {
+    function listenRegistrations(): number {
+      return invokeCallArgs.filter(
+        (c) => c.command === 'plugin:event|listen' && c.args.event === 'file-change'
+      ).length;
+    }
+
+    it('registers exactly ONE file-change listener across concurrent startWatching calls', async () => {
+      // Regression: startup restore watches N repos back-to-back; a
+      // non-atomic `if (!unlisten)` check let every call register its own
+      // listener, leaking N-1 of them and dispatching every event N times.
+      await Promise.all([
+        startWatching('/repo/one'),
+        startWatching('/repo/two'),
+        startWatching('/repo/three'),
+      ]);
+
+      expect(listenRegistrations()).to.equal(1);
+
+      // Each repo still gets its own backend watcher
+      const watched = invokeCallArgs
+        .filter((c) => c.command === 'start_watching')
+        .map((c) => c.args.path);
+      expect(watched).to.have.members(['/repo/one', '/repo/two', '/repo/three']);
+    });
+
+    it('does not register another listener on later startWatching calls', async () => {
+      await startWatching('/repo/four');
+      expect(listenRegistrations()).to.equal(0); // registered in the previous test
+    });
+  });
+
   describe('startWatching', () => {
     it('should invoke start_watching with the path', async () => {
       await startWatching('/path/to/repo');
@@ -77,6 +112,20 @@ describe('watcher.service', () => {
 
       const call = invokeCallArgs.find((c) => c.command === 'stop_watching');
       expect(call).to.not.be.undefined;
+    });
+
+    it('should pass the specific path when given one', async () => {
+      await stopWatching('/repo/one');
+
+      const call = invokeCallArgs.find((c) => c.command === 'stop_watching');
+      expect(call!.args.path).to.equal('/repo/one');
+    });
+
+    it('should pass null (stop all) when called without a path', async () => {
+      await stopWatching();
+
+      const call = invokeCallArgs.find((c) => c.command === 'stop_watching');
+      expect(call!.args.path).to.equal(null);
     });
 
     it('should throw on backend error', async () => {

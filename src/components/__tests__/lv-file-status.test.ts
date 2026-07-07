@@ -25,6 +25,8 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvFileStatus } from '../sidebar/lv-file-status.ts';
 import '../sidebar/lv-file-status.ts';
+import { repositoryStore } from '../../stores/repository.store.ts';
+import type { Repository } from '../../types/git.types.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -780,6 +782,184 @@ describe('lv-file-status', () => {
       expect(events.length).to.be.greaterThan(1);
       const lastEvent = events[events.length - 1];
       expect(lastEvent.stagedCount).to.equal(5); // 5 staged files now
+    });
+  });
+
+  // ── Multi-repo behavior ──────────────────────────────────────────────
+  describe('multi-repo behavior', () => {
+    function openRepoInStore(path: string): void {
+      repositoryStore.getState().addRepository({
+        path,
+        name: path.split('/').pop() ?? path,
+        isValid: true,
+        isBare: false,
+        headRef: 'main',
+        state: 'clean',
+        isShallow: false,
+        isPartialClone: false,
+        cloneFilter: null,
+      } as Repository);
+    }
+
+    beforeEach(() => {
+      repositoryStore.getState().reset();
+    });
+
+    it('mirrors loaded status into the repository store for the tab dirty badge', async () => {
+      openRepoInStore(REPO_PATH);
+      setupDefaultMocks();
+      const el = await renderFileStatus();
+      await el.updateComplete;
+
+      const repo = repositoryStore.getState().openRepositories[0];
+      expect(repo.status.length).to.equal(mockStatusEntries.length);
+      expect(repo.stagedFiles.length).to.equal(4);
+      expect(repo.unstagedFiles.length).to.equal(4);
+    });
+
+    it('ignores watcher events from OTHER repos', async () => {
+      setupDefaultMocks();
+      const el = await renderFileStatus();
+      clearHistory();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleWatcherEvent({
+        repoPath: '/some/other/repo',
+        eventType: 'workdir-changed',
+        paths: [],
+      });
+      await new Promise((r) => setTimeout(r, 400)); // past the 300ms debounce
+
+      expect(findCommands('get_status').length).to.equal(0);
+    });
+
+    it('a stale status result must not overwrite the newly active repo panel', async () => {
+      // Regression: switch tabs while a slow get_status for the OLD repo is
+      // in flight; its late result used to overwrite the panel now showing
+      // the NEW repo (destructive-action risk on same-named files).
+      openRepoInStore(REPO_PATH);
+      let releaseSlow!: () => void;
+      const slowGate = new Promise<void>((resolve) => {
+        releaseSlow = resolve;
+      });
+      const slowEntries = [
+        { path: 'stale-repo-file.ts', status: 'modified', isStaged: false, isConflicted: false },
+      ];
+      const fastEntries = [
+        { path: 'fresh-repo-file.ts', status: 'modified', isStaged: true, isConflicted: false },
+      ];
+      let statusCalls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_status') {
+          statusCalls++;
+          if (statusCalls === 1) {
+            await slowGate;
+            return slowEntries;
+          }
+          return fastEntries;
+        }
+        return null;
+      };
+
+      // First load (for REPO_PATH) hangs on the gate
+      const el = await fixture<LvFileStatus>(
+        html`<lv-file-status .repositoryPath=${REPO_PATH}></lv-file-status>`,
+      );
+      await el.updateComplete;
+
+      // Switch tabs; the second load resolves immediately
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Now the stale first load lands
+      releaseSlow();
+      await new Promise((r) => setTimeout(r, 20));
+
+      // The visible panel keeps the ACTIVE repo's data
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const staged = (el as any).stagedFiles as Array<{ path: string }>;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const unstaged = (el as any).unstagedFiles as Array<{ path: string }>;
+      expect(staged.map((f) => f.path)).to.deep.equal(['fresh-repo-file.ts']);
+      expect(unstaged).to.deep.equal([]);
+
+      // ...while the stale result still reached the store for ITS repo
+      const repoA = repositoryStore
+        .getState()
+        .openRepositories.find((r) => r.repository.path === REPO_PATH);
+      expect(repoA!.status.map((s) => s.path)).to.deep.equal(['stale-repo-file.ts']);
+    });
+
+    it('an A -> B -> A switch discards the outdated first A load', async () => {
+      // Regression: path-equality guards let a REORDERED pair of loads for
+      // the same repo apply the older result (reverting a staging change
+      // until the next watcher tick).
+      openRepoInStore(REPO_PATH);
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const outdatedEntries = [
+        { path: 'outdated.ts', status: 'modified', isStaged: false, isConflicted: false },
+      ];
+      const freshEntries = [
+        { path: 'fresh.ts', status: 'modified', isStaged: true, isConflicted: false },
+      ];
+      let statusCalls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_status') {
+          statusCalls++;
+          if (statusCalls === 1) {
+            await firstGate; // A's FIRST load is slow
+            return outdatedEntries;
+          }
+          return freshEntries; // B's load and A's second load are fast
+        }
+        return null;
+      };
+
+      const el = await fixture<LvFileStatus>(
+        html`<lv-file-status .repositoryPath=${REPO_PATH}></lv-file-status>`,
+      );
+      await el.updateComplete;
+
+      // A -> B -> A
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+      el.repositoryPath = REPO_PATH;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Now A's outdated first load finally lands — it must be discarded
+      releaseFirst();
+      await new Promise((r) => setTimeout(r, 20));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const staged = (el as any).stagedFiles as Array<{ path: string }>;
+      expect(staged.map((f) => f.path)).to.deep.equal(['fresh.ts']);
+
+      const repoA = repositoryStore
+        .getState()
+        .openRepositories.find((r) => r.repository.path === REPO_PATH);
+      expect(repoA!.status.map((s) => s.path)).to.deep.equal(['fresh.ts']);
+    });
+
+    it('reloads status on watcher events for ITS repo', async () => {
+      setupDefaultMocks();
+      const el = await renderFileStatus();
+      clearHistory();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).handleWatcherEvent({
+        repoPath: REPO_PATH,
+        eventType: 'workdir-changed',
+        paths: [],
+      });
+      await new Promise((r) => setTimeout(r, 400));
+
+      expect(findCommands('get_status').length).to.equal(1);
     });
   });
 });

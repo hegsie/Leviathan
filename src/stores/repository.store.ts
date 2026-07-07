@@ -33,6 +33,9 @@ export interface RepositoryState {
 
   // Persisted open repos (restored on startup)
   persistedOpenRepos: PersistedOpenRepo[];
+  // Path of the tab that was active when the app last persisted — restored
+  // by restorePersistedRepositories so a restart lands on the same tab
+  persistedActivePath: string | null;
 
   // Loading state
   isLoading: boolean;
@@ -42,14 +45,25 @@ export interface RepositoryState {
   recentRepositories: RecentRepository[];
 
   // Actions - Repository management
-  addRepository: (repo: Repository) => void;
+  /**
+   * Open a repo as a tab. By default it becomes the active tab; pass
+   * `{ activate: false }` when opening several repos in a batch (workspace
+   * open) so each add doesn't fire the activation side effects (index
+   * builds, integration checks) — activate the final one explicitly.
+   */
+  addRepository: (repo: Repository, options?: { activate?: boolean }) => void;
   removeRepository: (path: string) => void;
+  /** Remove a repo from the persisted list only (e.g. it failed to restore) */
+  prunePersistedRepo: (path: string) => void;
   setActiveIndex: (index: number) => void;
   setActiveByPath: (path: string) => void;
 
-  // Actions - Update active repo data
+  // Actions - Update repo data
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
+  /** Update any open repo's data by path — works for background tabs too */
+  updateRepoData: (path: string, data: Partial<Omit<OpenRepository, 'repository'>>) => void;
+  // Convenience setters for the ACTIVE repo
   setBranches: (branches: Branch[]) => void;
   setCurrentBranch: (branch: Branch | null) => void;
   setRemotes: (remotes: Remote[]) => void;
@@ -75,6 +89,7 @@ const initialState = {
   openRepositories: [] as OpenRepository[],
   activeIndex: -1,
   persistedOpenRepos: [] as PersistedOpenRepo[],
+  persistedActivePath: null as string | null,
   isLoading: false,
   error: null,
   recentRepositories: [] as RecentRepository[],
@@ -103,8 +118,9 @@ export const repositoryStore = createStore<RepositoryState>()(
       ...initialState,
 
       // Repository management
-      addRepository: (repo) => {
+      addRepository: (repo, options) => {
         const name = repo.name || repo.path.split('/').pop() || repo.path;
+        const activate = options?.activate ?? true;
 
         set((state) => {
           const existingIndex = state.openRepositories.findIndex(
@@ -112,7 +128,7 @@ export const repositoryStore = createStore<RepositoryState>()(
           );
 
           if (existingIndex >= 0) {
-            return { activeIndex: existingIndex };
+            return activate ? { activeIndex: existingIndex } : state;
           }
 
           const newRepos = [...state.openRepositories, createEmptyRepoData(repo)];
@@ -122,7 +138,7 @@ export const repositoryStore = createStore<RepositoryState>()(
 
           return {
             openRepositories: newRepos,
-            activeIndex: newRepos.length - 1,
+            activeIndex: activate ? newRepos.length - 1 : state.activeIndex,
             persistedOpenRepos: newPersistedRepos,
             error: null,
           };
@@ -167,6 +183,12 @@ export const repositoryStore = createStore<RepositoryState>()(
         });
       },
 
+      prunePersistedRepo: (path) => {
+        set((state) => ({
+          persistedOpenRepos: state.persistedOpenRepos.filter((r) => r.path !== path),
+        }));
+      },
+
       setActiveIndex: (index) => {
         set((state) => {
           if (index < 0 || index >= state.openRepositories.length) {
@@ -191,79 +213,55 @@ export const repositoryStore = createStore<RepositoryState>()(
 
       setError: (error) => set({ error, isLoading: false }),
 
-      // Update active repo data
-      setBranches: (branches) => {
+      // Update repo data. All setters funnel through updateRepoData so any
+      // open repo (active or background) can be updated by path without
+      // touching activeIndex.
+      updateRepoData: (path, data) => {
         set((state) => {
-          if (!isActiveIndexValid(state)) return state;
+          const index = state.openRepositories.findIndex(
+            (r) => r.repository.path === path
+          );
+          if (index < 0) return state;
           const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            branches,
-          };
+          newRepos[index] = { ...newRepos[index], ...data };
           return { openRepositories: newRepos };
         });
+      },
+
+      setBranches: (branches) => {
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { branches });
       },
 
       setCurrentBranch: (currentBranch) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            currentBranch,
-          };
-          return { openRepositories: newRepos };
-        });
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { currentBranch });
       },
 
       setRemotes: (remotes) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            remotes,
-          };
-          return { openRepositories: newRepos };
-        });
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { remotes });
       },
 
       setTags: (tags) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            tags,
-          };
-          return { openRepositories: newRepos };
-        });
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { tags });
       },
 
       setStashes: (stashes) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
-            stashes,
-          };
-          return { openRepositories: newRepos };
-        });
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) get().updateRepoData(path, { stashes });
       },
 
       setStatus: (status) => {
-        set((state) => {
-          if (!isActiveIndexValid(state)) return state;
-          const newRepos = [...state.openRepositories];
-          newRepos[state.activeIndex] = {
-            ...newRepos[state.activeIndex],
+        const path = get().getActiveRepository()?.repository.path;
+        if (path) {
+          get().updateRepoData(path, {
             status,
             stagedFiles: status.filter((s) => s.isStaged),
             unstagedFiles: status.filter((s) => !s.isStaged),
-          };
-          return { openRepositories: newRepos };
-        });
+          });
+        }
       },
 
       updateActiveRepository: (repo) => {
@@ -324,6 +322,13 @@ export const repositoryStore = createStore<RepositoryState>()(
         recentRepositories: state.recentRepositories,
         persistedOpenRepos: state.persistedOpenRepos,
         activeIndex: state.activeIndex,
+        // Derive the active PATH at persist time: activeIndex alone can't be
+        // restored (openRepositories is rebuilt async at startup, so the
+        // rehydrate hook clamps the index). Keep the previous value while no
+        // repo is active (e.g. during the startup window before restore).
+        persistedActivePath:
+          state.openRepositories[state.activeIndex]?.repository.path ??
+          state.persistedActivePath,
       }),
       onRehydrateStorage: () => (state) => {
         // Clamp activeIndex to valid range — openRepositories starts empty

@@ -32,6 +32,7 @@ import type { Commit, RefsByCommit } from '../../../types/git.types.ts';
 // Import the actual component — registers <lv-graph-canvas> custom element
 import '../lv-graph-canvas.ts';
 import type { LvGraphCanvas } from '../lv-graph-canvas.ts';
+import { clearGraphCacheForTests, evictGraphCache } from '../lv-graph-canvas.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -703,6 +704,279 @@ describe('lv-graph-canvas', () => {
       expect(result).to.be.true;
       expect(selectedEvent).to.not.be.null;
       expect(selectedEvent!.detail.commit.oid).to.equal(commit2.oid);
+    });
+  });
+
+  // ── Per-repo graph cache ─────────────────────────────────────────────
+  describe('per-repo graph cache', () => {
+    beforeEach(() => {
+      clearGraphCacheForTests();
+    });
+
+    async function switchRepo(el: LvGraphCanvas, path: string): Promise<void> {
+      el.repositoryPath = path;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+    }
+
+    it('renders a previously-visited repo from cache without the loading state', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+      clearHistory();
+
+      // Switch back — cached page must be applied synchronously
+      el.repositoryPath = REPO_PATH;
+      await el.updateComplete;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+    });
+
+    it('still revalidates a cached repo in the background', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+      clearHistory();
+
+      await switchRepo(el, REPO_PATH);
+
+      // The cached render is instant, but a background reload still hits the
+      // backend so external changes are picked up
+      expect(findCommands('get_commit_history').length).to.equal(1);
+    });
+
+    it('a repo seen for the first time takes the normal loading path', async () => {
+      const el = await renderCanvas();
+      clearHistory();
+
+      await switchRepo(el, '/never/seen');
+
+      expect(findCommands('get_commit_history').length).to.equal(1);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+    });
+
+    it('a refresh during an in-flight load queues exactly one follow-up load', async () => {
+      // Regression: refresh() used to silently no-op while a load was in
+      // flight — a commit made right after a tab switch never appeared
+      // because the in-flight snapshot predated it.
+      const el = await renderCanvas();
+      clearHistory();
+
+      let releaseLoad!: () => void;
+      const loadGate = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      let gated = true;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_commit_history':
+            if (gated) {
+              gated = false; // only the first call blocks
+              await loadGate;
+            }
+            return defaultCommits;
+          case 'get_refs_by_commit':
+            return defaultRefs;
+          default:
+            return null;
+        }
+      };
+
+      // Start a slow load, then refresh twice while it's in flight
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).loadCommits();
+      await new Promise((r) => setTimeout(r, 10));
+      el.refresh();
+      el.refresh();
+
+      releaseLoad();
+      await new Promise((r) => setTimeout(r, 250));
+
+      // The in-flight load plus exactly ONE queued follow-up
+      expect(findCommands('get_commit_history').length).to.equal(2);
+    });
+
+    it('switching repos mid-stats-fetch does not leave the stats spinner stuck on', async () => {
+      // Regression: fetchCommitStats' finally only cleared isLoadingStats
+      // when still on the same repo, so switching away mid-fetch (esp. to an
+      // empty repo that runs no stats fetch of its own) left the spinner on.
+      const el = await renderCanvas();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).isLoadingStats = true; // simulate an in-flight stats fetch
+
+      // Switch to a different repo (uncached) — willUpdate must reset it
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoadingStats).to.be.false;
+    });
+
+    it('a superseded load must not clear isLoading while the newest load is still running', async () => {
+      // Regression: loadCommits' finally cleared isLoading unconditionally,
+      // so double-switching between two uncached repos let the first
+      // (superseded) load drop the spinner while the second was still in
+      // flight — flashing a stale graph with no loading indicator.
+      const el = await renderCanvas();
+
+      // Gate get_commit_history so we control when each load resolves
+      const gates: Array<() => void> = [];
+      mockInvoke = async (command: string) => {
+        if (command === 'get_commit_history') {
+          await new Promise<void>((resolve) => gates.push(resolve));
+          return defaultCommits;
+        }
+        if (command === 'get_refs_by_commit') return defaultRefs;
+        return null;
+      };
+
+      // Switch to A (load v+1, gated), then B (load v+2, gated) before A resolves
+      el.repositoryPath = '/repo/a';
+      await el.updateComplete;
+      el.repositoryPath = '/repo/b';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.true;
+
+      // Resolve A's (superseded) load first — it must NOT clear isLoading
+      gates[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading, 'superseded load must not drop the spinner').to.be.true;
+
+      // Resolve B's (newest) load — now the spinner clears
+      gates[1]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.false;
+    });
+
+    it('a failed background revalidation does not paint an error over the cached graph', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+
+      // The repo becomes temporarily unreachable for the background reload
+      mockInvoke = async (command: string) => {
+        if (command === 'get_commit_history') {
+          throw new Error('repository temporarily unavailable');
+        }
+        if (command === 'get_refs_by_commit') return defaultRefs;
+        return null;
+      };
+
+      await switchRepo(el, REPO_PATH);
+
+      // The cached graph still shows; no error banner over working content
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.be.null;
+    });
+
+    it('a failed FOREGROUND load still surfaces the error', async () => {
+      const el = await renderCanvas();
+      mockInvoke = async (command: string) => {
+        if (command === 'get_commit_history') {
+          throw new Error('boom');
+        }
+        if (command === 'get_refs_by_commit') return defaultRefs;
+        return null;
+      };
+
+      await switchRepo(el, '/never/visited');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.contain('boom');
+    });
+
+    it('evictGraphCache removes a repo so reopening takes the loading path', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+
+      evictGraphCache(REPO_PATH);
+      clearHistory();
+
+      // Switching back is NOT served from cache: the loading path runs
+      el.repositoryPath = REPO_PATH;
+      await el.updateComplete;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.true;
+
+      await new Promise((r) => setTimeout(r, 200));
+      expect(findCommands('get_commit_history').length).to.equal(1);
+    });
+
+    it('a successful background reload clears a previous load error', async () => {
+      const el = await renderCanvas();
+      // Foreground load fails on a fresh repo -> error panel state
+      mockInvoke = async (command: string) => {
+        if (command === 'get_commit_history') throw new Error('boom');
+        if (command === 'get_refs_by_commit') return defaultRefs;
+        return null;
+      };
+      await switchRepo(el, '/failing/repo');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.contain('boom');
+
+      // The repo recovers; a queued/background reload succeeds
+      setupDefaultMocks();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).loadCommits({ background: true });
+      await new Promise((r) => setTimeout(r, 200));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.be.null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+    });
+
+    it('clearing the search filter during a tab switch keeps the instant cached render', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+      clearHistory();
+
+      // Tab switch back: app-shell clears the filter in the same update
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).searchFilter = null;
+      el.repositoryPath = REPO_PATH;
+      await el.updateComplete;
+
+      // Cached render applied instantly, no foreground spinner
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).isLoading).to.be.false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+
+      // Exactly ONE (background) reload — the filter branch must not fire a
+      // second, cancelling foreground load
+      await new Promise((r) => setTimeout(r, 200));
+      expect(findCommands('get_commit_history').length).to.equal(1);
+    });
+
+    it('background revalidation updates the graph when the repo changed', async () => {
+      const el = await renderCanvas();
+      await switchRepo(el, '/other/repo');
+
+      // The repo gains a commit while its tab is in the background
+      const newCommit = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'New commit',
+        message: 'New commit',
+        timestamp: 1700003000,
+        parentIds: [commit3.oid],
+      });
+      setupDefaultMocks({ commits: [newCommit, ...defaultCommits] });
+
+      await switchRepo(el, REPO_PATH);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length + 1);
     });
   });
 });

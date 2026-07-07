@@ -28,6 +28,7 @@ import type { LvWorkspaceManagerDialog } from '../lv-workspace-manager-dialog.ts
 
 // Import the actual component — registers <lv-workspace-manager-dialog>
 import '../lv-workspace-manager-dialog.ts';
+import { uiStore, repositoryStore } from '../../../stores/index.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
@@ -884,5 +885,80 @@ describe('lv-workspace-manager-dialog', () => {
 
       expect(closeFired).to.be.true;
     });
+  });
+
+  describe('open workspace partial-failure feedback', () => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    function selectWorkspaceWithRepos(
+      el: LvWorkspaceManagerDialog,
+      paths: string[],
+    ): void {
+      const ws = makeWorkspace({
+        id: 'ws-open',
+        name: 'OpenMe',
+        repositories: paths.map((p) => ({ path: p, name: p.split('/').pop() ?? p })),
+      });
+      (el as any).workspaces = [ws];
+      (el as any).selectedWorkspaceId = 'ws-open';
+      // Mark every repo as existing + valid so the pre-check passes and the
+      // open attempt itself decides success/failure
+      const statuses = new Map<string, WorkspaceRepoStatus>();
+      for (const p of paths) {
+        statuses.set(p, { exists: true, isValidRepo: true } as unknown as WorkspaceRepoStatus);
+      }
+      (el as any).repoStatuses = statuses;
+    }
+
+    it('warns (not plain success) when some repos fail to open', async () => {
+      uiStore.setState({ toasts: [] });
+      repositoryStore.getState().reset();
+      setupDefaultMocks({});
+      mockInvoke = (command: string, args?: unknown) => {
+        const params = args as Record<string, unknown> | undefined;
+        if (command === 'open_repository') {
+          if (params?.path === '/ws/gone') return Promise.reject(new Error('not found'));
+          return Promise.resolve({ path: params?.path as string, name: 'repo' });
+        }
+        if (command === 'update_workspace_last_opened') return Promise.resolve(undefined);
+        return Promise.resolve(null);
+      };
+
+      const el = await renderDialog();
+      selectWorkspaceWithRepos(el, ['/ws/ok', '/ws/gone']);
+
+      await (el as any).handleOpenWorkspace();
+      await tick(el);
+
+      const toasts = uiStore.getState().toasts;
+      const last = toasts[toasts.length - 1];
+      expect(last.type).to.equal('warning');
+      expect(last.message).to.contain('1 of 2');
+      // The repo that opened is still added
+      expect(
+        repositoryStore.getState().openRepositories.map((r) => r.repository.path),
+      ).to.deep.equal(['/ws/ok']);
+    });
+
+    it('errors when NO repo in the workspace could be opened', async () => {
+      uiStore.setState({ toasts: [] });
+      repositoryStore.getState().reset();
+      setupDefaultMocks({});
+      mockInvoke = (command: string) => {
+        if (command === 'open_repository') return Promise.reject(new Error('not found'));
+        if (command === 'update_workspace_last_opened') return Promise.resolve(undefined);
+        return Promise.resolve(null);
+      };
+
+      const el = await renderDialog();
+      selectWorkspaceWithRepos(el, ['/ws/gone-1', '/ws/gone-2']);
+
+      await (el as any).handleOpenWorkspace();
+      await tick(el);
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts[toasts.length - 1].type).to.equal('error');
+      expect(repositoryStore.getState().openRepositories.length).to.equal(0);
+    });
+    /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 });

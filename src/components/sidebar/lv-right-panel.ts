@@ -247,14 +247,18 @@ export class LvRightPanel extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
-    // Tab switching shortcuts
-    if (e.key === '1' && (e.ctrlKey || e.metaKey)) {
+    // Tab switching shortcuts. Ctrl+SHIFT+digit: plain Ctrl+digit belongs to
+    // the global repository-tab shortcuts (browser convention), so the panel
+    // takes the shifted chord. Matched on e.code because Shift changes e.key
+    // ('1' -> '!') on most layouts.
+    if (!e.shiftKey || !(e.ctrlKey || e.metaKey)) return;
+    if (e.code === 'Digit1') {
       e.preventDefault();
       this.switchTab('changes');
-    } else if (e.key === '2' && (e.ctrlKey || e.metaKey)) {
+    } else if (e.code === 'Digit2') {
       e.preventDefault();
       this.switchTab('details');
-    } else if (e.key === '3' && (e.ctrlKey || e.metaKey)) {
+    } else if (e.code === 'Digit3') {
       e.preventDefault();
       this.switchTab('analytics');
     }
@@ -297,7 +301,7 @@ export class LvRightPanel extends LitElement {
         <button
           class="tab ${this.activeTab === 'changes' ? 'active' : ''}"
           @click=${() => this.switchTab('changes')}
-          title="Working Changes (Ctrl+1)"
+          title="Working Changes (Ctrl+Shift+1)"
         >
           <span>Changes</span>
           ${this.changesCount > 0 ? html`<span class="badge">${this.changesCount}</span>` : nothing}
@@ -306,7 +310,7 @@ export class LvRightPanel extends LitElement {
         <button
           class="tab ${this.activeTab === 'details' ? 'active' : ''}"
           @click=${() => this.switchTab('details')}
-          title="Commit Details (Ctrl+2)"
+          title="Commit Details (Ctrl+Shift+2)"
         >
           <span>Details</span>
           ${this.commit ? html`<span class="badge">${this.commit.oid.slice(0, 7)}</span>` : nothing}
@@ -314,7 +318,7 @@ export class LvRightPanel extends LitElement {
         <button
           class="tab ${this.activeTab === 'analytics' ? 'active' : ''}"
           @click=${() => this.switchTab('analytics')}
-          title="Repository Analytics (Ctrl+3)"
+          title="Repository Analytics (Ctrl+Shift+3)"
         >
           <span>Analytics</span>
         </button>

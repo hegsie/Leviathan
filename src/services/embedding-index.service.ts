@@ -29,25 +29,39 @@ export interface EmbeddingIndexProgress {
 }
 
 class EmbeddingIndexService {
-  private building = false;
-  private currentRepoPath: string | null = null;
+  // Builds are tracked per repo, keyed by the cancel epoch they started
+  // under. Concurrent builds for DIFFERENT repos must both run (a global
+  // flag silently dropped every build after the first). Dedup is
+  // epoch-aware (mirroring searchIndexService): after a cancel (tab close)
+  // bumps the epoch, a reopen's build is a new epoch, and the cancelled
+  // build's late completion must not clear the reopen build's marker.
+  private buildingRepos = new Map<string, number>();
+  // Bumped by cancelBuild() so a build cancelled mid-flight doesn't dedupe
+  // away or clobber a subsequent reopen build.
+  private cancelEpochs = new Map<string, number>();
 
   /**
    * Build the embedding index for a repository.
    * Non-blocking - meant to be called fire-and-forget.
    */
   async buildIndex(repoPath: string): Promise<void> {
-    if (this.building) return;
-    this.building = true;
+    const epoch = this.cancelEpochs.get(repoPath) ?? 0;
+    // Dedupe only builds from the SAME epoch: a cancelled pre-close build
+    // still unwinding must not block the rebuild for a reopened tab.
+    if (this.buildingRepos.get(repoPath) === epoch) return;
+    this.buildingRepos.set(repoPath, epoch);
 
     try {
       const count = await invoke<number>('build_embedding_index', { path: repoPath });
-      this.currentRepoPath = repoPath;
-      console.log(`[EmbeddingIndex] Built index with ${count} commits`);
+      console.log(`[EmbeddingIndex] Built index for ${repoPath} with ${count} commits`);
     } catch (err) {
       console.warn('[EmbeddingIndex] Failed to build index:', err);
     } finally {
-      this.building = false;
+      // Only clear the marker if it still belongs to THIS build — a newer
+      // (post-cancel) build may have replaced it
+      if (this.buildingRepos.get(repoPath) === epoch) {
+        this.buildingRepos.delete(repoPath);
+      }
     }
   }
 
@@ -88,9 +102,14 @@ class EmbeddingIndexService {
   }
 
   /**
-   * Cancel an in-progress embedding build
+   * Cancel an in-progress embedding build (e.g. the tab was closed).
+   * Bumps the epoch and clears the in-flight marker so a reopened tab can
+   * start a fresh build, and the cancelled build's late completion can't
+   * clear the reopen build's marker.
    */
   async cancelBuild(repoPath: string): Promise<void> {
+    this.cancelEpochs.set(repoPath, (this.cancelEpochs.get(repoPath) ?? 0) + 1);
+    this.buildingRepos.delete(repoPath);
     await invoke<void>('cancel_embedding_build', { path: repoPath });
   }
 
@@ -119,12 +138,6 @@ class EmbeddingIndexService {
     });
   }
 
-  /**
-   * Invalidate the index (e.g., when switching repos)
-   */
-  invalidate(): void {
-    this.currentRepoPath = null;
-  }
 }
 
 export const embeddingIndexService = new EmbeddingIndexService();

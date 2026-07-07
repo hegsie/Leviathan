@@ -9,11 +9,16 @@ const invokedCommands: Array<{ command: string; args?: unknown }> = [];
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
+// When set, build_embedding_index waits on this before resolving — lets
+// tests overlap builds for different repos
+let pendingBuildGate: Promise<void> | null = null;
+
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   invokedCommands.push({ command, args });
 
   switch (command) {
     case 'build_embedding_index':
+      if (pendingBuildGate) await pendingBuildGate;
       return 42;
     case 'refresh_embedding_index':
       return 5;
@@ -54,6 +59,107 @@ import { embeddingIndexService } from '../embedding-index.service.ts';
 describe('EmbeddingIndexService', () => {
   beforeEach(() => {
     invokedCommands.length = 0;
+    pendingBuildGate = null;
+  });
+
+  it('builds indexes for DIFFERENT repos concurrently without dropping any', async () => {
+    // Regression: a single global "building" flag silently skipped repo B's
+    // build while repo A's (slow ONNX) build was in flight, so activating a
+    // second tab never got a semantic index.
+    let releaseBuilds!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseBuilds = resolve;
+    });
+
+    const buildA = embeddingIndexService.buildIndex('/repo/a');
+    const buildB = embeddingIndexService.buildIndex('/repo/b');
+    releaseBuilds();
+    await Promise.all([buildA, buildB]);
+
+    const buildPaths = invokedCommands
+      .filter((c) => c.command === 'build_embedding_index')
+      .map((c) => (c.args as Record<string, unknown>).path);
+    expect(buildPaths).to.have.members(['/repo/a', '/repo/b']);
+  });
+
+  it('deduplicates concurrent builds for the SAME repo', async () => {
+    let releaseBuilds!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseBuilds = resolve;
+    });
+
+    const first = embeddingIndexService.buildIndex('/repo/a');
+    const second = embeddingIndexService.buildIndex('/repo/a');
+    releaseBuilds();
+    await Promise.all([first, second]);
+
+    const buildCalls = invokedCommands.filter((c) => c.command === 'build_embedding_index');
+    expect(buildCalls.length).to.equal(1);
+  });
+
+  it('cancelBuild clears the in-flight marker so a reopened tab can rebuild immediately', async () => {
+    // Regression: close-tab cancels the build but the dedup marker stayed
+    // until the cancelled invoke unwound — a quick reopen was deduped
+    // against the cancelled build and never got an index.
+    let releaseOldBuild!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseOldBuild = resolve;
+    });
+    const cancelledBuild = embeddingIndexService.buildIndex('/repo/a');
+    await embeddingIndexService.cancelBuild('/repo/a'); // tab closed
+
+    pendingBuildGate = null;
+    const reopenBuild = embeddingIndexService.buildIndex('/repo/a'); // tab reopened
+    releaseOldBuild();
+    await Promise.all([cancelledBuild, reopenBuild]);
+
+    const buildCalls = invokedCommands.filter((c) => c.command === 'build_embedding_index');
+    expect(buildCalls.length).to.equal(2);
+    const cancelCall = invokedCommands.find((c) => c.command === 'cancel_embedding_build');
+    expect((cancelCall!.args as Record<string, unknown>).path).to.equal('/repo/a');
+  });
+
+  it("a cancelled build's late completion must not clear a reopen build's marker", async () => {
+    // Regression: buildingRepos was a plain Set with no epoch, so a
+    // cancelled build's finally could delete the reopen build's in-flight
+    // marker, letting a third activation start a redundant concurrent build.
+    const path = '/repo/cancel-race';
+    let releaseFirst!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const build1 = embeddingIndexService.buildIndex(path); // in flight (epoch 0)
+    await embeddingIndexService.cancelBuild(path); // tab closed → epoch 1
+
+    // Reopen: a fresh build (epoch 1) starts and stays in flight
+    let releaseSecond!: () => void;
+    pendingBuildGate = new Promise((resolve) => {
+      releaseSecond = resolve;
+    });
+    const build2 = embeddingIndexService.buildIndex(path);
+
+    // The original cancelled build now finishes and runs its finally — it
+    // must NOT clear build2's (epoch-1) marker
+    releaseFirst();
+    await build1;
+
+    // A further activation must still be deduped against build2 — no third
+    // concurrent build
+    const build3 = embeddingIndexService.buildIndex(path);
+    const buildCalls = invokedCommands.filter((c) => c.command === 'build_embedding_index');
+    expect(buildCalls.length).to.equal(2);
+
+    // Cleanup: let build2 finish so no promise dangles into other tests
+    releaseSecond();
+    await Promise.all([build2, build3]);
+  });
+
+  it('allows rebuilding a repo after its previous build finished', async () => {
+    await embeddingIndexService.buildIndex('/repo/a');
+    await embeddingIndexService.buildIndex('/repo/a');
+
+    const buildCalls = invokedCommands.filter((c) => c.command === 'build_embedding_index');
+    expect(buildCalls.length).to.equal(2);
   });
 
   it('buildIndex invokes build_embedding_index command', async () => {

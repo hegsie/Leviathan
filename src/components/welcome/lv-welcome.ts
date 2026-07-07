@@ -414,17 +414,40 @@ export class LvWelcome extends LitElement {
   private async handleWorkspaceClick(workspace: Workspace): Promise<void> {
     const store = repositoryStore.getState();
 
+    // Open WITHOUT activating each repo: addRepository's default activation
+    // would fire the per-activation side effects (index builds, integration
+    // checks) once per repo — a 10-repo workspace would still kick off 10
+    // concurrent history walks. Activate only the final repo; the rest get
+    // their indexes lazily when their tab is first activated.
+    let lastOpenedPath: string | null = null;
+    let failedCount = 0;
     for (const repo of workspace.repositories) {
       const result = await openRepository({ path: repo.path });
       if (result.success && result.data) {
-        store.addRepository(result.data);
-        searchIndexService.buildIndex(repo.path);
+        store.addRepository(result.data, { activate: false });
+        lastOpenedPath = result.data.path;
+      } else {
+        failedCount++;
       }
+    }
+    if (lastOpenedPath) {
+      store.setActiveByPath(lastOpenedPath);
     }
 
     workspaceStore.getState().setActiveWorkspaceId(workspace.id);
     await workspaceService.updateWorkspaceLastOpened(workspace.id);
-    showToast(`Opened workspace: ${workspace.name}`, 'success');
+    // A repo that failed to open (moved, deleted) must not hide behind a
+    // green success toast
+    if (failedCount === 0) {
+      showToast(`Opened workspace: ${workspace.name}`, 'success');
+    } else if (lastOpenedPath) {
+      showToast(
+        `Opened workspace: ${workspace.name} (${failedCount} of ${workspace.repositories.length} repositories failed to open)`,
+        'warning',
+      );
+    } else {
+      showToast(`Could not open workspace: ${workspace.name} — no repository could be opened`, 'error');
+    }
   }
 
   private handleManageWorkspaces(): void {

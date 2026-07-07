@@ -3,7 +3,7 @@
  * Contains menu buttons and repository tabs
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { repositoryStore, type OpenRepository } from '../../stores/index.ts';
@@ -86,10 +86,18 @@ export class LvToolbar extends LitElement {
       .tabs {
         display: flex;
         flex: 1;
-        overflow-x: hidden;
+        min-width: 0;
+        overflow-x: auto;
         padding: 0 var(--spacing-xs);
         gap: var(--spacing-xs);
         scroll-behavior: smooth;
+        /* Scrolling happens via wheel/trackpad and the arrow buttons; a
+           scrollbar in a 32px-high strip is just noise */
+        scrollbar-width: none;
+      }
+
+      .tabs::-webkit-scrollbar {
+        display: none;
       }
 
       .scroll-btn {
@@ -138,7 +146,10 @@ export class LvToolbar extends LitElement {
         cursor: pointer;
         transition: all var(--transition-fast);
         white-space: nowrap;
-        flex-shrink: 0;
+        /* Tabs shrink (with ellipsis) before the strip overflows */
+        flex: 0 1 auto;
+        min-width: 90px;
+        max-width: 200px;
       }
 
       .tab:hover {
@@ -149,10 +160,41 @@ export class LvToolbar extends LitElement {
       .tab.active {
         background: var(--color-bg-tertiary);
         color: var(--color-text-primary);
+        font-weight: 600;
+        box-shadow: inset 0 -2px 0 var(--color-accent, var(--color-primary));
       }
 
       .tab-name {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
         white-space: nowrap;
+        text-align: left;
+      }
+
+      .tab-hint {
+        color: var(--color-text-muted);
+        font-size: var(--font-size-xs);
+        font-weight: normal;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 70px;
+      }
+
+      .tab-dirty {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--color-warning, #e5a50a);
+        flex-shrink: 0;
+      }
+
+      .tab-ahead-behind {
+        color: var(--color-text-muted);
+        font-size: var(--font-size-xs);
+        font-weight: normal;
+        flex-shrink: 0;
       }
 
       .provider-icon {
@@ -209,6 +251,101 @@ export class LvToolbar extends LitElement {
         font-size: var(--font-size-sm);
         font-style: italic;
       }
+
+      .menu-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 999;
+      }
+
+      .tab-list-menu,
+      .tab-context-menu {
+        position: fixed;
+        z-index: 1000;
+        min-width: 220px;
+        max-width: 360px;
+        max-height: 60vh;
+        overflow-y: auto;
+        padding: var(--spacing-xs);
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+      }
+
+      .tab-list-item {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .tab-list-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .tab-list-item .check {
+        width: 14px;
+        flex-shrink: 0;
+        color: var(--color-accent, var(--color-primary));
+      }
+
+      .tab-list-item .item-texts {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .tab-list-item .item-path {
+        color: var(--color-text-muted);
+        font-size: var(--font-size-xs);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        direction: rtl;
+        text-align: left;
+      }
+
+      .context-menu-item {
+        display: block;
+        width: 100%;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .context-menu-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .context-menu-item:disabled {
+        color: var(--color-text-muted);
+        cursor: default;
+      }
+
+      .context-menu-item:disabled:hover {
+        background: transparent;
+      }
+
+      .context-menu-separator {
+        height: 1px;
+        margin: var(--spacing-xs) 0;
+        background: var(--color-border);
+      }
     `,
   ];
 
@@ -225,12 +362,22 @@ export class LvToolbar extends LitElement {
   @state() private semanticAvailable = false;
   @state() private canScrollLeft = false;
   @state() private canScrollRight = false;
+  // Anchor for the "all open repositories" dropdown (null = closed)
+  @state() private tabListAnchor: { x: number; y: number } | null = null;
+  // Right-click context menu on a tab (null = closed)
+  @state() private tabContextMenu: { x: number; y: number; index: number } | null = null;
 
   private unsubscribe?: () => void;
   private _resizeObserver?: ResizeObserver;
 
   connectedCallback(): void {
     super.connectedCallback();
+    // Seed from current store state — repos may already be open if the
+    // toolbar (re)mounts after startup restore
+    const initial = repositoryStore.getState();
+    this.openRepositories = initial.openRepositories;
+    this.activeIndex = initial.activeIndex;
+    this.isLoading = initial.isLoading;
     // Subscribe to store changes
     this.unsubscribe = repositoryStore.subscribe((state) => {
       this.openRepositories = state.openRepositories;
@@ -260,6 +407,10 @@ export class LvToolbar extends LitElement {
     super.disconnectedCallback();
     this.unsubscribe?.();
     this._resizeObserver?.disconnect();
+    if (this.menuEscapeListenerAttached) {
+      document.removeEventListener('keydown', this.handleMenuEscape, { capture: true });
+      this.menuEscapeListenerAttached = false;
+    }
   }
 
   private async handleOpenRepo(): Promise<void> {
@@ -313,6 +464,95 @@ export class LvToolbar extends LitElement {
   private handleTabClose(e: Event, path: string): void {
     e.stopPropagation();
     repositoryStore.getState().removeRepository(path);
+  }
+
+  // Middle-click closes a tab (browser-tab convention)
+  private handleTabAuxClick(e: MouseEvent, path: string): void {
+    if (e.button === 1) {
+      e.preventDefault();
+      repositoryStore.getState().removeRepository(path);
+    }
+  }
+
+  private handleTabContextMenu(e: MouseEvent, index: number): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.tabListAnchor = null;
+    this.tabContextMenu = { x: e.clientX, y: e.clientY, index };
+  }
+
+  private handleCloseOtherTabs(index: number): void {
+    const keep = repositoryStore.getState().openRepositories[index]?.repository.path;
+    this.tabContextMenu = null;
+    if (!keep) return;
+    const others = repositoryStore
+      .getState()
+      .openRepositories.filter((r) => r.repository.path !== keep)
+      .map((r) => r.repository.path);
+    for (const path of others) {
+      repositoryStore.getState().removeRepository(path);
+    }
+  }
+
+  private handleCloseTabsToRight(index: number): void {
+    this.tabContextMenu = null;
+    const toClose = repositoryStore
+      .getState()
+      .openRepositories.slice(index + 1)
+      .map((r) => r.repository.path);
+    for (const path of toClose) {
+      repositoryStore.getState().removeRepository(path);
+    }
+  }
+
+  private handleCloseAllTabs(): void {
+    this.tabContextMenu = null;
+    const toClose = repositoryStore
+      .getState()
+      .openRepositories.map((r) => r.repository.path);
+    for (const path of toClose) {
+      repositoryStore.getState().removeRepository(path);
+    }
+  }
+
+  private async handleCopyTabPath(index: number): Promise<void> {
+    const path = repositoryStore.getState().openRepositories[index]?.repository.path;
+    this.tabContextMenu = null;
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      showToast('Repository path copied', 'success');
+    } catch {
+      showToast('Failed to copy path', 'error');
+    }
+  }
+
+  private handleToggleTabList(e: MouseEvent): void {
+    if (this.tabListAnchor) {
+      this.tabListAnchor = null;
+      return;
+    }
+    this.tabContextMenu = null;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    this.tabListAnchor = { x: rect.right, y: rect.bottom + 4 };
+  }
+
+  private handleTabListSelect(index: number): void {
+    this.tabListAnchor = null;
+    repositoryStore.getState().setActiveIndex(index);
+  }
+
+  /**
+   * When several open repos share a name (two clones of "api"), the bare
+   * name can't identify a tab — disambiguate with the parent directory.
+   */
+  private getTabHint(repo: OpenRepository): string | null {
+    const name = repo.repository.name;
+    const sameName = this.openRepositories.filter((r) => r.repository.name === name);
+    if (sameName.length < 2) return null;
+    // Split on both separators — Windows paths use backslashes
+    const parts = repo.repository.path.split(/[\\/]/).filter(Boolean);
+    return parts.length >= 2 ? parts[parts.length - 2] : null;
   }
 
   private handleTabCloseKeydown(e: KeyboardEvent, path: string): void {
@@ -455,11 +695,149 @@ export class LvToolbar extends LitElement {
     this.updateScrollButtons();
   }
 
+  // Close the tab menus on Escape, matching the other context menus in the
+  // app (e.g. lv-file-status). Registered only while a menu is open.
+  private handleMenuEscape = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      this.tabListAnchor = null;
+      this.tabContextMenu = null;
+    }
+  };
+
+  private menuEscapeListenerAttached = false;
+
+  private syncMenuEscapeListener(): void {
+    const menuOpen = this.tabListAnchor !== null || this.tabContextMenu !== null;
+    if (menuOpen && !this.menuEscapeListenerAttached) {
+      document.addEventListener('keydown', this.handleMenuEscape, { capture: true });
+      this.menuEscapeListenerAttached = true;
+    } else if (!menuOpen && this.menuEscapeListenerAttached) {
+      document.removeEventListener('keydown', this.handleMenuEscape, { capture: true });
+      this.menuEscapeListenerAttached = false;
+    }
+  }
+
   protected updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
+    this.syncMenuEscapeListener();
     if (changedProperties.has('openRepositories')) {
       this.updateComplete.then(() => this.updateScrollButtons());
     }
+    // Keep the active tab visible when activated from anywhere (keyboard
+    // shortcut, command palette, dropdown) — not just direct clicks.
+    if (changedProperties.has('activeIndex') && this.activeIndex >= 0) {
+      this.updateComplete.then(() => {
+        this.tabsContainer
+          ?.querySelector('.tab.active')
+          ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      });
+    }
+  }
+
+  private renderTabBadges(repo: OpenRepository) {
+    const dirty = repo.status.length > 0;
+    const ab = repo.currentBranch?.aheadBehind;
+    const showAheadBehind = ab && (ab.ahead > 0 || ab.behind > 0);
+    return html`
+      ${showAheadBehind
+        ? html`<span
+            class="tab-ahead-behind"
+            title="${ab.ahead} ahead, ${ab.behind} behind upstream"
+            >${ab.ahead > 0 ? `↑${ab.ahead}` : ''}${ab.behind > 0 ? `↓${ab.behind}` : ''}</span
+          >`
+        : nothing}
+      ${dirty
+        ? html`<span class="tab-dirty" title="Uncommitted changes" aria-label="Uncommitted changes"></span>`
+        : nothing}
+    `;
+  }
+
+  private renderTabListMenu() {
+    if (!this.tabListAnchor) return nothing;
+    return html`
+      <div class="menu-backdrop" @click=${() => (this.tabListAnchor = null)}></div>
+      <div
+        class="tab-list-menu"
+        role="menu"
+        aria-label="Open repositories"
+        style="top: ${this.tabListAnchor.y}px; left: ${this.tabListAnchor.x}px; transform: translateX(-100%);"
+      >
+        ${this.openRepositories.map(
+          (repo, index) => html`
+            <button
+              class="tab-list-item"
+              role="menuitem"
+              @click=${() => this.handleTabListSelect(index)}
+            >
+              <span class="check">
+                ${index === this.activeIndex
+                  ? html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>`
+                  : nothing}
+              </span>
+              <span class="item-texts">
+                <span>${repo.repository.name}</span>
+                <span class="item-path">${repo.repository.path}</span>
+              </span>
+            </button>
+          `
+        )}
+      </div>
+    `;
+  }
+
+  private renderTabContextMenu() {
+    if (!this.tabContextMenu) return nothing;
+    const { x, y, index } = this.tabContextMenu;
+    const repo = this.openRepositories[index];
+    if (!repo) return nothing;
+    const isLast = index === this.openRepositories.length - 1;
+    const isOnly = this.openRepositories.length === 1;
+    return html`
+      <div class="menu-backdrop" @click=${() => (this.tabContextMenu = null)}></div>
+      <div
+        class="tab-context-menu"
+        role="menu"
+        aria-label="Tab actions for ${repo.repository.name}"
+        style="top: ${y}px; left: ${x}px;"
+      >
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          @click=${() => {
+            this.tabContextMenu = null;
+            repositoryStore.getState().removeRepository(repo.repository.path);
+          }}
+        >
+          Close
+        </button>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          ?disabled=${isOnly}
+          @click=${() => this.handleCloseOtherTabs(index)}
+        >
+          Close Others
+        </button>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          ?disabled=${isLast}
+          @click=${() => this.handleCloseTabsToRight(index)}
+        >
+          Close Tabs to the Right
+        </button>
+        <button class="context-menu-item" role="menuitem" @click=${() => this.handleCloseAllTabs()}>
+          Close All
+        </button>
+        <div class="context-menu-separator"></div>
+        <button class="context-menu-item" role="menuitem" @click=${() => this.handleCopyTabPath(index)}>
+          Copy Path
+        </button>
+      </div>
+    `;
   }
 
   protected firstUpdated(): void {
@@ -547,10 +925,17 @@ export class LvToolbar extends LitElement {
                     role="tab"
                     aria-selected=${index === this.activeIndex}
                     aria-label="${repo.repository.name}"
+                    title="${repo.repository.path}"
                     @click=${() => this.handleTabClick(index)}
+                    @auxclick=${(e: MouseEvent) => this.handleTabAuxClick(e, repo.repository.path)}
+                    @contextmenu=${(e: MouseEvent) => this.handleTabContextMenu(e, index)}
                   >
                     ${this.renderProviderIcon(repo)}
                     <span class="tab-name">${repo.repository.name}</span>
+                    ${this.getTabHint(repo)
+                      ? html`<span class="tab-hint">${this.getTabHint(repo)}</span>`
+                      : nothing}
+                    ${this.renderTabBadges(repo)}
                     <span
                       class="tab-close"
                       role="button"
@@ -578,7 +963,24 @@ export class LvToolbar extends LitElement {
             <polyline points="9 18 15 12 9 6"></polyline>
           </svg>
         </button>
+        ${this.openRepositories.length > 0
+          ? html`
+              <button
+                class="menu-btn tab-list-btn"
+                title="All open repositories"
+                aria-label="List all open repositories"
+                aria-expanded=${this.tabListAnchor !== null}
+                @click=${this.handleToggleTabList}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </button>
+            `
+          : nothing}
       </div>
+
+      ${this.renderTabListMenu()} ${this.renderTabContextMenu()}
 
       <div class="toolbar-section">
         ${this.activeRepo ? html`

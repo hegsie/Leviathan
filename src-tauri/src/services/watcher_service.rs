@@ -1,7 +1,11 @@
 //! File system watcher service
+//!
+//! Watches any number of repositories at once. Every event is tagged with the
+//! repository path it came from so consumers can route it to the right repo.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -21,72 +25,82 @@ pub enum WatcherEvent {
     ConfigChanged,
 }
 
-/// Service for watching file system changes in a repository
+/// Service for watching file system changes across open repositories
 pub struct WatcherService {
-    watcher: Option<RecommendedWatcher>,
-    event_rx: Option<Receiver<Result<Event>>>,
+    watchers: HashMap<String, RecommendedWatcher>,
+    event_tx: Sender<(String, Result<Event>)>,
+    event_rx: Receiver<(String, Result<Event>)>,
 }
 
 impl WatcherService {
     /// Create a new WatcherService
     pub fn new() -> Self {
+        let (event_tx, event_rx) = channel();
         Self {
-            watcher: None,
-            event_rx: None,
+            watchers: HashMap::new(),
+            event_tx,
+            event_rx,
         }
     }
 
-    /// Start watching a repository
+    /// Start watching a repository. Watching the same path again is a no-op;
+    /// other repositories already being watched are unaffected.
     pub fn watch(&mut self, repo_path: &Path) -> Result<()> {
-        let (tx, rx) = channel();
+        let key = repo_path.to_string_lossy().to_string();
+        if self.watchers.contains_key(&key) {
+            return Ok(());
+        }
 
         let config = Config::default().with_poll_interval(Duration::from_secs(1));
 
-        let tx_clone = tx.clone();
-        let watcher = RecommendedWatcher::new(
+        let tx = self.event_tx.clone();
+        let event_key = key.clone();
+        let mut watcher = RecommendedWatcher::new(
             move |result: std::result::Result<Event, notify::Error>| {
                 let event = result
                     .map_err(|e| LeviathanError::OperationFailed(format!("Watch error: {}", e)));
-                let _ = tx_clone.send(event);
+                let _ = tx.send((event_key.clone(), event));
             },
             config,
         )
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to create watcher: {}", e)))?;
 
-        self.watcher = Some(watcher);
-        self.event_rx = Some(rx);
+        watcher
+            .watch(repo_path, RecursiveMode::Recursive)
+            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to watch: {}", e)))?;
 
-        // Watch the repository directory
-        if let Some(ref mut w) = self.watcher {
-            w.watch(repo_path, RecursiveMode::Recursive)
-                .map_err(|e| LeviathanError::OperationFailed(format!("Failed to watch: {}", e)))?;
-        }
-
+        self.watchers.insert(key, watcher);
         Ok(())
     }
 
-    /// Stop watching
+    /// Stop watching a repository. Other repositories keep their watchers.
     pub fn unwatch(&mut self, repo_path: &Path) -> Result<()> {
-        if let Some(ref mut w) = self.watcher {
-            w.unwatch(repo_path).map_err(|e| {
-                LeviathanError::OperationFailed(format!("Failed to unwatch: {}", e))
-            })?;
+        let key = repo_path.to_string_lossy().to_string();
+        if let Some(mut watcher) = self.watchers.remove(&key) {
+            let _ = watcher.unwatch(repo_path);
         }
-        self.watcher = None;
-        self.event_rx = None;
         Ok(())
     }
 
-    /// Get pending events (non-blocking)
-    pub fn poll_events(&self) -> Vec<WatcherEvent> {
+    /// Stop watching all repositories
+    pub fn unwatch_all(&mut self) {
+        self.watchers.clear();
+    }
+
+    /// Number of repositories currently being watched
+    pub fn watcher_count(&self) -> usize {
+        self.watchers.len()
+    }
+
+    /// Get pending events (non-blocking), each tagged with the repository
+    /// path the event came from
+    pub fn poll_events(&self) -> Vec<(String, WatcherEvent)> {
         let mut events = Vec::new();
 
-        if let Some(ref rx) = self.event_rx {
-            while let Ok(result) = rx.try_recv() {
-                if let Ok(event) = result {
-                    if let Some(watcher_event) = Self::classify_event(&event) {
-                        events.push(watcher_event);
-                    }
+        while let Ok((repo_path, result)) = self.event_rx.try_recv() {
+            if let Ok(event) = result {
+                if let Some(watcher_event) = Self::classify_event(&event) {
+                    events.push((repo_path, watcher_event));
                 }
             }
         }

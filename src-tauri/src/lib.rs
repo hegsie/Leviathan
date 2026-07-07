@@ -732,6 +732,7 @@ pub fn run() {
             commands::search_index::build_search_index,
             commands::search_index::search_index,
             commands::search_index::refresh_search_index,
+            commands::search_index::drop_search_index,
             // Embedding index (semantic search)
             commands::embedding_index::build_embedding_index,
             commands::embedding_index::refresh_embedding_index,
