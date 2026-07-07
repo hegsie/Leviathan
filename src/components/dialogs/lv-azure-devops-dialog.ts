@@ -993,9 +993,11 @@ export class LvAzureDevOpsDialog extends LitElement {
 
       if (result.success && result.data) {
         this.workItems = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load work items';
       }
-    } catch {
-      // Silent fail for work items
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load work items';
     }
   }
 
@@ -1013,9 +1015,11 @@ export class LvAzureDevOpsDialog extends LitElement {
 
       if (result.success && result.data) {
         this.pipelineRuns = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load pipeline runs';
       }
-    } catch {
-      // Silent fail for pipelines
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load pipeline runs';
     }
   }
 
