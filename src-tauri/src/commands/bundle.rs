@@ -172,30 +172,62 @@ pub async fn bundle_verify(path: String, bundle_path: String) -> Result<BundleVe
 
     let is_valid = output.status.success();
 
-    // Parse refs and prerequisites from output
+    // Parse refs and prerequisites from output. `git bundle verify` groups
+    // its output into sections: "The bundle contains …" lists the refs the
+    // bundle provides (each line is "<oid> <refname>"), while "The bundle
+    // requires …" lists prerequisite commits the target must already have
+    // (each line is a bare "<oid>" with no refname). We must track the current
+    // section because a bare prerequisite oid is otherwise indistinguishable
+    // from a ref line, and older parsers that keyed off a "-" prefix never
+    // matched modern git output — leaving `requires` permanently empty.
     let mut refs = Vec::new();
     let mut requires = Vec::new();
 
+    #[derive(PartialEq)]
+    enum Section {
+        None,
+        Contains,
+        Requires,
+    }
+    let mut section = Section::None;
+
     for line in combined.lines() {
         let line = line.trim();
-        // Lines like "The bundle contains this ref:" or just refs listed
-        // Format: <oid> refs/heads/main
-        if line.len() >= 40 && line.chars().take(40).all(|c| c.is_ascii_hexdigit()) {
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_lowercase();
+        if lower.contains("the bundle requires") {
+            section = Section::Requires;
+            continue;
+        }
+        if lower.contains("the bundle contains") {
+            section = Section::Contains;
+            continue;
+        }
+
+        let first = line.split_whitespace().next().unwrap_or("");
+        let is_oid = (first.len() == 40 || first.len() == 64)
+            && first.chars().all(|c| c.is_ascii_hexdigit());
+        if !is_oid {
+            continue;
+        }
+
+        if section == Section::Requires {
+            // Prerequisite lines carry only the bare oid.
+            requires.push(first.to_string());
+        } else {
+            // A ref line: "<oid> <refname>". Skip the bundle's HEAD pseudo-ref
+            // so it isn't reported as a real branch.
             let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
             if parts.len() == 2 {
-                refs.push(BundleRef {
-                    oid: parts[0].to_string(),
-                    name: parts[1].trim().to_string(),
-                });
-            }
-        }
-        // Prerequisites are marked with "-" prefix in verify output
-        if line.starts_with('-') || line.contains("prerequisite") {
-            if let Some(oid) = line
-                .split_whitespace()
-                .find(|s| s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit()))
-            {
-                requires.push(oid.to_string());
+                let name = parts[1].trim().to_string();
+                if name != "HEAD" {
+                    refs.push(BundleRef {
+                        oid: parts[0].to_string(),
+                        name,
+                    });
+                }
             }
         }
     }
@@ -337,6 +369,7 @@ pub async fn bundle_unbundle(path: String, bundle_path: String) -> Result<Vec<Bu
 
         let stdout = String::from_utf8_lossy(&list_output.stdout);
         let mut fetched_refs = Vec::new();
+        let mut refused_refs: Vec<(String, String)> = Vec::new();
 
         // Fetch each ref individually
         for line in stdout.lines() {
@@ -345,9 +378,12 @@ pub async fn bundle_unbundle(path: String, bundle_path: String) -> Result<Vec<Bu
                 let oid = parts[0];
                 let refname = parts[1].trim();
 
-                // Fetch this specific ref. Skip refs that look like flags;
-                // they originate from the bundle file and are not trusted.
-                if refname.starts_with('-') {
+                // Skip the bundle's HEAD pseudo-ref and anything that is not a
+                // real ref. Fetching "HEAD:HEAD" would create a bogus local
+                // branch refs/heads/HEAD and make every later "HEAD" lookup
+                // ambiguous. Flag-like names originate from the untrusted
+                // bundle and are rejected for the same reason.
+                if refname == "HEAD" || !refname.starts_with("refs/") || refname.starts_with('-') {
                     continue;
                 }
                 let fetch_result = Command::new("git")
@@ -358,15 +394,54 @@ pub async fn bundle_unbundle(path: String, bundle_path: String) -> Result<Vec<Bu
                     .arg(format!("{}:{}", refname, refname))
                     .output();
 
-                if let Ok(result) = fetch_result {
-                    if result.status.success() {
+                match fetch_result {
+                    Ok(result) if result.status.success() => {
                         fetched_refs.push(BundleRef {
                             oid: oid.to_string(),
                             name: refname.to_string(),
                         });
                     }
+                    Ok(result) => {
+                        // git refuses to update a checked-out branch and rejects
+                        // non-fast-forward updates. Record why so the user is
+                        // told the ref was not updated instead of it silently
+                        // vanishing from the result.
+                        let stderr = String::from_utf8_lossy(&result.stderr);
+                        let reason = stderr
+                            .lines()
+                            .rev()
+                            .find(|l| !l.trim().is_empty())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        refused_refs.push((refname.to_string(), reason));
+                    }
+                    Err(e) => {
+                        refused_refs.push((refname.to_string(), e.to_string()));
+                    }
                 }
             }
+        }
+
+        // Surface refused refs rather than reporting success while the ref the
+        // user most likely wanted (e.g. the checked-out branch) was never
+        // updated.
+        if !refused_refs.is_empty() {
+            let detail = refused_refs
+                .iter()
+                .map(|(name, reason)| {
+                    if reason.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{} ({})", name, reason)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(LeviathanError::OperationFailed(format!(
+                "Some refs from the bundle could not be updated: {}. This usually means the branch is currently checked out or the update was not a fast-forward.",
+                detail
+            )));
         }
 
         if fetched_refs.is_empty() {
@@ -378,8 +453,13 @@ pub async fn bundle_unbundle(path: String, bundle_path: String) -> Result<Vec<Bu
         return Ok(fetched_refs);
     }
 
-    // Parse the fetched refs from the bundle
-    bundle_list_heads(bundle_path).await
+    // Parse the fetched refs from the bundle. The "*:*" refspec only updates
+    // refs/*, so exclude the bundle's HEAD pseudo-ref from the reported result.
+    let heads = bundle_list_heads(bundle_path).await?;
+    Ok(heads
+        .into_iter()
+        .filter(|r| r.name.starts_with("refs/"))
+        .collect())
 }
 
 #[cfg(test)]
@@ -583,6 +663,96 @@ mod tests {
             result.err()
         );
         assert!(bundle_file.exists());
+    }
+
+    // Finding 71: a partial bundle's prerequisites must be reported.
+    #[tokio::test]
+    async fn test_bundle_verify_reports_prerequisites() {
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid();
+        repo.create_commit("Second", &[("a.txt", "a")]);
+        repo.create_commit("Third", &[("b.txt", "b")]);
+
+        // A bundle of just the last two commits requires `base` as a
+        // prerequisite (partial history).
+        let bundle_file = repo.path.join("partial.bundle");
+        bundle_create(
+            repo.path_str(),
+            bundle_file.to_string_lossy().to_string(),
+            vec![format!("{}..HEAD", base)],
+            false,
+        )
+        .await
+        .unwrap();
+
+        let result = bundle_verify(repo.path_str(), bundle_file.to_string_lossy().to_string())
+            .await
+            .unwrap();
+
+        assert!(result.is_valid);
+        assert!(
+            !result.requires.is_empty(),
+            "partial bundle must report prerequisites, got {:?}",
+            result.requires
+        );
+        assert!(
+            result.requires.iter().any(|o| o == &base.to_string()),
+            "prerequisite should be the base commit {}, got {:?}",
+            base,
+            result.requires
+        );
+        // The prerequisite oid must not leak into the refs list.
+        assert!(
+            result.refs.iter().all(|r| r.oid != base.to_string()),
+            "prerequisite must not appear as a ref: {:?}",
+            result.refs
+        );
+    }
+
+    // Findings 69 and 70: unbundling a --all bundle into a repo whose
+    // checked-out branch it contains must (a) not create a bogus refs/heads/HEAD
+    // branch and (b) surface the refused checked-out branch as an error rather
+    // than silently reporting success.
+    #[tokio::test]
+    async fn test_bundle_unbundle_reports_refused_checked_out_branch() {
+        let source = TestRepo::with_initial_commit();
+        source.create_commit("c2", &[("f.txt", "2")]);
+        source.create_branch("feature");
+        source.create_commit("c3", &[("f.txt", "3")]);
+
+        let bundle_file = source.path.join("all.bundle");
+        bundle_create(
+            source.path_str(),
+            bundle_file.to_string_lossy().to_string(),
+            vec![],
+            true,
+        )
+        .await
+        .unwrap();
+
+        // Target has `main` checked out; the bundle contains refs/heads/main.
+        let target = TestRepo::with_initial_commit();
+        let result =
+            bundle_unbundle(target.path_str(), bundle_file.to_string_lossy().to_string()).await;
+
+        assert!(
+            result.is_err(),
+            "refused checked-out branch must surface an error, got {:?}",
+            result
+        );
+        let msg = format!("{:?}", result.err().unwrap());
+        assert!(
+            msg.contains("main") || msg.to_lowercase().contains("checked out"),
+            "error should name the refused ref: {}",
+            msg
+        );
+
+        // Finding 70: no bogus refs/heads/HEAD branch created.
+        let git = target.repo();
+        assert!(
+            git.find_branch("HEAD", git2::BranchType::Local).is_err(),
+            "must not create a local branch named HEAD"
+        );
     }
 
     #[tokio::test]

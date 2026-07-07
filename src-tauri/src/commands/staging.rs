@@ -337,7 +337,12 @@ pub async fn stage_files(path: String, paths: Vec<String>) -> Result<()> {
 
     for file_path in paths {
         let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
-        if full_path.exists() {
+        // Use symlink_metadata (does NOT follow symlinks) rather than
+        // Path::exists (which follows them). A dangling symlink — one whose
+        // target does not exist — must still be staged as a 120000 blob
+        // containing the link target, exactly as `git add` does; treating it
+        // as a deletion would silently stage the symlink's removal.
+        if std::fs::symlink_metadata(&full_path).is_ok() {
             index.add_path(Path::new(&file_path))?;
         } else {
             index.remove_path(Path::new(&file_path))?;
@@ -353,23 +358,33 @@ pub async fn stage_files(path: String, paths: Vec<String>) -> Result<()> {
 pub async fn unstage_files(path: String, paths: Vec<String>) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    let head_ref = repo.head()?;
-    let head_commit = head_ref.peel_to_commit()?;
-    let head_tree = head_commit.tree()?;
-    let head_object = head_commit.as_object();
+    // Resolve the HEAD commit. On an unborn branch (a freshly initialized
+    // repository with no commits yet) there is no HEAD, and `git reset --
+    // <paths>` resolves against the empty tree — equivalent to removing the
+    // requested paths from the index. Propagating repo.head()'s error here
+    // would wrongly make unstaging impossible until the first commit exists.
+    let head_commit = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
 
     let mut index = repo.index()?;
 
     for file_path in paths {
         let path_obj = Path::new(&file_path);
 
-        // Check if file exists in HEAD
-        if head_tree.get_path(path_obj).is_ok() {
-            // Reset to HEAD version
-            repo.reset_default(Some(head_object), [path_obj])?;
-        } else {
-            // Remove from index (was newly added)
-            index.remove_path(path_obj)?;
+        match &head_commit {
+            Some(commit) => {
+                let head_tree = commit.tree()?;
+                if head_tree.get_path(path_obj).is_ok() {
+                    // Reset to HEAD version
+                    repo.reset_default(Some(commit.as_object()), [path_obj])?;
+                } else {
+                    // Remove from index (was newly added)
+                    index.remove_path(path_obj)?;
+                }
+            }
+            None => {
+                // Unborn HEAD: reset against the empty tree == drop from index.
+                index.remove_path(path_obj)?;
+            }
         }
     }
 
@@ -387,12 +402,16 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
     let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
     let index = repo.index()?;
 
-    // Separate files into three categories:
-    // 1. In HEAD: checkout from HEAD tree
-    // 2. In index but not in HEAD: checkout from index
-    // 3. Untracked: delete
-    let mut head_paths: Vec<&str> = Vec::new();
-    let mut index_only_paths: Vec<&str> = Vec::new();
+    // "Discard changes" mirrors `git checkout -- <pathspec>`, which restores
+    // the working tree from the INDEX — never from HEAD. Restoring from HEAD
+    // would silently overwrite staged content (e.g. a file with staged edits
+    // plus later unstaged edits would lose the staged version, which is never
+    // committed and has no reflog: unrecoverable data loss). So:
+    //   1. Tracked (present in the index): restore the worktree from the index.
+    //   2. Untracked (not in the index and not in HEAD): delete it.
+    // A path in HEAD but absent from the index is a staged deletion; there is
+    // no worktree change to discard, so it is left untouched.
+    let mut index_paths: Vec<&str> = Vec::new();
     let mut untracked_paths: Vec<&str> = Vec::new();
 
     for file_path in &paths {
@@ -407,40 +426,23 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
         // Check if file exists in index
         let in_index = index.get_path(path_obj, 0).is_some();
 
-        if in_head {
-            // File is in HEAD - checkout from HEAD tree
-            head_paths.push(file_path);
-        } else if in_index {
-            // File is staged but not in HEAD - checkout from index
-            index_only_paths.push(file_path);
-        } else {
-            // File is untracked - need to delete it
+        if in_index {
+            // Tracked - restore the worktree from the staged (index) version.
+            index_paths.push(file_path);
+        } else if !in_head {
+            // Untracked - need to delete it.
             untracked_paths.push(file_path);
         }
+        // in_head && !in_index: staged deletion, nothing to discard.
     }
 
-    // Checkout files from HEAD tree
-    if !head_paths.is_empty() {
-        if let Some(ref tree) = head_tree {
-            let mut checkout_opts = git2::build::CheckoutBuilder::new();
-            checkout_opts.force();
-            checkout_opts.remove_untracked(false);
-
-            for file_path in &head_paths {
-                checkout_opts.path(file_path);
-            }
-
-            repo.checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
-        }
-    }
-
-    // Checkout files from index (staged but not in HEAD)
-    if !index_only_paths.is_empty() {
+    // Restore tracked files from the index (matches `git checkout -- <path>`).
+    if !index_paths.is_empty() {
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.force();
         checkout_opts.remove_untracked(false);
 
-        for file_path in &index_only_paths {
+        for file_path in &index_paths {
             checkout_opts.path(file_path);
         }
 
@@ -691,6 +693,24 @@ pub async fn get_file_hunks(path: String, file_path: String, staged: bool) -> Re
     })
 }
 
+/// Append one unified-diff line (`prefix` + `content`) to `patch`.
+///
+/// When `content` has no trailing newline the line is the file's final line
+/// with no end-of-file newline, so a `\ No newline at end of file` marker is
+/// emitted immediately after it — exactly as git's own patches do. Without
+/// this marker `git apply --cached` either rejects the patch ("patch does not
+/// apply", when the pre-image lacks the newline) or stages a blob with a
+/// spurious trailing newline.
+fn push_diff_line(patch: &mut String, prefix: char, content: &str) {
+    patch.push(prefix);
+    patch.push_str(content);
+    if content.ends_with('\n') {
+        return;
+    }
+    patch.push('\n');
+    patch.push_str("\\ No newline at end of file\n");
+}
+
 /// Build a unified diff patch string from a single hunk
 fn build_hunk_patch(file_path: &str, hunk: &IndexedDiffHunk) -> String {
     let mut patch = String::new();
@@ -708,15 +728,11 @@ fn build_hunk_patch(file_path: &str, hunk: &IndexedDiffHunk) -> String {
     // Lines
     for line in &hunk.lines {
         let prefix = match line.line_type.as_str() {
-            "addition" => "+",
-            "deletion" => "-",
-            _ => " ",
+            "addition" => '+',
+            "deletion" => '-',
+            _ => ' ',
         };
-        patch.push_str(&format!("{}{}", prefix, line.content));
-        // Ensure each line ends with newline
-        if !line.content.ends_with('\n') {
-            patch.push('\n');
-        }
+        push_diff_line(&mut patch, prefix, &line.content);
     }
 
     patch
@@ -816,7 +832,7 @@ pub async fn stage_lines(
 
     for (hunk, selected_indices) in &selected_hunks {
         // Rebuild the hunk with only selected changes
-        let mut new_lines: Vec<String> = Vec::new();
+        let mut hunk_body = String::new();
         let mut old_count: u32 = 0;
         let mut new_count: u32 = 0;
 
@@ -825,38 +841,22 @@ pub async fn stage_lines(
 
             match line.line_type.as_str() {
                 "context" => {
-                    let mut content = line.content.clone();
-                    if !content.ends_with('\n') {
-                        content.push('\n');
-                    }
-                    new_lines.push(format!(" {}", content));
+                    push_diff_line(&mut hunk_body, ' ', &line.content);
                     old_count += 1;
                     new_count += 1;
                 }
                 "addition" if is_selected => {
-                    let mut content = line.content.clone();
-                    if !content.ends_with('\n') {
-                        content.push('\n');
-                    }
-                    new_lines.push(format!("+{}", content));
+                    push_diff_line(&mut hunk_body, '+', &line.content);
                     new_count += 1;
                 }
                 // Not-selected additions fall through to _ => {} (omitted)
                 "deletion" => {
                     if is_selected {
-                        let mut content = line.content.clone();
-                        if !content.ends_with('\n') {
-                            content.push('\n');
-                        }
-                        new_lines.push(format!("-{}", content));
+                        push_diff_line(&mut hunk_body, '-', &line.content);
                         old_count += 1;
                     } else {
                         // Not selected deletions become context lines
-                        let mut content = line.content.clone();
-                        if !content.ends_with('\n') {
-                            content.push('\n');
-                        }
-                        new_lines.push(format!(" {}", content));
+                        push_diff_line(&mut hunk_body, ' ', &line.content);
                         old_count += 1;
                         new_count += 1;
                     }
@@ -871,9 +871,7 @@ pub async fn stage_lines(
             hunk.old_start, old_count, hunk.new_start, new_count
         ));
 
-        for line in &new_lines {
-            patch.push_str(line);
-        }
+        patch.push_str(&hunk_body);
     }
 
     // Apply the patch
@@ -1696,5 +1694,159 @@ mod tests {
         assert_eq!(sorted.unstaged_count, 0);
         assert_eq!(sorted.untracked_count, 0);
         assert_eq!(sorted.conflicted_count, 0);
+    }
+
+    // Finding 21 (data-loss): `discard_changes` on a file with both staged and
+    // later unstaged edits must restore the worktree from the INDEX (like
+    // `git checkout -- <path>`), NOT from HEAD. Restoring from HEAD destroys
+    // the staged version, which is never committed and has no reflog.
+    #[tokio::test]
+    async fn test_discard_changes_preserves_staged_content() {
+        let repo = TestRepo::with_initial_commit();
+
+        // v1 committed
+        repo.create_commit("add f", &[("f.txt", "v1\n")]);
+        // v2 staged
+        repo.create_file("f.txt", "v2-staged\n");
+        repo.stage_file("f.txt");
+        // v3 unstaged on top
+        repo.create_file("f.txt", "v3-worktree\n");
+
+        let result = discard_changes(repo.path_str(), vec!["f.txt".to_string()]).await;
+        assert!(result.is_ok(), "discard failed: {:?}", result.err());
+
+        // Worktree must be restored to the STAGED version (v2), not HEAD (v1).
+        let content = std::fs::read_to_string(repo.path.join("f.txt")).unwrap();
+        assert_eq!(
+            content, "v2-staged\n",
+            "worktree must be restored from the index (staged v2), not HEAD"
+        );
+
+        // The staged index blob must remain v2 — the staged change survives.
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        let entry = index
+            .get_path(Path::new("f.txt"), 0)
+            .expect("f.txt should still be tracked in the index");
+        let blob = git_repo.find_blob(entry.id).unwrap();
+        assert_eq!(
+            blob.content(),
+            b"v2-staged\n",
+            "staged content must not be discarded"
+        );
+    }
+
+    // Finding 25 (wrong-result): staging a dangling symlink (target missing)
+    // must stage it as a 120000 blob containing the link target, exactly like
+    // `git add`. Deciding via Path::exists() (which follows the link) wrongly
+    // treats it as a deletion.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_stage_dangling_symlink() {
+        let repo = TestRepo::with_initial_commit();
+
+        std::os::unix::fs::symlink("does-not-exist", repo.path.join("broken"))
+            .expect("failed to create symlink");
+
+        let result = stage_files(repo.path_str(), vec!["broken".to_string()]).await;
+        assert!(result.is_ok(), "staging failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        let entry = index
+            .get_path(Path::new("broken"), 0)
+            .expect("dangling symlink should be staged, not treated as a deletion");
+        assert_eq!(
+            entry.mode, 0o120000,
+            "should be staged as a symlink (120000)"
+        );
+        let blob = git_repo.find_blob(entry.id).unwrap();
+        assert_eq!(
+            blob.content(),
+            b"does-not-exist",
+            "symlink blob must contain the link target"
+        );
+    }
+
+    // Finding 26 (wrong-error): unstaging must work in a repository with no
+    // commits (unborn HEAD). `git reset -- <paths>` resolves against the empty
+    // tree there, dropping the paths from the index.
+    #[tokio::test]
+    async fn test_unstage_files_unborn_head() {
+        let repo = TestRepo::new(); // freshly initialized, no commits
+
+        repo.create_file("new.txt", "content\n");
+        repo.stage_file("new.txt");
+
+        // Sanity: it is staged.
+        {
+            let git_repo = repo.repo();
+            let index = git_repo.index().unwrap();
+            assert!(index.get_path(Path::new("new.txt"), 0).is_some());
+        }
+
+        let result = unstage_files(repo.path_str(), vec!["new.txt".to_string()]).await;
+        assert!(
+            result.is_ok(),
+            "unstage on unborn HEAD should succeed: {:?}",
+            result.err()
+        );
+
+        // The file is no longer staged...
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(
+            index.get_path(Path::new("new.txt"), 0).is_none(),
+            "file should be removed from the index after unstage"
+        );
+        // ...but still present in the worktree (now untracked).
+        assert!(repo.path.join("new.txt").exists());
+    }
+
+    // Finding 30 (wrong-result): staging the last hunk of a file whose final
+    // line has no trailing newline must succeed and stage the exact worktree
+    // bytes. Without the "\ No newline at end of file" marker the generated
+    // patch is rejected by `git apply --cached` ("patch does not apply").
+    #[tokio::test]
+    async fn test_stage_hunk_by_index_no_trailing_newline() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Commit a file whose final line has NO trailing newline.
+        repo.create_commit("add nonl", &[("nonl.txt", "line1\nline2")]);
+
+        // Modify the final (no-newline) line, still without a trailing newline.
+        repo.create_file("nonl.txt", "line1\nCHANGED");
+
+        let hunks = get_file_hunks(repo.path_str(), "nonl.txt".to_string(), false)
+            .await
+            .unwrap();
+        assert!(!hunks.hunks.is_empty());
+
+        let result = stage_hunk_by_index(repo.path_str(), "nonl.txt".to_string(), 0).await;
+        assert!(
+            result.is_ok(),
+            "staging a no-trailing-newline hunk should succeed: {:?}",
+            result.err()
+        );
+
+        // The staged blob must be the exact worktree bytes (no spurious \n).
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        let entry = index.get_path(Path::new("nonl.txt"), 0).unwrap();
+        let blob = git_repo.find_blob(entry.id).unwrap();
+        assert_eq!(
+            blob.content(),
+            b"line1\nCHANGED",
+            "staged content must match the worktree bytes exactly"
+        );
+
+        // And the file should now be fully staged (no remaining unstaged hunks).
+        let remaining = get_file_hunks(repo.path_str(), "nonl.txt".to_string(), false)
+            .await
+            .unwrap();
+        assert!(
+            remaining.hunks.is_empty(),
+            "file should be fully staged after staging its only hunk"
+        );
     }
 }

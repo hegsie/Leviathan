@@ -1,10 +1,314 @@
 //! Git Hooks management command handlers
 //! View, edit, enable/disable git hooks
+//!
+//! In addition to the management commands (list/edit/toggle), this module
+//! provides a small hook *runner* used by the git2-based write paths so they
+//! invoke client-side hooks with the same semantics as canonical git
+//! (githooks(5)). libgit2 runs no hooks, so without this the app would
+//! silently bypass pre-commit/commit-msg/pre-push/etc. on its default paths.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use tauri::command;
 
-use crate::error::Result;
+use crate::error::{LeviathanError, Result};
+
+/// Resolve the hooks directory exactly as git does:
+/// - `core.hooksPath` if set. A leading `~` is expanded to `$HOME`; a relative
+///   path resolves against the repository working directory (git resolves it
+///   against the repo's top-level working tree).
+/// - otherwise `<commondir>/hooks` (using `commondir()`, NOT `path()`, so
+///   linked worktrees share the main repo's hooks like git).
+fn resolve_hooks_dir(repo: &git2::Repository) -> PathBuf {
+    if let Ok(config) = repo.config() {
+        if let Ok(hooks_path) = config.get_string("core.hooksPath") {
+            if !hooks_path.is_empty() {
+                let expanded = expand_tilde(&hooks_path);
+                let p = Path::new(&expanded);
+                if p.is_absolute() {
+                    return p.to_path_buf();
+                }
+                // Relative: resolve against the working directory (git's rule).
+                if let Some(workdir) = repo.workdir() {
+                    return workdir.join(p);
+                }
+                return p.to_path_buf();
+            }
+        }
+    }
+    repo.commondir().join("hooks")
+}
+
+/// Expand a leading `~` (or `~/`) to the user's home directory, like git.
+fn expand_tilde(path: &str) -> String {
+    if path == "~" {
+        if let Some(home) = home_dir() {
+            return home.to_string_lossy().to_string();
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return home.join(rest).to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
+}
+
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+}
+
+/// Whether `path` is an existing, executable regular file.
+///
+/// On non-unix platforms executability cannot be reliably determined from the
+/// filesystem, so hooks are best-effort skipped there (documented deviation).
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    false
+}
+
+/// Outcome of attempting to run a hook.
+pub struct HookOutcome {
+    /// The hook existed, was executable, and was executed.
+    pub ran: bool,
+    /// Exit status success (true when the hook did not run).
+    pub success: bool,
+    /// Combined stdout+stderr the hook produced (empty when it did not run).
+    pub output: String,
+}
+
+/// Run a single git hook with githooks(5) semantics.
+///
+/// - Resolves the hook via [`resolve_hooks_dir`] and runs it only if the file
+///   exists and is executable.
+/// - Executes with the current directory set to the repository working tree.
+/// - `args` are passed as positional arguments; `stdin_data`, when `Some`, is
+///   fed on the hook's stdin (otherwise stdin is `/dev/null` so a hook that
+///   reads stdin can never hang the GUI on inherited process stdin).
+pub fn run_hook(
+    repo: &git2::Repository,
+    name: &str,
+    args: &[&str],
+    stdin_data: Option<&str>,
+) -> Result<HookOutcome> {
+    let not_run = HookOutcome {
+        ran: false,
+        success: true,
+        output: String::new(),
+    };
+
+    // Bare repositories have no working tree to run hooks against.
+    let workdir = match repo.workdir() {
+        Some(w) => w.to_path_buf(),
+        None => return Ok(not_run),
+    };
+
+    let hook_path = resolve_hooks_dir(repo).join(name);
+    if !is_executable(&hook_path) {
+        return Ok(not_run);
+    }
+
+    let mut cmd = std::process::Command::new(&hook_path);
+    cmd.current_dir(&workdir);
+    cmd.args(args);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    if stdin_data.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+
+    // Do NOT export GIT_DIR/GIT_WORK_TREE: hooks (e.g. husky, lint-staged)
+    // discover the repository from the working directory, and a stale GIT_DIR
+    // would misdirect them (and break linked worktrees). cwd = workdir is
+    // exactly what git relies on.
+
+    let mut child = cmd.spawn().map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to run {} hook: {}", name, e))
+    })?;
+
+    if let Some(data) = stdin_data {
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(data.as_bytes());
+        }
+        // stdin dropped here -> EOF for the hook.
+    }
+
+    let output = child.wait_with_output().map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to run {} hook: {}", name, e))
+    })?;
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+
+    Ok(HookOutcome {
+        ran: true,
+        success: output.status.success(),
+        output: combined,
+    })
+}
+
+/// Run a blocking hook (pre-commit, commit-msg, pre-merge-commit, pre-push).
+/// A non-zero exit aborts the operation with the hook's output in the error,
+/// mirroring canonical git.
+pub fn run_hook_blocking(
+    repo: &git2::Repository,
+    name: &str,
+    args: &[&str],
+    stdin_data: Option<&str>,
+) -> Result<()> {
+    let outcome = run_hook(repo, name, args, stdin_data)?;
+    if outcome.ran && !outcome.success {
+        let detail = outcome.output.trim();
+        return Err(LeviathanError::OperationFailed(if detail.is_empty() {
+            format!("{} hook failed", name)
+        } else {
+            format!("{} hook failed:\n{}", name, detail)
+        }));
+    }
+    Ok(())
+}
+
+/// Run a non-blocking hook (post-commit, post-checkout, post-merge). Failures
+/// are logged but never abort the operation, mirroring canonical git.
+pub fn run_hook_noblock(repo: &git2::Repository, name: &str, args: &[&str]) {
+    match run_hook(repo, name, args, None) {
+        Ok(outcome) => {
+            if outcome.ran && !outcome.success {
+                tracing::warn!("{} hook exited non-zero: {}", name, outcome.output.trim());
+            }
+        }
+        Err(e) => tracing::warn!("failed to run {} hook: {}", name, e),
+    }
+}
+
+/// Run the commit-msg hook: write `message` to the per-worktree
+/// `COMMIT_EDITMSG` file, pass its path to the hook (which may rewrite it),
+/// and return the possibly-modified message. A non-zero exit aborts the commit.
+pub fn run_commit_msg_hook(repo: &git2::Repository, message: &str) -> Result<String> {
+    let hook_path = resolve_hooks_dir(repo).join("commit-msg");
+    if !is_executable(&hook_path) {
+        return Ok(message.to_string());
+    }
+
+    let msg_file = repo.path().join("COMMIT_EDITMSG");
+    std::fs::write(&msg_file, message)?;
+
+    let arg = msg_file.to_string_lossy().to_string();
+    run_hook_blocking(repo, "commit-msg", &[arg.as_str()], None)?;
+
+    // The hook may have edited the message file in place.
+    Ok(std::fs::read_to_string(&msg_file).unwrap_or_else(|_| message.to_string()))
+}
+
+/// Convenience wrapper for the post-checkout hook.
+/// `branch_switch` selects the flag argument git passes (1 = branch checkout,
+/// 0 = file checkout).
+pub fn run_post_checkout(
+    repo: &git2::Repository,
+    old_oid: &str,
+    new_oid: &str,
+    branch_switch: bool,
+) {
+    let flag = if branch_switch { "1" } else { "0" };
+    run_hook_noblock(repo, "post-checkout", &[old_oid, new_oid, flag]);
+}
+
+/// The all-zeros object id git uses for a missing ref (e.g. unborn HEAD or a
+/// remote ref that does not yet exist).
+pub const ZERO_OID: &str = "0000000000000000000000000000000000000000";
+
+/// Resolve HEAD to a full oid string, or [`ZERO_OID`] when HEAD is unborn.
+pub fn head_oid_string(repo: &git2::Repository) -> String {
+    repo.head()
+        .ok()
+        .and_then(|h| h.target())
+        .map(|o| o.to_string())
+        .unwrap_or_else(|| ZERO_OID.to_string())
+}
+
+/// The remote's fetch URL, falling back to the remote name (git passes the
+/// name as the second pre-push argument when no URL is configured).
+fn remote_url(repo: &git2::Repository, remote_name: &str) -> String {
+    let url = repo
+        .find_remote(remote_name)
+        .ok()
+        .map(|r| r.url().unwrap_or("").to_string())
+        .unwrap_or_default();
+    if url.is_empty() {
+        remote_name.to_string()
+    } else {
+        url
+    }
+}
+
+/// Run the pre-push hook for a branch push (blocking, git parity).
+///
+/// Passes `<remote-name> <remote-url>` as arguments and feeds the ref update
+/// line `<local ref> <local oid> <remote ref> <remote oid>` on stdin, per
+/// githooks(5). The remote oid is the known remote-tracking value or all-zeros
+/// when the remote ref does not exist yet. A non-zero exit aborts the push.
+pub fn run_pre_push_branch(
+    repo: &git2::Repository,
+    remote_name: &str,
+    branch_name: &str,
+) -> Result<()> {
+    let url = remote_url(repo, remote_name);
+
+    let local_ref = format!("refs/heads/{}", branch_name);
+    let local_oid = repo
+        .refname_to_id(&local_ref)
+        .map(|o| o.to_string())
+        .unwrap_or_else(|_| ZERO_OID.to_string());
+    let remote_ref = format!("refs/heads/{}", branch_name);
+    let remote_oid = repo
+        .refname_to_id(&format!("refs/remotes/{}/{}", remote_name, branch_name))
+        .map(|o| o.to_string())
+        .unwrap_or_else(|_| ZERO_OID.to_string());
+
+    let stdin = format!(
+        "{} {} {} {}\n",
+        local_ref, local_oid, remote_ref, remote_oid
+    );
+    run_hook_blocking(repo, "pre-push", &[remote_name, &url], Some(&stdin))
+}
+
+/// Run the pre-push hook for a tag push (blocking, git parity).
+pub fn run_pre_push_tag(repo: &git2::Repository, remote_name: &str, tag_name: &str) -> Result<()> {
+    let url = remote_url(repo, remote_name);
+
+    let local_ref = format!("refs/tags/{}", tag_name);
+    let local_oid = repo
+        .refname_to_id(&local_ref)
+        .map(|o| o.to_string())
+        .unwrap_or_else(|_| ZERO_OID.to_string());
+    // Tag refs are not mirrored into refs/remotes, so the remote side is
+    // treated as absent (all-zeros), matching a first-time tag push.
+    let stdin = format!("{} {} {} {}\n", local_ref, local_oid, local_ref, ZERO_OID);
+    run_hook_blocking(repo, "pre-push", &[remote_name, &url], Some(&stdin))
+}
 
 /// A git hook
 #[derive(Debug, Clone, serde::Serialize)]
@@ -323,5 +627,123 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         let result = delete_hook(repo.path_str(), "pre-commit".to_string()).await;
         assert!(result.is_ok()); // Should not error
+    }
+
+    // ---- Hook runner tests ----
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_hook_skips_nonexecutable() {
+        let repo = TestRepo::with_initial_commit();
+        // Write a hook file WITHOUT the executable bit.
+        let hooks_dir = repo.path.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(hooks_dir.join("pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
+
+        let git_repo = repo.repo();
+        let outcome = run_hook(&git_repo, "pre-commit", &[], None).unwrap();
+        assert!(!outcome.ran, "non-executable hook must be skipped");
+        // Blocking wrapper must NOT abort for a skipped hook.
+        assert!(run_hook_blocking(&git_repo, "pre-commit", &[], None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_hook_blocking_aborts_on_failure() {
+        let repo = TestRepo::with_initial_commit();
+        repo.install_hook("pre-commit", "#!/bin/sh\necho nope 1>&2\nexit 1\n");
+        let git_repo = repo.repo();
+        let err = run_hook_blocking(&git_repo, "pre-commit", &[], None).unwrap_err();
+        assert!(
+            err.to_string().contains("nope"),
+            "hook output missing: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_hook_noblock_ignores_failure() {
+        let repo = TestRepo::with_initial_commit();
+        repo.install_hook("post-commit", "#!/bin/sh\nexit 3\n");
+        let git_repo = repo.repo();
+        // Must not panic or abort.
+        run_hook_noblock(&git_repo, "post-commit", &[]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_hookspath_absolute() {
+        let repo = TestRepo::with_initial_commit();
+        let alt = tempfile::tempdir().unwrap();
+        // Install an executable pre-commit in the alternate absolute dir.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let hook = alt.path().join("pre-commit");
+            let marker = repo.path.join("abs-marker");
+            std::fs::write(
+                &hook,
+                format!("#!/bin/sh\ntouch \"{}\"\n", marker.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        {
+            let git_repo = repo.repo();
+            let mut cfg = git_repo.config().unwrap();
+            cfg.set_str("core.hooksPath", &alt.path().to_string_lossy())
+                .unwrap();
+        }
+        let git_repo = repo.repo();
+        let outcome = run_hook(&git_repo, "pre-commit", &[], None).unwrap();
+        assert!(outcome.ran, "hook under absolute core.hooksPath must run");
+        assert!(repo.path.join("abs-marker").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_hookspath_relative_resolves_against_workdir() {
+        let repo = TestRepo::with_initial_commit();
+        // Relative hooksPath resolves against the working directory.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = repo.path.join("myhooks");
+            std::fs::create_dir_all(&dir).unwrap();
+            let hook = dir.join("pre-commit");
+            std::fs::write(&hook, "#!/bin/sh\nexit 7\n").unwrap();
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        {
+            let git_repo = repo.repo();
+            let mut cfg = git_repo.config().unwrap();
+            cfg.set_str("core.hooksPath", "myhooks").unwrap();
+        }
+        let git_repo = repo.repo();
+        let outcome = run_hook(&git_repo, "pre-commit", &[], None).unwrap();
+        assert!(outcome.ran, "relative core.hooksPath hook must run");
+        assert!(!outcome.success, "hook exited 7");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_commit_msg_hook_rewrites_message() {
+        let repo = TestRepo::with_initial_commit();
+        // Append a trailer to whatever message is passed.
+        repo.install_hook(
+            "commit-msg",
+            "#!/bin/sh\necho '\nSigned-off-by: hook' >> \"$1\"\nexit 0\n",
+        );
+        let git_repo = repo.repo();
+        let out = run_commit_msg_hook(&git_repo, "original message").unwrap();
+        assert!(out.starts_with("original message"));
+        assert!(out.contains("Signed-off-by: hook"), "got: {out:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_commit_msg_hook_can_abort() {
+        let repo = TestRepo::with_initial_commit();
+        repo.install_hook("commit-msg", "#!/bin/sh\nexit 1\n");
+        let git_repo = repo.repo();
+        assert!(run_commit_msg_hook(&git_repo, "msg").is_err());
     }
 }

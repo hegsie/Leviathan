@@ -9,6 +9,7 @@ import { uiStore } from '../../../stores/ui.store.ts';
 import type { Commit } from '../../../types/git.types.ts';
 
 let failingCommands: Set<string> = new Set();
+let mockFiles: unknown[] = [];
 let cbId = 0;
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
@@ -21,7 +22,7 @@ const mockInvoke: MockInvoke = async (command: string) => {
   }
 
   if (command === 'get_commit_files') {
-    return [];
+    return mockFiles;
   }
 
   return null;
@@ -51,6 +52,30 @@ const mockCommit: Commit = {
 describe('lv-commit-details', () => {
   beforeEach(() => {
     failingCommands = new Set();
+    mockFiles = [];
+  });
+
+  it('shows the previous path for a renamed file', async () => {
+    mockFiles = [
+      {
+        path: 'src/new-name.ts',
+        oldPath: 'src/old-name.ts',
+        status: 'renamed',
+        additions: 3,
+        deletions: 1,
+      },
+    ];
+
+    const el = await fixture<LvCommitDetails>(
+      html`<lv-commit-details .repositoryPath=${'/test/repo'} .commit=${mockCommit}></lv-commit-details>`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).loadFiles();
+    await el.updateComplete;
+
+    const renamedFrom = el.shadowRoot!.querySelector('.file-renamed-from');
+    expect(renamedFrom).to.not.be.null;
+    expect(renamedFrom!.textContent).to.contain('src/old-name.ts');
   });
 
   it('renders with a commit', async () => {

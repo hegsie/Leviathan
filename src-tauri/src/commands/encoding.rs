@@ -278,50 +278,98 @@ pub async fn convert_file_encoding(
     let bom_len = detect_bom(&data).map(|(_, len)| len).unwrap_or(0);
     let content_data = &data[bom_len..];
 
-    // Decode the source content
-    let source_encoding = encoding_rs::Encoding::for_label(source_encoding_name.as_bytes())
-        .unwrap_or(encoding_rs::UTF_8);
+    // Decode the source content into a Rust string. encoding_rs can decode
+    // FROM UTF-16 but not UTF-32, so UTF-32 sources are decoded manually to
+    // avoid the for_label() fallback silently treating them as UTF-8 (mojibake).
+    let source_upper = source_encoding_name.to_uppercase();
+    let decoded: std::borrow::Cow<str> = if source_upper == "UTF-32LE" || source_upper == "UTF-32BE"
+    {
+        let le = source_upper == "UTF-32LE";
+        let mut s = String::new();
+        for chunk in content_data.chunks(4) {
+            if chunk.len() < 4 {
+                break;
+            }
+            let cp = if le {
+                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+            } else {
+                u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+            };
+            s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+        }
+        std::borrow::Cow::Owned(s)
+    } else {
+        let source_encoding = encoding_rs::Encoding::for_label(source_encoding_name.as_bytes())
+            .unwrap_or(encoding_rs::UTF_8);
+        let (decoded, _, had_errors) = source_encoding.decode(content_data);
+        if had_errors {
+            tracing::warn!(
+                "Encountered errors decoding file from {}",
+                source_encoding_name
+            );
+        }
+        decoded
+    };
 
-    let (decoded, _, had_errors) = source_encoding.decode(content_data);
-    if had_errors {
-        tracing::warn!(
-            "Encountered errors decoding file from {}",
-            source_encoding_name
-        );
-    }
-
-    // Encode to target encoding
-    let target_encoding_lower = targetEncoding.to_lowercase();
-    let target_enc = encoding_rs::Encoding::for_label(target_encoding_lower.as_bytes())
-        .ok_or_else(|| {
-            LeviathanError::OperationFailed(format!(
-                "Unsupported target encoding: {}",
-                targetEncoding
-            ))
-        })?;
-
-    let (encoded, _, had_encode_errors) = target_enc.encode(&decoded);
-    if had_encode_errors {
-        tracing::warn!("Encountered errors encoding file to {}", target_enc.name());
-    }
+    // Encode to the target encoding. encoding_rs::encode() maps UTF-16/UTF-32
+    // targets back to UTF-8 (it cannot emit those units), so those must be
+    // handled manually; otherwise we would write UTF-8 bytes behind a UTF-16
+    // BOM and corrupt the file.
+    let target_norm = targetEncoding.to_lowercase().replace('_', "-");
+    let (body, target_name): (Vec<u8>, String) = match target_norm.as_str() {
+        "utf-16" | "utf16" | "utf-16le" | "utf16le" => {
+            let bytes = decoded
+                .encode_utf16()
+                .flat_map(|u| u.to_le_bytes())
+                .collect();
+            (bytes, "UTF-16LE".to_string())
+        }
+        "utf-16be" | "utf16be" => {
+            let bytes = decoded
+                .encode_utf16()
+                .flat_map(|u| u.to_be_bytes())
+                .collect();
+            (bytes, "UTF-16BE".to_string())
+        }
+        "utf-32" | "utf32" | "utf-32le" | "utf32le" | "utf-32be" | "utf32be" => {
+            return Err(LeviathanError::OperationFailed(
+                "UTF-32 encoding is not supported. Please choose UTF-8, UTF-16LE, or UTF-16BE."
+                    .to_string(),
+            ));
+        }
+        _ => {
+            let target_enc =
+                encoding_rs::Encoding::for_label(target_norm.as_bytes()).ok_or_else(|| {
+                    LeviathanError::OperationFailed(format!(
+                        "Unsupported target encoding: {}",
+                        targetEncoding
+                    ))
+                })?;
+            let (encoded, _, had_encode_errors) = target_enc.encode(&decoded);
+            if had_encode_errors {
+                tracing::warn!("Encountered errors encoding file to {}", target_enc.name());
+            }
+            (encoded.into_owned(), target_enc.name().to_string())
+        }
+    };
 
     // Build output with optional BOM
     let mut output = Vec::new();
-    let target_name = target_enc.name().to_uppercase();
+    let target_name_upper = target_name.to_uppercase();
 
     // Add BOM for UTF encodings if appropriate
-    if target_name.contains("UTF-8") {
+    if target_name_upper.contains("UTF-8") {
         // UTF-8 BOM is optional; we add it if the source had a BOM
         if detect_bom(&data).is_some() {
             output.extend_from_slice(BOM_UTF8);
         }
-    } else if target_name.contains("UTF-16LE") {
+    } else if target_name_upper.contains("UTF-16LE") {
         output.extend_from_slice(BOM_UTF16_LE);
-    } else if target_name.contains("UTF-16BE") {
+    } else if target_name_upper.contains("UTF-16BE") {
         output.extend_from_slice(BOM_UTF16_BE);
     }
 
-    output.extend_from_slice(&encoded);
+    output.extend_from_slice(&body);
 
     let bytes_written = output.len();
 
@@ -333,7 +381,7 @@ pub async fn convert_file_encoding(
     Ok(ConvertEncodingResult {
         success: true,
         source_encoding: source_encoding_name,
-        target_encoding: target_enc.name().to_string(),
+        target_encoding: target_name,
         bytes_written,
     })
 }
@@ -665,6 +713,90 @@ mod tests {
         // Read and verify content is preserved
         let content = fs::read_to_string(repo.path.join("preserve_test.txt")).unwrap();
         assert_eq!(content, original_text);
+    }
+
+    /// Finding 59: converting to UTF-16LE must emit real UTF-16 code units,
+    /// not UTF-8 bytes behind a UTF-16 BOM.
+    #[tokio::test]
+    async fn test_convert_to_utf16le_produces_valid_utf16() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file("u16.txt", "hello");
+
+        let result = convert_file_encoding(
+            repo.path_str(),
+            "u16.txt".to_string(),
+            "utf-16le".to_string(),
+        )
+        .await;
+        assert!(result.is_ok(), "utf-16le conversion should succeed");
+
+        let bytes = fs::read(repo.path.join("u16.txt")).unwrap();
+        // Expect BOM FF FE followed by 2-byte little-endian code units.
+        assert_eq!(
+            bytes,
+            vec![0xFF, 0xFE, b'h', 0x00, b'e', 0x00, b'l', 0x00, b'l', 0x00, b'o', 0x00,],
+            "UTF-16LE output must be BOM + 2-byte LE units, got {:?}",
+            bytes
+        );
+    }
+
+    /// Finding 59: converting to UTF-16BE must emit big-endian code units.
+    #[tokio::test]
+    async fn test_convert_to_utf16be_produces_valid_utf16() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file("u16be.txt", "Ab");
+
+        let result = convert_file_encoding(
+            repo.path_str(),
+            "u16be.txt".to_string(),
+            "utf-16be".to_string(),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let bytes = fs::read(repo.path.join("u16be.txt")).unwrap();
+        assert_eq!(bytes, vec![0xFE, 0xFF, 0x00, b'A', 0x00, b'b']);
+    }
+
+    /// Finding 59: UTF-16 output must round-trip back through detection as UTF-16.
+    #[tokio::test]
+    async fn test_convert_to_utf16le_detected_as_utf16() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file("rt.txt", "roundtrip");
+
+        convert_file_encoding(
+            repo.path_str(),
+            "rt.txt".to_string(),
+            "utf-16le".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let info = detect_file_encoding(repo.path_str(), "rt.txt".to_string())
+            .await
+            .unwrap();
+        assert_eq!(info.encoding, "UTF-16LE");
+        assert!(info.has_bom);
+    }
+
+    /// Finding 59: UTF-32 targets can't be emitted correctly, so refuse cleanly.
+    #[tokio::test]
+    async fn test_convert_to_utf32_is_refused() {
+        let repo = TestRepo::with_initial_commit();
+        let original = "keep me safe";
+        repo.create_file("u32.txt", original);
+
+        let result = convert_file_encoding(
+            repo.path_str(),
+            "u32.txt".to_string(),
+            "utf-32le".to_string(),
+        )
+        .await;
+        assert!(result.is_err(), "UTF-32 target must be refused");
+
+        // The original file must be left untouched (no corruption / data loss).
+        let after = fs::read_to_string(repo.path.join("u32.txt")).unwrap();
+        assert_eq!(after, original);
     }
 
     #[tokio::test]

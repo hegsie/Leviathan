@@ -329,6 +329,12 @@ export interface CherryPickCommand {
   commitOid: string;
   /** If true, stages changes without committing (like `git cherry-pick -n`) */
   noCommit?: boolean;
+  /**
+   * For a merge commit, which parent (1-based) to cherry-pick relative to
+   * (`git cherry-pick -m`). The backend requires this when the target has more
+   * than one parent; ignored for non-merge commits.
+   */
+  mainline?: number;
 }
 
 export interface ContinueCherryPickCommand {
@@ -351,6 +357,12 @@ export interface CherryPickFromBranchCommand {
 export interface RevertCommand {
   path: string;
   commitOid: string;
+  /**
+   * For a merge commit, which parent (1-based) to revert relative to
+   * (`git revert -m`). The backend requires this when the target has more than
+   * one parent; ignored for non-merge commits.
+   */
+  mainline?: number;
 }
 
 export interface ContinueRevertCommand {

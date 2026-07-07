@@ -8,7 +8,68 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri::command;
 
+use crate::error::LeviathanError;
 use crate::error::Result;
+
+/// Refuse to reset while a multi-step operation (rebase, bisect, or a
+/// cherry-pick/revert *sequence*) is in progress. Canonical `git reset` leaves
+/// `.git/rebase-merge`, `.git/rebase-apply`, `.git/BISECT_LOG` and the sequencer
+/// directory in place, but libgit2's reset unconditionally runs
+/// `git_repository_state_cleanup` for MIXED/HARD resets and deletes them,
+/// silently destroying the in-progress operation. Mirror git by refusing.
+/// (A plain single-op Merge / CherryPick / Revert is intentionally allowed:
+/// `git reset` is the documented way to abort those, and clearing MERGE_HEAD /
+/// CHERRY_PICK_HEAD / REVERT_HEAD is exactly what git itself does.)
+fn ensure_resettable(repo: &git2::Repository) -> Result<()> {
+    use git2::RepositoryState::*;
+    match repo.state() {
+        Rebase | RebaseInteractive | RebaseMerge | ApplyMailbox | ApplyMailboxOrRebase => {
+            Err(LeviathanError::OperationFailed(
+                "Cannot reset while a rebase is in progress. Finish or abort the rebase (git rebase --continue or --abort) before undoing.".to_string(),
+            ))
+        }
+        Bisect => Err(LeviathanError::OperationFailed(
+            "Cannot reset while a bisect is in progress. Run 'git bisect reset' before undoing.".to_string(),
+        )),
+        CherryPickSequence => Err(LeviathanError::OperationFailed(
+            "Cannot reset while a cherry-pick sequence is in progress. Finish or abort it (git cherry-pick --continue or --abort) before undoing.".to_string(),
+        )),
+        RevertSequence => Err(LeviathanError::OperationFailed(
+            "Cannot reset while a revert sequence is in progress. Finish or abort it (git revert --continue or --abort) before undoing.".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Parse the source ref of a checkout reflog message.
+/// Format: "checkout: moving from <from> to <to>".
+fn parse_checkout_source(message: &str) -> Option<String> {
+    let rest = message.split_once("moving from ")?.1;
+    let from = rest.rsplit_once(" to ")?.0.trim();
+    if from.is_empty() {
+        None
+    } else {
+        Some(from.to_string())
+    }
+}
+
+/// Record a marker in repo config so `redo_last_action` can distinguish an
+/// app-performed undo from a user-initiated reset. `redo_target` is the state
+/// redo should restore (HEAD before the undo); `undo_head` is HEAD immediately
+/// after the undo, used to detect whether anything changed since.
+fn set_redo_marker(repo: &git2::Repository, redo_target: &str, undo_head: &str) {
+    if let Ok(mut cfg) = repo.config() {
+        let _ = cfg.set_str("leviathan.redotarget", redo_target);
+        let _ = cfg.set_str("leviathan.redohead", undo_head);
+    }
+}
+
+fn clear_redo_marker(repo: &git2::Repository) {
+    if let Ok(mut cfg) = repo.config() {
+        let _ = cfg.remove("leviathan.redotarget");
+        let _ = cfg.remove("leviathan.redohead");
+    }
+}
 
 /// Represents a single undoable git action parsed from the reflog
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,10 +333,42 @@ pub async fn undo_last_action(path: String) -> Result<UndoAction> {
     // Parse the action we're undoing
     let (action_type, description) = parse_reflog_action(&message);
 
+    // Undoing a checkout must restore the previous HEAD *symbolically* — like
+    // `git switch -` — which returns to the previous branch and never moves any
+    // branch ref. A mixed reset here would rewrite the current branch to the
+    // pre-checkout commit and orphan its commits (data loss).
+    if action_type == "checkout" {
+        return undo_checkout(
+            &repo,
+            &message,
+            &before_oid_str,
+            &target_oid_str,
+            timestamp,
+            author,
+            description,
+        );
+    }
+
+    // Refuse if a rebase/bisect/sequence is in progress: a reset would destroy it.
+    ensure_resettable(&repo)?;
+
+    // If the recorded action did not move HEAD (e.g. a synthetic record_action
+    // entry such as a branch delete, or a checkout between two refs at the same
+    // commit), a reset to that OID is a silent no-op that restores nothing.
+    // Refuse rather than claim a successful undo.
+    if target_oid_str == before_oid_str {
+        return Err(LeviathanError::OperationFailed(
+            "This action did not move HEAD, so it cannot be undone by resetting. Nothing was changed.".to_string(),
+        ));
+    }
+
     // Perform a mixed reset to the previous state
     let target_oid = git2::Oid::from_str(&target_oid_str)?;
     let target_commit = repo.find_commit(target_oid)?;
     repo.reset(target_commit.as_object(), git2::ResetType::Mixed, None)?;
+
+    // Record a marker so a subsequent redo can tell this was an app undo.
+    set_redo_marker(&repo, &before_oid_str, &target_oid_str);
 
     let details = serde_json::json!({
         "undoneAction": action_type,
@@ -293,60 +386,115 @@ pub async fn undo_last_action(path: String) -> Result<UndoAction> {
     })
 }
 
-/// Redo the last undone action by moving HEAD forward in the reflog
+/// Undo a checkout by switching back to the previous branch (or detached
+/// commit) symbolically, exactly like `git switch -`. Never moves a branch ref.
+#[allow(clippy::too_many_arguments)]
+fn undo_checkout(
+    repo: &git2::Repository,
+    message: &str,
+    before_oid_str: &str,
+    fallback_oid_str: &str,
+    timestamp: i64,
+    author: String,
+    description: String,
+) -> Result<UndoAction> {
+    let from = parse_checkout_source(message).ok_or_else(|| {
+        LeviathanError::OperationFailed(
+            "Could not determine which branch to switch back to for this checkout.".to_string(),
+        )
+    })?;
+
+    let make_action = |after: String| {
+        let details = serde_json::json!({
+            "undoneAction": "checkout",
+            "undoneDescription": description,
+            "author": author,
+        });
+        UndoAction {
+            action_type: "undo".to_string(),
+            description: format!("Undo: {}", description),
+            timestamp,
+            before_ref: before_oid_str.to_string(),
+            after_ref: after,
+            details: Some(details.to_string()),
+        }
+    };
+
+    // Prefer switching back to the named branch (symbolic, like `git switch -`).
+    if let Ok(branch) = repo.find_branch(&from, git2::BranchType::Local) {
+        let commit = branch.get().peel_to_commit()?;
+        repo.checkout_tree(commit.as_object(), None)?;
+        repo.set_head(&format!("refs/heads/{}", from))?;
+        return Ok(make_action(commit.id().to_string()));
+    }
+
+    // Otherwise the previous location was a detached commit; restore it detached.
+    let oid = git2::Oid::from_str(fallback_oid_str)?;
+    let commit = repo.find_commit(oid)?;
+    repo.checkout_tree(commit.as_object(), None)?;
+    repo.set_head_detached(oid)?;
+    Ok(make_action(fallback_oid_str.to_string()))
+}
+
+/// Redo the last undone action.
+///
+/// Only fires when the immediately preceding HEAD movement was an undo the app
+/// performed (recognized via a marker written by `undo_last_action`). A reset
+/// the user performed themselves — through the reflog dialog, Smart Undo, or the
+/// git CLI — is NOT an app undo, and "redoing" over it is refused so the user's
+/// deliberate reset is never silently reverted.
 #[command]
 pub async fn redo_last_action(path: String) -> Result<UndoAction> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    // To redo, we look for the reflog entry that was created by our undo
-    // (which is a reset). The entry before that reset is our redo target.
-    let (before_oid_str, target_oid_str, timestamp, author) = {
-        let reflog = repo.reflog("HEAD")?;
-
-        if reflog.len() < 2 {
-            return Err(crate::error::LeviathanError::OperationFailed(
-                "Nothing to redo: not enough reflog history".to_string(),
-            ));
+    // Read the app-undo marker. Absent marker => the last action was not an
+    // app undo, so there is nothing to redo.
+    let (redo_target, undo_head) = {
+        let cfg = repo.config()?;
+        let target = cfg.get_string("leviathan.redotarget").ok();
+        let head = cfg.get_string("leviathan.redohead").ok();
+        match (target, head) {
+            (Some(t), Some(h)) if !t.is_empty() && !h.is_empty() => (t, h),
+            _ => {
+                return Err(LeviathanError::OperationFailed(
+                    "Nothing to redo: the last action was not an undo.".to_string(),
+                ));
+            }
         }
-
-        // The most recent entry (index 0) should be the reset from an undo.
-        // Its id_old (before_ref) is the state we want to redo to.
-        let current_entry = reflog.get(0).ok_or_else(|| {
-            crate::error::LeviathanError::OperationFailed(
-                "Failed to read current reflog entry".to_string(),
-            )
-        })?;
-
-        let msg = current_entry
-            .message()
-            .ok()
-            .flatten()
-            .unwrap_or("")
-            .to_string();
-        if !msg.to_lowercase().contains("reset") {
-            return Err(crate::error::LeviathanError::OperationFailed(
-                "Nothing to redo: last action was not an undo".to_string(),
-            ));
-        }
-
-        // The old id of the current entry is where we were before the undo
-        let current_oid = current_entry.id_new().to_string();
-        let redo_target = current_entry.id_old().to_string();
-        let ts = current_entry.committer().when().seconds();
-        let auth = current_entry
-            .committer()
-            .name()
-            .ok()
-            .unwrap_or("Unknown")
-            .to_string();
-
-        (current_oid, redo_target, ts, auth)
     };
 
-    // Perform a mixed reset to the redo target
-    let target_oid = git2::Oid::from_str(&target_oid_str)?;
+    // If HEAD has moved since the undo (a new commit, a manual reset, etc.),
+    // the marker is stale and redoing would clobber whatever the user did next.
+    let current_head = repo
+        .head()
+        .ok()
+        .and_then(|h| h.target())
+        .map(|o| o.to_string());
+    if current_head.as_deref() != Some(undo_head.as_str()) {
+        return Err(LeviathanError::OperationFailed(
+            "Nothing to redo: the repository has changed since the last undo.".to_string(),
+        ));
+    }
+
+    // Refuse if a rebase/bisect/sequence is in progress: a reset would destroy it.
+    ensure_resettable(&repo)?;
+
+    // Perform a mixed reset to the redo target (undo always used a mixed reset).
+    let target_oid = git2::Oid::from_str(&redo_target)?;
     let target_commit = repo.find_commit(target_oid)?;
     repo.reset(target_commit.as_object(), git2::ResetType::Mixed, None)?;
+
+    // The marker has been consumed.
+    clear_redo_marker(&repo);
+
+    let author = match repo.signature() {
+        Ok(sig) => sig.name().unwrap_or("Unknown").to_string(),
+        Err(_) => "Unknown".to_string(),
+    };
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
 
     let details = serde_json::json!({
         "author": author,
@@ -356,8 +504,8 @@ pub async fn redo_last_action(path: String) -> Result<UndoAction> {
         action_type: "redo".to_string(),
         description: "Redo: restored previous state".to_string(),
         timestamp,
-        before_ref: before_oid_str,
-        after_ref: target_oid_str,
+        before_ref: undo_head,
+        after_ref: redo_target,
         details: Some(details.to_string()),
     })
 }
@@ -775,24 +923,104 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         // Determine the default branch name
         let default_branch = repo.current_branch();
+        // Record the OID of the default branch before anything happens.
+        let main_oid_before = repo.head_oid();
         repo.create_branch("feature");
 
-        // Record the OID before checkout
-        let before_checkout_oid = repo.head_oid();
-
-        // Create a commit on feature branch with different tree
+        // Create a commit on feature branch with a different tree
         repo.checkout_branch("feature");
         repo.create_commit("Feature work", &[("feature.txt", "work")]);
         let feature_oid = repo.head_oid();
+        assert_ne!(feature_oid, main_oid_before);
 
         // Checkout back to default branch
         repo.checkout_branch(&default_branch);
-        assert_eq!(repo.head_oid(), before_checkout_oid);
+        assert_eq!(repo.head_oid(), main_oid_before);
 
-        // Undo the checkout (should go back to feature branch HEAD)
+        // Undo the checkout. Canonical git undoes a checkout with `git switch -`,
+        // which returns to the previous branch *symbolically* and never moves a
+        // branch ref.
         let result = undo_last_action(repo.path_str()).await;
         assert!(result.is_ok());
+
+        // HEAD is back on the feature branch (symbolic switch), not the default.
+        assert_eq!(repo.current_branch(), "feature");
         assert_eq!(repo.head_oid(), feature_oid);
+
+        // Neither branch ref moved: the default branch stayed where it was, and
+        // no commit was orphaned.
+        let git_repo = repo.repo();
+        let main_ref = git_repo
+            .find_branch(&default_branch, git2::BranchType::Local)
+            .unwrap();
+        assert_eq!(main_ref.get().target().unwrap(), main_oid_before);
+        let feature_ref = git_repo
+            .find_branch("feature", git2::BranchType::Local)
+            .unwrap();
+        assert_eq!(feature_ref.get().target().unwrap(), feature_oid);
+    }
+
+    #[tokio::test]
+    async fn test_undo_record_action_is_refused() {
+        // A synthetic record_action entry sits at the current HEAD OID, so
+        // "undoing" it would be a no-op mixed reset. That must be refused, not
+        // reported as a successful undo that restored nothing.
+        let repo = TestRepo::with_initial_commit();
+        let head_before = repo.head_oid();
+
+        let action = UndoAction {
+            action_type: "branch_delete".to_string(),
+            description: "Deleted branch feature".to_string(),
+            timestamp: 0,
+            before_ref: head_before.to_string(),
+            after_ref: head_before.to_string(),
+            details: None,
+        };
+        record_action(repo.path_str(), action).await.unwrap();
+
+        let result = undo_last_action(repo.path_str()).await;
+        assert!(result.is_err(), "undo of a no-op record_action must fail");
+        // HEAD must be untouched.
+        assert_eq!(repo.head_oid(), head_before);
+    }
+
+    #[tokio::test]
+    async fn test_redo_after_user_reset_is_refused() {
+        // A reset the user performed themselves (here via reset_to_reflog) is
+        // NOT an app undo, so redo must refuse and must NOT revert it.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Second", &[("f2.txt", "2")]);
+        let second_oid = repo.head_oid();
+
+        crate::commands::reflog::reset_to_reflog(repo.path_str(), 1, "hard".to_string())
+            .await
+            .unwrap();
+        let after_reset = repo.head_oid();
+        assert_ne!(after_reset, second_oid);
+
+        let result = redo_last_action(repo.path_str()).await;
+        assert!(
+            result.is_err(),
+            "redo must not fire after a user-initiated reset"
+        );
+        // The user's deliberate reset is preserved.
+        assert_eq!(repo.head_oid(), after_reset);
+    }
+
+    #[tokio::test]
+    async fn test_undo_refused_during_bisect() {
+        // A reset mid-bisect would erase .git/BISECT_LOG; git preserves it.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Second", &[("f2.txt", "2")]);
+        let second_oid = repo.head_oid();
+
+        std::fs::write(repo.path.join(".git").join("BISECT_LOG"), b"").unwrap();
+        assert_eq!(repo.repo().state(), git2::RepositoryState::Bisect);
+
+        let result = undo_last_action(repo.path_str()).await;
+        assert!(result.is_err(), "undo must refuse during a bisect");
+        assert_eq!(repo.head_oid(), second_oid);
+        assert!(repo.path.join(".git").join("BISECT_LOG").exists());
     }
 
     #[tokio::test]

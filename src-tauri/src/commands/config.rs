@@ -79,6 +79,83 @@ fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
     }
 }
 
+/// Run git config and return raw, *untrimmed* stdout.
+///
+/// Unlike [`run_git_config`], this does not trim the output — it is used for
+/// NUL-terminated (`--null`) parsing where records and values are delimited
+/// explicitly, so trimming would corrupt values with leading/trailing
+/// whitespace or newlines (e.g. multi-line shell aliases).
+fn run_git_config_raw(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
+    let mut cmd = create_command("git");
+
+    if let Some(path) = repo_path {
+        cmd.current_dir(path);
+    }
+
+    cmd.arg("config");
+    cmd.args(args);
+
+    let output = cmd
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git config: {}", e)))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Exit code 1 with no output means "key/section not found" — a benign
+        // empty result for --get / --get-regexp / --list.
+        if output.status.code() == Some(1) && stderr.is_empty() {
+            Ok(String::new())
+        } else {
+            Err(LeviathanError::OperationFailed(if stderr.is_empty() {
+                "Failed to read git configuration".to_string()
+            } else {
+                stderr
+            }))
+        }
+    }
+}
+
+/// Run `git config ... --unset ...`, refusing when git reports a real failure.
+///
+/// A missing key (git exits 5 with no stderr) is treated as a benign no-op —
+/// clearing an already-empty field should succeed. Every other failure
+/// (multi-valued key, locked config, read-only file) is surfaced so the UI can
+/// show it, exactly as the git CLI refuses these operations instead of silently
+/// doing nothing.
+fn run_git_config_unset(repo_path: Option<&Path>, args: &[&str]) -> Result<()> {
+    let mut cmd = create_command("git");
+
+    if let Some(path) = repo_path {
+        cmd.current_dir(path);
+    }
+
+    cmd.arg("config");
+    cmd.args(args);
+
+    let output = cmd
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git config: {}", e)))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    // Exit code 5 with empty stderr => the key does not exist; unsetting it is a
+    // no-op. A multi-valued key also exits 5, but with a warning on stderr.
+    if output.status.code() == Some(5) && stderr.is_empty() {
+        return Ok(());
+    }
+
+    Err(LeviathanError::OperationFailed(if stderr.is_empty() {
+        "Failed to unset git configuration value".to_string()
+    } else {
+        stderr
+    }))
+}
+
 /// Get a single config value
 #[command]
 pub async fn get_config_value(
@@ -137,9 +214,9 @@ pub async fn unset_config_value(
         "--local"
     };
 
-    // --unset might fail if the key doesn't exist, which is fine
-    let _ = run_git_config(repo_path, &[scope, "--unset", &key]);
-    Ok(())
+    // A missing key is a benign no-op; any other failure (e.g. a multi-valued
+    // key) is surfaced to the user instead of being silently swallowed.
+    run_git_config_unset(repo_path, &[scope, "--unset", &key])
 }
 
 /// Get all config entries from a specific scope
@@ -162,20 +239,22 @@ pub async fn get_config_list(
         "local"
     };
 
-    let result = run_git_config(repo_path, &[scope_arg, "--list"])?;
+    // Use NUL-terminated output so multi-line values (e.g. shell aliases) are
+    // preserved intact. Each record is `key\nvalue`, records separated by NUL.
+    let result = run_git_config_raw(repo_path, &[scope_arg, "--null", "--list"])?;
 
     let entries: Vec<ConfigEntry> = result
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(2, '=').collect();
-            if parts.len() == 2 {
-                Some(ConfigEntry {
-                    key: parts[0].to_string(),
-                    value: parts[1].to_string(),
-                    scope: scope_name.to_string(),
-                })
-            } else {
-                None
+        .split('\0')
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let (key, value) = match record.split_once('\n') {
+                Some((k, v)) => (k.to_string(), v.to_string()),
+                None => (record.to_string(), String::new()),
+            };
+            ConfigEntry {
+                key,
+                value,
+                scope: scope_name.to_string(),
             }
         })
         .collect();
@@ -183,41 +262,43 @@ pub async fn get_config_list(
     Ok(entries)
 }
 
+/// Resolve the *effective* value of a config key with repository context,
+/// returning the value and whether it resolves from the global scope.
+///
+/// Runs `git config --show-scope --null --get <key>` with the repo as the
+/// working directory, so the result matches what commits actually use:
+/// libgit2's `repo.signature()` honours the file precedence
+/// (system → global → local → worktree) and conditional includes
+/// (`includeIf gitdir:`) that a bare `--global --get` (run without a working
+/// directory) silently ignores.
+fn read_effective_config(repo_path: &Path, key: &str) -> (Option<String>, String) {
+    let raw = run_git_config_raw(Some(repo_path), &["--show-scope", "--null", "--get", key])
+        .unwrap_or_default();
+    // Output format: `scope\0value` (with a trailing NUL).
+    let trimmed = raw.strip_suffix('\0').unwrap_or(raw.as_str());
+    match trimmed.split_once('\0') {
+        Some((scope, value)) if !value.is_empty() => (Some(value.to_string()), scope.to_string()),
+        _ => (None, String::new()),
+    }
+}
+
 /// Get user identity (name and email)
 #[command]
 pub async fn get_user_identity(path: String) -> Result<UserIdentity> {
     let repo_path = Path::new(&path);
 
-    // Get local values first
-    let local_name = run_git_config(Some(repo_path), &["--local", "--get", "user.name"]).ok();
-    let local_email = run_git_config(Some(repo_path), &["--local", "--get", "user.email"]).ok();
-
-    // Get global values
-    let global_name = run_git_config(None, &["--global", "--get", "user.name"]).ok();
-    let global_email = run_git_config(None, &["--global", "--get", "user.email"]).ok();
-
-    // Determine effective values and where they come from
-    let (name, name_is_global) = if let Some(n) = local_name.filter(|s| !s.is_empty()) {
-        (Some(n), false)
-    } else if let Some(n) = global_name.filter(|s| !s.is_empty()) {
-        (Some(n), true)
-    } else {
-        (None, false)
-    };
-
-    let (email, email_is_global) = if let Some(e) = local_email.filter(|s| !s.is_empty()) {
-        (Some(e), false)
-    } else if let Some(e) = global_email.filter(|s| !s.is_empty()) {
-        (Some(e), true)
-    } else {
-        (None, false)
-    };
+    // Resolve the effective identity the way libgit2 does when it signs a
+    // commit: with repository context, honouring system scope and conditional
+    // includes. This keeps the displayed identity in sync with the recorded
+    // commit author.
+    let (name, name_scope) = read_effective_config(repo_path, "user.name");
+    let (email, email_scope) = read_effective_config(repo_path, "user.email");
 
     Ok(UserIdentity {
         name,
         email,
-        name_is_global,
-        email_is_global,
+        name_is_global: name_scope == "global",
+        email_is_global: email_scope == "global",
     })
 }
 
@@ -239,7 +320,7 @@ pub async fn set_user_identity(
 
     if let Some(n) = name {
         if n.is_empty() {
-            let _ = run_git_config(repo_path, &[scope, "--unset", "user.name"]);
+            run_git_config_unset(repo_path, &[scope, "--unset", "user.name"])?;
         } else {
             run_git_config(repo_path, &[scope, "user.name", &n])?;
         }
@@ -247,7 +328,7 @@ pub async fn set_user_identity(
 
     if let Some(e) = email {
         if e.is_empty() {
-            let _ = run_git_config(repo_path, &[scope, "--unset", "user.email"]);
+            run_git_config_unset(repo_path, &[scope, "--unset", "user.email"])?;
         } else {
             run_git_config(repo_path, &[scope, "user.email", &e])?;
         }
@@ -261,58 +342,44 @@ pub async fn set_user_identity(
 pub async fn get_aliases(path: Option<String>) -> Result<Vec<GitAlias>> {
     let repo_path = path.as_ref().map(|p| Path::new(p.as_str()));
 
-    // Get global aliases
-    let global_result = run_git_config(None, &["--global", "--get-regexp", "^alias\\."])?;
-    let global_aliases: Vec<GitAlias> = global_result
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(2, ' ').collect();
-            if parts.len() == 2 && parts[0].starts_with("alias.") {
-                Some(GitAlias {
-                    name: parts[0]
-                        .strip_prefix("alias.")
-                        .unwrap_or(parts[0])
-                        .to_string(),
-                    command: parts[1].to_string(),
-                    is_global: true,
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Resolve every alias across all scopes in one pass, with repository
+    // context so system-scope and conditional-include aliases are visible.
+    // `--show-scope --null` emits `scope\0key\nvalue` records in increasing
+    // precedence (system → global → local → worktree), so a later record for
+    // the same alias name overrides an earlier one — matching git's own
+    // effective resolution. NUL termination keeps multi-line alias bodies
+    // intact.
+    let raw = run_git_config_raw(
+        repo_path,
+        &["--show-scope", "--null", "--get-regexp", "^alias\\."],
+    )?;
 
-    // Get local aliases if repo path is provided
-    let mut all_aliases = global_aliases;
-
-    if repo_path.is_some() {
-        let local_result = run_git_config(repo_path, &["--local", "--get-regexp", "^alias\\."])
-            .unwrap_or_default();
-
-        for line in local_result.lines() {
-            let parts: Vec<&str> = line.splitn(2, ' ').collect();
-            if parts.len() == 2 && parts[0].starts_with("alias.") {
-                let name = parts[0]
-                    .strip_prefix("alias.")
-                    .unwrap_or(parts[0])
-                    .to_string();
-
-                // Check if we already have a global alias with this name
-                // If so, replace it with the local one
-                if let Some(idx) = all_aliases.iter().position(|a| a.name == name) {
-                    all_aliases[idx] = GitAlias {
-                        name,
-                        command: parts[1].to_string(),
-                        is_global: false,
-                    };
-                } else {
-                    all_aliases.push(GitAlias {
-                        name,
-                        command: parts[1].to_string(),
-                        is_global: false,
-                    });
-                }
-            }
+    let mut all_aliases: Vec<GitAlias> = Vec::new();
+    let mut fields = raw.split('\0');
+    while let Some(scope) = fields.next() {
+        if scope.is_empty() {
+            continue;
+        }
+        let Some(record) = fields.next() else {
+            break;
+        };
+        let (key, command) = match record.split_once('\n') {
+            Some((k, v)) => (k, v),
+            None => (record, ""),
+        };
+        let Some(name) = key.strip_prefix("alias.") else {
+            continue;
+        };
+        let alias = GitAlias {
+            name: name.to_string(),
+            command: command.to_string(),
+            is_global: scope == "global",
+        };
+        // Later (higher-precedence) scope wins for a duplicate alias name.
+        if let Some(idx) = all_aliases.iter().position(|a| a.name == alias.name) {
+            all_aliases[idx] = alias;
+        } else {
+            all_aliases.push(alias);
         }
     }
 
@@ -388,21 +455,15 @@ pub async fn get_common_settings(path: String) -> Result<Vec<ConfigEntry>> {
     let mut settings = Vec::new();
 
     for key in common_keys {
-        // Try local first, then global
-        let local_value = run_git_config(Some(repo_path), &["--local", "--get", key]).ok();
-        let global_value = run_git_config(None, &["--global", "--get", key]).ok();
-
-        if let Some(val) = local_value.filter(|s| !s.is_empty()) {
+        // Resolve the effective value with repository context so system-scope
+        // settings (e.g. core.autocrlf set by the Windows Git installer) and
+        // conditional includes are reflected, with their true scope.
+        let (value, scope) = read_effective_config(repo_path, key);
+        if let Some(val) = value {
             settings.push(ConfigEntry {
                 key: key.to_string(),
                 value: val,
-                scope: "local".to_string(),
-            });
-        } else if let Some(val) = global_value.filter(|s| !s.is_empty()) {
-            settings.push(ConfigEntry {
-                key: key.to_string(),
-                value: val,
-                scope: "global".to_string(),
+                scope,
             });
         }
     }
@@ -512,42 +573,29 @@ pub async fn set_git_config(
 #[command]
 pub async fn get_all_git_config(path: String) -> Result<Vec<GitConfig>> {
     let repo_path = Path::new(&path);
-    let result = run_git_config(Some(repo_path), &["--list", "--show-scope"])?;
+    // NUL-terminated output: `scope\0key\nvalue` records, so multi-line values
+    // (e.g. shell aliases) are preserved instead of spawning phantom entries.
+    let raw = run_git_config_raw(Some(repo_path), &["--show-scope", "--null", "--list"])?;
 
-    let entries: Vec<GitConfig> = result
-        .lines()
-        .filter_map(|line| {
-            // Format: "scope\tkey=value" or "scope key=value"
-            // git config --show-scope outputs: "local   key=value" (tab-separated)
-            let (scope, rest) = if let Some(idx) = line.find('\t') {
-                (&line[..idx], &line[idx + 1..])
-            } else {
-                // Fallback: try splitting on first space
-                let parts: Vec<&str> = line.splitn(2, ' ').collect();
-                if parts.len() == 2 {
-                    (parts[0], parts[1])
-                } else {
-                    return None;
-                }
-            };
-
-            let kv_parts: Vec<&str> = rest.splitn(2, '=').collect();
-            if kv_parts.len() == 2 {
-                Some(GitConfig {
-                    key: kv_parts[0].to_string(),
-                    value: kv_parts[1].to_string(),
-                    scope: scope.trim().to_string(),
-                })
-            } else {
-                // Key with no value
-                Some(GitConfig {
-                    key: rest.to_string(),
-                    value: String::new(),
-                    scope: scope.trim().to_string(),
-                })
-            }
-        })
-        .collect();
+    let mut entries: Vec<GitConfig> = Vec::new();
+    let mut fields = raw.split('\0');
+    while let Some(scope) = fields.next() {
+        if scope.is_empty() {
+            continue;
+        }
+        let Some(record) = fields.next() else {
+            break;
+        };
+        let (key, value) = match record.split_once('\n') {
+            Some((k, v)) => (k.to_string(), v.to_string()),
+            None => (record.to_string(), String::new()),
+        };
+        entries.push(GitConfig {
+            key,
+            value,
+            scope: scope.to_string(),
+        });
+    }
 
     Ok(entries)
 }
@@ -557,13 +605,13 @@ pub async fn get_all_git_config(path: String) -> Result<Vec<GitConfig>> {
 pub async fn unset_git_config(path: String, key: String, global: Option<bool>) -> Result<()> {
     let repo_path = Path::new(&path);
 
+    // A missing key is a benign no-op; any other failure (e.g. a multi-valued
+    // key) is surfaced to the user rather than silently swallowed.
     if global.unwrap_or(false) {
-        let _ = run_git_config(Some(repo_path), &["--global", "--unset", &key]);
+        run_git_config_unset(Some(repo_path), &["--global", "--unset", &key])
     } else {
-        let _ = run_git_config(Some(repo_path), &["--unset", &key]);
+        run_git_config_unset(Some(repo_path), &["--unset", &key])
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -698,5 +746,164 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(val2, None);
+    }
+
+    // --- Finding 3: multi-line config values must be preserved ---
+
+    const MULTILINE_ALIAS: &str = "!f() {\n  git push -u origin HEAD\n}\nf";
+
+    fn set_local_config(repo: &TestRepo, key: &str, value: &str) {
+        let r = repo.repo();
+        let mut cfg = r.config().expect("config");
+        cfg.set_str(key, value).expect("set config value");
+    }
+
+    #[tokio::test]
+    async fn test_get_aliases_preserves_multiline_value() {
+        let repo = TestRepo::with_initial_commit();
+        set_local_config(&repo, "alias.publish", MULTILINE_ALIAS);
+
+        let aliases = get_aliases(Some(repo.path_str())).await.unwrap();
+        let publish = aliases
+            .iter()
+            .find(|a| a.name == "publish")
+            .expect("publish alias present");
+        assert_eq!(publish.command, MULTILINE_ALIAS);
+        assert!(!publish.is_global);
+    }
+
+    #[tokio::test]
+    async fn test_get_all_git_config_preserves_multiline_value() {
+        let repo = TestRepo::with_initial_commit();
+        set_local_config(&repo, "alias.publish", MULTILINE_ALIAS);
+
+        let entries = get_all_git_config(repo.path_str()).await.unwrap();
+        let entry = entries
+            .iter()
+            .find(|e| e.key == "alias.publish")
+            .expect("alias.publish present");
+        assert_eq!(entry.value, MULTILINE_ALIAS);
+        assert_eq!(entry.scope, "local");
+        // No phantom entries: only the real alias carries the multi-line body.
+        assert!(entries
+            .iter()
+            .all(|e| e.key == "alias.publish" || !e.value.contains('\n')));
+    }
+
+    #[tokio::test]
+    async fn test_get_config_list_preserves_multiline_value() {
+        let repo = TestRepo::with_initial_commit();
+        set_local_config(&repo, "alias.publish", MULTILINE_ALIAS);
+
+        let entries = get_config_list(Some(repo.path_str()), Some(false))
+            .await
+            .unwrap();
+        let entry = entries
+            .iter()
+            .find(|e| e.key == "alias.publish")
+            .expect("alias.publish present");
+        assert_eq!(entry.value, MULTILINE_ALIAS);
+    }
+
+    // --- Finding 1: identity/settings must reflect the effective value ---
+
+    #[tokio::test]
+    async fn test_get_user_identity_follows_includes() {
+        // The effective identity libgit2 uses for commits honours included
+        // config files; a bare `--local --get` does not. get_user_identity must
+        // report the value commits are actually recorded with.
+        let repo = TestRepo::new();
+        let extra = repo.path.join("extra.cfg");
+        std::fs::write(&extra, "[user]\n\temail = included@example.com\n").unwrap();
+        {
+            let r = repo.repo();
+            let mut cfg = r.config().unwrap();
+            // Drop the direct email so the effective value comes from the include.
+            let _ = cfg.remove("user.email");
+            cfg.set_str("include.path", extra.to_str().unwrap())
+                .unwrap();
+        }
+
+        let identity = get_user_identity(repo.path_str()).await.unwrap();
+        assert_eq!(identity.email.as_deref(), Some("included@example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_get_common_settings_reads_included_value() {
+        let repo = TestRepo::new();
+        let extra = repo.path.join("extra.cfg");
+        std::fs::write(&extra, "[core]\n\tautocrlf = input\n").unwrap();
+        set_local_config(&repo, "include.path", extra.to_str().unwrap());
+
+        let settings = get_common_settings(repo.path_str()).await.unwrap();
+        let autocrlf = settings
+            .iter()
+            .find(|e| e.key == "core.autocrlf")
+            .expect("core.autocrlf present via include");
+        assert_eq!(autocrlf.value, "input");
+    }
+
+    // --- Finding 5: unset must refuse on real failures, not report success ---
+
+    #[tokio::test]
+    async fn test_unset_config_value_multivalue_errors() {
+        let repo = TestRepo::new();
+        {
+            let r = repo.repo();
+            let mut cfg = r.config().unwrap();
+            // Add two values for the same key.
+            cfg.set_multivar("test.multi", "^nomatch$", "one").unwrap();
+            cfg.set_multivar("test.multi", "^nomatch$", "two").unwrap();
+        }
+
+        let result =
+            unset_config_value(Some(repo.path_str()), "test.multi".to_string(), Some(false)).await;
+        assert!(
+            result.is_err(),
+            "unsetting a multi-valued key must fail like git, not silently succeed"
+        );
+
+        // Both values are still present — nothing was destroyed.
+        let raw = run_git_config_raw(Some(&repo.path), &["--get-all", "test.multi"]).unwrap();
+        assert!(raw.contains("one") && raw.contains("two"));
+    }
+
+    #[tokio::test]
+    async fn test_set_user_identity_clear_multivalue_email_errors() {
+        let repo = TestRepo::new();
+        {
+            let r = repo.repo();
+            let mut cfg = r.config().unwrap();
+            cfg.set_multivar("user.email", "^nomatch$", "second@example.com")
+                .unwrap();
+        }
+
+        // Clearing the email field must refuse when the key is multi-valued.
+        let result = set_user_identity(
+            Some(repo.path_str()),
+            None,
+            Some(String::new()),
+            Some(false),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "clearing a multi-valued user.email must fail, matching git"
+        );
+
+        let raw = run_git_config_raw(Some(&repo.path), &["--get-all", "user.email"]).unwrap();
+        assert!(raw.contains("second@example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_unset_config_value_missing_key_is_noop() {
+        let repo = TestRepo::with_initial_commit();
+        let result = unset_config_value(
+            Some(repo.path_str()),
+            "nonexistent.key".to_string(),
+            Some(false),
+        )
+        .await;
+        assert!(result.is_ok(), "clearing an absent key is a benign no-op");
     }
 }

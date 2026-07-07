@@ -1589,9 +1589,16 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // A merge commit has no single "the change" to undo; git requires an
+    // explicit mainline parent (`git revert -m`). Default to the first parent
+    // (the branch the merge landed on), which is what reverting a merge almost
+    // always means, and tell the user so.
+    const isMergeCommit = commit.parentIds.length > 1;
     const confirmed = await showConfirm(
       'Revert Commit',
-      `Are you sure you want to revert commit ${commit.oid.substring(0, 7)}? This will create a new commit that undoes the changes.`,
+      isMergeCommit
+        ? `Commit ${commit.oid.substring(0, 7)} is a merge commit. Reverting it will create a new commit that undoes the merge relative to its first parent (mainline). Continue?`
+        : `Are you sure you want to revert commit ${commit.oid.substring(0, 7)}? This will create a new commit that undoes the changes.`,
       'warning'
     );
     if (!confirmed) return;
@@ -1600,6 +1607,7 @@ export class AppShell extends LitElement {
       m.revert({
         path: this.activeRepository!.repository.path,
         commitOid: commit.oid,
+        mainline: isMergeCommit ? 1 : undefined,
       })
     );
 
@@ -2920,6 +2928,11 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
     const result = await gitService.createStash({ path: this.activeRepository.repository.path });
     if (result.success) {
+      if (result.data === null) {
+        // Clean working tree: nothing to stash — informational, not an error.
+        showToast('No local changes to save', 'info');
+        return;
+      }
       showToast('Stash created', 'success');
       this.handleRefresh();
     } else {

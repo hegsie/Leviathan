@@ -5,6 +5,35 @@ use tauri::command;
 
 use crate::error::Result;
 
+/// Refuse to reset while a multi-step operation (rebase, bisect, or a
+/// cherry-pick/revert *sequence*) is in progress. Canonical `git reset` leaves
+/// `.git/rebase-merge`, `.git/rebase-apply`, `.git/BISECT_LOG` and the sequencer
+/// directory in place, but libgit2's reset unconditionally runs
+/// `git_repository_state_cleanup` for MIXED/HARD resets and deletes them,
+/// silently destroying the in-progress operation. Mirror git by refusing.
+/// (A plain single-op Merge / CherryPick / Revert is intentionally allowed:
+/// `git reset` is the documented way to abort those.)
+fn ensure_resettable(repo: &git2::Repository) -> Result<()> {
+    use git2::RepositoryState::*;
+    match repo.state() {
+        Rebase | RebaseInteractive | RebaseMerge | ApplyMailbox | ApplyMailboxOrRebase => {
+            Err(crate::error::LeviathanError::OperationFailed(
+                "Cannot reset while a rebase is in progress. Finish or abort the rebase (git rebase --continue or --abort) first.".to_string(),
+            ))
+        }
+        Bisect => Err(crate::error::LeviathanError::OperationFailed(
+            "Cannot reset while a bisect is in progress. Run 'git bisect reset' first.".to_string(),
+        )),
+        CherryPickSequence => Err(crate::error::LeviathanError::OperationFailed(
+            "Cannot reset while a cherry-pick sequence is in progress. Finish or abort it (git cherry-pick --continue or --abort) first.".to_string(),
+        )),
+        RevertSequence => Err(crate::error::LeviathanError::OperationFailed(
+            "Cannot reset while a revert sequence is in progress. Finish or abort it (git revert --continue or --abort) first.".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// A reflog entry representing a recorded state change
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +136,14 @@ pub async fn reset_to_reflog(
         "hard" => git2::ResetType::Hard,
         _ => git2::ResetType::Mixed,
     };
+
+    // A MIXED or HARD reset triggers libgit2's repository state cleanup, which
+    // would delete any in-progress rebase/bisect/sequencer state. Refuse in
+    // that case, mirroring what canonical git preserves. (SOFT resets do not
+    // trigger the cleanup, so they are left alone.)
+    if matches!(reset_type, git2::ResetType::Mixed | git2::ResetType::Hard) {
+        ensure_resettable(&repo)?;
+    }
 
     // Perform the reset
     repo.reset(target_commit.as_object(), reset_type, None)?;
@@ -395,6 +432,30 @@ mod tests {
         let result = get_reflog(repo.path_str(), Some(0)).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_reset_to_reflog_refused_during_bisect() {
+        // A mixed/hard reset would erase .git/BISECT_LOG (libgit2 state cleanup);
+        // canonical git preserves it. The reset must be refused.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Second", &[("f2.txt", "2")]);
+        let second_oid = repo.head_oid();
+
+        std::fs::write(repo.path.join(".git").join("BISECT_LOG"), b"").unwrap();
+        assert_eq!(repo.repo().state(), git2::RepositoryState::Bisect);
+
+        // Hard reset must be refused.
+        let hard = reset_to_reflog(repo.path_str(), 1, "hard".to_string()).await;
+        assert!(hard.is_err(), "hard reset must refuse during a bisect");
+
+        // Mixed reset must be refused.
+        let mixed = reset_to_reflog(repo.path_str(), 1, "mixed".to_string()).await;
+        assert!(mixed.is_err(), "mixed reset must refuse during a bisect");
+
+        // HEAD and the bisect state are both preserved.
+        assert_eq!(repo.head_oid(), second_oid);
+        assert!(repo.path.join(".git").join("BISECT_LOG").exists());
     }
 
     #[tokio::test]

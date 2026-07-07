@@ -1501,7 +1501,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       }
 
       // Handle "no newline at end of file" markers
-      if (line.origin === 'del-eofnl' || line.origin === 'add-eofnl') {
+      if (
+        line.origin === 'del-eofnl' ||
+        line.origin === 'add-eofnl' ||
+        line.origin === 'context-eofnl'
+      ) {
         lines.push('\\ No newline at end of file');
         continue;
       }
@@ -1511,8 +1515,10 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       if (line.origin === 'addition') prefix = '+';
       else if (line.origin === 'deletion') prefix = '-';
 
-      // Get content and strip only trailing newline
-      const content = line.content.replace(/\n$/, '').replace(/\r$/, '');
+      // Strip only the trailing newline. A \r must be kept: in a CRLF file it
+      // is part of the file's bytes, and the patch context has to byte-match
+      // the index blob or `git apply --cached` rejects it.
+      const content = line.content.replace(/\n$/, '');
 
       lines.push(prefix + content);
     }
@@ -1640,6 +1646,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       const firstOldLine = hunk.oldStart;
       const firstNewLine = hunk.newStart;
 
+      // Tracks whether the content line most recently written into this patch
+      // was actually emitted. A "\ No newline at end of file" marker annotates
+      // the line immediately before it, so it must only be emitted when that
+      // line made it into the patch (an unselected addition is skipped, so its
+      // marker must be skipped too) — otherwise `git apply` rejects the patch.
+      let lastContentEmitted = false;
+
       for (let i = 0; i < hunk.lines.length; i++) {
         const line = hunk.lines[i];
         const isSelected = selectedLineIndices.has(i);
@@ -1650,18 +1663,27 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         }
 
         // Handle "no newline at end of file" markers
-        if (line.origin === 'del-eofnl' || line.origin === 'add-eofnl') {
-          // Only include if the corresponding line is selected
+        if (
+          line.origin === 'del-eofnl' ||
+          line.origin === 'add-eofnl' ||
+          line.origin === 'context-eofnl'
+        ) {
+          if (lastContentEmitted) {
+            hunkPatchLines.push('\\ No newline at end of file');
+          }
           continue;
         }
 
-        const content = line.content.replace(/\n$/, '').replace(/\r$/, '');
+        // Strip only the trailing newline; keep \r so CRLF content byte-matches
+        // the index blob.
+        const content = line.content.replace(/\n$/, '');
 
         if (line.origin === 'context') {
           // Always include context lines
           hunkPatchLines.push(' ' + content);
           oldLineCount++;
           newLineCount++;
+          lastContentEmitted = true;
         } else if (line.origin === 'deletion') {
           if (isSelected) {
             // Include this deletion in the patch
@@ -1676,13 +1698,17 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
             oldLineCount++;
             newLineCount++;
           }
+          lastContentEmitted = true;
         } else if (line.origin === 'addition') {
           if (isSelected) {
             // Include this addition
             hunkPatchLines.push('+' + content);
             newLineCount++;
+            lastContentEmitted = true;
+          } else {
+            // Unselected additions are simply not included
+            lastContentEmitted = false;
           }
-          // Unselected additions are simply not included
         }
       }
 

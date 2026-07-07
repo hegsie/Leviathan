@@ -89,6 +89,16 @@ pub async fn squash_commits(
 
     let squashed_count = commits_to_squash.len() as u32;
 
+    // The squashed range must be part of the current branch history: the
+    // branch ref is force-moved below, so an unrelated `to` would rewrite
+    // the branch to foreign history.
+    let head_commit = repo.head()?.peel_to_commit()?;
+    if head_commit.id() != to && !repo.graph_descendant_of(head_commit.id(), to)? {
+        return Err(LeviathanError::OperationFailed(
+            "The commits to squash must be part of the current branch history.".to_string(),
+        ));
+    }
+
     // Get the tree from the newest commit (to_commit) - this contains the final state
     let tree = to_commit.tree()?;
 
@@ -110,6 +120,46 @@ pub async fn squash_commits(
         &[&from_commit],
     )?;
 
+    // Replay every commit after to_commit (to..HEAD) onto the squashed
+    // commit, like `git rebase -i` does when a mid-history range is
+    // squashed. Without this, moving the branch ref to the squashed commit
+    // would silently discard all descendants of to_commit.
+    let mut commits_after = Vec::new();
+    let mut revwalk = repo.revwalk()?;
+    revwalk.push(head_commit.id())?;
+    revwalk.hide(to)?;
+    revwalk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
+    for oid in revwalk {
+        commits_after.push(repo.find_commit(oid?)?);
+    }
+
+    let mut new_head_oid = new_oid;
+    for commit in &commits_after {
+        let current_base = repo.find_commit(new_head_oid)?;
+        let parent_tree = commit.parent(0)?.tree()?;
+        let commit_tree = commit.tree()?;
+        let base_tree = current_base.tree()?;
+
+        let mut merge_result = repo.merge_trees(&parent_tree, &base_tree, &commit_tree, None)?;
+        if merge_result.has_conflicts() {
+            // Nothing has been moved yet — the repository is untouched.
+            return Err(LeviathanError::OperationFailed(format!(
+                "Cannot squash: replaying the later commit {} onto the squashed \
+                 commit produced a conflict. Use an interactive rebase instead.",
+                commit.id()
+            )));
+        }
+        let new_tree = repo.find_tree(merge_result.write_tree_to(&repo)?)?;
+        new_head_oid = repo.commit(
+            None,
+            &commit.author(),
+            &signature,
+            commit.message().unwrap_or(""),
+            &new_tree,
+            &[&current_base],
+        )?;
+    }
+
     // Now we need to update HEAD to point to the new commit
     // First check if we're on a branch or in detached HEAD state
     let head = repo.head()?;
@@ -119,20 +169,29 @@ pub async fn squash_commits(
         let refname = format!("refs/heads/{}", branch_name);
         repo.reference(
             &refname,
-            new_oid,
+            new_head_oid,
             true,
             &format!("squash: {} commits into one", squashed_count),
         )?;
     } else {
         // Detached HEAD - just update HEAD
-        repo.set_head_detached(new_oid)?;
+        repo.set_head_detached(new_head_oid)?;
     }
 
     // Checkout the new commit to update working directory
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
 
+    // git's rebase sequencer fires post-commit per replayed commit as HEAD
+    // advances. This app replays as an ATOMIC batch — nothing is moved until
+    // the whole sequence succeeds, so a mid-replay conflict leaves the repo
+    // untouched. Advancing HEAD per commit to fire the hook accurately would
+    // break that atomicity, and firing N times with HEAD already at the final
+    // commit would feed every invocation the same (wrong) SHA. So fire
+    // post-commit once, for the final rewritten HEAD.
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
+
     Ok(SquashResult {
-        new_oid: new_oid.to_string(),
+        new_oid: new_head_oid.to_string(),
         squashed_count,
         success: true,
     })
@@ -159,6 +218,25 @@ pub async fn fixup_commit(
     if repo.state() != git2::RepositoryState::Clean {
         return Err(LeviathanError::OperationFailed(
             "Another operation is in progress".to_string(),
+        ));
+    }
+
+    // Refuse on unstaged working-tree changes, like the canonical flow
+    // (`git commit --fixup` + `git rebase --autosquash`), which errors with
+    // "cannot rebase: You have unstaged changes." The final checkout below
+    // would otherwise silently overwrite them. Untracked files are fine.
+    let statuses = repo.statuses(None)?;
+    let has_unstaged = statuses.iter().any(|s| {
+        s.status().intersects(
+            git2::Status::WT_MODIFIED
+                | git2::Status::WT_DELETED
+                | git2::Status::WT_TYPECHANGE
+                | git2::Status::WT_RENAMED,
+        )
+    });
+    if has_unstaged {
+        return Err(LeviathanError::OperationFailed(
+            "Cannot fixup: you have unstaged changes. Commit or stash them first.".to_string(),
         ));
     }
 
@@ -495,6 +573,113 @@ mod tests {
         // Verify final content is preserved
         let content = std::fs::read_to_string(repo.path.join("test.txt")).unwrap();
         assert_eq!(content, "line1\nline2\nline3\n");
+    }
+
+    #[tokio::test]
+    async fn test_squash_commits_mid_history_preserves_descendants() {
+        // `git rebase -i` squashing C1+C2 in C0-C1-C2-C3 yields
+        // C0-(C1+C2)-C3': the later commit C3 and its file are preserved,
+        // not silently discarded.
+        let repo = TestRepo::with_initial_commit();
+        let c0 = repo.head_oid();
+        let _c1 = repo.create_commit("Commit 1", &[("f1.txt", "1")]);
+        let c2 = repo.create_commit("Commit 2", &[("f2.txt", "2")]);
+        let _c3 = repo.create_commit("Commit 3", &[("f3.txt", "3")]);
+
+        let result = squash_commits(
+            repo.path_str(),
+            c0.to_string(),
+            c2.to_string(),
+            "Squashed".to_string(),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "mid-history squash failed: {:?}",
+            result.err()
+        );
+        let squash_result = result.unwrap();
+        assert_eq!(squash_result.squashed_count, 2);
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        // HEAD is the replayed C3, on top of the squashed commit, on top of C0.
+        assert_eq!(head.summary().unwrap(), Some("Commit 3"));
+        assert_eq!(head.id().to_string(), squash_result.new_oid);
+        let squashed = head.parent(0).unwrap();
+        assert_eq!(squashed.summary().unwrap(), Some("Squashed"));
+        assert_eq!(squashed.parent(0).unwrap().id(), c0);
+
+        // All files, including C3's, survive in the working tree.
+        assert!(repo.path.join("f1.txt").exists());
+        assert!(repo.path.join("f2.txt").exists());
+        assert!(repo.path.join("f3.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_squash_runs_post_commit_hook() {
+        // The squash replays history as an atomic batch (nothing is moved until
+        // the whole sequence succeeds), so post-commit fires once for the final
+        // rewritten HEAD — firing per replayed commit would either break that
+        // atomicity or feed every invocation the same, already-final SHA.
+        let repo = TestRepo::with_initial_commit();
+        let counter = repo.path.join("pc-count");
+        repo.install_hook(
+            "post-commit",
+            &format!("#!/bin/sh\necho x >> \"{}\"\n", counter.display()),
+        );
+
+        let c0 = repo.head_oid();
+        let _c1 = repo.create_commit("Commit 1", &[("f1.txt", "1")]);
+        let c2 = repo.create_commit("Commit 2", &[("f2.txt", "2")]);
+        let _c3 = repo.create_commit("Commit 3", &[("f3.txt", "3")]);
+
+        squash_commits(
+            repo.path_str(),
+            c0.to_string(),
+            c2.to_string(),
+            "Squashed".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let count = std::fs::read_to_string(&counter)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(count, 1, "post-commit fires once for the rewritten HEAD");
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_refuses_unstaged_changes() {
+        // The canonical flow (`git commit --fixup` + `git rebase -i
+        // --autosquash`) refuses with "cannot rebase: You have unstaged
+        // changes." — the unstaged edit must survive untouched.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add b", &[("b.txt", "base\n")]);
+        let target_oid = repo.create_commit("Target commit", &[("target.txt", "original")]);
+        repo.create_commit("After commit", &[("after.txt", "after content")]);
+
+        // Staged fix for the target commit.
+        repo.create_file("target.txt", "modified");
+        repo.stage_file("target.txt");
+        // Unstaged precious edit to an unrelated file.
+        repo.create_file("b.txt", "base\nprecious unstaged\n");
+
+        let head_before = repo.head_oid();
+        let result = fixup_commit(repo.path_str(), target_oid.to_string(), None).await;
+        assert!(
+            result.is_err(),
+            "fixup with unstaged changes must refuse like git rebase"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unstaged"), "unexpected message: {msg}");
+
+        // Nothing was rewritten and the unstaged edit is preserved.
+        assert_eq!(repo.head_oid(), head_before);
+        let content = std::fs::read_to_string(repo.path.join("b.txt")).unwrap();
+        assert_eq!(content, "base\nprecious unstaged\n");
     }
 
     #[tokio::test]

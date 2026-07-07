@@ -28,7 +28,21 @@ pub async fn create_patch(
             None
         };
 
-        let diff = repo.diff_tree_to_tree(parent.as_ref(), Some(&commit.tree()?), None)?;
+        // Enable binary patch output and full (40-char) blob ids so that
+        // patches touching binary files contain a real "GIT binary patch"
+        // section that `git am`/`git apply` can apply, rather than an
+        // unapplyable "Binary files ... differ" placeholder.
+        let mut diff_opts = git2::DiffOptions::new();
+        diff_opts.show_binary(true);
+        diff_opts.id_abbrev(40);
+        let mut diff =
+            repo.diff_tree_to_tree(parent.as_ref(), Some(&commit.tree()?), Some(&mut diff_opts))?;
+
+        // Detect renames/copies so a moved file is emitted as a compact
+        // "rename from/to" instead of a full delete + add (git's default).
+        let mut find_opts = git2::DiffFindOptions::new();
+        find_opts.renames(true);
+        diff.find_similar(Some(&mut find_opts))?;
 
         // Format patch
         let mut patch_content = String::new();
@@ -86,19 +100,20 @@ pub async fn create_patch(
         patch_content.push_str(stats_buf.as_str().unwrap_or(""));
         patch_content.push('\n');
 
-        // Actual diff
+        // Actual diff. Accumulate as raw bytes so that non-UTF8 content
+        // (Latin-1, Shift-JIS, binary literal data, ...) is written verbatim
+        // instead of being silently dropped, which would corrupt the patch.
+        let mut patch_bytes = patch_content.into_bytes();
         diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
             let origin = line.origin();
             if origin == '+' || origin == '-' || origin == ' ' {
-                patch_content.push(origin);
+                patch_bytes.push(origin as u8);
             }
-            if let Ok(content) = std::str::from_utf8(line.content()) {
-                patch_content.push_str(content);
-            }
+            patch_bytes.extend_from_slice(line.content());
             true
         })?;
 
-        patch_content.push_str("\n-- \n");
+        patch_bytes.extend_from_slice(b"\n-- \n");
 
         // Write patch file
         let short_id = &oid_str[..8.min(oid_str.len())];
@@ -118,7 +133,7 @@ pub async fn create_patch(
         if let Some(parent_dir) = patch_path.parent() {
             std::fs::create_dir_all(parent_dir)?;
         }
-        std::fs::write(&patch_path, &patch_content)?;
+        std::fs::write(&patch_path, &patch_bytes)?;
         patch_files.push(patch_path.to_string_lossy().to_string());
     }
 
@@ -134,8 +149,13 @@ pub async fn apply_patch(path: String, patch_path: String, check_only: Option<bo
     let diff = git2::Diff::from_buffer(&patch_content)?;
 
     if check_only.unwrap_or(false) {
-        // Dry run - just check if patch applies cleanly
-        repo.apply(&diff, git2::ApplyLocation::WorkDir, None)
+        // Dry run - just check if patch applies cleanly. Without
+        // ApplyOptions::check(true) libgit2 performs a REAL apply and writes
+        // the changes to the working tree (git apply --check must not modify
+        // anything).
+        let mut apply_opts = git2::ApplyOptions::new();
+        apply_opts.check(true);
+        repo.apply(&diff, git2::ApplyLocation::WorkDir, Some(&mut apply_opts))
             .map_err(|e| {
                 LeviathanError::OperationFailed(format!("Patch would not apply cleanly: {}", e))
             })?;
@@ -274,6 +294,141 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    /// Finding 58: `check_only` must NOT modify the working tree (git apply --check).
+    #[tokio::test]
+    async fn test_apply_patch_check_only_does_not_modify_worktree() {
+        let source = TestRepo::with_initial_commit();
+        source.create_commit("base", &[("f.txt", "base\n")]);
+        let oid = source.create_commit("change", &[("f.txt", "base\nadded line\n")]);
+
+        let output_dir = source.path.join("patches");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let files = create_patch(
+            source.path_str(),
+            vec![oid.to_string()],
+            output_dir.to_string_lossy().to_string(),
+        )
+        .await
+        .unwrap();
+
+        // Target repo whose working tree matches the patch's base ("base\n").
+        let target = TestRepo::with_initial_commit();
+        target.create_commit("base", &[("f.txt", "base\n")]);
+        let target_file = target.path.join("f.txt");
+        let before = std::fs::read_to_string(&target_file).unwrap();
+
+        let result = apply_patch(target.path_str(), files[0].clone(), Some(true)).await;
+        assert!(result.is_ok(), "check-only should report the patch applies");
+
+        let after = std::fs::read_to_string(&target_file).unwrap();
+        assert_eq!(
+            before, after,
+            "check_only=true must leave the working tree byte-identical"
+        );
+        assert_eq!(after, "base\n");
+    }
+
+    /// Finding 64: a patch touching a binary file must contain a real
+    /// "GIT binary patch" section, not an unapplyable placeholder.
+    #[tokio::test]
+    async fn test_create_patch_binary_file_produces_git_binary_patch() {
+        let source = TestRepo::with_initial_commit();
+
+        // Commit a binary blob (contains NUL / high bytes -> git treats as binary).
+        let binary: Vec<u8> = (0u16..256).map(|b| (b % 256) as u8).collect();
+        let bin_path = source.path.join("blob.bin");
+        std::fs::write(&bin_path, &binary).unwrap();
+        let repo = source.repo();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("blob.bin")).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = repo.signature().unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "add binary", &tree, &[&parent])
+            .unwrap();
+
+        let output_dir = source.path.join("patches");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let files = create_patch(
+            source.path_str(),
+            vec![oid.to_string()],
+            output_dir.to_string_lossy().to_string(),
+        )
+        .await
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(
+            contents.contains("GIT binary patch"),
+            "binary patch section missing; got:\n{}",
+            contents
+        );
+        assert!(
+            !contents.contains("Binary files"),
+            "should not emit the unapplyable 'Binary files differ' placeholder"
+        );
+
+        // The exported patch must be applyable to a fresh repo.
+        let target = TestRepo::with_initial_commit();
+        let apply_result = apply_patch(target.path_str(), files[0].clone(), None).await;
+        assert!(
+            apply_result.is_ok(),
+            "binary patch should apply cleanly: {:?}",
+            apply_result.err()
+        );
+        let applied = std::fs::read(target.path.join("blob.bin")).unwrap();
+        assert_eq!(applied, binary, "applied binary content must round-trip");
+    }
+
+    /// Finding 65: non-UTF8 diff content must be written verbatim, not dropped.
+    #[tokio::test]
+    async fn test_create_patch_preserves_non_utf8_bytes() {
+        let source = TestRepo::with_initial_commit();
+
+        // A file containing a Latin-1 0xE9 byte ("café" in ISO-8859-1).
+        let latin1: Vec<u8> = vec![b'c', b'a', b'f', 0xE9, b'\n'];
+        let file_path = source.path.join("latin1.txt");
+        std::fs::write(&file_path, &latin1).unwrap();
+        let repo = source.repo();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("latin1.txt")).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = repo.signature().unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "add latin1", &tree, &[&parent])
+            .unwrap();
+
+        let output_dir = source.path.join("patches");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let files = create_patch(
+            source.path_str(),
+            vec![oid.to_string()],
+            output_dir.to_string_lossy().to_string(),
+        )
+        .await
+        .unwrap();
+
+        let bytes = std::fs::read(&files[0]).unwrap();
+        // The raw 0xE9 byte must survive into the patch body.
+        assert!(
+            bytes.windows(1).any(|w| w == [0xE9]),
+            "non-UTF8 byte 0xE9 was dropped from the patch"
+        );
+        // And it must be preceded by the '+' add marker + "caf".
+        assert!(
+            bytes
+                .windows(5)
+                .any(|w| w == [b'+', b'c', b'a', b'f', 0xE9]),
+            "the '+' marker and content must stay glued to the byte"
+        );
     }
 
     #[tokio::test]

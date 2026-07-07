@@ -1302,8 +1302,10 @@ export async function getStashes(
 
 export async function createStash(
   args: CreateStashCommand,
-): Promise<CommandResult<Stash>> {
-  return invokeCommand<Stash>("create_stash", args);
+): Promise<CommandResult<Stash | null>> {
+  // Returns null when the working tree is clean (nothing to stash) — a benign
+  // no-op mirroring `git stash push` ("No local changes to save"), not an error.
+  return invokeCommand<Stash | null>("create_stash", args);
 }
 
 export async function applyStash(
@@ -1696,6 +1698,12 @@ export interface CleanEntry {
   path: string;
   isDirectory: boolean;
   isIgnored: boolean;
+  /**
+   * True when this entry is an untracked nested git repository. Deleting it
+   * destroys the embedded repo's history, so `git clean` only removes it with a
+   * second `-f`; the UI must confirm and pass `forceNested` to clean it.
+   */
+  isNestedRepo: boolean;
   size: number | null;
 }
 
@@ -1714,10 +1722,14 @@ export async function getCleanableFiles(
 export async function cleanFiles(
   repoPath: string,
   paths: string[],
+  forceNested = false,
 ): Promise<CommandResult<number>> {
+  // forceNested is required to remove untracked nested git repositories,
+  // mirroring `git clean -ff`. Without it the backend refuses to delete them.
   return invokeCommand<number>("clean_files", {
     path: repoPath,
     paths,
+    forceNested,
   });
 }
 
@@ -2112,6 +2124,8 @@ export interface GpgConfig {
   signCommits: boolean;
   signTags: boolean;
   gpgProgram: string | null;
+  /** Signature format (gpg.format): "openpgp" (default), "ssh", or "x509". */
+  gpgFormat: string | null;
 }
 
 export interface CommitSignature {
@@ -5891,7 +5905,8 @@ export async function filterCommits(
   return invokeCommand<FilteredCommit[]>("filter_commits", {
     path,
     filter,
-    maxCount: maxCount ?? 500,
+    // Rust parameter is `max_results`; Tauri maps it to the `maxResults` key.
+    maxResults: maxCount ?? 500,
   });
 }
 
@@ -5908,7 +5923,8 @@ export async function getBranchDiffCommits(
     path,
     baseBranch,
     compareBranch,
-    maxCount: maxCount ?? 500,
+    // Rust parameter is `max_results`; Tauri maps it to the `maxResults` key.
+    maxResults: maxCount ?? 500,
   });
 }
 

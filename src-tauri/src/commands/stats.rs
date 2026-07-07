@@ -151,6 +151,7 @@ pub struct HourActivity {
 pub async fn get_repo_stats(path: String, max_commits: Option<usize>) -> Result<RepoStats> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let max = max_commits.unwrap_or(10000);
+    let mailmap = repo.mailmap().ok();
 
     let mut revwalk = repo.revwalk()?;
     // push_head may fail for empty repos - that's OK
@@ -182,9 +183,7 @@ pub async fn get_repo_stats(path: String, max_commits: Option<usize>) -> Result<
         total_commits += 1;
 
         let time_secs = commit.time().seconds();
-        let author = commit.author();
-        let author_name = author.name().ok().unwrap_or("Unknown").to_string();
-        let author_email = author.email().ok().unwrap_or("unknown").to_string();
+        let (author_name, author_email) = resolve_author(&commit, mailmap.as_ref());
 
         // Track first and latest commit
         match first_commit_date {
@@ -217,22 +216,22 @@ pub async fn get_repo_stats(path: String, max_commits: Option<usize>) -> Result<
             entry.latest_commit = time_secs;
         }
 
-        // Time-based activity (approximate from epoch seconds)
-        // Simple date calculation from unix timestamp
-        let days_since_epoch = time_secs / 86400;
+        // Time-based activity in the author's recorded local timezone, matching
+        // what `git log` displays (author-local time, not UTC).
+        let local_secs = author_local_secs(&commit);
+        let days_since_epoch = local_secs.div_euclid(86400);
         // Day of week: Jan 1 1970 was Thursday (4)
-        let dow = ((days_since_epoch % 7) + 4) % 7;
+        let dow = ((days_since_epoch % 7) + 4).rem_euclid(7);
         dow_activity[dow as usize] += 1;
 
-        // Hour of day (UTC)
-        let hour = ((time_secs % 86400) / 3600) as usize;
+        // Hour of day (author-local)
+        let hour = (local_secs.rem_euclid(86400) / 3600) as usize;
         if hour < 24 {
             hour_activity[hour] += 1;
         }
 
-        // Year and month (approximate)
-        // More accurate calculation
-        let (year, month) = epoch_to_year_month(time_secs);
+        // Year and month (author-local)
+        let (year, month) = epoch_to_year_month(local_secs);
         *month_activity.entry((year, month)).or_insert(0) += 1;
     }
 
@@ -328,6 +327,7 @@ pub async fn get_contributor_stats(
 ) -> Result<Vec<ContributorStats>> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let max = max_commits.unwrap_or(5000);
+    let mailmap = repo.mailmap().ok();
 
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
@@ -343,34 +343,10 @@ pub async fn get_contributor_stats(
         let oid = oid_result?;
         let commit = repo.find_commit(oid)?;
         let time_secs = commit.time().seconds();
-        let author = commit.author();
-        let author_name = author.name().ok().unwrap_or("Unknown").to_string();
-        let author_email = author.email().ok().unwrap_or("unknown").to_string();
+        let (author_name, author_email) = resolve_author(&commit, mailmap.as_ref());
 
-        // Get diff stats for this commit
-        let (added, deleted) = if commit.parent_count() > 0 {
-            if let Ok(parent) = commit.parent(0) {
-                if let (Ok(parent_tree), Ok(commit_tree)) = (parent.tree(), commit.tree()) {
-                    if let Ok(diff) =
-                        repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), None)
-                    {
-                        if let Ok(stats) = diff.stats() {
-                            (stats.insertions(), stats.deletions())
-                        } else {
-                            (0, 0)
-                        }
-                    } else {
-                        (0, 0)
-                    }
-                } else {
-                    (0, 0)
-                }
-            } else {
-                (0, 0)
-            }
-        } else {
-            (0, 0)
-        };
+        // Get diff stats for this commit (mirrors `git log --numstat`).
+        let (added, deleted) = commit_line_churn(&repo, &commit);
 
         let key = author_email.clone();
         let entry = contributors_map.entry(key).or_insert(ContributorStats {
@@ -435,6 +411,61 @@ fn epoch_to_year_month(epoch: i64) -> (i32, u32) {
 
 fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// Resolve a commit's author name/email, applying the repository's `.mailmap`
+/// when available. Canonical git stats commands (`git shortlog`, `git log`)
+/// honor the mailmap by default, coalescing identities that changed name/email.
+fn resolve_author(commit: &git2::Commit, mailmap: Option<&git2::Mailmap>) -> (String, String) {
+    if let Some(mm) = mailmap {
+        if let Ok(sig) = commit.author_with_mailmap(mm) {
+            return (
+                sig.name().unwrap_or("Unknown").to_string(),
+                sig.email().unwrap_or("unknown").to_string(),
+            );
+        }
+    }
+    let author = commit.author();
+    (
+        author.name().unwrap_or("Unknown").to_string(),
+        author.email().unwrap_or("unknown").to_string(),
+    )
+}
+
+/// Compute a commit's timestamp in the author's recorded local timezone.
+/// Git records and displays author-local time (e.g. `%ad`), so activity
+/// buckets (hour/weekday/month) must use the offset rather than raw UTC.
+fn author_local_secs(commit: &git2::Commit) -> i64 {
+    let time = commit.time();
+    time.seconds() + i64::from(time.offset_minutes()) * 60
+}
+
+/// Per-commit line churn matching `git log --numstat` defaults:
+/// merge commits contribute no diff, and renames are detected (counted as
+/// 0 added / 0 deleted) rather than as a full delete + add.
+fn commit_line_churn(repo: &git2::Repository, commit: &git2::Commit) -> (usize, usize) {
+    if commit.parent_count() != 1 {
+        return (0, 0);
+    }
+    let parent = match commit.parent(0) {
+        Ok(p) => p,
+        Err(_) => return (0, 0),
+    };
+    let (parent_tree, commit_tree) = match (parent.tree(), commit.tree()) {
+        (Ok(pt), Ok(ct)) => (pt, ct),
+        _ => return (0, 0),
+    };
+    let mut diff = match repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), None) {
+        Ok(d) => d,
+        Err(_) => return (0, 0),
+    };
+    let mut find_opts = git2::DiffFindOptions::new();
+    find_opts.renames(true);
+    let _ = diff.find_similar(Some(&mut find_opts));
+    match diff.stats() {
+        Ok(stats) => (stats.insertions(), stats.deletions()),
+        Err(_) => (0, 0),
+    }
 }
 
 /// Parse ISO 8601 date string to epoch seconds
@@ -503,6 +534,7 @@ pub async fn get_repo_statistics(
     until: Option<String>,
 ) -> Result<RepoStatistics> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    let mailmap = repo.mailmap().ok();
 
     // Parse date filters
     let since_epoch = since.as_ref().and_then(|s| parse_iso8601_to_epoch(s));
@@ -555,9 +587,7 @@ pub async fn get_repo_statistics(
 
         total_commits += 1;
 
-        let author = commit.author();
-        let author_name = author.name().ok().unwrap_or("Unknown").to_string();
-        let author_email = author.email().ok().unwrap_or("unknown").to_string();
+        let (author_name, author_email) = resolve_author(&commit, mailmap.as_ref());
 
         // Track first and last commit
         match first_commit_date {
@@ -571,27 +601,11 @@ pub async fn get_repo_statistics(
             _ => {}
         }
 
-        // Get diff stats (lines added/deleted)
-        let (added, deleted) = if include_contributors && commit.parent_count() > 0 {
-            if let Ok(parent) = commit.parent(0) {
-                if let (Ok(parent_tree), Ok(commit_tree)) = (parent.tree(), commit.tree()) {
-                    if let Ok(diff) =
-                        repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), None)
-                    {
-                        if let Ok(stats) = diff.stats() {
-                            (stats.insertions() as u64, stats.deletions() as u64)
-                        } else {
-                            (0, 0)
-                        }
-                    } else {
-                        (0, 0)
-                    }
-                } else {
-                    (0, 0)
-                }
-            } else {
-                (0, 0)
-            }
+        // Get diff stats (lines added/deleted), mirroring `git log --numstat`:
+        // merges contribute nothing and renames count as 0/0.
+        let (added, deleted) = if include_contributors {
+            let (a, d) = commit_line_churn(&repo, &commit);
+            (a as u64, d as u64)
         } else {
             (0, 0)
         };
@@ -624,23 +638,26 @@ pub async fn get_repo_statistics(
             }
         }
 
-        // Activity breakdown
+        // Activity breakdown in the author's recorded local timezone, matching
+        // what `git log` displays (author-local time, not UTC).
         if include_activity {
+            let local_secs = author_local_secs(&commit);
+
             // Year/month activity
-            let (year, month) = epoch_to_year_month(time_secs);
+            let (year, month) = epoch_to_year_month(local_secs);
             let entry = month_activity
                 .entry((year as u32, month))
                 .or_insert((0, HashSet::new()));
             entry.0 += 1;
             entry.1.insert(author_email.clone());
 
-            // Day of week (0=Sunday)
-            let days_since_epoch = time_secs / 86400;
-            let dow = ((days_since_epoch % 7) + 4) % 7; // Jan 1, 1970 was Thursday (4)
+            // Day of week (0=Sunday); Jan 1, 1970 was Thursday (4)
+            let days_since_epoch = local_secs.div_euclid(86400);
+            let dow = ((days_since_epoch % 7) + 4).rem_euclid(7);
             weekday_activity[dow as usize] += 1;
 
-            // Hour of day (UTC)
-            let hour = ((time_secs % 86400) / 3600) as usize;
+            // Hour of day (author-local)
+            let hour = (local_secs.rem_euclid(86400) / 3600) as usize;
             if hour < 24 {
                 hour_activity[hour] += 1;
             }
@@ -816,9 +833,8 @@ pub async fn get_repo_statistics(
                         continue;
                     }
                 }
-                if let Ok(email) = commit.author().email() {
-                    unique_authors.insert(email.to_string());
-                }
+                let (_, email) = resolve_author(&commit, mailmap.as_ref());
+                unique_authors.insert(email);
             }
         }
         unique_authors.len() as u32
@@ -1113,5 +1129,257 @@ mod tests {
 
         // Repo age should be 0 for same-day commits
         assert_eq!(stats.repo_age_days, 0);
+    }
+
+    // ---- Regression-test helpers for canonical git parity ----------------
+
+    /// Build a string of `n` distinct lines with the given prefix.
+    fn lines(prefix: &str, n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("{prefix}{i}\n"))
+            .collect::<String>()
+    }
+
+    /// Create a commit with an explicit author identity, timestamp, file
+    /// changes, and parents. `changes` maps a path to `Some(content)` to
+    /// create/update or `None` to delete. When `update_ref` is provided the
+    /// named ref is moved to the new commit.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_with(
+        repo: &git2::Repository,
+        name: &str,
+        email: &str,
+        when: git2::Time,
+        message: &str,
+        changes: &[(&str, Option<&str>)],
+        parents: &[git2::Oid],
+        update_ref: Option<&str>,
+    ) -> git2::Oid {
+        // Build the tree from the first parent (all test paths are top-level).
+        let base_tree = parents
+            .first()
+            .map(|p| repo.find_commit(*p).expect("parent").tree().expect("tree"));
+        let mut builder = repo.treebuilder(base_tree.as_ref()).expect("tree builder");
+        for (path, content) in changes {
+            match content {
+                Some(c) => {
+                    let blob = repo.blob(c.as_bytes()).expect("write blob");
+                    builder.insert(path, blob, 0o100644).expect("insert entry");
+                }
+                None => {
+                    builder.remove(path).expect("remove entry");
+                }
+            }
+        }
+        let tree_oid = builder.write().expect("write tree");
+        let tree = repo.find_tree(tree_oid).expect("find tree");
+        let sig = git2::Signature::new(name, email, &when).expect("signature");
+        let parent_commits: Vec<git2::Commit> = parents
+            .iter()
+            .map(|p| repo.find_commit(*p).expect("parent"))
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parent_commits.iter().collect();
+        repo.commit(update_ref, &sig, &sig, message, &tree, &parent_refs)
+            .expect("create commit")
+    }
+
+    fn find_contrib<'a>(contributors: &'a [ContributorStats], email: &str) -> &'a ContributorStats {
+        contributors
+            .iter()
+            .find(|c| c.email == email)
+            .unwrap_or_else(|| panic!("contributor {email} not found"))
+    }
+
+    // Finding 102: contributor/total churn must match `git log --numstat` —
+    // merges contribute no diff, and a pure rename counts as 0 added/0 deleted
+    // (not a full delete + add).
+    #[tokio::test]
+    async fn test_contributor_stats_skips_merges_and_detects_renames() {
+        let repo = TestRepo::new();
+        let git = repo.repo();
+        let t = git2::Time::new(1_600_000_000, 0);
+        let big = lines("l", 100);
+        let bob_lines = lines("b", 50);
+
+        // C0 (root): Alice seeds a base file.
+        let c0 = commit_with(
+            &git,
+            "Alice",
+            "alice@example.com",
+            t,
+            "seed",
+            &[("base.txt", Some("base\n"))],
+            &[],
+            Some("refs/heads/main"),
+        );
+        // C1: Alice adds a 100-line file.
+        let c1 = commit_with(
+            &git,
+            "Alice",
+            "alice@example.com",
+            t,
+            "add big",
+            &[("big.txt", Some(&big))],
+            &[c0],
+            Some("refs/heads/main"),
+        );
+        // Feature branch: Bob adds a 50-line file.
+        let cb = commit_with(
+            &git,
+            "Bob",
+            "bob@example.com",
+            t,
+            "bob work",
+            &[("bob.txt", Some(&bob_lines))],
+            &[c1],
+            Some("refs/heads/feature"),
+        );
+        // C2: Carol renames big.txt -> renamed.txt (byte-identical content).
+        let c2 = commit_with(
+            &git,
+            "Carol",
+            "carol@example.com",
+            t,
+            "rename big",
+            &[("big.txt", None), ("renamed.txt", Some(&big))],
+            &[c1],
+            Some("refs/heads/main"),
+        );
+        // Merge: Carol merges feature; first-parent diff brings in bob.txt.
+        commit_with(
+            &git,
+            "Carol",
+            "carol@example.com",
+            t,
+            "merge feature",
+            &[("bob.txt", Some(&bob_lines))],
+            &[c2, cb],
+            Some("refs/heads/main"),
+        );
+        // TestRepo::new() leaves HEAD on the unborn default branch (which is
+        // `master` when no init.defaultBranch is configured); point it at the
+        // branch this history was built on so the None revspec resolves.
+        git.set_head("refs/heads/main").unwrap();
+
+        let contributors = get_contributor_stats(repo.path_str(), None).await.unwrap();
+
+        let alice = find_contrib(&contributors, "alice@example.com");
+        assert_eq!(alice.lines_added, 100, "Alice's non-root addition");
+        assert_eq!(alice.lines_deleted, 0);
+
+        let bob = find_contrib(&contributors, "bob@example.com");
+        assert_eq!(bob.lines_added, 50);
+        assert_eq!(bob.lines_deleted, 0);
+
+        // Carol's only work is a pure rename + a merge: canonical numstat is 0/0.
+        let carol = find_contrib(&contributors, "carol@example.com");
+        assert_eq!(
+            carol.lines_added, 0,
+            "rename must count as 0 added and merge must be skipped"
+        );
+        assert_eq!(carol.lines_deleted, 0);
+
+        // get_repo_statistics shares the same churn logic.
+        let stats = get_repo_statistics(repo.path_str(), false, true, false, None, None)
+            .await
+            .unwrap();
+        let top = stats.top_contributors.unwrap();
+        let carol2 = top.iter().find(|c| c.email == "carol@example.com").unwrap();
+        assert_eq!(carol2.lines_added, 0);
+        assert_eq!(carol2.lines_deleted, 0);
+    }
+
+    // Finding 103: contributor aggregation must honor `.mailmap`, coalescing
+    // identities like `git shortlog -sne` does.
+    #[tokio::test]
+    async fn test_contributor_stats_respects_mailmap() {
+        let repo = TestRepo::new();
+        std::fs::write(
+            repo.path.join(".mailmap"),
+            "Alice Proper <alice@proper.com> <alice@old.com>\n",
+        )
+        .expect("write mailmap");
+
+        let git = repo.repo();
+        let t = git2::Time::new(1_600_000_000, 0);
+        let c0 = commit_with(
+            &git,
+            "Alice",
+            "alice@old.com",
+            t,
+            "first",
+            &[("a.txt", Some("a\n"))],
+            &[],
+            Some("refs/heads/main"),
+        );
+        commit_with(
+            &git,
+            "Alice Proper",
+            "alice@proper.com",
+            t,
+            "second",
+            &[("b.txt", Some("b\n"))],
+            &[c0],
+            Some("refs/heads/main"),
+        );
+
+        let stats = get_repo_statistics(repo.path_str(), false, true, false, None, None)
+            .await
+            .unwrap();
+        let contributors = stats.top_contributors.unwrap();
+        assert_eq!(
+            contributors.len(),
+            1,
+            "mailmap should coalesce the two identities into one"
+        );
+        assert_eq!(contributors[0].name, "Alice Proper");
+        assert_eq!(contributors[0].email, "alice@proper.com");
+        assert_eq!(contributors[0].commits, 2);
+        assert_eq!(stats.total_contributors, 1);
+    }
+
+    // Finding 104: activity buckets must use the author's recorded timezone,
+    // matching what `git log` displays, not UTC.
+    #[tokio::test]
+    async fn test_activity_buckets_use_author_timezone() {
+        let repo = TestRepo::new();
+        let git = repo.repo();
+        // 14:00 UTC with a +09:00 offset => 23:00 author-local time.
+        let when = git2::Time::new(50_400, 540);
+        commit_with(
+            &git,
+            "Kenji",
+            "kenji@example.com",
+            when,
+            "evening commit",
+            &[("f.txt", Some("x\n"))],
+            &[],
+            Some("refs/heads/main"),
+        );
+
+        let stats = get_repo_statistics(repo.path_str(), true, false, false, None, None)
+            .await
+            .unwrap();
+        let hours = stats.activity_by_hour.unwrap();
+        assert_eq!(
+            hours[23].commits, 1,
+            "commit should bucket at local hour 23"
+        );
+        assert_eq!(hours[14].commits, 0, "should not bucket at UTC hour 14");
+
+        // get_repo_stats shares the same bucketing logic.
+        let legacy = get_repo_stats(repo.path_str(), None).await.unwrap();
+        let h23 = legacy
+            .activity_by_hour
+            .iter()
+            .find(|h| h.hour == 23)
+            .unwrap();
+        assert_eq!(h23.commit_count, 1);
+        let h14 = legacy
+            .activity_by_hour
+            .iter()
+            .find(|h| h.hour == 14)
+            .unwrap();
+        assert_eq!(h14.commit_count, 0);
     }
 }

@@ -50,81 +50,37 @@ fn apply_diff_options(
     }
 }
 
-/// Check if a file extension indicates a known text file type.
-/// This is used to override git's binary detection for common text formats
-/// that may be incorrectly flagged as binary (e.g., UTF-16 encoded JSON).
-fn is_known_text_extension(path: &str) -> bool {
-    let path_lower = path.to_lowercase();
-    let text_extensions = [
-        ".json",
-        ".txt",
-        ".md",
-        ".markdown",
-        ".xml",
-        ".yaml",
-        ".yml",
-        ".toml",
-        ".html",
-        ".htm",
-        ".css",
-        ".scss",
-        ".sass",
-        ".less",
-        ".js",
-        ".jsx",
-        ".ts",
-        ".tsx",
-        ".mjs",
-        ".cjs",
-        ".rs",
-        ".py",
-        ".rb",
-        ".java",
-        ".kt",
-        ".scala",
-        ".go",
-        ".c",
-        ".cpp",
-        ".h",
-        ".hpp",
-        ".cs",
-        ".fs",
-        ".vb",
-        ".swift",
-        ".m",
-        ".mm",
-        ".sh",
-        ".bash",
-        ".zsh",
-        ".fish",
-        ".ps1",
-        ".bat",
-        ".cmd",
-        ".sql",
-        ".graphql",
-        ".gql",
-        ".env",
-        ".ini",
-        ".cfg",
-        ".conf",
-        ".config",
-        ".gitignore",
-        ".gitattributes",
-        ".editorconfig",
-        ".dockerfile",
-        ".containerfile",
-        ".tf",
-        ".tfvars",
-        ".hcl",
-        ".vue",
-        ".svelte",
-        ".astro",
-        ".csv",
-        ".tsv",
-        ".log",
-    ];
-    text_extensions.iter().any(|ext| path_lower.ends_with(ext))
+/// Resolve the HEAD tree, tolerating an unborn HEAD (a repository with no
+/// commits yet). Returns `None` when HEAD is unborn/missing so callers can diff
+/// against the empty tree, exactly as `git diff --cached` does before the first
+/// commit.
+fn head_tree_opt(repo: &git2::Repository) -> Result<Option<git2::Tree<'_>>> {
+    match repo.head() {
+        Ok(head) => Ok(Some(head.peel_to_tree()?)),
+        Err(e)
+            if e.code() == git2::ErrorCode::UnbornBranch
+                || e.code() == git2::ErrorCode::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
+
+/// Enable rename detection on a diff, mirroring git's default `diff.renames`
+/// (on by default since git 2.9). Without this, libgit2 reports a rename as a
+/// delete + add pair and never yields `Delta::Renamed`.
+fn detect_renames(diff: &mut git2::Diff) -> Result<()> {
+    let mut find_opts = git2::DiffFindOptions::new();
+    find_opts.renames(true);
+    diff.find_similar(Some(&mut find_opts))?;
+    Ok(())
+}
+
+// NOTE: git's binary detection is now reported faithfully. The former
+// `is_known_text_extension` override faked `is_binary = false` for
+// text-extension files that libgit2 flagged binary (e.g. UTF-16 JSON),
+// which produced an empty, non-binary diff with no indication.
 
 /// Get diff for all changed files
 #[command]
@@ -136,7 +92,7 @@ pub async fn get_diff(
 ) -> Result<Vec<DiffFile>> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    let diff = if let Some(ref commit_oid) = commit {
+    let mut diff = if let Some(ref commit_oid) = commit {
         // Diff between two commits or commit and parent
         let commit = repo.find_commit(git2::Oid::from_str(commit_oid)?)?;
 
@@ -149,13 +105,16 @@ pub async fn get_diff(
             repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit.tree()?), None)?
         }
     } else if staged.unwrap_or(false) {
-        // Staged changes (index vs HEAD)
-        let head = repo.head()?.peel_to_tree()?;
-        repo.diff_tree_to_index(Some(&head), None, None)?
+        // Staged changes (index vs HEAD, or the empty tree on an unborn HEAD)
+        let head_tree = head_tree_opt(&repo)?;
+        repo.diff_tree_to_index(head_tree.as_ref(), None, None)?
     } else {
         // Unstaged changes (working directory vs index)
         repo.diff_index_to_workdir(None, None)?
     };
+
+    // Detect renames/copies (git's default) so a move is one entry, not add+del.
+    detect_renames(&mut diff)?;
 
     parse_diff(&diff)
 }
@@ -208,7 +167,7 @@ pub async fn get_diff_with_options(
         opts.show_untracked_content(true);
     }
 
-    let diff = if let Some(ref commit_oid) = commit {
+    let mut diff = if let Some(ref commit_oid) = commit {
         // Diff between two commits or commit and parent
         let commit_obj = repo.find_commit(git2::Oid::from_str(commit_oid)?)?;
 
@@ -229,13 +188,15 @@ pub async fn get_diff_with_options(
             )?
         }
     } else if staged.unwrap_or(false) {
-        // Staged changes (index vs HEAD)
-        let head = repo.head()?.peel_to_tree()?;
-        repo.diff_tree_to_index(Some(&head), None, Some(&mut opts))?
+        // Staged changes (index vs HEAD, or the empty tree on an unborn HEAD)
+        let head_tree = head_tree_opt(&repo)?;
+        repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))?
     } else {
         // Unstaged changes (working directory vs index)
         repo.diff_index_to_workdir(None, Some(&mut opts))?
     };
+
+    detect_renames(&mut diff)?;
 
     let files = parse_diff(&diff)?;
     Ok(files
@@ -266,14 +227,16 @@ pub async fn get_file_diff(
 
     let is_staged = staged.unwrap_or(false);
 
-    let diff = if is_staged {
-        // Staged changes: compare HEAD to index
-        let head = repo.head()?.peel_to_tree()?;
-        repo.diff_tree_to_index(Some(&head), None, Some(&mut opts))?
+    let mut diff = if is_staged {
+        // Staged changes: compare HEAD to index (empty tree on an unborn HEAD)
+        let head_tree = head_tree_opt(&repo)?;
+        repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))?
     } else {
         // Unstaged changes: compare index to workdir
         repo.diff_index_to_workdir(None, Some(&mut opts))?
     };
+
+    detect_renames(&mut diff)?;
 
     let files = parse_diff(&diff)?;
 
@@ -291,12 +254,14 @@ pub async fn get_file_diff(
     fallback_opts.recurse_untracked_dirs(true);
     fallback_opts.show_untracked_content(true);
 
-    let fallback_diff = if is_staged {
-        let head = repo.head()?.peel_to_tree()?;
-        repo.diff_tree_to_index(Some(&head), None, Some(&mut fallback_opts))?
+    let mut fallback_diff = if is_staged {
+        let head_tree = head_tree_opt(&repo)?;
+        repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut fallback_opts))?
     } else {
         repo.diff_index_to_workdir(None, Some(&mut fallback_opts))?
     };
+
+    detect_renames(&mut fallback_diff)?;
 
     let all_files = parse_diff(&fallback_diff)?;
 
@@ -305,41 +270,16 @@ pub async fn get_file_diff(
         return Ok(maybe_truncate_diff(file.clone(), max_lines));
     }
 
-    // Try case-insensitive match
+    // Try case-insensitive match (handles case-sensitivity mismatches on
+    // Windows). We deliberately do NOT fall back to a filename-suffix match or
+    // to the opposite staging area: `git diff [--cached] -- <path>` is strict
+    // about the path and never substitutes a different file's diff. Doing so
+    // here previously returned an unrelated file (e.g. vendor/foo.c for a
+    // request of src/foo.c) or presented staged hunks as unstaged.
     if let Some(file) = all_files
         .iter()
         .find(|f| f.path.eq_ignore_ascii_case(&normalized_file_path))
     {
-        return Ok(maybe_truncate_diff(file.clone(), max_lines));
-    }
-
-    // Try matching by filename only (handles path prefix mismatches)
-    let filename = normalized_file_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(&normalized_file_path);
-    if let Some(file) = all_files
-        .iter()
-        .find(|f| f.path.ends_with(filename) || f.path.eq_ignore_ascii_case(filename))
-    {
-        return Ok(maybe_truncate_diff(file.clone(), max_lines));
-    }
-
-    // Try the opposite staging state as fallback
-    // (sometimes a file shows in status but diff is in the other state)
-    let opposite_diff = if is_staged {
-        repo.diff_index_to_workdir(None, Some(&mut fallback_opts))?
-    } else {
-        let head = repo.head()?.peel_to_tree()?;
-        repo.diff_tree_to_index(Some(&head), None, Some(&mut fallback_opts))?
-    };
-
-    let opposite_files = parse_diff(&opposite_diff)?;
-    if let Some(file) = opposite_files.iter().find(|f| {
-        f.path == normalized_file_path
-            || f.path.eq_ignore_ascii_case(&normalized_file_path)
-            || f.path.ends_with(filename)
-    }) {
         return Ok(maybe_truncate_diff(file.clone(), max_lines));
     }
 
@@ -514,9 +454,10 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
 
             let is_image = is_image_file(&file_path);
             let image_type = get_image_type(&file_path);
-            // Override binary detection for known text file extensions
-            // (git may flag UTF-16 or files with long lines as binary)
-            let is_binary = delta.flags().is_binary() && !is_known_text_extension(&file_path);
+            // Report git's binary status faithfully. libgit2 may only set the
+            // binary flag on a later callback (after inspecting the blob), so
+            // this is refreshed below for existing entries too.
+            let is_binary = delta.flags().is_binary();
 
             files.push(DiffFile {
                 path: file_path.clone(),
@@ -539,6 +480,13 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
                 .last_mut()
                 .expect("files vec must be non-empty after push")
         };
+
+        // The binary flag may only be raised on a later callback for this
+        // file (once libgit2 has loaded the blob), so keep it current. This
+        // prevents a binary file from being rendered as an empty text diff.
+        if delta.flags().is_binary() {
+            file_entry.is_binary = true;
+        }
 
         // Handle hunk header
         if let Some(hunk) = hunk {
@@ -591,6 +539,8 @@ fn parse_diff(diff: &git2::Diff) -> Result<Vec<DiffFile>> {
 #[serde(rename_all = "camelCase")]
 pub struct CommitFileEntry {
     pub path: String,
+    /// For a renamed/copied file, the previous path; `None` otherwise.
+    pub old_path: Option<String>,
     pub status: FileStatus,
     pub additions: usize,
     pub deletions: usize,
@@ -606,7 +556,11 @@ pub async fn get_commit_files(path: String, commit_oid: String) -> Result<Vec<Co
     let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
     let commit_tree = commit.tree()?;
 
-    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
+    let mut diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
+
+    // Detect renames/copies (git's default) so a moved file is a single
+    // "renamed" entry instead of a delete + add pair.
+    detect_renames(&mut diff)?;
 
     // First pass: collect file info
     let mut files: Vec<CommitFileEntry> = Vec::new();
@@ -628,8 +582,18 @@ pub async fn get_commit_files(path: String, commit_oid: String) -> Result<Vec<Co
             _ => FileStatus::Modified,
         };
 
+        // Surface the previous path for renames/copies so the UI can show it.
+        let old_path = match delta.status() {
+            git2::Delta::Renamed | git2::Delta::Copied => delta
+                .old_file()
+                .path()
+                .map(|p| p.to_string_lossy().to_string()),
+            _ => None,
+        };
+
         files.push(CommitFileEntry {
             path: file_path,
+            old_path,
             status,
             additions: 0,
             deletions: 0,
@@ -702,13 +666,21 @@ pub async fn get_commits_stats(path: String, commit_oids: Vec<String>) -> Result
             }
         };
 
-        let diff = match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None) {
+        let mut diff = match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)
+        {
             Ok(d) => d,
             Err(_) => {
                 skipped_diff += 1;
                 continue;
             }
         };
+
+        // Detect renames so a pure rename reports 0/0 like git, rather than
+        // over-counting the full file as +N/-N (delete + add).
+        if detect_renames(&mut diff).is_err() {
+            skipped_diff += 1;
+            continue;
+        }
 
         let (additions, deletions, files_changed) = match diff.stats() {
             Ok(s) => (s.insertions(), s.deletions(), s.files_changed()),
@@ -772,7 +744,10 @@ pub async fn get_commit_file_diff(
     let mut opts = git2::DiffOptions::new();
     opts.pathspec(&file_path);
 
-    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
+    let mut diff =
+        repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
+
+    detect_renames(&mut diff)?;
 
     let files = parse_diff(&diff)?;
     files
@@ -858,6 +833,18 @@ pub async fn get_file_blame(
         std::fs::read_to_string(full_path).unwrap_or_default()
     };
 
+    // For a working-tree blame (no explicit commit), libgit2 blamed the file
+    // as of HEAD, which misaligns with a modified working copy. Reconcile the
+    // committed blame with the actual working-tree buffer so inserted/deleted
+    // lines stay aligned and uncommitted lines are attributed to the zero OID
+    // (git's "Not Committed Yet"). libgit2 has no direct working-tree blame.
+    let buffer_blame = if commit_oid.is_none() {
+        Some(blame.blame_buffer(file_content.as_bytes())?)
+    } else {
+        None
+    };
+    let active_blame = buffer_blame.as_ref().unwrap_or(&blame);
+
     let content_lines: Vec<&str> = file_content.lines().collect();
     let total_lines = content_lines.len() as u32;
 
@@ -879,9 +866,26 @@ pub async fn get_file_blame(
     {
         let line_num = i + 1;
 
-        if let Some(hunk) = blame.get_line(line_num) {
+        if let Some(hunk) = active_blame.get_line(line_num) {
             let commit_id = hunk.final_commit_id();
             let short_id = commit_id.to_string()[..7].to_string();
+
+            // A zero OID means the line differs from HEAD, i.e. it is not yet
+            // committed (git shows "Not Committed Yet").
+            if commit_id.is_zero() {
+                lines.push(BlameLine {
+                    line_number: line_num,
+                    content: line_content.to_string(),
+                    commit_oid: commit_id.to_string(),
+                    commit_short_id: short_id,
+                    author_name: "Not Committed Yet".to_string(),
+                    author_email: String::new(),
+                    timestamp: 0,
+                    summary: String::new(),
+                    is_boundary: hunk.is_boundary(),
+                });
+                continue;
+            }
 
             // Get commit details
             let (author_name, author_email, timestamp, summary) =
@@ -1484,20 +1488,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_is_known_text_extension() {
-        assert!(is_known_text_extension("file.json"));
-        assert!(is_known_text_extension("file.txt"));
-        assert!(is_known_text_extension("file.rs"));
-        assert!(is_known_text_extension("file.py"));
-        assert!(is_known_text_extension("file.ts"));
-        assert!(is_known_text_extension("file.tsx"));
-        assert!(is_known_text_extension("FILE.JSON")); // case insensitive
-        assert!(!is_known_text_extension("file.exe"));
-        assert!(!is_known_text_extension("file.dll"));
-        assert!(!is_known_text_extension("file"));
-    }
-
-    #[tokio::test]
     async fn test_get_diff_new_untracked_file() {
         let repo = TestRepo::with_initial_commit();
 
@@ -2067,5 +2057,202 @@ mod tests {
         assert!(out.hunks.is_empty(), "partial hunk must never be included");
         assert_eq!(out.truncated, Some(true));
         assert_eq!(out.total_lines, Some(100));
+    }
+
+    /// Commit a single renamed file (delete old + add identical new content).
+    fn commit_rename(repo: &TestRepo, old: &str, new: &str, content: &str) -> git2::Oid {
+        repo.create_file(new, content);
+        std::fs::remove_file(repo.path.join(old)).unwrap();
+        let git = repo.repo();
+        let mut index = git.index().unwrap();
+        index.remove_path(Path::new(old)).unwrap();
+        index.add_path(Path::new(new)).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = git.find_tree(tree_oid).unwrap();
+        let sig = git.signature().unwrap();
+        let parent = git.head().unwrap().peel_to_commit().unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "rename", &tree, &[&parent])
+            .unwrap()
+    }
+
+    /// Finding 61: a committed rename must be one "renamed" entry with 0/0
+    /// stats, not a delete + add pair, matching `git show --name-status`.
+    #[tokio::test]
+    async fn test_get_commit_files_detects_rename() {
+        let repo = TestRepo::with_initial_commit();
+        let content = "line1\nline2\nline3\nline4\nline5\n";
+        repo.create_commit("add", &[("file_a.txt", content)]);
+        let oid = commit_rename(&repo, "file_a.txt", "file_b.txt", content);
+
+        let files = get_commit_files(repo.path_str(), oid.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(files.len(), 1, "rename must be a single entry, not add+del");
+        assert_eq!(files[0].status, FileStatus::Renamed);
+        assert_eq!(files[0].path, "file_b.txt");
+        assert_eq!(files[0].old_path.as_deref(), Some("file_a.txt"));
+        assert_eq!(files[0].additions, 0, "pure rename has 0 insertions");
+        assert_eq!(files[0].deletions, 0, "pure rename has 0 deletions");
+    }
+
+    /// Finding 61: get_commits_stats must report 0/0/1 for a pure rename.
+    #[tokio::test]
+    async fn test_get_commits_stats_rename_is_zero() {
+        let repo = TestRepo::with_initial_commit();
+        let content = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+        repo.create_commit("add", &[("orig.txt", content)]);
+        let oid = commit_rename(&repo, "orig.txt", "moved.txt", content);
+
+        let stats = get_commits_stats(repo.path_str(), vec![oid.to_string()])
+            .await
+            .unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].additions, 0);
+        assert_eq!(stats[0].deletions, 0);
+        assert_eq!(stats[0].files_changed, 1);
+    }
+
+    /// Finding 62: a working-tree blame with an uncommitted inserted line must
+    /// attribute that line to "Not Committed Yet" and keep the rest aligned.
+    #[tokio::test]
+    async fn test_get_file_blame_working_tree_uncommitted_line() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("add", &[("f.txt", "alpha\nbeta\ngamma\n")]);
+
+        // Insert a new line at the top of the working copy only.
+        repo.create_file("f.txt", "NEWLINE\nalpha\nbeta\ngamma\n");
+
+        let result = get_file_blame(repo.path_str(), "f.txt".to_string(), None, None, None)
+            .await
+            .unwrap();
+
+        // All four working-tree lines must be present (no trailing drop).
+        assert_eq!(result.lines.len(), 4);
+        assert_eq!(result.lines[0].content, "NEWLINE");
+        assert_eq!(result.lines[0].author_name, "Not Committed Yet");
+        assert_eq!(result.lines[0].commit_oid, "0".repeat(40));
+        // Existing lines keep their real attribution, correctly aligned.
+        assert_eq!(result.lines[1].content, "alpha");
+        assert_ne!(result.lines[1].commit_oid, "0".repeat(40));
+        assert_eq!(result.lines[3].content, "gamma");
+        assert_ne!(result.lines[3].commit_oid, "0".repeat(40));
+    }
+
+    /// Finding 63: staged diff of the first file in a repo with no commits
+    /// (unborn HEAD) must succeed against the empty tree, like `git diff --cached`.
+    #[tokio::test]
+    async fn test_get_file_diff_staged_unborn_head() {
+        let repo = TestRepo::new(); // no initial commit -> unborn HEAD
+        repo.create_file("first.txt", "hello\nworld\n");
+        repo.stage_file("first.txt");
+
+        let result =
+            get_file_diff(repo.path_str(), "first.txt".to_string(), Some(true), None).await;
+        assert!(
+            result.is_ok(),
+            "staged diff on unborn HEAD should succeed: {:?}",
+            result.err()
+        );
+        let f = result.unwrap();
+        assert_eq!(f.path, "first.txt");
+        assert_eq!(f.status, FileStatus::New);
+        assert!(f.additions >= 2);
+    }
+
+    /// Finding 63: get_diff staged also works on an unborn HEAD.
+    #[tokio::test]
+    async fn test_get_diff_staged_unborn_head() {
+        let repo = TestRepo::new();
+        repo.create_file("first.txt", "content\n");
+        repo.stage_file("first.txt");
+
+        let result = get_diff(repo.path_str(), Some(true), None, None).await;
+        assert!(
+            result.is_ok(),
+            "unborn HEAD staged diff: {:?}",
+            result.err()
+        );
+        let files = result.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "first.txt");
+        assert_eq!(files[0].status, FileStatus::New);
+    }
+
+    /// Finding 66: a UTF-16 file that git flags binary must be reported as
+    /// binary (git's default), not as an empty non-binary diff.
+    #[tokio::test]
+    async fn test_utf16_file_reported_as_binary() {
+        let repo = TestRepo::with_initial_commit();
+
+        // UTF-16LE bytes for {"a":2} (with BOM), committed.
+        let to_utf16le = |s: &str| -> Vec<u8> {
+            let mut v = vec![0xFF, 0xFE];
+            for u in s.encode_utf16() {
+                v.extend_from_slice(&u.to_le_bytes());
+            }
+            v
+        };
+        let git = repo.repo();
+        std::fs::write(repo.path.join("data.json"), to_utf16le("{\"a\":2}")).unwrap();
+        let mut index = git.index().unwrap();
+        index.add_path(Path::new("data.json")).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = git.find_tree(tree_oid).unwrap();
+        let sig = git.signature().unwrap();
+        let parent = git.head().unwrap().peel_to_commit().unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "add utf16", &tree, &[&parent])
+            .unwrap();
+
+        // Modify the working copy.
+        std::fs::write(repo.path.join("data.json"), to_utf16le("{\"a\":3}")).unwrap();
+
+        let result = get_file_diff(repo.path_str(), "data.json".to_string(), Some(false), None)
+            .await
+            .unwrap();
+        assert!(
+            result.is_binary,
+            "UTF-16 file must be reported as binary, not an empty text diff"
+        );
+    }
+
+    /// Finding 67: requesting the diff of an unchanged path must not substitute
+    /// another file that merely shares a basename.
+    #[tokio::test]
+    async fn test_get_file_diff_no_basename_substitution() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "add",
+            &[("vendor/foo.c", "a\nb\nc\n"), ("src/foo.c", "x\ny\nz\n")],
+        );
+        // Only vendor/foo.c is modified.
+        repo.create_file("vendor/foo.c", "a\nb\nMODIFIED\n");
+
+        // Requesting the unchanged src/foo.c must NOT return vendor/foo.c's diff.
+        let result =
+            get_file_diff(repo.path_str(), "src/foo.c".to_string(), Some(false), None).await;
+        assert!(
+            result.is_err(),
+            "unchanged src/foo.c must not resolve to vendor/foo.c's diff"
+        );
+    }
+
+    /// Finding 67: the unstaged diff of a fully-staged file must not return the
+    /// staged hunks (the opposite staging area).
+    #[tokio::test]
+    async fn test_get_file_diff_unstaged_does_not_return_staged() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("f.txt", "base\n")]);
+        // Stage a change; working tree == index (no unstaged change).
+        repo.create_file("f.txt", "staged change\n");
+        repo.stage_file("f.txt");
+
+        let result = get_file_diff(repo.path_str(), "f.txt".to_string(), Some(false), None).await;
+        assert!(
+            result.is_err(),
+            "unstaged diff of a fully-staged file must not surface the staged hunks"
+        );
     }
 }

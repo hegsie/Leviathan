@@ -100,11 +100,27 @@ pub async fn remove_from_gitignore(path: String, pattern: String) -> Result<()> 
     Ok(())
 }
 
+/// Whether a path is tracked (present in the index at stage 0).
+///
+/// Git never applies gitignore rules to tracked files, so callers must treat a
+/// tracked path as not ignored regardless of what the gitignore patterns say.
+fn is_path_tracked(repo: &git2::Repository, path: &Path) -> bool {
+    match repo.index() {
+        Ok(index) => index.get_path(path, 0).is_some(),
+        Err(_) => false,
+    }
+}
+
 /// Check if a file path matches any gitignore pattern
 #[command]
 pub async fn is_ignored(path: String, file_path: String) -> Result<bool> {
     let repo = git2::Repository::open(Path::new(&path))?;
-    Ok(repo.is_path_ignored(Path::new(&file_path))?)
+    let file = Path::new(&file_path);
+    // gitignore only affects untracked files; a tracked file is never ignored.
+    if is_path_tracked(&repo, file) {
+        return Ok(false);
+    }
+    Ok(repo.is_path_ignored(file)?)
 }
 
 /// Result of checking whether a file is ignored by gitignore rules
@@ -138,7 +154,13 @@ pub async fn check_ignore(path: String, file_paths: Vec<String>) -> Result<Vec<I
 
     let mut results = Vec::with_capacity(file_paths.len());
     for file_path in &file_paths {
-        let is_ignored = repo.is_path_ignored(Path::new(file_path)).unwrap_or(false);
+        let file = Path::new(file_path);
+        // gitignore only affects untracked files; a tracked file is never ignored.
+        let is_ignored = if is_path_tracked(&repo, file) {
+            false
+        } else {
+            repo.is_path_ignored(file).unwrap_or(false)
+        };
         results.push(IgnoreCheckResult {
             path: file_path.clone(),
             is_ignored,
@@ -150,8 +172,13 @@ pub async fn check_ignore(path: String, file_paths: Vec<String>) -> Result<Vec<I
 
 /// Check if files are ignored by gitignore rules, with verbose rule details.
 ///
-/// Uses `git check-ignore -v --no-index` to get the source file, line number,
-/// and pattern that matches each path.
+/// Uses `git check-ignore -v -n -z --stdin` to get the source file, line number,
+/// and pattern that matches each path. The `-z` / `--stdin` combination:
+///   * consults the index natively, so tracked files are reported as NOT ignored
+///     (matching `git check-ignore`; gitignore rules only affect untracked files),
+///   * NUL-separates the four output fields and disables pathname C-quoting, so
+///     non-ASCII paths and patterns containing `:` are handled correctly, and
+///   * passes pathnames on stdin, avoiding argument-length limits.
 #[command]
 pub async fn check_ignore_verbose(
     path: String,
@@ -161,135 +188,99 @@ pub async fn check_ignore_verbose(
         return Ok(Vec::new());
     }
 
-    // Use git check-ignore -v --no-index -n to get verbose output for all paths.
-    // -v gives source:linenum:pattern\tpath
-    // --no-index checks against gitignore rules without requiring the file to exist
-    // -n (--non-matching) also shows paths that are NOT ignored
-    let output = create_command("git")
+    // Feed the paths on stdin, NUL-separated (required by -z / --stdin).
+    let mut stdin_bytes = Vec::new();
+    for file_path in &file_paths {
+        stdin_bytes.extend_from_slice(file_path.as_bytes());
+        stdin_bytes.push(0);
+    }
+
+    let mut child = create_command("git")
         .arg("-C")
         .arg(&path)
         .arg("check-ignore")
         .arg("-v")
-        .arg("--no-index")
         .arg("-n")
-        .args(&file_paths)
-        .output()
+        .arg("-z")
+        .arg("--stdin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| {
             LeviathanError::OperationFailed(format!("Failed to run git check-ignore: {}", e))
         })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse the output. Each line has the format:
-    // source:linenum:pattern\tpathname    (for matched paths)
-    // ::\t pathname                        (for non-matched paths with -n)
-    let mut results: Vec<IgnoreCheckVerboseResult> = Vec::with_capacity(file_paths.len());
-    let mut seen_paths = std::collections::HashSet::new();
-
-    for line in stdout.lines() {
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Some(result) = parse_check_ignore_verbose_line(line) {
-            seen_paths.insert(result.path.clone());
-            results.push(result);
-        }
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(&stdin_bytes).map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to write to git check-ignore: {}", e))
+        })?;
     }
 
-    // For any paths not in the output (shouldn't happen with -n, but be safe),
-    // fall back to git2 is_path_ignored
-    let repo = git2::Repository::open(Path::new(&path))?;
-    for file_path in &file_paths {
-        if !seen_paths.contains(file_path.as_str()) {
-            let is_ignored = repo.is_path_ignored(Path::new(file_path)).unwrap_or(false);
+    let output = child.wait_with_output().map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to run git check-ignore: {}", e))
+    })?;
+
+    Ok(parse_check_ignore_z(&output.stdout))
+}
+
+/// Parse the NUL-separated output of `git check-ignore -v -n -z --stdin`.
+///
+/// Records are groups of four NUL-terminated fields:
+/// `<source>\0<linenum>\0<pattern>\0<pathname>\0`. A non-matching path has empty
+/// `source`, `linenum`, and `pattern` fields.
+fn parse_check_ignore_z(stdout: &[u8]) -> Vec<IgnoreCheckVerboseResult> {
+    // Collect NUL-terminated fields, dropping the trailing empty field after the
+    // final NUL. Fields are decoded lossily (paths are otherwise raw bytes).
+    let mut fields: Vec<String> = stdout
+        .split(|b| *b == 0)
+        .map(|f| String::from_utf8_lossy(f).into_owned())
+        .collect();
+    if fields.last().map(|f| f.is_empty()).unwrap_or(false) {
+        fields.pop();
+    }
+
+    let mut results = Vec::with_capacity(fields.len() / 4);
+    for record in fields.chunks_exact(4) {
+        let source = &record[0];
+        let line_num_str = &record[1];
+        let pattern = &record[2];
+        let path_name = record[3].clone();
+
+        // Non-matching path: all rule fields empty.
+        if source.is_empty() && pattern.is_empty() {
             results.push(IgnoreCheckVerboseResult {
-                path: file_path.clone(),
-                is_ignored,
+                path: path_name,
+                is_ignored: false,
                 source_file: None,
                 source_line: None,
                 pattern: None,
                 is_negated: false,
             });
+            continue;
         }
-    }
 
-    Ok(results)
-}
-
-/// Parse a single line of `git check-ignore -v --no-index -n` output.
-///
-/// Format: `source:linenum:pattern\tpathname`
-/// For non-matching (with -n): `::\t pathname`
-fn parse_check_ignore_verbose_line(line: &str) -> Option<IgnoreCheckVerboseResult> {
-    // Split on tab to separate the rule info from the path
-    let tab_pos = line.find('\t')?;
-    let rule_part = &line[..tab_pos];
-    let path_part = line[tab_pos + 1..].trim().to_string();
-
-    if path_part.is_empty() {
-        return None;
-    }
-
-    // Parse rule_part which is "source:linenum:pattern"
-    // For non-matching lines: "::"
-    // We need to split on ':' but be careful - source paths on Windows can contain ':'
-    // The format is: source_file:line_number:pattern
-    // Non-matching: ::
-
-    if rule_part == "::" {
-        // Non-matching path
-        return Some(IgnoreCheckVerboseResult {
-            path: path_part,
-            is_ignored: false,
-            source_file: None,
-            source_line: None,
-            pattern: None,
-            is_negated: false,
+        let is_negated = pattern.starts_with('!');
+        results.push(IgnoreCheckVerboseResult {
+            path: path_name,
+            is_ignored: !is_negated,
+            source_file: if source.is_empty() {
+                None
+            } else {
+                Some(source.clone())
+            },
+            source_line: line_num_str.parse::<u32>().ok(),
+            pattern: if pattern.is_empty() {
+                None
+            } else {
+                Some(pattern.clone())
+            },
+            is_negated,
         });
     }
 
-    // Find the pattern by splitting from the right on ':'
-    // Pattern is after the last ':', line number is between second-to-last and last ':'
-    // Source file is everything before the second-to-last ':'
-    let mut colon_positions: Vec<usize> = Vec::new();
-    for (i, ch) in rule_part.char_indices() {
-        if ch == ':' {
-            colon_positions.push(i);
-        }
-    }
-
-    if colon_positions.len() < 2 {
-        return None;
-    }
-
-    let last_colon = colon_positions[colon_positions.len() - 1];
-    let second_last_colon = colon_positions[colon_positions.len() - 2];
-
-    let source_file = &rule_part[..second_last_colon];
-    let line_num_str = &rule_part[second_last_colon + 1..last_colon];
-    let pattern_str = &rule_part[last_colon + 1..];
-
-    let source_line = line_num_str.parse::<u32>().ok();
-    let is_negated = pattern_str.starts_with('!');
-    let is_ignored = !is_negated;
-
-    Some(IgnoreCheckVerboseResult {
-        path: path_part,
-        is_ignored,
-        source_file: if source_file.is_empty() {
-            None
-        } else {
-            Some(source_file.to_string())
-        },
-        source_line,
-        pattern: if pattern_str.is_empty() {
-            None
-        } else {
-            Some(pattern_str.to_string())
-        },
-        is_negated,
-    })
+    results
 }
 
 /// Get common gitignore templates
@@ -565,6 +556,87 @@ mod tests {
         assert!(!rs_result.is_ignored);
     }
 
+    // Regression (finding 91): ignore rules never apply to tracked files.
+    // Canonical git: `git check-ignore -v tracked.log` prints nothing / exits 1,
+    // and `git status --ignored` never lists a tracked file.
+    #[tokio::test]
+    async fn test_tracked_file_is_never_ignored() {
+        let repo = TestRepo::with_initial_commit();
+        // Commit both the ignore rule and a file the rule would otherwise match.
+        repo.create_commit(
+            "Add gitignore and tracked log",
+            &[(".gitignore", "*.log\n"), ("tracked.log", "data\n")],
+        );
+
+        // is_ignored: tracked file must be reported as NOT ignored.
+        let single = is_ignored(repo.path_str(), "tracked.log".to_string())
+            .await
+            .unwrap();
+        assert!(!single, "tracked.log is tracked, so it must not be ignored");
+
+        // Sanity: an untracked *.log file is still ignored.
+        let untracked = is_ignored(repo.path_str(), "untracked.log".to_string())
+            .await
+            .unwrap();
+        assert!(untracked, "untracked.log must still be ignored");
+
+        // check_ignore: tracked file must be NOT ignored.
+        let results = check_ignore(
+            repo.path_str(),
+            vec!["tracked.log".to_string(), "untracked.log".to_string()],
+        )
+        .await
+        .unwrap();
+        let tracked = results.iter().find(|r| r.path == "tracked.log").unwrap();
+        assert!(
+            !tracked.is_ignored,
+            "check_ignore must not ignore tracked.log"
+        );
+        let untracked = results.iter().find(|r| r.path == "untracked.log").unwrap();
+        assert!(
+            untracked.is_ignored,
+            "check_ignore must ignore untracked.log"
+        );
+
+        // check_ignore_verbose: tracked file must be NOT ignored, with no rule details.
+        let verbose = check_ignore_verbose(
+            repo.path_str(),
+            vec!["tracked.log".to_string(), "untracked.log".to_string()],
+        )
+        .await
+        .unwrap();
+        let tracked = verbose.iter().find(|r| r.path == "tracked.log").unwrap();
+        assert!(
+            !tracked.is_ignored,
+            "check_ignore_verbose must not ignore tracked.log"
+        );
+        assert!(tracked.source_file.is_none());
+        assert!(tracked.pattern.is_none());
+        let untracked = verbose.iter().find(|r| r.path == "untracked.log").unwrap();
+        assert!(untracked.is_ignored);
+        assert_eq!(untracked.pattern.as_deref(), Some("*.log"));
+    }
+
+    // Regression (finding 92): non-ASCII pathnames must be reported once, unquoted.
+    #[tokio::test]
+    async fn test_check_ignore_verbose_non_ascii_path() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add gitignore", &[(".gitignore", "caf*\n")]);
+
+        let verbose = check_ignore_verbose(repo.path_str(), vec!["café.log".to_string()])
+            .await
+            .unwrap();
+
+        // Exactly one entry for one input path (no garbled duplicate).
+        assert_eq!(verbose.len(), 1, "expected a single result for one path");
+        let entry = &verbose[0];
+        assert_eq!(entry.path, "café.log", "path must be returned unquoted");
+        assert!(entry.is_ignored);
+        assert_eq!(entry.source_file.as_deref(), Some(".gitignore"));
+        assert_eq!(entry.source_line, Some(1));
+        assert_eq!(entry.pattern.as_deref(), Some("caf*"));
+    }
+
     #[tokio::test]
     async fn test_check_ignore_verbose_empty_list() {
         let repo = TestRepo::with_initial_commit();
@@ -573,48 +645,95 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    #[test]
-    fn test_parse_check_ignore_verbose_line_matching() {
-        let line = ".gitignore:1:*.log\ttest.log";
-        let result = parse_check_ignore_verbose_line(line).unwrap();
-        assert_eq!(result.path, "test.log");
-        assert!(result.is_ignored);
-        assert_eq!(result.source_file.as_deref(), Some(".gitignore"));
-        assert_eq!(result.source_line, Some(1));
-        assert_eq!(result.pattern.as_deref(), Some("*.log"));
-        assert!(!result.is_negated);
+    // Build the NUL-separated output of `git check-ignore -v -n -z` for the given
+    // records of (source, linenum, pattern, path).
+    fn z_output(records: &[(&str, &str, &str, &str)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (source, linenum, pattern, path) in records {
+            for field in [source, linenum, pattern, path] {
+                out.extend_from_slice(field.as_bytes());
+                out.push(0);
+            }
+        }
+        out
     }
 
     #[test]
-    fn test_parse_check_ignore_verbose_line_non_matching() {
-        let line = "::\tsrc/main.rs";
-        let result = parse_check_ignore_verbose_line(line).unwrap();
-        assert_eq!(result.path, "src/main.rs");
-        assert!(!result.is_ignored);
-        assert!(result.source_file.is_none());
-        assert!(result.source_line.is_none());
-        assert!(result.pattern.is_none());
-        assert!(!result.is_negated);
+    fn test_parse_check_ignore_z_matching() {
+        let out = z_output(&[(".gitignore", "1", "*.log", "test.log")]);
+        let results = parse_check_ignore_z(&out);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.path, "test.log");
+        assert!(r.is_ignored);
+        assert_eq!(r.source_file.as_deref(), Some(".gitignore"));
+        assert_eq!(r.source_line, Some(1));
+        assert_eq!(r.pattern.as_deref(), Some("*.log"));
+        assert!(!r.is_negated);
     }
 
     #[test]
-    fn test_parse_check_ignore_verbose_line_negated() {
-        let line = ".gitignore:3:!important.log\timportant.log";
-        let result = parse_check_ignore_verbose_line(line).unwrap();
-        assert_eq!(result.path, "important.log");
-        assert!(!result.is_ignored);
-        assert!(result.is_negated);
-        assert_eq!(result.pattern.as_deref(), Some("!important.log"));
+    fn test_parse_check_ignore_z_non_matching() {
+        let out = z_output(&[("", "", "", "src/main.rs")]);
+        let results = parse_check_ignore_z(&out);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.path, "src/main.rs");
+        assert!(!r.is_ignored);
+        assert!(r.source_file.is_none());
+        assert!(r.source_line.is_none());
+        assert!(r.pattern.is_none());
+        assert!(!r.is_negated);
     }
 
     #[test]
-    fn test_parse_check_ignore_verbose_line_subdirectory_gitignore() {
-        let line = "src/.gitignore:2:*.tmp\tsrc/data.tmp";
-        let result = parse_check_ignore_verbose_line(line).unwrap();
-        assert_eq!(result.path, "src/data.tmp");
-        assert!(result.is_ignored);
-        assert_eq!(result.source_file.as_deref(), Some("src/.gitignore"));
-        assert_eq!(result.source_line, Some(2));
-        assert_eq!(result.pattern.as_deref(), Some("*.tmp"));
+    fn test_parse_check_ignore_z_negated() {
+        let out = z_output(&[(".gitignore", "3", "!important.log", "important.log")]);
+        let results = parse_check_ignore_z(&out);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.path, "important.log");
+        assert!(!r.is_ignored);
+        assert!(r.is_negated);
+        assert_eq!(r.pattern.as_deref(), Some("!important.log"));
+    }
+
+    #[test]
+    fn test_parse_check_ignore_z_multiple_records() {
+        let out = z_output(&[
+            ("src/.gitignore", "2", "*.tmp", "src/data.tmp"),
+            ("", "", "", "keep.txt"),
+        ]);
+        let results = parse_check_ignore_z(&out);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].path, "src/data.tmp");
+        assert!(results[0].is_ignored);
+        assert_eq!(results[0].source_file.as_deref(), Some("src/.gitignore"));
+        assert_eq!(results[0].source_line, Some(2));
+        assert_eq!(results[0].pattern.as_deref(), Some("*.tmp"));
+        assert_eq!(results[1].path, "keep.txt");
+        assert!(!results[1].is_ignored);
+    }
+
+    #[test]
+    fn test_parse_check_ignore_z_non_ascii_path() {
+        // With -z there is no C-quoting: the raw UTF-8 path comes through verbatim.
+        let out = z_output(&[(".gitignore", "3", "caf*", "café.log")]);
+        let results = parse_check_ignore_z(&out);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, "café.log");
+        assert!(results[0].is_ignored);
+        assert_eq!(results[0].pattern.as_deref(), Some("caf*"));
+    }
+
+    #[test]
+    fn test_parse_check_ignore_z_pattern_with_colon() {
+        // A pattern containing ':' must survive (the old colon-splitting parser
+        // mangled it); -z fields are unambiguous.
+        let out = z_output(&[(".gitignore", "5", "foo:bar", "foo:bar")]);
+        let results = parse_check_ignore_z(&out);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].pattern.as_deref(), Some("foo:bar"));
+        assert_eq!(results[0].path, "foo:bar");
     }
 }

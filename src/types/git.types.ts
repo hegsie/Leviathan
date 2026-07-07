@@ -318,6 +318,8 @@ export interface HunkDiffLine {
 
 export interface CommitFileEntry {
   path: string;
+  /** For a renamed/copied file, the previous path; `null` otherwise. */
+  oldPath: string | null;
   status: FileStatus;
   additions: number;
   deletions: number;

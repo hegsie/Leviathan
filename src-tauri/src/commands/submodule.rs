@@ -305,18 +305,19 @@ pub async fn deinit_submodule(
 pub async fn remove_submodule(path: String, submodule_path: String) -> Result<()> {
     let repo_path = Path::new(&path);
 
+    // Mirror canonical git submodule removal: `git submodule deinit -f <path>`
+    // followed by `git rm -f <path>`. This removes the working tree, the
+    // .gitmodules entry, and the index entry, but intentionally LEAVES the
+    // submodule's object store under `.git/modules/<name>` intact so that any
+    // local commits made inside the submodule that were never pushed remain
+    // recoverable. Deleting `.git/modules/<name>` here (as a previous version
+    // did) permanently destroyed those commits with no reflog and no recovery
+    // path — a data-loss bug that canonical git never inflicts.
+
     // Step 1: Deinit the submodule
     run_git_command(repo_path, &["submodule", "deinit", "-f", &submodule_path])?;
 
-    // Step 2: Remove from .git/modules
-    let git_modules_path = repo_path.join(".git").join("modules").join(&submodule_path);
-    if git_modules_path.exists() {
-        std::fs::remove_dir_all(&git_modules_path).map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to remove .git/modules: {}", e))
-        })?;
-    }
-
-    // Step 3: Remove from working tree and index
+    // Step 2: Remove from working tree and index (keeps .git/modules for recovery)
     run_git_command(repo_path, &["rm", "-f", &submodule_path])?;
 
     Ok(())
@@ -531,5 +532,85 @@ mod tests {
         // Remove on nonexistent submodule should fail
         let result = remove_submodule(repo.path_str(), "nonexistent".to_string()).await;
         assert!(result.is_err());
+    }
+
+    /// Run a git command in `dir`, panicking on failure. Enables local-file
+    /// protocol so `submodule add ../path` works in the sandbox.
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let output = create_command("git")
+            .current_dir(dir)
+            .arg("-c")
+            .arg("protocol.file.allow=always")
+            .args(args)
+            .output()
+            .expect("failed to spawn git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Canonical `git rm`-based submodule removal preserves the submodule's
+    /// object store under `.git/modules/<name>`, so unpushed commits made
+    /// inside the submodule remain recoverable. remove_submodule must NOT
+    /// destroy that object store.
+    #[tokio::test]
+    async fn test_remove_submodule_preserves_unpushed_commits() {
+        // Source repository that will be used as the submodule.
+        let source = TestRepo::with_initial_commit();
+
+        // Superproject.
+        let super_repo = TestRepo::with_initial_commit();
+        let super_path = super_repo.path.clone();
+
+        // Add the submodule at deps/lib and commit.
+        let source_url = source.path.to_string_lossy().to_string();
+        git_in(&super_path, &["submodule", "add", &source_url, "deps/lib"]);
+        git_in(&super_path, &["commit", "-m", "add submodule"]);
+
+        // Make a commit inside the submodule that is never pushed.
+        let sub_path = super_path.join("deps").join("lib");
+        git_in(&sub_path, &["config", "user.email", "test@example.com"]);
+        git_in(&sub_path, &["config", "user.name", "Test User"]);
+        std::fs::write(sub_path.join("local.txt"), "local work").unwrap();
+        git_in(&sub_path, &["add", "local.txt"]);
+        git_in(&sub_path, &["commit", "-m", "unpushed local work"]);
+        let unpushed_oid = git_in(&sub_path, &["rev-parse", "HEAD"]);
+
+        // Sanity: the object store exists before removal.
+        let modules_dir = super_path.join(".git").join("modules").join("deps/lib");
+        assert!(
+            modules_dir.exists(),
+            "submodule gitdir should exist before removal"
+        );
+
+        // Remove the submodule.
+        let result = remove_submodule(super_repo.path_str(), "deps/lib".to_string()).await;
+        assert!(
+            result.is_ok(),
+            "remove_submodule failed: {:?}",
+            result.err()
+        );
+
+        // Working tree entry is gone...
+        assert!(
+            !super_path.join("deps").join("lib").exists(),
+            "submodule working tree should be removed"
+        );
+
+        // ...but the object store is preserved and the unpushed commit is
+        // still recoverable (matching canonical `git rm`).
+        assert!(
+            modules_dir.exists(),
+            "remove_submodule destroyed .git/modules — unpushed commits are unrecoverable"
+        );
+        let obj_type = git_in(&modules_dir, &["cat-file", "-t", &unpushed_oid]);
+        assert_eq!(
+            obj_type, "commit",
+            "unpushed submodule commit should remain recoverable after removal"
+        );
     }
 }

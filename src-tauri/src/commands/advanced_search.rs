@@ -39,10 +39,12 @@ pub struct FilteredCommit {
     pub is_merge: bool,
 }
 
-/// Parse a line of git log output formatted as:
-/// `%H|%h|%s|%an|%ae|%at|%cn|%ct|%P`
+/// Parse a line of git log output formatted as [`LOG_FORMAT`], whose fields are
+/// separated by NUL (`%x00`). NUL is used instead of `|` because a commit subject
+/// (`%s`) or an author/committer name can legitimately contain `|`, which would
+/// otherwise shift every subsequent field into the wrong slot.
 fn parse_log_line(line: &str) -> Option<FilteredCommit> {
-    let parts: Vec<&str> = line.splitn(9, '|').collect();
+    let parts: Vec<&str> = line.splitn(9, '\0').collect();
     if parts.len() < 9 {
         return None;
     }
@@ -97,7 +99,7 @@ fn execute_git_log(cmd: &mut Command) -> Result<Vec<FilteredCommit>> {
     Ok(commits)
 }
 
-const LOG_FORMAT: &str = "%H|%h|%s|%an|%ae|%at|%cn|%ct|%P";
+const LOG_FORMAT: &str = "%H%x00%h%x00%s%x00%an%x00%ae%x00%at%x00%cn%x00%ct%x00%P";
 
 /// Filter commits using a rich set of criteria
 ///
@@ -128,7 +130,16 @@ pub async fn filter_commits(
 
     if let Some(ref message) = filter.message {
         cmd.arg(format!("--grep={}", message));
-        cmd.arg("-i");
+        // Match the message literally (like `git log --grep=… -F`); without -F
+        // the query is a regex, so "v1.2" would spuriously match "v1x2".
+        cmd.arg("--fixed-strings");
+        // NOTE: -i is deliberately NOT added here. Canonical git applies -i
+        // globally to ALL header-matching patterns (--grep, --author, --committer)
+        // and defaults to case-sensitive. Adding -i only when a message filter is
+        // present silently made --author/--committer case-insensitive whenever a
+        // message was also supplied, so an unrelated field changed the author
+        // result set. Matching canonical git's default keeps every field
+        // case-sensitive regardless of which other filters are set.
     }
 
     if let Some(ref after_date) = filter.after_date {
@@ -333,6 +344,126 @@ mod tests {
         let commits = result.unwrap();
         assert_eq!(commits.len(), 1);
         assert!(commits[0].message.contains("unique_search_xyz"));
+    }
+
+    #[tokio::test]
+    async fn test_filter_commits_subject_with_pipe() {
+        // Regression (finding 105): a commit subject containing '|' must not shift
+        // author/committer/date fields. Canonical git emits pipes verbatim; the
+        // NUL-separated format parses every field unambiguously.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "feat: support a|b syntax in parser",
+            &[("parser.txt", "content")],
+        );
+
+        let filter = CommitFilter {
+            author: None,
+            committer: None,
+            message: None,
+            after_date: None,
+            before_date: None,
+            path: None,
+            branch: None,
+            min_parents: None,
+            max_parents: None,
+            no_merges: None,
+            first_parent: None,
+        };
+
+        let result = filter_commits(repo.path_str(), filter, Some(1)).await;
+        assert!(result.is_ok());
+        let commits = result.unwrap();
+        assert_eq!(commits.len(), 1);
+        let commit = &commits[0];
+        assert_eq!(commit.message, "feat: support a|b syntax in parser");
+        assert_eq!(commit.author_name, "Test User");
+        assert_eq!(commit.author_email, "test@example.com");
+        assert!(commit.author_date > 0);
+        assert_eq!(commit.committer_name, "Test User");
+        assert!(commit.committer_date > 0);
+        assert_eq!(commit.parent_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_filter_commits_author_case_sensitive_regardless_of_message() {
+        // Regression (finding 110): --author is case-sensitive in canonical git,
+        // and -i is global to all header patterns. The author result set must not
+        // change depending on whether an unrelated message filter is also present.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Second commit", &[("file2.txt", "content")]);
+
+        // Author-only, lowercase: must match nothing (author is "Test User").
+        let author_only = CommitFilter {
+            author: Some("test user".to_string()),
+            committer: None,
+            message: None,
+            after_date: None,
+            before_date: None,
+            path: None,
+            branch: None,
+            min_parents: None,
+            max_parents: None,
+            no_merges: None,
+            first_parent: None,
+        };
+        let r1 = filter_commits(repo.path_str(), author_only, Some(100)).await;
+        assert!(r1.is_ok());
+        assert!(
+            r1.unwrap().is_empty(),
+            "lowercase author must be case-sensitive (0 matches)"
+        );
+
+        // Same lowercase author, now WITH a message filter: adding an unrelated
+        // message filter must not flip the author match to case-insensitive.
+        let author_and_message = CommitFilter {
+            author: Some("test user".to_string()),
+            committer: None,
+            message: Some("Second".to_string()),
+            after_date: None,
+            before_date: None,
+            path: None,
+            branch: None,
+            min_parents: None,
+            max_parents: None,
+            no_merges: None,
+            first_parent: None,
+        };
+        let r2 = filter_commits(repo.path_str(), author_and_message, Some(100)).await;
+        assert!(r2.is_ok());
+        assert!(
+            r2.unwrap().is_empty(),
+            "author case-sensitivity must not depend on the message filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_filter_commits_message_literal_not_regex() {
+        // Regression (finding 108): the message filter must match literally, so
+        // "v1.2" must NOT match a commit whose message is "release v1x2".
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("release v1x2", &[("rel.txt", "content")]);
+
+        let filter = CommitFilter {
+            author: None,
+            committer: None,
+            message: Some("v1.2".to_string()),
+            after_date: None,
+            before_date: None,
+            path: None,
+            branch: None,
+            min_parents: None,
+            max_parents: None,
+            no_merges: None,
+            first_parent: None,
+        };
+
+        let result = filter_commits(repo.path_str(), filter, Some(100)).await;
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap().is_empty(),
+            "literal 'v1.2' must not match 'v1x2'"
+        );
     }
 
     #[tokio::test]
@@ -599,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_parse_log_line_valid() {
-        let line = "abc123def456abc123def456abc123def456abc123|abc123d|feat: add feature|John Doe|john@example.com|1700000000|John Doe|1700000000|parent1 parent2";
+        let line = "abc123def456abc123def456abc123def456abc123\x00abc123d\x00feat: add feature\x00John Doe\x00john@example.com\x001700000000\x00John Doe\x001700000000\x00parent1 parent2";
         let commit = parse_log_line(line);
         assert!(commit.is_some());
         let commit = commit.unwrap();
@@ -617,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_parse_log_line_no_parents() {
-        let line = "abc123|abc1|initial|Author|a@b.com|1000|Author|1000|";
+        let line = "abc123\x00abc1\x00initial\x00Author\x00a@b.com\x001000\x00Author\x001000\x00";
         let commit = parse_log_line(line);
         assert!(commit.is_some());
         let commit = commit.unwrap();
@@ -627,7 +758,8 @@ mod tests {
 
     #[test]
     fn test_parse_log_line_single_parent() {
-        let line = "abc123|abc1|second|Author|a@b.com|1000|Author|1000|deadbeef";
+        let line =
+            "abc123\x00abc1\x00second\x00Author\x00a@b.com\x001000\x00Author\x001000\x00deadbeef";
         let commit = parse_log_line(line);
         assert!(commit.is_some());
         let commit = commit.unwrap();
@@ -644,13 +776,19 @@ mod tests {
 
     #[test]
     fn test_parse_log_line_message_with_pipe() {
-        // The message field is part of splitn(9, '|'), so pipes in parents field
-        // are handled, but the subject (%s) should not contain pipes normally.
-        // This tests that the 9-part split handles it correctly.
-        let line = "abc123|abc1|msg|Author|a@b.com|1000|Committer|1000|p1 p2 p3";
+        // Regression: a commit subject (%s) containing '|' must NOT corrupt any
+        // downstream field. With NUL separators the pipe is preserved verbatim in
+        // the message and every other field parses correctly.
+        let line = "abc123\x00abc1\x00feat: support a|b syntax in parser\x00Dev One\x00dev@example.com\x001783335269\x00Dev One\x001783335269\x00p1 p2 p3";
         let commit = parse_log_line(line);
         assert!(commit.is_some());
         let commit = commit.unwrap();
+        assert_eq!(commit.message, "feat: support a|b syntax in parser");
+        assert_eq!(commit.author_name, "Dev One");
+        assert_eq!(commit.author_email, "dev@example.com");
+        assert_eq!(commit.author_date, 1783335269);
+        assert_eq!(commit.committer_name, "Dev One");
+        assert_eq!(commit.committer_date, 1783335269);
         assert_eq!(commit.parent_count, 3);
     }
 }

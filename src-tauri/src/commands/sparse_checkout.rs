@@ -84,9 +84,16 @@ pub async fn get_sparse_checkout_config(path: String) -> Result<SparseCheckoutCo
 /// Enable sparse checkout
 #[command]
 pub async fn enable_sparse_checkout(path: String, cone_mode: bool) -> Result<SparseCheckoutConfig> {
+    // git >= 2.37 enables cone mode by default for `sparse-checkout init`.
+    // To honor a caller's request for non-cone (glob/pattern) mode we must
+    // pass `--no-cone` explicitly; otherwise git silently enables cone mode
+    // and later glob patterns are rejected with "specify directories rather
+    // than patterns".
     let mut args = vec!["sparse-checkout", "init"];
     if cone_mode {
         args.push("--cone");
+    } else {
+        args.push("--no-cone");
     }
     run_git(&path, &args)?;
     Ok(build_config(&path))
@@ -144,14 +151,22 @@ mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
 
-    /// Check if git supports sparse-checkout (requires git >= 2.25)
+    /// Check if git supports sparse-checkout (requires git >= 2.25).
+    /// Detect by parsing `git --version` rather than probing `--help`
+    /// (which can invoke a man pager and give a misleading non-zero exit,
+    /// causing these tests to silently skip on a fully capable git).
     fn git_supports_sparse_checkout() -> bool {
-        Command::new("git")
-            .args(["sparse-checkout", "list"])
-            .arg("--help")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        let out = match Command::new("git").arg("--version").output() {
+            Ok(o) if o.status.success() => o,
+            _ => return false,
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        // Expected form: "git version 2.43.0"
+        let version = text.split_whitespace().nth(2).unwrap_or("");
+        let mut parts = version.split('.');
+        let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        major > 2 || (major == 2 && minor >= 25)
     }
 
     #[tokio::test]
@@ -192,6 +207,38 @@ mod tests {
         assert!(result.is_ok());
         let config = result.unwrap();
         assert!(config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_enable_sparse_checkout_no_cone_allows_glob_patterns() {
+        if !git_supports_sparse_checkout() {
+            eprintln!("Skipping: git sparse-checkout not supported");
+            return;
+        }
+
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add docs", &[("docs/readme.md", "# Docs")]);
+
+        // Requesting non-cone mode must actually produce non-cone mode.
+        let config = enable_sparse_checkout(repo.path_str(), false)
+            .await
+            .unwrap();
+        assert!(config.enabled);
+        assert!(
+            !config.cone_mode,
+            "requesting cone_mode=false must yield non-cone mode, got cone_mode=true"
+        );
+
+        // In non-cone mode a glob pattern must be accepted (cone mode rejects
+        // it with 'specify directories rather than patterns').
+        let result = set_sparse_checkout_patterns(repo.path_str(), vec!["*.md".to_string()]).await;
+        assert!(
+            result.is_ok(),
+            "glob pattern should be accepted in non-cone mode: {:?}",
+            result.err()
+        );
+        let config = result.unwrap();
+        assert!(config.patterns.iter().any(|p| p.contains("*.md")));
     }
 
     #[tokio::test]

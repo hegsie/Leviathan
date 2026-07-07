@@ -260,6 +260,12 @@ pub async fn create_commit(
     }
     let repo = repo;
 
+    // Run client-side hooks like canonical git does — the git2 commit path
+    // otherwise bypasses them entirely. pre-commit can veto the commit;
+    // commit-msg can veto or rewrite the message.
+    crate::commands::hooks::run_hook_blocking(&repo, "pre-commit", &[], None)?;
+    let message = crate::commands::hooks::run_commit_msg_hook(&repo, &message)?;
+
     let default_signature = repo.signature()?;
 
     // Build author and committer signatures, optionally with custom dates
@@ -331,6 +337,9 @@ pub async fn create_commit(
         }
         commit_oid
     };
+
+    // post-commit runs after the commit is created and never blocks it.
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
 
     let commit = repo.find_commit(commit_oid)?;
     Ok(Commit::from_git2(&commit))
@@ -407,7 +416,35 @@ async fn create_commit_with_git_cli(
 /// This only updates the commit message; the tree and parents remain the same.
 #[command]
 pub async fn amend_commit_message(path: String, message: String) -> Result<Commit> {
+    // libgit2's repo.commit() cannot sign and would strip any existing signature.
+    // When commit.gpgsign is enabled, amend via the CLI so the reworded commit is
+    // re-signed instead of silently emitted unsigned.
+    if should_sign_commit(&path, None)? {
+        let output = crate::utils::create_command("git")
+            .current_dir(&path)
+            .args(["commit", "--amend", "-S", "-m", &message])
+            .output()
+            .map_err(|e| {
+                LeviathanError::OperationFailed(format!("Failed to run git commit --amend: {}", e))
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(LeviathanError::OperationFailed(format!(
+                "Git commit --amend failed: {}",
+                stderr.trim()
+            )));
+        }
+        let repo = git2::Repository::open(Path::new(&path))?;
+        let head_commit = repo.head()?.peel_to_commit()?;
+        return Ok(Commit::from_git2(&head_commit));
+    }
+
     let repo = git2::Repository::open(Path::new(&path))?;
+
+    // git runs pre-commit/commit-msg/post-commit for `git commit --amend` too;
+    // the git2 amend path otherwise bypasses them.
+    crate::commands::hooks::run_hook_blocking(&repo, "pre-commit", &[], None)?;
+    let message = crate::commands::hooks::run_commit_msg_hook(&repo, &message)?;
 
     let head_commit = repo
         .head()?
@@ -432,6 +469,8 @@ pub async fn amend_commit_message(path: String, message: String) -> Result<Commi
         &tree,
         &parent_refs,
     )?;
+
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
 
     let new_commit = repo.find_commit(new_oid)?;
     Ok(Commit::from_git2(&new_commit))
@@ -471,6 +510,9 @@ pub async fn amend_commit(
 
     let repo = git2::Repository::open(Path::new(&path))?;
 
+    // git runs pre-commit for `git commit --amend`; the git2 path bypasses it.
+    crate::commands::hooks::run_hook_blocking(&repo, "pre-commit", &[], None)?;
+
     let head_commit = repo
         .head()?
         .peel_to_commit()
@@ -483,6 +525,8 @@ pub async fn amend_commit(
     // Use the new message or keep the original
     let commit_message =
         message.unwrap_or_else(|| head_commit.message().ok().unwrap_or("").to_string());
+    // commit-msg may veto or rewrite the (possibly reused) message.
+    let commit_message = crate::commands::hooks::run_commit_msg_hook(&repo, &commit_message)?;
 
     // Use new author if reset_author is true, otherwise keep original
     let author = if reset_author.unwrap_or(false) {
@@ -524,6 +568,8 @@ pub async fn amend_commit(
     } else {
         repo.set_head_detached(new_oid)?;
     }
+
+    crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
 
     Ok(AmendResult {
         new_oid: new_oid.to_string(),
@@ -2128,5 +2174,176 @@ mod tests {
             1,
             "a revert commit keeps a single parent"
         );
+    }
+
+    // Finding 100: amend_commit_message must honor commit.gpgsign and re-sign the
+    // reworded commit rather than emit it unsigned (libgit2 cannot sign).
+    #[tokio::test]
+    async fn test_amend_commit_message_signs_when_gpgsign_enabled() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Configure SSH signing; skip if ssh-keygen is unavailable.
+        let keydir = tempfile::TempDir::new().unwrap();
+        let key = keydir.path().join("id");
+        let gen = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f", key.to_str().unwrap(), "-q"])
+            .output();
+        if gen.map(|o| !o.status.success()).unwrap_or(true) {
+            return;
+        }
+        let pubkey = format!("{}.pub", key.to_str().unwrap());
+        for (k, v) in [
+            ("gpg.format", "ssh"),
+            ("user.signingkey", pubkey.as_str()),
+            ("commit.gpgsign", "true"),
+        ] {
+            std::process::Command::new("git")
+                .current_dir(&repo.path)
+                .args(["config", k, v])
+                .output()
+                .unwrap();
+        }
+
+        let commit = amend_commit_message(repo.path_str(), "Reworded and signed".to_string())
+            .await
+            .unwrap();
+        assert_eq!(commit.summary, "Reworded and signed");
+
+        // The reworded commit must carry a signature.
+        let git_repo = repo.repo();
+        let oid = git2::Oid::from_str(&commit.oid).unwrap();
+        assert!(
+            git_repo.extract_signature(&oid, None).is_ok(),
+            "amended commit must be signed when commit.gpgsign=true"
+        );
+    }
+
+    // ---- Hook parity (git2 commit path) ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_create_commit_pre_commit_hook_aborts() {
+        let repo = TestRepo::with_initial_commit();
+        let head_before = repo.head_oid();
+        repo.install_hook("pre-commit", "#!/bin/sh\necho blocked 1>&2\nexit 1\n");
+        repo.create_file("new.txt", "x");
+        repo.stage_file("new.txt");
+
+        let result = create_commit(
+            repo.path_str(),
+            "Should be blocked".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "pre-commit exit 1 must abort the commit");
+        assert!(result.unwrap_err().to_string().contains("blocked"));
+        // HEAD must not have advanced.
+        assert_eq!(repo.head_oid(), head_before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_create_commit_runs_post_commit_hook() {
+        let repo = TestRepo::with_initial_commit();
+        let marker = repo.path.join("post-commit-ran");
+        repo.install_hook(
+            "post-commit",
+            &format!("#!/bin/sh\ntouch \"{}\"\n", marker.display()),
+        );
+        repo.create_file("new.txt", "x");
+        repo.stage_file("new.txt");
+
+        let result = create_commit(
+            repo.path_str(),
+            "With post-commit".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(marker.exists(), "post-commit hook must run after commit");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_create_commit_commit_msg_hook_rewrites() {
+        let repo = TestRepo::with_initial_commit();
+        repo.install_hook(
+            "commit-msg",
+            "#!/bin/sh\nprintf '\\nEdited-by: hook' >> \"$1\"\n",
+        );
+        repo.create_file("new.txt", "x");
+        repo.stage_file("new.txt");
+
+        let commit = create_commit(
+            repo.path_str(),
+            "Base message".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let full = get_commit_message(repo.path_str(), commit.oid)
+            .await
+            .unwrap();
+        assert!(
+            full.contains("Edited-by: hook"),
+            "commit-msg rewrite must be persisted, got: {full:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_amend_commit_pre_commit_hook_aborts() {
+        let repo = TestRepo::with_initial_commit();
+        let head_before = repo.head_oid();
+        repo.install_hook("pre-commit", "#!/bin/sh\nexit 1\n");
+
+        let result = amend_commit(
+            repo.path_str(),
+            Some("new msg".to_string()),
+            None,
+            Some(false),
+        )
+        .await;
+        assert!(result.is_err(), "amend must honor pre-commit");
+        assert_eq!(repo.head_oid(), head_before, "HEAD must not move");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_amend_commit_runs_post_commit_and_commit_msg_hooks() {
+        let repo = TestRepo::with_initial_commit();
+        let marker = repo.path.join("amend-post-commit");
+        repo.install_hook(
+            "post-commit",
+            &format!("#!/bin/sh\ntouch \"{}\"\n", marker.display()),
+        );
+        repo.install_hook("commit-msg", "#!/bin/sh\nprintf '\\ntrailer' >> \"$1\"\n");
+
+        let result = amend_commit(
+            repo.path_str(),
+            Some("Reworded".to_string()),
+            None,
+            Some(false),
+        )
+        .await
+        .unwrap();
+        assert!(marker.exists(), "post-commit must run on amend");
+        let full = get_commit_message(repo.path_str(), result.new_oid)
+            .await
+            .unwrap();
+        assert!(full.contains("trailer"), "commit-msg rewrite must persist");
     }
 }

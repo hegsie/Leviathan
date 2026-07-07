@@ -899,4 +899,99 @@ describe('lv-diff-view', () => {
       expect(statusBadge!.classList.contains('new')).to.be.true;
     });
   });
+
+  // ── Patch construction: no-newline markers and CRLF content ──────────────
+  // Regression tests for hunk/line staging producing patches that byte-match
+  // the index (findings: EOFNL markers and CR stripping).
+  describe('patch construction', () => {
+    async function bareView(): Promise<LvDiffView> {
+      const el = await fixture<LvDiffView>(html`<lv-diff-view></lv-diff-view>`);
+      await el.updateComplete;
+      return el;
+    }
+
+    it('buildHunkPatch keeps the \\r in CRLF content lines', async () => {
+      const el = await bareView();
+      const hunk = makeDiffHunk({
+        header: '@@ -1,2 +1,2 @@',
+        oldStart: 1,
+        oldLines: 2,
+        newStart: 1,
+        newLines: 2,
+        lines: [
+          makeDiffLine({ content: 'ctx\r\n', origin: 'context', oldLineNo: 1, newLineNo: 1 }),
+          makeDiffLine({ content: 'old\r\n', origin: 'deletion', oldLineNo: 2, newLineNo: null }),
+          makeDiffLine({ content: 'new\r\n', origin: 'addition', oldLineNo: null, newLineNo: 2 }),
+        ],
+      });
+      (el as unknown as { file: unknown }).file = makeStatusEntry({ path: 'f.txt' });
+      (el as unknown as { diff: unknown }).diff = makeDiffFile({ path: 'f.txt', hunks: [hunk] });
+
+      const patch = (el as unknown as { buildHunkPatch: (h: DiffHunk) => string }).buildHunkPatch(hunk);
+      const patchLines = patch.split('\n');
+      // \r is preserved (part of the file bytes); only the \n terminator is stripped.
+      expect(patchLines).to.include(' ctx\r');
+      expect(patchLines).to.include('-old\r');
+      expect(patchLines).to.include('+new\r');
+    });
+
+    it('buildSelectedLinesPatch emits "\\ No newline at end of file" markers', async () => {
+      const el = await bareView();
+      // Mirrors libgit2 output for a file whose last line lacks a trailing
+      // newline on both sides: the marker follows the annotated content line.
+      const hunk = makeDiffHunk({
+        header: '@@ -1,3 +1,3 @@',
+        oldStart: 1,
+        oldLines: 3,
+        newStart: 1,
+        newLines: 3,
+        lines: [
+          makeDiffLine({ content: 'line1\n', origin: 'context', oldLineNo: 1, newLineNo: 1 }),
+          makeDiffLine({ content: 'line2\n', origin: 'context', oldLineNo: 2, newLineNo: 2 }),
+          makeDiffLine({ content: 'last', origin: 'deletion', oldLineNo: 3, newLineNo: null }),
+          makeDiffLine({ content: '\n\\ No newline at end of file\n', origin: 'add-eofnl', oldLineNo: null, newLineNo: null }),
+          makeDiffLine({ content: 'CHANGED', origin: 'addition', oldLineNo: null, newLineNo: 3 }),
+          makeDiffLine({ content: '\n\\ No newline at end of file\n', origin: 'del-eofnl', oldLineNo: null, newLineNo: null }),
+        ],
+      });
+      (el as unknown as { file: unknown }).file = makeStatusEntry({ path: 'f.txt' });
+      (el as unknown as { diff: unknown }).diff = makeDiffFile({ path: 'f.txt', hunks: [hunk] });
+      // Select the deletion (index 2) and the addition (index 4).
+      (el as unknown as { selectedLines: Set<string> }).selectedLines = new Set(['0-2', '0-4']);
+
+      const patch = (el as unknown as { buildSelectedLinesPatch: () => string }).buildSelectedLinesPatch();
+
+      // The marker must appear immediately after both the deleted and the added
+      // last line — not be dropped.
+      expect(patch).to.contain('-last\n\\ No newline at end of file\n');
+      expect(patch).to.contain('+CHANGED\n\\ No newline at end of file');
+    });
+
+    it('buildSelectedLinesPatch skips the newline marker of an unselected addition', async () => {
+      const el = await bareView();
+      // Appending a line without a trailing newline: only the new side lacks
+      // the newline. If the addition is not selected, its marker must not leak
+      // into the patch (which would otherwise fail to apply).
+      const hunk = makeDiffHunk({
+        header: '@@ -1,1 +1,2 @@',
+        oldStart: 1,
+        oldLines: 1,
+        newStart: 1,
+        newLines: 2,
+        lines: [
+          makeDiffLine({ content: 'line1\n', origin: 'context', oldLineNo: 1, newLineNo: 1 }),
+          makeDiffLine({ content: 'new', origin: 'addition', oldLineNo: null, newLineNo: 2 }),
+          makeDiffLine({ content: '\n\\ No newline at end of file\n', origin: 'del-eofnl', oldLineNo: null, newLineNo: null }),
+        ],
+      });
+      (el as unknown as { file: unknown }).file = makeStatusEntry({ path: 'f.txt' });
+      (el as unknown as { diff: unknown }).diff = makeDiffFile({ path: 'f.txt', hunks: [hunk] });
+      // Select nothing meaningful — the addition (index 1) is NOT selected.
+      (el as unknown as { selectedLines: Set<string> }).selectedLines = new Set(['0-0']);
+
+      const patch = (el as unknown as { buildSelectedLinesPatch: () => string }).buildSelectedLinesPatch();
+      // No change selected → empty patch, and certainly no stray marker.
+      expect(patch).to.not.contain('No newline at end of file');
+    });
+  });
 });

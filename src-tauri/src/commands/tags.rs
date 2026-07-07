@@ -23,6 +23,43 @@ pub struct TagDetails {
     pub is_signed: bool,
 }
 
+/// Whether a tag object's raw message contains any recognized signature block.
+/// Covers OpenPGP, SSH, and x509 (gpgsm) signatures, matching `git verify-tag`.
+fn message_is_signed(bytes: &[u8]) -> bool {
+    let msg = String::from_utf8_lossy(bytes);
+    msg.contains("-----BEGIN PGP SIGNATURE-----")
+        || msg.contains("-----BEGIN SSH SIGNATURE-----")
+        || msg.contains("-----BEGIN SIGNED MESSAGE-----")
+}
+
+/// Whether tag signing is enabled for the repository (tag.gpgsign = true).
+fn tag_signing_enabled(repo: &git2::Repository) -> bool {
+    repo.config()
+        .and_then(|c| c.get_bool("tag.gpgsign"))
+        .unwrap_or(false)
+}
+
+/// Create a signed annotated tag via the git CLI.
+///
+/// libgit2's `Repository::tag` cannot sign, so honoring tag.gpgsign requires
+/// shelling out. Errors (e.g. no signing key) surface to the user, exactly as
+/// `git tag -s` would refuse.
+fn create_signed_tag_cli(path: &str, name: &str, target: &str, message: &str) -> Result<()> {
+    let output = crate::utils::create_command("git")
+        .current_dir(path)
+        .args(["tag", "-s", "-m", message, name, target])
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git tag: {}", e)))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LeviathanError::OperationFailed(format!(
+            "Failed to create signed tag: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Get all tags
 #[command]
 pub async fn get_tags(path: String) -> Result<Vec<Tag>> {
@@ -85,14 +122,8 @@ pub async fn get_tag_details(path: String, name: String) -> Result<TagDetails> {
 
     // Try to get tag details if it's an annotated tag
     let details = if let Ok(tag) = repo.find_tag(ref_oid) {
-        // Check if tag is signed by looking for PGP signature in the raw message
-        let is_signed = tag
-            .message_bytes()
-            .map(|bytes| {
-                let msg = String::from_utf8_lossy(bytes);
-                msg.contains("-----BEGIN PGP SIGNATURE-----")
-            })
-            .unwrap_or(false);
+        // Check if tag is signed by looking for a signature block in the raw message
+        let is_signed = tag.message_bytes().map(message_is_signed).unwrap_or(false);
 
         TagDetails {
             name,
@@ -147,9 +178,14 @@ pub async fn create_tag(
     let target_obj = repo.find_object(target_oid, None)?;
 
     let (is_annotated, tagger) = if let Some(ref msg) = message {
-        // Create annotated tag
+        // Create annotated tag. libgit2 cannot sign, so when tag.gpgsign is on we
+        // must shell out to `git tag -s` to honor the configured signing.
         let signature = repo.signature()?;
-        repo.tag(&name, &target_obj, &signature, msg, false)?;
+        if tag_signing_enabled(&repo) {
+            create_signed_tag_cli(&path, &name, &target_oid.to_string(), msg)?;
+        } else {
+            repo.tag(&name, &target_obj, &signature, msg, false)?;
+        }
         (
             true,
             Some(Signature {
@@ -205,6 +241,10 @@ pub async fn push_tag(
         format!("refs/tags/{}:refs/tags/{}", name, name)
     };
 
+    // Run pre-push like canonical git — the git2 push path otherwise bypasses
+    // it. A non-zero exit aborts the tag push.
+    crate::commands::hooks::run_pre_push_tag(&repo, remote_name, &name)?;
+
     remote_obj.push(&[&refspec], Some(&mut push_opts))?;
 
     Ok(())
@@ -235,18 +275,21 @@ pub async fn edit_tag_message(path: String, name: String, message: String) -> Re
     // Delete the old tag
     repo.tag_delete(&name)?;
 
-    // Create new tag with updated message
+    // Create new tag with updated message, honoring tag.gpgsign (libgit2 cannot
+    // sign, so fall back to `git tag -s` when signing is enabled).
     let signature = repo.signature()?;
-    let new_tag_oid = repo.tag(&name, &target_obj, &signature, &message, false)?;
+    let new_tag_oid = if tag_signing_enabled(&repo) {
+        create_signed_tag_cli(&path, &name, &target_oid.to_string(), &message)?;
+        repo.refname_to_id(&format!("refs/tags/{}", name))?
+    } else {
+        repo.tag(&name, &target_obj, &signature, &message, false)?
+    };
 
     // Return the updated tag details
     let new_tag = repo.find_tag(new_tag_oid)?;
     let is_signed = new_tag
         .message_bytes()
-        .map(|bytes| {
-            let msg = String::from_utf8_lossy(bytes);
-            msg.contains("-----BEGIN PGP SIGNATURE-----")
-        })
+        .map(message_is_signed)
         .unwrap_or(false);
 
     Ok(TagDetails {
@@ -266,6 +309,37 @@ pub async fn edit_tag_message(path: String, name: String, message: String) -> Re
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    // ---- pre-push hook parity for tag pushes ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_push_tag_pre_push_hook_aborts() {
+        let repo = TestRepo::with_initial_commit();
+        let bare = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(bare.path()).unwrap();
+        repo.add_remote("origin", &bare.path().to_string_lossy());
+        repo.create_lightweight_tag("v1");
+
+        repo.install_hook(
+            "pre-push",
+            "#!/bin/sh\ncat >/dev/null\necho tag-denied 1>&2\nexit 1\n",
+        );
+
+        let result = push_tag(
+            repo.path_str(),
+            "v1".to_string(),
+            Some("origin".to_string()),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "pre-push exit 1 must abort the tag push");
+        assert!(result.unwrap_err().to_string().contains("tag-denied"));
+
+        let bare_repo = git2::Repository::open(bare.path()).unwrap();
+        assert!(bare_repo.refname_to_id("refs/tags/v1").is_err());
+    }
 
     #[tokio::test]
     async fn test_get_tags_empty() {
@@ -540,5 +614,102 @@ mod tests {
 
         // Target should still point to the same commit
         assert_eq!(result.target_oid, head_oid.to_string());
+    }
+
+    #[test]
+    fn test_message_is_signed_formats() {
+        assert!(message_is_signed(
+            b"msg\n-----BEGIN PGP SIGNATURE-----\n...\n"
+        ));
+        assert!(message_is_signed(
+            b"msg\n-----BEGIN SSH SIGNATURE-----\n...\n"
+        ));
+        assert!(message_is_signed(
+            b"msg\n-----BEGIN SIGNED MESSAGE-----\n...\n"
+        ));
+        assert!(!message_is_signed(b"just a plain tag message"));
+    }
+
+    /// Configure the repo for SSH tag signing. Returns false (test should skip)
+    /// when ssh-keygen is unavailable.
+    fn setup_ssh_signing(repo: &TestRepo, keydir: &std::path::Path) -> bool {
+        let key = keydir.join("id");
+        let gen = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f", key.to_str().unwrap(), "-q"])
+            .output();
+        if gen.map(|o| !o.status.success()).unwrap_or(true) {
+            return false;
+        }
+        let pubkey = format!("{}.pub", key.to_str().unwrap());
+        let cfg = |k: &str, v: &str| {
+            std::process::Command::new("git")
+                .current_dir(&repo.path)
+                .args(["config", k, v])
+                .output()
+                .unwrap();
+        };
+        cfg("gpg.format", "ssh");
+        cfg("user.signingkey", &pubkey);
+        cfg("tag.gpgsign", "true");
+        true
+    }
+
+    // Finding 99: with tag.gpgsign=true, app-created annotated tags must be signed.
+    #[tokio::test]
+    async fn test_create_tag_signs_when_tag_gpgsign_enabled() {
+        let repo = TestRepo::with_initial_commit();
+        let keydir = tempfile::TempDir::new().unwrap();
+        if !setup_ssh_signing(&repo, keydir.path()) {
+            return; // ssh-keygen unavailable
+        }
+
+        create_tag(
+            repo.path_str(),
+            "v1.0.0".to_string(),
+            None,
+            Some("Signed release".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let details = get_tag_details(repo.path_str(), "v1.0.0".to_string())
+            .await
+            .unwrap();
+        assert!(
+            details.is_signed,
+            "annotated tag must be signed when tag.gpgsign=true"
+        );
+    }
+
+    // Finding 99: editing a tag message must also re-sign when tag.gpgsign=true.
+    #[tokio::test]
+    async fn test_edit_tag_message_signs_when_tag_gpgsign_enabled() {
+        let repo = TestRepo::with_initial_commit();
+        let keydir = tempfile::TempDir::new().unwrap();
+        if !setup_ssh_signing(&repo, keydir.path()) {
+            return; // ssh-keygen unavailable
+        }
+
+        create_tag(
+            repo.path_str(),
+            "v1.0.0".to_string(),
+            None,
+            Some("Original".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let details = edit_tag_message(
+            repo.path_str(),
+            "v1.0.0".to_string(),
+            "Updated signed".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(details.message, Some("Updated signed".to_string()));
+        assert!(
+            details.is_signed,
+            "edited tag must be signed when tag.gpgsign=true"
+        );
     }
 }

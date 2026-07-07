@@ -124,30 +124,7 @@ pub async fn get_cleanup_candidates(
             .ok()
             .and_then(|u| u.name().ok().flatten().map(|n| n.to_string()));
 
-        let ahead_behind = if let Ok(upstream_branch) = branch.upstream() {
-            if let Some(upstream_oid) = upstream_branch.get().target() {
-                repo.graph_ahead_behind(branch_oid, upstream_oid)
-                    .ok()
-                    .map(|(ahead, behind)| AheadBehind { ahead, behind })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         let protected = is_protected(&name);
-
-        // Check if merged: HEAD is a descendant of the branch commit
-        let is_merged = repo
-            .graph_descendant_of(head_oid, branch_oid)
-            .unwrap_or(false);
-
-        // Check if stale
-        let is_stale = stale_days > 0
-            && last_commit_timestamp
-                .map(|ts| ts < stale_threshold)
-                .unwrap_or(false);
 
         // Check if upstream is gone
         let is_gone = {
@@ -163,6 +140,41 @@ pub async fn get_cleanup_candidates(
             // Gone if upstream is configured but branch.upstream() fails
             has_merge && has_remote && branch.upstream().is_err()
         };
+
+        let ahead_behind = if let Ok(upstream_branch) = branch.upstream() {
+            if let Some(upstream_oid) = upstream_branch.get().target() {
+                repo.graph_ahead_behind(branch_oid, upstream_oid)
+                    .ok()
+                    .map(|(ahead, behind)| AheadBehind { ahead, behind })
+            } else {
+                None
+            }
+        } else if is_gone {
+            // Upstream was deleted, so ahead/behind relative to it is
+            // impossible. Measure divergence from HEAD instead: a gone branch
+            // with commits not in HEAD is exactly what `git branch -d` refuses
+            // as "not fully merged", so the UI must be able to flag it as risky
+            // (unpushed commits) rather than silently "safe".
+            repo.graph_ahead_behind(branch_oid, head_oid)
+                .ok()
+                .map(|(ahead, behind)| AheadBehind { ahead, behind })
+        } else {
+            None
+        };
+
+        // Check if merged: HEAD is a descendant of the branch commit, or the
+        // branch points at the exact same commit as HEAD (git treats a branch
+        // whose tip equals HEAD as merged — `git branch --merged` lists it).
+        let is_merged = branch_oid == head_oid
+            || repo
+                .graph_descendant_of(head_oid, branch_oid)
+                .unwrap_or(false);
+
+        // Check if stale
+        let is_stale = stale_days > 0
+            && last_commit_timestamp
+                .map(|ts| ts < stale_threshold)
+                .unwrap_or(false);
 
         let base = |category: &str| CleanupCandidate {
             name: name.clone(),
@@ -274,6 +286,78 @@ mod tests {
         assert!(
             !candidates.iter().any(|c| c.category == "stale"),
             "No stale candidates when stale_days=0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_cleanup_candidates_branch_at_head_is_merged() {
+        // Finding 19: a branch pointing at the same commit as HEAD is merged.
+        // `git branch --merged` lists it and `git branch -d` deletes it, but
+        // graph_descendant_of(head, branch) returns false for equal OIDs.
+        let repo = TestRepo::with_initial_commit();
+        // Create branches at HEAD without advancing main.
+        repo.create_branch("b1");
+        repo.create_branch("b2");
+
+        let result = get_cleanup_candidates(repo.path_str(), Some(0)).await;
+        assert!(result.is_ok());
+        let candidates = result.unwrap();
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.name == "b1" && c.category == "merged"),
+            "Branch b1 at HEAD should be a merged candidate (git branch --merged lists it)"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.name == "b2" && c.category == "merged"),
+            "Branch b2 at HEAD should be a merged candidate (git branch --merged lists it)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_cleanup_candidates_gone_branch_reports_unpushed_commits() {
+        // Finding 12: a branch whose upstream was deleted and which contains
+        // commits not in HEAD is exactly the case git protects (`git branch -d`
+        // refuses "not fully merged"). The backend must compute ahead relative
+        // to HEAD for gone branches so the UI flags them as risky, not merged.
+        let repo = TestRepo::with_initial_commit();
+
+        // Local branch "feature" configured to track origin/feature, but with
+        // NO remote-tracking ref present (simulating the remote branch being
+        // deleted and pruned) — so branch.upstream() fails ("gone" upstream).
+        repo.create_branch("feature");
+        {
+            let git_repo = repo.repo();
+            let mut config = git_repo.config().expect("config");
+            config
+                .set_str("branch.feature.remote", "origin")
+                .expect("set remote");
+            config
+                .set_str("branch.feature.merge", "refs/heads/feature")
+                .expect("set merge");
+        }
+        // Advance "feature" by 2 commits not contained in HEAD (main).
+        repo.checkout_branch("feature");
+        repo.create_commit("wip 1", &[("wip1.txt", "one")]);
+        repo.create_commit("wip 2", &[("wip2.txt", "two")]);
+        repo.checkout_branch("main");
+
+        let result = get_cleanup_candidates(repo.path_str(), Some(0)).await;
+        assert!(result.is_ok());
+        let candidates = result.unwrap();
+        let gone = candidates
+            .iter()
+            .find(|c| c.name == "feature" && c.category == "gone")
+            .expect("feature should be a gone candidate");
+        let ab = gone
+            .ahead_behind
+            .as_ref()
+            .expect("gone branch must report ahead/behind relative to HEAD");
+        assert_eq!(
+            ab.ahead, 2,
+            "gone branch with 2 unpushed commits must report ahead=2 so the UI flags it as risky"
         );
     }
 
