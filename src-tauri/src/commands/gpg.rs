@@ -152,15 +152,25 @@ fn expand_tilde(p: &str) -> String {
     p.to_string()
 }
 
-/// Whether a configured SSH signing key is usable: either a literal public key
-/// ("ssh-..." or "key::...") or a path to an existing key file. SSH signing does
-/// not involve the gpg binary at all.
+/// Whether `key` is an inline OpenSSH signing-key literal (any key type git
+/// accepts for `user.signingkey` when `gpg.format=ssh`), as opposed to a path to
+/// a key file. Single source of truth for SSH key-shape detection, shared with
+/// `unified_profiles::detect_gpg_format` so the two can't drift.
+pub(crate) fn is_ssh_literal_key(key: &str) -> bool {
+    const SSH_PREFIXES: &[&str] = &["ssh-", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-", "key::"];
+    let key = key.trim();
+    SSH_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
+/// Whether a configured SSH signing key is usable: either an inline public key
+/// literal (see `is_ssh_literal_key`) or a path to an existing key file. SSH
+/// signing does not involve the gpg binary at all.
 fn ssh_key_is_usable(key: &str) -> bool {
     let key = key.trim();
     if key.is_empty() {
         return false;
     }
-    if key.starts_with("ssh-") || key.starts_with("key::") {
+    if is_ssh_literal_key(key) {
         return true;
     }
     Path::new(&expand_tilde(key)).exists()
@@ -982,6 +992,42 @@ mod tests {
         assert!(
             status.can_sign,
             "a literal SSH public key must be reported as usable"
+        );
+    }
+
+    #[test]
+    fn test_is_ssh_literal_key_covers_all_shapes() {
+        assert!(is_ssh_literal_key("ssh-ed25519 AAAA..."));
+        assert!(is_ssh_literal_key("ssh-rsa AAAA..."));
+        assert!(is_ssh_literal_key("ecdsa-sha2-nistp256 AAAA..."));
+        assert!(is_ssh_literal_key("sk-ssh-ed25519@openssh.com AAAA..."));
+        assert!(is_ssh_literal_key(
+            "sk-ecdsa-sha2-nistp256@openssh.com AAAA..."
+        ));
+        assert!(is_ssh_literal_key("key::ssh-ed25519 AAAA..."));
+        assert!(!is_ssh_literal_key("ABCDEF1234567890")); // OpenPGP key id
+        assert!(!is_ssh_literal_key("/home/me/.ssh/id.pub")); // a path, not a literal
+    }
+
+    #[tokio::test]
+    async fn test_get_signing_status_ecdsa_literal_key() {
+        // An inline ECDSA SSH key must be reported usable, not misread as a path.
+        let repo = TestRepo::with_initial_commit();
+        run_git_command(&repo.path, &["config", "gpg.format", "ssh"]).unwrap();
+        run_git_command(
+            &repo.path,
+            &[
+                "config",
+                "user.signingkey",
+                "ecdsa-sha2-nistp256 AAAAE2ECDSA",
+            ],
+        )
+        .unwrap();
+
+        let status = get_signing_status(repo.path_str()).await.unwrap();
+        assert!(
+            status.can_sign,
+            "an inline ECDSA SSH public key must be reported as usable"
         );
     }
 

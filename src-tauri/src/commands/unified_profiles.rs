@@ -575,10 +575,9 @@ pub async fn unassign_unified_profile_from_repository(path: String) -> Result<()
 /// should be used (and any stale local `gpg.format` cleared).
 fn detect_gpg_format(signing_key: &str) -> Option<&'static str> {
     let key = signing_key.trim();
-    // Mirrors the SSH key-shape prefixes git accepts for `user.signingkey`
-    // when `gpg.format=ssh`. Keep in sync with gpg.rs::ssh_key_is_usable.
-    const SSH_PREFIXES: &[&str] = &["ssh-", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-", "key::"];
-    if SSH_PREFIXES.iter().any(|p| key.starts_with(p)) || key.ends_with(".pub") {
+    // Reuse gpg.rs's single source of truth for SSH key-shape detection, plus a
+    // `.pub` path (a public-key file also implies ssh format).
+    if crate::commands::gpg::is_ssh_literal_key(key) || key.ends_with(".pub") {
         Some("ssh")
     } else {
         None
