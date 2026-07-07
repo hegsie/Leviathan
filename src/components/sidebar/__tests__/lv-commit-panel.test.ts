@@ -719,4 +719,115 @@ describe('lv-commit-panel', () => {
       }
     });
   });
+
+  // ── AI vibe-check / split analysis feedback ─────────────────────────────
+  describe('AI analysis feedback', () => {
+    it('handleVibeCheck surfaces an error and resets loading on failure', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as {
+        handleVibeCheck: () => Promise<void>;
+        isAnalyzing: boolean;
+        generationError: string | null;
+      };
+      mockInvoke = async (command: string) => {
+        if (command === 'analyze_staged_changes') throw new Error('vibe boom');
+        return null;
+      };
+
+      await internal.handleVibeCheck();
+
+      expect(internal.isAnalyzing).to.be.false; // not stuck
+      expect(internal.generationError).to.contain('vibe boom');
+    });
+
+    it('handleSuggestSplits surfaces an error and resets loading on failure', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as {
+        handleSuggestSplits: () => Promise<void>;
+        isAnalyzingSplit: boolean;
+        generationError: string | null;
+      };
+      mockInvoke = async (command: string) => {
+        if (command === 'suggest_commit_splits') throw new Error('split boom');
+        return null;
+      };
+
+      await internal.handleSuggestSplits();
+
+      expect(internal.isAnalyzingSplit).to.be.false; // not stuck
+      expect(internal.generationError).to.contain('split boom');
+    });
+
+    it('handleSuggestSplits gives feedback when no split is needed', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as {
+        handleSuggestSplits: () => Promise<void>;
+        isAnalyzingSplit: boolean;
+        generationError: string | null;
+      };
+      mockInvoke = async (command: string) => {
+        if (command === 'suggest_commit_splits') {
+          return { shouldSplit: false, groups: [], explanation: 'cohesive' };
+        }
+        return null;
+      };
+
+      await internal.handleSuggestSplits();
+
+      // Success path: no error, loading cleared. (Toast feedback is emitted for
+      // the "no split needed" case.)
+      expect(internal.isAnalyzingSplit).to.be.false;
+      expect(internal.generationError).to.be.null;
+    });
+
+    it('reloads the author identity on repository-refresh (e.g. after a profile is applied)', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as { cachedAuthor: string };
+
+      // Simulate applying a profile that rewrote the repo git identity.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_user_identity') {
+          return { name: 'New Identity', email: 'new@example.com' };
+        }
+        return null;
+      };
+
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(internal.cachedAuthor).to.equal('New Identity');
+    });
+
+    it('handleStageGroup isolates the group by unstaging every other staged file', async () => {
+      const el = await renderCommitPanel();
+      const internal = el as unknown as {
+        handleStageGroup: (files: string[]) => Promise<void>;
+      };
+      // The index has the group's files, another group's file (c.ts), AND a
+      // staged file in no suggested group (z.ts). All non-group files must be
+      // unstaged so the commit is truly isolated.
+      mockInvoke = async (command: string) => {
+        if (command === 'get_status') {
+          return [
+            { path: 'a.ts', status: 'modified', isStaged: true, isConflicted: false },
+            { path: 'b.ts', status: 'modified', isStaged: true, isConflicted: false },
+            { path: 'c.ts', status: 'modified', isStaged: true, isConflicted: false },
+            { path: 'z.ts', status: 'modified', isStaged: true, isConflicted: false },
+            { path: 'u.ts', status: 'modified', isStaged: false, isConflicted: false },
+          ];
+        }
+        return null;
+      };
+
+      invokeHistory.length = 0;
+      await internal.handleStageGroup(['a.ts', 'b.ts']);
+
+      const unstage = invokeHistory.find(h => h.command === 'unstage_files');
+      const stage = invokeHistory.find(h => h.command === 'stage_files');
+      expect(unstage, 'unstages all other staged files').to.exist;
+      expect((unstage!.args as { paths: string[] }).paths).to.deep.equal(['c.ts', 'z.ts']);
+      expect(stage, 'stages this group').to.exist;
+      expect((stage!.args as { paths: string[] }).paths).to.deep.equal(['a.ts', 'b.ts']);
+    });
+  });
 });

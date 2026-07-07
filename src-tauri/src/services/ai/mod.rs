@@ -79,7 +79,7 @@ impl AiProviderType {
             AiProviderType::Ollama => "llama3.2",
             AiProviderType::LmStudio => "local-model",
             AiProviderType::OpenAi => "gpt-4o-mini",
-            AiProviderType::Anthropic => "claude-sonnet-4-20250514",
+            AiProviderType::Anthropic => "claude-haiku-4-5",
             AiProviderType::GithubCopilot => "gpt-4o",
             AiProviderType::GoogleGemini => "gemini-2.0-flash",
             AiProviderType::LocalInference => "local",
@@ -733,13 +733,17 @@ impl AiService {
             }
         }
 
-        // Fall back to any other available provider
-        for (pt, provider) in &self.providers {
-            if *pt == AiProviderType::LocalInference {
+        // Fall back to any other available provider, in a deterministic order.
+        // Iterating `self.providers` (a HashMap) directly would pick an
+        // unpredictable provider across runs when several have keys configured.
+        for pt in AiProviderType::all() {
+            if pt == AiProviderType::LocalInference {
                 continue; // Already checked above
             }
-            if provider.is_available().await {
-                return Some((provider.as_ref(), *pt));
+            if let Some(provider) = self.providers.get(&pt) {
+                if provider.is_available().await {
+                    return Some((provider.as_ref(), pt));
+                }
             }
         }
 

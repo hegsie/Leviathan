@@ -44,10 +44,24 @@ fn tag_signing_enabled(repo: &git2::Repository) -> bool {
 /// libgit2's `Repository::tag` cannot sign, so honoring tag.gpgsign requires
 /// shelling out. Errors (e.g. no signing key) surface to the user, exactly as
 /// `git tag -s` would refuse.
-fn create_signed_tag_cli(path: &str, name: &str, target: &str, message: &str) -> Result<()> {
+fn create_signed_tag_cli(
+    path: &str,
+    name: &str,
+    target: &str,
+    message: &str,
+    force: bool,
+) -> Result<()> {
+    // `force` (`-f`) is only for editing an existing tag in place (atomic
+    // replace). Creating a tag must NOT force, so a duplicate name errors just
+    // like the unsigned path and canonical `git tag`.
+    let mut args = vec!["tag", "-s"];
+    if force {
+        args.push("-f");
+    }
+    args.extend(["-m", message, name, target]);
     let output = crate::utils::create_command("git")
         .current_dir(path)
-        .args(["tag", "-s", "-m", message, name, target])
+        .args(&args)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git tag: {}", e)))?;
     if !output.status.success() {
@@ -182,7 +196,7 @@ pub async fn create_tag(
         // must shell out to `git tag -s` to honor the configured signing.
         let signature = repo.signature()?;
         if tag_signing_enabled(&repo) {
-            create_signed_tag_cli(&path, &name, &target_oid.to_string(), msg)?;
+            create_signed_tag_cli(&path, &name, &target_oid.to_string(), msg, false)?;
         } else {
             repo.tag(&name, &target_obj, &signature, msg, false)?;
         }
@@ -250,8 +264,9 @@ pub async fn push_tag(
     Ok(())
 }
 
-/// Edit an annotated tag's message
-/// This works by deleting the old tag and creating a new one with the updated message
+/// Edit an annotated tag's message.
+/// The tag is overwritten in place (force) so the operation is atomic: a signing
+/// failure can't leave the old tag deleted and unrecoverable (tags have no reflog).
 #[command]
 pub async fn edit_tag_message(path: String, name: String, message: String) -> Result<TagDetails> {
     let repo = git2::Repository::open(Path::new(&path))?;
@@ -272,17 +287,18 @@ pub async fn edit_tag_message(path: String, name: String, message: String) -> Re
     let target_oid = tag.target_id();
     let target_obj = repo.find_object(target_oid, None)?;
 
-    // Delete the old tag
-    repo.tag_delete(&name)?;
-
-    // Create new tag with updated message, honoring tag.gpgsign (libgit2 cannot
-    // sign, so fall back to `git tag -s` when signing is enabled).
+    // Replace the tag in place atomically. We do NOT delete the old tag first:
+    // annotated tags have no reflog, so a failure (e.g. signing refused) after
+    // deletion would be unrecoverable data loss. The force flag / `git tag -f`
+    // overwrites the existing tag only once the replacement is successfully
+    // created, honoring tag.gpgsign (libgit2 cannot sign, so fall back to
+    // `git tag -s` when signing is enabled).
     let signature = repo.signature()?;
     let new_tag_oid = if tag_signing_enabled(&repo) {
-        create_signed_tag_cli(&path, &name, &target_oid.to_string(), &message)?;
+        create_signed_tag_cli(&path, &name, &target_oid.to_string(), &message, true)?;
         repo.refname_to_id(&format!("refs/tags/{}", name))?
     } else {
-        repo.tag(&name, &target_obj, &signature, &message, false)?
+        repo.tag(&name, &target_obj, &signature, &message, true)?
     };
 
     // Return the updated tag details
@@ -560,6 +576,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fetched.message, Some("Updated message".to_string()));
+    }
+
+    // Editing must be atomic: the annotated tag must never be deleted before
+    // its replacement exists (tags have no reflog, so a failed re-create would
+    // be unrecoverable). Verify the tag survives, keeps its target, and carries
+    // the new message.
+    #[tokio::test]
+    async fn test_edit_tag_message_is_atomic() {
+        let repo = TestRepo::with_initial_commit();
+        let head_oid = repo.head_oid();
+
+        create_tag(
+            repo.path_str(),
+            "v1.0.0".to_string(),
+            None,
+            Some("Original message".to_string()),
+        )
+        .await
+        .unwrap();
+
+        edit_tag_message(
+            repo.path_str(),
+            "v1.0.0".to_string(),
+            "Updated message".to_string(),
+        )
+        .await
+        .unwrap();
+
+        // The tag reference must still exist after the edit.
+        let git_repo = repo.repo();
+        let ref_oid = git_repo
+            .refname_to_id("refs/tags/v1.0.0")
+            .expect("tag must still exist after editing its message");
+        let tag = git_repo
+            .find_tag(ref_oid)
+            .expect("tag must still be an annotated tag");
+
+        // It must still point at the original target commit...
+        assert_eq!(tag.target_id(), head_oid);
+        // ...and carry the new message.
+        assert_eq!(tag.message().unwrap(), Some("Updated message"));
     }
 
     #[tokio::test]

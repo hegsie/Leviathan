@@ -828,8 +828,18 @@ pub async fn list_bitbucket_issues(
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch issues: {}", e)))?;
 
     if !response.status().is_success() {
-        // Issues might not be enabled, return empty list
-        return Ok(vec![]);
+        // A 404 means the issue tracker is not enabled for this repo — treat as empty.
+        // Other failures (401/403/500…) are real errors and must be surfaced, not
+        // silently swallowed as "no issues".
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(vec![]);
+        }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "Bitbucket API error {}: {}",
+            status, body
+        )));
     }
 
     #[derive(Deserialize)]
@@ -1093,8 +1103,18 @@ pub async fn list_bitbucket_pipelines(
         })?;
 
     if !response.status().is_success() {
-        // Pipelines might not be enabled
-        return Ok(vec![]);
+        // A 404 means Pipelines is not enabled for this repo — treat as empty.
+        // Other failures (401/403/500…) are real errors and must be surfaced, not
+        // silently swallowed as "no pipelines".
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(vec![]);
+        }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "Bitbucket API error {}: {}",
+            status, body
+        )));
     }
 
     #[derive(Deserialize)]

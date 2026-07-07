@@ -841,4 +841,42 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
   });
+
+  describe('handleRefresh tab-switch race', () => {
+    it('does not write refreshed data into a different tab if the user switches during the IPC await', async () => {
+      repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+      repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+      repositoryStore.getState().setActiveIndex(0);
+
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+
+        // Defer the open_repository resolution so we can switch tabs mid-flight.
+        let resolveOpen: (v: unknown) => void = () => {};
+        mockResponses['open_repository'] = () =>
+          new Promise((res) => {
+            resolveOpen = res;
+          });
+
+        const refreshPromise = (el as any).handleRefresh();
+        await new Promise((r) => setTimeout(r, 0));
+
+        // User switches to repo B while repo A's refresh is still in flight.
+        repositoryStore.getState().setActiveIndex(1);
+
+        // Repo A's fetch now resolves with (stale-for-B) repo A data.
+        resolveOpen(mockRepo('/repo/a', 'a-refreshed'));
+        await refreshPromise;
+
+        // Repo B's tab slot must still hold repo B — not repo A's identity.
+        const repoB = repositoryStore.getState().openRepositories[1];
+        expect(repoB.repository.path).to.equal('/repo/b');
+        expect(repoB.repository.name).to.equal('b');
+      } finally {
+        el.remove();
+      }
+    });
+  });
 });
