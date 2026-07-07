@@ -9,11 +9,25 @@ import { expect, fixture, html } from '@open-wc/testing';
 let failingCommands: Set<string> = new Set();
 let cleanableEntries: unknown[] = [];
 let lastCleanFilesArgs: Record<string, unknown> | null = null;
+// Controls the result of the app's showConfirm() dialog (plugin-dialog's
+// confirm() routes through `plugin:dialog|message` and treats a truthy return
+// as "confirmed").
+let confirmResult = true;
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
+
+  if (
+    command === 'plugin:dialog|message' ||
+    command === 'plugin:dialog|confirm' ||
+    command === 'plugin:dialog|ask'
+  ) {
+    // plugin-dialog's confirm() resolves true only when the command returns the
+    // OK button label ('Ok'); anything else is treated as declined.
+    return confirmResult ? 'Ok' : 'Cancel';
+  }
 
   if (failingCommands.has(command)) {
     throw { code: 'COMMAND_ERROR', message: 'Permission denied' };
@@ -45,6 +59,7 @@ describe('lv-clean-dialog', () => {
     failingCommands = new Set();
     cleanableEntries = [];
     lastCleanFilesArgs = null;
+    confirmResult = true;
     const state = uiStore.getState();
     state.toasts.forEach(t => state.removeToast(t.id));
   });
@@ -123,52 +138,42 @@ describe('lv-clean-dialog', () => {
     cleanableEntries = [
       { path: 'vendor/', isDirectory: true, isIgnored: false, isNestedRepo: true, size: null },
     ];
-    const originalConfirm = window.confirm;
-    window.confirm = () => true;
+    confirmResult = true;
 
-    try {
-      const el = await fixture<LvCleanDialog>(
-        html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
-      );
-      await waitForEntries(el);
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    await waitForEntries(el);
 
-      // User explicitly opts into deleting the nested repo.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (el as any).selectedPaths = new Set(['vendor/']);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (el as any).handleClean();
+    // User explicitly opts into deleting the nested repo.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['vendor/']);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
 
-      expect(lastCleanFilesArgs).to.not.be.null;
-      expect(lastCleanFilesArgs!.forceNested).to.be.true;
-    } finally {
-      window.confirm = originalConfirm;
-    }
+    expect(lastCleanFilesArgs).to.not.be.null;
+    expect(lastCleanFilesArgs!.forceNested).to.be.true;
   });
 
   it('aborts the clean when the nested-repo confirmation is declined', async () => {
     cleanableEntries = [
       { path: 'vendor/', isDirectory: true, isIgnored: false, isNestedRepo: true, size: null },
     ];
-    const originalConfirm = window.confirm;
-    window.confirm = () => false;
+    confirmResult = false;
 
-    try {
-      const el = await fixture<LvCleanDialog>(
-        html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
-      );
-      await waitForEntries(el);
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    await waitForEntries(el);
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (el as any).selectedPaths = new Set(['vendor/']);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (el as any).handleClean();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['vendor/']);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
 
-      // Declining must not invoke clean_files at all.
-      expect(lastCleanFilesArgs).to.be.null;
-      expect(el.open).to.be.true;
-    } finally {
-      window.confirm = originalConfirm;
-    }
+    // Declining must not invoke clean_files at all.
+    expect(lastCleanFilesArgs).to.be.null;
+    expect(el.open).to.be.true;
   });
 
   it('passes forceNested=false for ordinary (non-nested) selections', async () => {

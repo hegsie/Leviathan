@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { CleanEntry } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 
 @customElement('lv-clean-dialog')
 export class LvCleanDialog extends LitElement {
@@ -436,10 +437,14 @@ export class LvCleanDialog extends LitElement {
     );
     if (nestedRepos.length > 0) {
       const names = nestedRepos.map(e => e.path).join(', ');
-      const confirmed = window.confirm(
+      const confirmed = await showConfirm(
+        nestedRepos.length === 1
+          ? 'Delete Nested Repository'
+          : 'Delete Nested Repositories',
         `${nestedRepos.length === 1 ? 'A nested git repository' : 'Nested git repositories'} ` +
           `(${names}) will be permanently deleted, including all its history. ` +
-          `This cannot be undone. Continue?`
+          `This cannot be undone. Continue?`,
+        'warning'
       );
       if (!confirmed) return;
     }

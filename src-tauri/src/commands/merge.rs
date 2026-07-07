@@ -122,11 +122,24 @@ pub async fn merge(
         // state so the user isn't stuck with a half-merged repo.
         repo.merge(&[&annotated_commit], None, None)?;
 
-        let result = (|| -> Result<()> {
-            if repo.index()?.has_conflicts() {
-                return Err(LeviathanError::MergeConflict);
-            }
+        // A conflict is the expected "user must resolve" path; the UI drives a
+        // conflict-resolution flow that needs MERGE_HEAD intact (and
+        // `abort_merge` to undo), so return before any cleanup.
+        if repo.index()?.has_conflicts() {
+            return Err(LeviathanError::MergeConflict);
+        }
 
+        // git runs pre-merge-commit before creating the automatic merge commit,
+        // but a non-zero exit does NOT abort the merge — git leaves
+        // MERGE_HEAD/MERGE_MSG in place ("Not committing merge; use 'git commit'
+        // to complete the merge"). So on a veto, return WITHOUT cleanup_state,
+        // keeping the merge resumable via commit_merge and abortable via
+        // abort_merge. (A squash merge records no merge commit, so no hook.)
+        if !squash.unwrap_or(false) {
+            crate::commands::hooks::run_hook_blocking(&repo, "pre-merge-commit", &[], None)?;
+        }
+
+        let result = (|| -> Result<()> {
             let signature = repo.signature()?;
             let head = repo.head()?.peel_to_commit()?;
             let tree_oid = repo.index()?.write_tree()?;
@@ -148,10 +161,6 @@ pub async fn merge(
                     &[&head],
                 )?;
             } else {
-                // git runs pre-merge-commit before creating an automatic merge
-                // commit; a non-zero exit aborts the merge (blocking).
-                crate::commands::hooks::run_hook_blocking(&repo, "pre-merge-commit", &[], None)?;
-
                 let source_commit = repo.find_commit(annotated_commit.id())?;
                 repo.commit(
                     Some("HEAD"),
@@ -168,19 +177,11 @@ pub async fn merge(
             Ok(())
         })();
 
-        // MergeConflict is the expected "user must resolve" path; the UI
-        // drives a conflict-resolution flow that needs MERGE_HEAD intact
-        // (and `abort_merge` to undo). Only call cleanup_state for
-        // non-conflict errors (disk-full, signature missing, etc.).
-        match result {
-            Err(LeviathanError::MergeConflict) => {
-                return Err(LeviathanError::MergeConflict);
-            }
-            Err(e) => {
-                let _ = repo.cleanup_state();
-                return Err(e);
-            }
-            Ok(()) => {}
+        // A genuine commit-phase failure (missing signature, disk error) still
+        // resets the half-merged state so the user isn't stuck.
+        if let Err(e) = result {
+            let _ = repo.cleanup_state();
+            return Err(e);
         }
 
         repo.cleanup_state()?;
@@ -2516,14 +2517,26 @@ theirs
         .await;
         assert!(
             result.is_err(),
-            "pre-merge-commit exit 1 must abort the merge"
+            "pre-merge-commit exit 1 must stop the automatic merge commit"
         );
         assert!(result.unwrap_err().to_string().contains("denied"));
 
-        // Merge must be aborted: state clean and HEAD unmoved.
+        // git does NOT abort on a pre-merge-commit veto: it leaves the merge
+        // resumable ("use 'git commit' to complete the merge"). So MERGE_HEAD
+        // must survive (state == Merge) and HEAD must not have moved yet.
         let git_repo = repo.repo();
-        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert_eq!(git_repo.state(), git2::RepositoryState::Merge);
         assert_eq!(repo.head_oid(), head_before);
+
+        // The merge must remain completable via commit_merge (hooks aside).
+        commit_merge(repo.path_str(), None, None).await.unwrap();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            2,
+            "completing the merge yields a merge commit"
+        );
+        assert_eq!(repo.repo().state(), git2::RepositoryState::Clean);
     }
 
     #[cfg(unix)]
