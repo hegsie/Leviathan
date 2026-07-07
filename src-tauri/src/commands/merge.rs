@@ -139,17 +139,27 @@ pub async fn merge(
             crate::commands::hooks::run_hook_blocking(&repo, "pre-merge-commit", &[], None)?;
         }
 
+        // Default to the MERGE_MSG libgit2 wrote during repo.merge() — git's
+        // canonical auto-message ("Merge branch 'feature'") — with '#' comment
+        // lines stripped, like `git commit` does.
+        let commit_message = message.unwrap_or_else(|| default_merge_message(&repo, &source_ref));
+
+        // git runs commit-msg for an automatic merge commit (after
+        // pre-merge-commit); the hook may rewrite the message or veto it. Like
+        // pre-merge-commit, a veto leaves the merge resumable, so run it before
+        // the cleanup-guarded commit closure. (A squash merge records no merge
+        // commit, so no hook — matching `git merge --squash`.)
+        let commit_message = if squash.unwrap_or(false) {
+            commit_message
+        } else {
+            crate::commands::hooks::run_commit_msg_hook(&repo, &commit_message)?
+        };
+
         let result = (|| -> Result<()> {
             let signature = repo.signature()?;
             let head = repo.head()?.peel_to_commit()?;
             let tree_oid = repo.index()?.write_tree()?;
             let tree = repo.find_tree(tree_oid)?;
-
-            // Default to the MERGE_MSG libgit2 wrote during repo.merge() —
-            // git's canonical auto-message ("Merge branch 'feature'") — with
-            // '#' comment lines stripped, like `git commit` does.
-            let commit_message =
-                message.unwrap_or_else(|| default_merge_message(&repo, &source_ref));
 
             if squash.unwrap_or(false) {
                 repo.commit(
@@ -2537,6 +2547,42 @@ theirs
             "completing the merge yields a merge commit"
         );
         assert_eq!(repo.repo().state(), git2::RepositoryState::Clean);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_merge_runs_commit_msg_hook() {
+        // git runs commit-msg for an automatic (non-conflict) merge commit; the
+        // hook may rewrite the message. Verify it fires and its edit lands.
+        let repo = TestRepo::with_initial_commit();
+        let initial = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature", &[("feature.txt", "content")]);
+        repo.checkout_branch(&initial);
+
+        repo.install_hook(
+            "commit-msg",
+            "#!/bin/sh\necho 'Reviewed-by: hook' >> \"$1\"\n",
+        );
+
+        merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert!(
+            head.message().unwrap().contains("Reviewed-by: hook"),
+            "commit-msg hook must run and rewrite the auto-merge message, got: {:?}",
+            head.message()
+        );
     }
 
     #[cfg(unix)]

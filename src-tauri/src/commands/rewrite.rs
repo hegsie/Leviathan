@@ -688,7 +688,16 @@ pub async fn cherry_pick_range(path: String, commit_oids: Vec<String>) -> Result
 
     // Record the HEAD the sequence starts from so an abort mid-sequence can
     // rewind to it (matching git's return-to-pre-sequence-HEAD on --abort).
+    // Persist it up front: a mid-range pick can stop not only on a conflict but
+    // on an already-applied (empty) pick, which returns Err before the conflict
+    // branch runs — yet still leaves CHERRY_PICK_HEAD and earlier picks applied.
+    // Writing the sequence head now lets abort_cherry_pick rewind the whole
+    // range regardless of how the sequence stops.
     let pre_sequence_head = repo.head()?.peel_to_commit()?.id();
+    std::fs::write(
+        repo.path().join(CHERRY_PICK_SEQUENCE_HEAD),
+        pre_sequence_head.to_string(),
+    )?;
 
     let mut results = Vec::new();
 
@@ -1498,8 +1507,15 @@ pub async fn cherry_pick_from_branch(
     // Reverse so we apply oldest first
     commit_oids.reverse();
 
-    // Record the pre-sequence HEAD for abort rewind.
+    // Record the pre-sequence HEAD for abort rewind. Persist it up front so an
+    // abort can rewind the whole range even when the sequence stops on an
+    // already-applied (empty) pick, which returns Err before the conflict
+    // branch writes the sequencer state.
     let pre_sequence_head = repo.head()?.peel_to_commit()?.id();
+    std::fs::write(
+        repo.path().join(CHERRY_PICK_SEQUENCE_HEAD),
+        pre_sequence_head.to_string(),
+    )?;
 
     // Cherry-pick each commit
     let mut results = Vec::new();
@@ -3145,6 +3161,53 @@ mod tests {
         let git_dir = test_repo.repo().path().to_path_buf();
         assert!(!git_dir.join(CHERRY_PICK_SEQUENCE).exists());
         assert!(!git_dir.join(CHERRY_PICK_SEQUENCE_HEAD).exists());
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_range_abort_rewinds_on_empty_mid_pick() {
+        // A mid-range pick that is already present in HEAD stops the sequence
+        // with an "empty" error (not a conflict). Abort must still rewind the
+        // whole range to the pre-sequence HEAD, removing earlier applied picks —
+        // this only works if the sequence head was persisted before the loop.
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Base", &[("shared.txt", "base")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let a = test_repo.create_commit("A adds a.txt", &[("a.txt", "a")]);
+        let d = test_repo.create_commit("D adds d.txt", &[("d.txt", "d")]);
+        let e = test_repo.create_commit("E adds e.txt", &[("e.txt", "e")]);
+
+        // Pre-apply D onto main so the mid-range pick of D becomes empty.
+        test_repo.checkout_branch("main");
+        cherry_pick(test_repo.path_str(), d.to_string(), None, None)
+            .await
+            .unwrap();
+        let pre_seq = test_repo.head_oid();
+
+        // Range [A, D, E]: A applies, D is empty -> Err; repo left mid-sequence.
+        let result = cherry_pick_range(
+            test_repo.path_str(),
+            vec![a.to_string(), d.to_string(), e.to_string()],
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an already-applied mid-range pick must error"
+        );
+        assert_ne!(test_repo.head_oid(), pre_seq, "A was applied");
+
+        // Abort must rewind to the pre-sequence HEAD, removing the applied A.
+        abort_cherry_pick(test_repo.path_str()).await.unwrap();
+        assert_eq!(
+            test_repo.head_oid(),
+            pre_seq,
+            "abort must rewind to pre-sequence HEAD even after an empty pick"
+        );
+        assert!(
+            !test_repo.path.join("a.txt").exists(),
+            "applied pick A must be removed on abort"
+        );
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
     }
 
     #[tokio::test]
