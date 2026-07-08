@@ -352,6 +352,16 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
     pendingAuthByProvider.delete(provider);
   } catch (e) {
     log.error(`${provider} OAuth error:`, e);
+    // Same guard as the success path: only surface/clean up if the flow THIS poll
+    // served is still the current one. A superseded flow's late error/timeout
+    // (the user cancelled and restarted — cancelOAuth can't abort the backend
+    // wait, which runs to its timeout) must NOT fire a spurious error for the new
+    // flow or delete the new flow's pending entry (which would silently drop the
+    // user's real, in-progress sign-in).
+    const current = pendingAuthByProvider.get(provider);
+    if (!current || current.state !== pending.state) {
+      return;
+    }
     notifyStateChange({
       status: 'error',
       error: e instanceof Error ? e.message : `${provider} OAuth failed`,

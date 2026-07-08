@@ -326,4 +326,48 @@ describe('oauth.service - loopback cancel/restart guard', () => {
 
     unsub();
   });
+
+  it("a superseded flow's late error/timeout does not error or clobber the newer flow", async () => {
+    const { startOAuth } = await import('../oauth.service.ts');
+
+    // Flow A's wait rejects (timeout); flow B's wait is held open. cancelOAuth
+    // can't abort A's backend wait, so A's rejection arrives while B is pending.
+    const rejecters = new Map<number, (e: Error) => void>();
+    const states: string[] = [];
+    let n = 0;
+    mockInvoke = (command, args) => {
+      if (command === 'oauth_get_authorize_url') {
+        n += 1;
+        const state = `state-${n}`;
+        states.push(state);
+        return Promise.resolve({ authorizeUrl: 'https://login/authorize', state, loopbackPort: 8080 + n });
+      }
+      if (command === 'oauth_wait_for_callback') {
+        const port = (args as { port: number }).port;
+        return new Promise((_resolve, reject) => rejecters.set(port, reject));
+      }
+      return Promise.resolve(null);
+    };
+
+    const errors: string[] = [];
+    const unsub = onOAuthStateChange((s) => {
+      if (s.provider === 'azure' && s.status === 'error') errors.push(s.error ?? '');
+    });
+
+    // Flow A (port 8081), cancel, restart → flow B (port 8082) is current.
+    await startOAuth('azure', 'cid');
+    cancelOAuth('azure');
+    await startOAuth('azure', 'cid');
+
+    // Flow A's backend wait finally times out (rejects) minutes later.
+    rejecters.get(8081)!(new Error('OAuth callback timed out'));
+    await new Promise((r) => setTimeout(r, 40));
+
+    // No spurious error for the current flow, and flow B stays pending.
+    expect(errors, 'no spurious timeout error for the newer flow').to.have.length(0);
+    expect(isPendingOAuth(), 'the newer flow is still pending').to.be.true;
+    expect(getPendingProvider()).to.equal('azure');
+
+    unsub();
+  });
 });
