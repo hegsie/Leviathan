@@ -204,7 +204,6 @@ describe('oauth.service - exchangeCode server-side PKCE contract (M5/M11)', () =
 
     mockInvoke = (command) => {
       if (command === 'oauth_exchange_code') {
-        // eslint-disable-next-line camelcase
         return Promise.resolve({ access_token: 'a', id_token: 'h2.p2.s2' });
       }
       return Promise.resolve(null);
@@ -333,5 +332,39 @@ describe('oauth.service - device-code flow (Azure DevOps)', () => {
     };
     await cancelDeviceCode('flow-9');
     expect(captured!.flowId).to.equal('flow-9');
+  });
+});
+
+describe('oauth.service - refreshToken', () => {
+  const defaultMock = mockInvoke;
+  afterEach(() => {
+    mockInvoke = defaultMock;
+  });
+
+  it('normalizes snake_case token fields returned by the backend', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_refresh_token') {
+        return Promise.resolve({ access_token: 'a2', refresh_token: 'r2', expires_in: 1800 });
+      }
+      return Promise.resolve(null);
+    };
+    const { refreshToken } = await import('../oauth.service.ts');
+    const tokens = await refreshToken('azure', 'old-refresh');
+    expect(tokens.accessToken).to.equal('a2');
+    expect(tokens.refreshToken).to.equal('r2');
+    expect(tokens.expiresIn).to.equal(1800);
+  });
+
+  it('accepts camelCase token fields', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_refresh_token') {
+        return Promise.resolve({ accessToken: 'a3', refreshToken: 'r3', expiresIn: 3600 });
+      }
+      return Promise.resolve(null);
+    };
+    const { refreshToken } = await import('../oauth.service.ts');
+    const tokens = await refreshToken('azure', 'old-refresh');
+    expect(tokens.accessToken).to.equal('a3');
+    expect(tokens.refreshToken).to.equal('r3');
   });
 });

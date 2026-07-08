@@ -474,7 +474,19 @@ export async function refreshToken(
   if (!result.success || !result.data) {
     throw new Error(result.error?.message ?? 'Failed to refresh OAuth token');
   }
-  return result.data;
+
+  // Normalize snake_case/camelCase like exchangeCode/pollDeviceCode (serde edge case),
+  // so callers reliably read accessToken/refreshToken/expiresIn.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raw = result.data as any;
+  return {
+    accessToken: raw.accessToken || raw.access_token,
+    refreshToken: raw.refreshToken || raw.refresh_token,
+    expiresIn: raw.expiresIn || raw.expires_in,
+    tokenType: raw.tokenType || raw.token_type,
+    scope: raw.scope,
+    idToken: raw.idToken || raw.id_token,
+  };
 }
 
 /**

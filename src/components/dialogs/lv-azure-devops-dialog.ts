@@ -616,6 +616,8 @@ export class LvAzureDevOpsDialog extends LitElement {
   private deviceFlowId: string | null = null;
   /** Org typed on the PAT form, stashed while on the OAuth tab so it survives a round-trip. */
   private savedPatOrg = '';
+  /** Last `${org}::${token}` written to the keyring git credential, to skip redundant re-syncs. */
+  private lastSyncedGitCredKey: string | null = null;
   /**
    * Bumped whenever an Entra sign-in should be abandoned (new start, cancel,
    * close, disconnect). Async continuations capture the value at start and bail
@@ -821,7 +823,7 @@ export class LvAzureDevOpsDialog extends LitElement {
     const org = this.detectedRepo?.organization || this.organizationInput;
     if (!org) return;
 
-    // Get token for selected account (or legacy token if no account)
+    // Get token for selected account (refresh-aware for OAuth accounts).
     const token = await this.getSelectedAccountToken();
     const result = await gitService.checkAdoConnectionWithToken(org, token);
     if (result.success && result.data) {
@@ -837,17 +839,10 @@ export class LvAzureDevOpsDialog extends LitElement {
         });
       }
 
-      // Ensure git credentials are stored in keyring for push/pull operations
-      if (result.data.connected && org && token) {
-        try {
-          // Store for both dev.azure.com and {org}.visualstudio.com formats
-          // Username must be non-empty for macOS Keychain - use 'pat' as a placeholder
-          await gitService.storeGitCredentials('https://dev.azure.com', 'pat', token);
-          await gitService.storeGitCredentials(`https://${org}.visualstudio.com`, 'pat', token);
-          log.debug(`Synced git credentials to keyring for dev.azure.com and ${org}.visualstudio.com`);
-        } catch (err) {
-          log.warn('Failed to sync git credentials to keyring:', err);
-        }
+      // Sync the keyring git credentials only with a VERIFIED-connected token, so
+      // external git push/pull get a valid credential (never a stale fallback).
+      if (result.data.connected && token) {
+        await this.syncGitCredentials(org, token);
       }
     } else if (!result.success) {
       log.error('checkConnection failed:', result.error?.message);
@@ -859,13 +854,20 @@ export class LvAzureDevOpsDialog extends LitElement {
   }
 
   /**
-   * Get the token for the currently selected account
+   * Get the token for the currently selected account, refreshing an expiring
+   * Entra OAuth token first (and re-syncing the keyring git credentials so
+   * push/pull stay valid). Non-OAuth (PAT) accounts return their stored token.
    */
   private async getSelectedAccountToken(): Promise<string | null> {
     if (!this.selectedAccountId) return null;
 
-    // Check account-specific token
-    let token = await credentialService.getAccountToken('azure-devops', this.selectedAccountId);
+    // Refresh-aware: for an OAuth account this returns a freshly-refreshed access
+    // token when the stored one is near expiry; for a PAT it returns it unchanged.
+    let token = await credentialService.getFreshAccountToken(
+      'azure-devops',
+      this.selectedAccountId,
+      'azure',
+    );
 
     // If not found, check legacy token and migrate it
     if (!token) {
@@ -879,6 +881,28 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
 
     return token;
+  }
+
+  /**
+   * Write the git credentials for `org` to the OS keyring so git push/pull
+   * outside this dialog use a valid credential. Only call this with a token that
+   * has been VERIFIED to work (a connected check) — never a stale fallback, which
+   * would clobber a previously-valid credential. Deduped by (org, token) to avoid
+   * redundant keyring writes on hot paths.
+   */
+  private async syncGitCredentials(org: string, token: string): Promise<void> {
+    const syncKey = `${org}::${token}`;
+    if (syncKey === this.lastSyncedGitCredKey) return;
+    // storeGitCredentials resolves to a CommandResult (it never throws), so check
+    // .success and only mark synced on success — otherwise a failed write would be
+    // stickily suppressed and never retried.
+    const c1 = await gitService.storeGitCredentials('https://dev.azure.com', 'pat', token);
+    const c2 = await gitService.storeGitCredentials(`https://${org}.visualstudio.com`, 'pat', token);
+    if (c1.success && c2.success) {
+      this.lastSyncedGitCredKey = syncKey;
+    } else {
+      log.warn('Failed to sync Azure DevOps git credentials to keyring:', c1.error ?? c2.error);
+    }
   }
 
   /**
@@ -1276,17 +1300,17 @@ export class LvAzureDevOpsDialog extends LitElement {
 
       // Store git credentials in keyring for push/pull operations. Non-fatal:
       // a keyring failure must not undo an otherwise-successful sign-in.
-      // Username must be non-empty for macOS Keychain - use 'pat' as a placeholder.
-      // Store for both dev.azure.com and {org}.visualstudio.com formats.
-      // NOTE: this stores the short-lived Entra access token (~1h). It is not
-      // auto-refreshed today, so git push/pull may require re-running "Sign in
-      // with Microsoft" after it expires (the account token keeps its refresh
-      // token via storeAccountOAuthToken for a future refresh path).
+      // The stored access token (~1h) is refreshed on-demand by getFreshAccountToken
+      // (using the refresh token persisted above via storeAccountOAuthToken), so
+      // in-app git push/pull keep working past expiry.
       // storeGitCredentials resolves to a CommandResult (it never throws), so
       // check .success rather than relying on a catch.
       const cred1 = await gitService.storeGitCredentials('https://dev.azure.com', 'pat', accessToken);
       const cred2 = await gitService.storeGitCredentials(`https://${organization}.visualstudio.com`, 'pat', accessToken);
-      if (!cred1.success || !cred2.success) {
+      if (cred1.success && cred2.success) {
+        // Record the synced (org, token) so checkConnection doesn't re-write it.
+        this.lastSyncedGitCredKey = `${organization}::${accessToken}`;
+      } else {
         log.warn('Failed to store Azure DevOps git credentials for push/pull:', cred1.error ?? cred2.error);
         showToast('Signed in, but saving git credentials failed — push/pull may prompt for credentials', 'error');
       }
@@ -1541,6 +1565,10 @@ export class LvAzureDevOpsDialog extends LitElement {
       if (this.organizationInput) {
         await gitService.deleteGitCredentials(`https://${this.organizationInput}.visualstudio.com`);
       }
+      // Deleted creds — force a re-sync on the next connect even if the token
+      // matches, both here and in the git.service token path (external git).
+      this.lastSyncedGitCredKey = null;
+      gitService.resetAdoGitCredentialSyncCache();
       log.debug('Deleted git credentials from keyring');
 
       this.syncSharedConnectionStatus(false);
@@ -1600,6 +1628,8 @@ export class LvAzureDevOpsDialog extends LitElement {
         if (organization) {
           await gitService.deleteGitCredentials(`https://${organization}.visualstudio.com`);
         }
+        this.lastSyncedGitCredKey = null;
+        gitService.resetAdoGitCredentialSyncCache();
       } catch (tokenErr) {
         const msg =
           tokenErr instanceof Error

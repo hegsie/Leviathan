@@ -1421,4 +1421,32 @@ describe('lv-azure-devops-dialog', () => {
       expect(deleteBtn!.disabled).to.equal(true);
     });
   });
+
+  describe('git credential sync', () => {
+    it('writes credentials once per (org, token) and dedupes repeats; re-syncs on change', async () => {
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      const api = el as unknown as { syncGitCredentials: (org: string, token: string) => Promise<void> };
+
+      const stores = () => invokeHistory.filter((h) => h.command === 'store_git_credentials').length;
+
+      invokeHistory.length = 0;
+      await api.syncGitCredentials('testorg', 'tok-1');
+      expect(stores(), 'writes both dev.azure.com and {org}.visualstudio.com').to.equal(2);
+
+      // Same (org, token) → deduped, no new writes.
+      await api.syncGitCredentials('testorg', 'tok-1');
+      expect(stores(), 'deduped repeat').to.equal(2);
+
+      // A refreshed token re-syncs.
+      await api.syncGitCredentials('testorg', 'tok-2');
+      expect(stores(), 'new token re-syncs').to.equal(4);
+
+      // A different org re-syncs even with the same token.
+      await api.syncGitCredentials('otherorg', 'tok-2');
+      expect(stores(), 'new org re-syncs').to.equal(6);
+    });
+  });
 });

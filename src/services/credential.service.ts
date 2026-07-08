@@ -190,6 +190,7 @@ export const AzureDevOpsCredentials = {
 // =============================================================================
 
 import type { IntegrationType } from '../types/integration-accounts.types.ts';
+import type { OAuthProvider } from '../types/oauth.types.ts';
 import type { GitHubConnectionStatus } from './git.service.ts';
 
 /**
@@ -418,6 +419,77 @@ export async function isOAuthTokenExpiring(
   const fiveMinutes = 5 * 60 * 1000;
   return Date.now() > tokenData.expiresAt - fiveMinutes;
 }
+
+/**
+ * Get a valid access token for an account, transparently refreshing it first if
+ * it is an OAuth token within 5 minutes of expiry. The rotated bundle (access +
+ * refresh + expiry) is persisted so subsequent calls reuse it.
+ *
+ * Falls back to the stored access token when there is no refresh token or the
+ * refresh fails, so callers still get something to try. Non-OAuth (PAT) accounts
+ * return their stored token unchanged.
+ *
+ * @param provider OAuth provider used for the refresh grant (e.g. 'azure').
+ * @param instanceUrl Optional instance/tenant forwarded to the refresh endpoint.
+ */
+export async function getFreshAccountToken(
+  integrationType: IntegrationType,
+  accountId: string,
+  provider: OAuthProvider,
+  instanceUrl?: string
+): Promise<string | null> {
+  const bundle = await getAccountOAuthToken(integrationType, accountId);
+  // No OAuth bundle (PAT / legacy) — return the plain stored token.
+  if (!bundle) {
+    return getAccountToken(integrationType, accountId);
+  }
+  // Compute expiry inline from the bundle we already have (avoid a second read).
+  const fiveMinutes = 5 * 60 * 1000;
+  const expiring = bundle.expiresAt ? Date.now() > bundle.expiresAt - fiveMinutes : false;
+  // Fresh enough, or nothing to refresh with — use the stored access token.
+  if (!bundle.refreshToken || !expiring) {
+    return bundle.accessToken;
+  }
+
+  // Single-flight per account: concurrent callers (e.g. a git push and the
+  // background token validator) share one refresh so rotated refresh tokens
+  // aren't lost to an overwrite.
+  const inFlightKey = `${integrationType}:${accountId}`;
+  const existing = inFlightTokenRefreshes.get(inFlightKey);
+  if (existing) return existing;
+
+  const refreshTokenValue = bundle.refreshToken;
+  const fallbackToken = bundle.accessToken;
+  const refreshPromise = (async (): Promise<string | null> => {
+    try {
+      const { refreshToken: refreshOAuthToken } = await import('./oauth.service.ts');
+      const refreshed = await refreshOAuthToken(provider, refreshTokenValue, instanceUrl);
+      await storeAccountOAuthToken(
+        integrationType,
+        accountId,
+        refreshed.accessToken,
+        // Entra rotates refresh tokens; keep the previous one if none was returned.
+        refreshed.refreshToken ?? refreshTokenValue,
+        refreshed.expiresIn
+      );
+      log.debug(` Refreshed OAuth token for ${integrationType} account ${accountId}`);
+      return refreshed.accessToken;
+    } catch (err) {
+      log.warn(
+        ` OAuth token refresh failed for ${integrationType} account ${accountId}; using existing token`,
+        err
+      );
+      return fallbackToken;
+    } finally {
+      inFlightTokenRefreshes.delete(inFlightKey);
+    }
+  })();
+  inFlightTokenRefreshes.set(inFlightKey, refreshPromise);
+  return refreshPromise;
+}
+
+/** In-flight OAuth refreshes keyed by `${integrationType}:${accountId}` (single-flight). */
+const inFlightTokenRefreshes = new Map<string, Promise<string | null>>();
 
 // ========================================================================
 // GitHub App Installation

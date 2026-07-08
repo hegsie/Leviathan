@@ -1,5 +1,14 @@
 import { expect } from '@open-wc/testing';
-import { parseIssueReferences, isClosingKeyword } from '../git.service.ts';
+import {
+  parseIssueReferences,
+  isClosingKeyword,
+  getAdoToken,
+  fetch as gitFetch,
+  resetAdoGitCredentialSyncCache,
+} from '../git.service.ts';
+import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import { createEmptyIntegrationAccount } from '../../types/unified-profile.types.ts';
+import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 
 // Mock Tauri API for tests that need invokeCommand
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
@@ -312,5 +321,134 @@ describe('git.service - Tauri command invocations', () => {
     expect(lastInvokedArgs).to.deep.equal({
       path: '/test/repo',
     });
+  });
+});
+
+describe('git.service - getAdoToken refresh wiring', () => {
+  const keyring = new Map<string, string>();
+
+  afterEach(() => {
+    unifiedProfileStore.getState().reset();
+    mockInvoke = () => Promise.resolve(null);
+  });
+
+  it('refreshes an expiring Entra OAuth token for the default azure-devops account', async () => {
+    const account: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('azure-devops', 'myorg'),
+      id: 'ado-1',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([account]);
+
+    const key = 'azure-devops_token_ado-1';
+    keyring.clear();
+    keyring.set(key, 'old-access');
+    // Bundle within the 5-minute refresh window (expires ~1s out).
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'old-access',
+      refreshToken: 'r1',
+      expiresAt: Date.now() + 1000,
+    }));
+
+    let refreshCalled = false;
+    mockInvoke = async (command: string, args?: unknown) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
+      if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
+      if (command === 'oauth_refresh_token') {
+        refreshCalled = true;
+        return { accessToken: 'new-access', refreshToken: 'r2', expiresIn: 3600 };
+      }
+      return null;
+    };
+
+    const result = await getAdoToken();
+    expect(result.success).to.be.true;
+    expect(result.data, 'returns the refreshed token').to.equal('new-access');
+    expect(refreshCalled, 'refresh grant was used').to.be.true;
+  });
+});
+
+describe('git.service - getRepoToken keyring sync (via fetch)', () => {
+  const keyring = new Map<string, string>();
+
+  function setupAdoAccount(accountOrg: string) {
+    const account: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('azure-devops', accountOrg),
+      id: 'ado-1',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([account]);
+    const key = 'azure-devops_token_ado-1';
+    keyring.clear();
+    keyring.set(key, 'tok');
+    // Far-future expiry → getFreshAccountToken returns the stored token, no refresh.
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'tok',
+      refreshToken: 'r',
+      expiresAt: Date.now() + 3_600_000,
+    }));
+  }
+
+  /** Mock invoke: GH repo absent, ADO repo in `repoOrg`, keyring-backed, fetch ok. */
+  function installMock(repoOrg: string, credWrites: string[]) {
+    mockInvoke = async (command: string, args?: unknown) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (command === 'detect_github_repo') return null;
+      if (command === 'detect_gitlab_repo') return null;
+      if (command === 'detect_ado_repo') {
+        return { organization: repoOrg, project: 'p', repository: 'repo', remoteName: 'origin' };
+      }
+      if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
+      if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
+      if (command === 'store_git_credentials') { credWrites.push(a!.url as string); return null; }
+      if (command === 'fetch') return null;
+      return null;
+    };
+  }
+
+  afterEach(() => {
+    unifiedProfileStore.getState().reset();
+    resetAdoGitCredentialSyncCache();
+    mockInvoke = () => Promise.resolve(null);
+  });
+
+  it('syncs keyring git credentials when the default account org matches the repo org', async () => {
+    setupAdoAccount('myorg');
+    const credWrites: string[] = [];
+    installMock('myorg', credWrites);
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(credWrites).to.include('https://dev.azure.com');
+    expect(credWrites).to.include('https://myorg.visualstudio.com');
+  });
+
+  it('does NOT sync when the default account org differs from the repo org', async () => {
+    setupAdoAccount('myorg');
+    const credWrites: string[] = [];
+    installMock('otherorg', credWrites); // repo is in a different org than the account
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(credWrites, 'no keyring write for a mismatched org').to.have.length(0);
+  });
+
+  it('dedupes repeat syncs and re-syncs after resetAdoGitCredentialSyncCache', async () => {
+    setupAdoAccount('myorg');
+    const credWrites: string[] = [];
+    installMock('myorg', credWrites);
+
+    await gitFetch({ path: '/repo', silent: true });
+    expect(credWrites).to.have.length(2);
+
+    // Same (org, token) → deduped, no new writes.
+    await gitFetch({ path: '/repo', silent: true });
+    expect(credWrites, 'deduped repeat').to.have.length(2);
+
+    // After a reset (mirrors disconnect/delete), the next call re-writes.
+    resetAdoGitCredentialSyncCache();
+    await gitFetch({ path: '/repo', silent: true });
+    expect(credWrites, 're-synced after reset').to.have.length(4);
   });
 });
