@@ -122,28 +122,6 @@ impl OAuthConfig {
         }
     }
 
-    /// Get Azure DevOps (Microsoft Entra ID) OAuth configuration
-    /// Note: Only supports work/school accounts. Personal accounts must use PAT authentication.
-    pub fn azure(client_id: &str, tenant_id: Option<&str>) -> Self {
-        let tenant = tenant_id.unwrap_or("common");
-        Self {
-            client_id: client_id.to_string(),
-            authorize_url: format!(
-                "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
-                tenant
-            ),
-            token_url: format!(
-                "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-                tenant
-            ),
-            scopes: vec![
-                "499b84ac-1321-427f-aa17-267ca6975798/user_impersonation".to_string(),
-                "offline_access".to_string(),
-            ],
-            redirect_uri: "leviathan://oauth/azure/callback".to_string(),
-        }
-    }
-
     /// Get Bitbucket OAuth configuration
     /// Bitbucket requires http/https redirect URIs, so we use the loopback server
     pub fn bitbucket(client_id: &str, redirect_port: u16) -> Self {
@@ -583,23 +561,6 @@ mod tests {
     }
 
     #[test]
-    fn test_azure_config_common_tenant() {
-        let config = OAuthConfig::azure("test-client-id", None);
-
-        assert!(config.authorize_url.contains("/common/"));
-        assert!(config.token_url.contains("/common/"));
-        assert_eq!(config.redirect_uri, "leviathan://oauth/azure/callback");
-    }
-
-    #[test]
-    fn test_azure_config_specific_tenant() {
-        let config = OAuthConfig::azure("test-client-id", Some("my-tenant"));
-
-        assert!(config.authorize_url.contains("/my-tenant/"));
-        assert!(config.token_url.contains("/my-tenant/"));
-    }
-
-    #[test]
     fn test_bitbucket_config() {
         // Bitbucket uses dedicated port 8085 to avoid conflicts
         let config = OAuthConfig::bitbucket("test-client-id", 8085);
@@ -660,18 +621,6 @@ mod tests {
 
         // Spaces should be encoded
         assert!(url.contains("state+with+spaces") || url.contains("state%20with%20spaces"));
-    }
-
-    #[test]
-    fn test_azure_devops_authorize_url() {
-        let config = OAuthConfig::azure("test-client-id", None);
-        let pkce = PKCEChallenge::new();
-        let url = config.build_authorize_url(&pkce, "test-state");
-
-        assert!(url.starts_with("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"));
-        assert!(url.contains("client_id=test-client-id"));
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains("code_challenge_method=S256"));
     }
 
     // ==========================================================================

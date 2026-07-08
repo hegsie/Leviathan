@@ -116,6 +116,11 @@ const mockPipelineRuns = [
   },
 ];
 
+const mockAdoOrganizations = [
+  { id: 'org-1', name: 'contoso', url: 'https://dev.azure.com/contoso' },
+  { id: 'org-2', name: 'fabrikam', url: 'https://dev.azure.com/fabrikam' },
+];
+
 function createTestAccount(
   overrides: Partial<IntegrationAccount> & { id: string }
 ): IntegrationAccount {
@@ -197,8 +202,23 @@ function setupMockInvoke(): void {
     if (command === 'list_ado_pull_requests') return mockPullRequests;
     if (command === 'query_ado_work_items') return mockWorkItems;
     if (command === 'list_ado_pipeline_runs') return mockPipelineRuns;
+    if (command === 'list_ado_organizations') return mockAdoOrganizations;
     if (command === 'create_ado_pull_request') return mockPullRequests[0];
     if (command === 'sync_git_credential_for_ado') return null;
+
+    // Entra device-code flow (Sign in with Microsoft)
+    if (command === 'oauth_start_device_code') {
+      return {
+        flowId: 'device-flow-1',
+        userCode: 'ABCD-EFGH',
+        verificationUri: 'https://microsoft.com/devicelogin',
+        expiresIn: 900,
+        interval: 1,
+        message: 'Enter the code to sign in.',
+      };
+    }
+    if (command === 'oauth_poll_device_code') return { accessToken: 'ado_oauth_token' };
+    if (command === 'oauth_cancel_device_code') return null;
 
     return null;
   };
@@ -772,15 +792,6 @@ describe('lv-azure-devops-dialog', () => {
           if (command === 'get_unified_profiles_config') {
             return { version: 3, profiles: [], accounts: [...persistedAccounts], repositoryAssignments: {} };
           }
-          // startOAuth must succeed so the deep-link 'oauth-complete' listener is
-          // registered (Azure is deep-link only; no loopback port).
-          if (command === 'oauth_get_authorize_url') {
-            return {
-              authorizeUrl: 'https://login.microsoftonline.com/authorize',
-              state: 'azure-state-persist',
-              loopbackPort: null,
-            };
-          }
           // Echo back the persisted account (with its generated id) like the backend does.
           if (command === 'save_global_account') {
             const account = (args as { account?: IntegrationAccount } | undefined)?.account;
@@ -797,20 +808,13 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
-      (el as unknown as { oauthClientId: string }).oauthClientId = 'client-abc';
       (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
       await el.updateComplete;
 
       invokeHistory.length = 0;
-      // Registers the oauth-complete listener.
+      // The device-code poll resolves with tokens, then the org is finalized.
       await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
-
-      window.dispatchEvent(
-        new CustomEvent('oauth-complete', {
-          detail: { provider: 'azure', tokens: { accessToken: 'ado_oauth_token' } },
-        })
-      );
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 50));
       await el.updateComplete;
 
       const saveCall = invokeHistory.find((h) => h.command === 'save_global_account');
@@ -830,24 +834,17 @@ describe('lv-azure-devops-dialog', () => {
       expect(selected).to.equal((account as { id: string }).id);
     });
 
-    it('Cancel during a pending sign-in tears down the flow so a late deep link does NOT connect', async () => {
+    it('Cancel during a pending device sign-in stops the flow so a late completion does NOT connect', async () => {
       connectionResponse = mockConnectedStatus;
-      // Start with no accounts: if the (cancelled) flow ever completed it would
-      // create a brand-new account via save_global_account.
+      // Poll never resolves, so the flow stays pending and we can cancel mid-flight.
       mockInvoke = (() => {
         const orig = mockInvoke;
         return async (command: string, args?: unknown) => {
           if (command === 'get_unified_profiles_config') {
             return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
           }
-          // Make startOAuth register a real pending flow so cancelOAuth('azure')
-          // has something to tear down (deep-link provider, no loopback port).
-          if (command === 'oauth_get_authorize_url') {
-            return {
-              authorizeUrl: 'https://login.microsoftonline.com/authorize',
-              state: 'azure-state-xyz',
-              loopbackPort: null,
-            };
+          if (command === 'oauth_poll_device_code') {
+            return new Promise(() => { /* never resolves */ });
           }
           return orig(command, args);
         };
@@ -859,67 +856,262 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
-      (el as unknown as { oauthClientId: string }).oauthClientId = 'client-abc';
       (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
       await el.updateComplete;
 
-      // Start the flow — registers the oauth-complete listener and sets pending.
-      await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      // Start the flow WITHOUT awaiting — the poll hangs, leaving the device code shown.
+      void (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
       expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.true;
-      expect(
-        (el as unknown as { _pendingOAuthHandler?: EventListener })._pendingOAuthHandler,
-        'a listener is registered after start'
-      ).to.not.be.undefined;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode, 'device code shown').to.not.be.null;
 
       // User clicks Cancel.
       invokeHistory.length = 0;
-      await (el as unknown as { handleCancelEntraOAuth: () => void }).handleCancelEntraOAuth();
+      (el as unknown as { handleCancelEntraOAuth: () => void }).handleCancelEntraOAuth();
       await el.updateComplete;
 
-      // The underlying flow is cancelled and the listener is removed.
+      // The flow is cancelled server-side and the UI resets.
       expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.false;
-      expect(
-        (el as unknown as { _pendingOAuthHandler?: EventListener })._pendingOAuthHandler,
-        'listener removed after cancel'
-      ).to.be.undefined;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode).to.be.null;
+      expect(invokeHistory.some((h) => h.command === 'oauth_cancel_device_code'), 'backend flow cancelled').to.be.true;
 
-      // A late deep-link completion fires AFTER cancel. With the listener gone,
-      // it must NOT verify/persist/connect anything.
-      window.dispatchEvent(
-        new CustomEvent('oauth-complete', {
-          detail: { provider: 'azure', tokens: { accessToken: 'ado_oauth_token' } },
-        })
-      );
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
-
-      expect(
-        invokeHistory.some((h) => h.command === 'check_ado_connection_with_token'),
-        'no connection verification after cancel'
-      ).to.be.false;
-      expect(
-        invokeHistory.some((h) => h.command === 'save_global_account'),
-        'no account persisted after cancel'
-      ).to.be.false;
-      expect(
-        invokeHistory.some((h) => h.command === 'store_keyring_token'),
-        'no token stored after cancel'
-      ).to.be.false;
+      // Nothing was verified or persisted.
+      expect(invokeHistory.some((h) => h.command === 'save_global_account')).to.be.false;
+      expect(invokeHistory.some((h) => h.command === 'store_keyring_token')).to.be.false;
       expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.be.null;
     });
 
-    it('surfaces an error and stops the spinner when Entra OAuth fails (not a stuck dead-end)', async () => {
-      // A failing authorize-url makes startOAuth emit OAuth state 'error' (it does
-      // NOT fire the success-only oauth-complete event). Without the OAuth state
-      // subscription this left the dialog spinning forever.
+    it('closing the dialog mid-sign-in cancels the device flow (no silent late connect)', async () => {
+      connectionResponse = mockConnectedStatus;
       mockInvoke = (() => {
         const orig = mockInvoke;
         return async (command: string, args?: unknown) => {
           if (command === 'get_unified_profiles_config') {
             return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
           }
-          if (command === 'oauth_get_authorize_url') {
-            throw new Error('Entra discovery failed');
+          if (command === 'oauth_poll_device_code') {
+            return new Promise(() => { /* never resolves */ });
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
+      await el.updateComplete;
+
+      void (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode, 'device code shown').to.not.be.null;
+
+      // Close via the modal (X / Escape / backdrop all route through handleClose).
+      invokeHistory.length = 0;
+      (el as unknown as { handleClose: () => void }).handleClose();
+      await el.updateComplete;
+
+      expect(invokeHistory.some((h) => h.command === 'oauth_cancel_device_code'), 'flow cancelled on close').to.be.true;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode).to.be.null;
+      expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.false;
+      expect(invokeHistory.some((h) => h.command === 'save_global_account')).to.be.false;
+    });
+
+    it('switching accounts mid-sign-in abandons the device flow (no write to the new account)', async () => {
+      connectionResponse = mockConnectedStatus;
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          if (command === 'oauth_poll_device_code') {
+            return new Promise(() => { /* never resolves */ });
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      await el.updateComplete;
+
+      // Start a device flow (poll hangs), showing the device code.
+      void (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode).to.not.be.null;
+
+      // Switching to another account must abandon the flow first.
+      invokeHistory.length = 0;
+      await (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+
+      expect(invokeHistory.some((h) => h.command === 'oauth_cancel_device_code'), 'flow cancelled on account switch').to.be.true;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode).to.be.null;
+      expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.false;
+      expect(invokeHistory.some((h) => h.command === 'save_global_account')).to.be.false;
+    });
+
+    it('cancelling clears the loading state so the sign-in button is not stuck disabled', async () => {
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Simulate being mid-"Connecting..." (resolveOrgAndFinalize sets both).
+      (el as unknown as { isLoading: boolean }).isLoading = true;
+      (el as unknown as { oauthPending: boolean }).oauthPending = true;
+      await el.updateComplete;
+
+      (el as unknown as { handleCancelEntraOAuth: () => void }).handleCancelEntraOAuth();
+      await el.updateComplete;
+
+      expect((el as unknown as { isLoading: boolean }).isLoading, 'loading cleared on cancel').to.be.false;
+      expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.false;
+    });
+
+    it('Add account clears a stale organization so a new sign-in uses the org picker', async () => {
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      // A previously-selected account left an org populated.
+      (el as unknown as { organizationInput: string }).organizationInput = 'previous-org';
+      await el.updateComplete;
+
+      (el as unknown as { handleAddAccount: () => void }).handleAddAccount();
+      await el.updateComplete;
+
+      expect((el as unknown as { organizationInput: string }).organizationInput, 'stale org cleared').to.equal('');
+      expect((el as unknown as { selectedAccountId: string | null }).selectedAccountId).to.be.null;
+    });
+
+    it('switching to the PAT tab mid-sign-in abandons the device flow', async () => {
+      connectionResponse = mockConnectedStatus;
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          if (command === 'oauth_poll_device_code') {
+            return new Promise(() => { /* never resolves */ });
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { authMethod: string }).authMethod = 'oauth';
+      await el.updateComplete;
+
+      void (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode).to.not.be.null;
+
+      invokeHistory.length = 0;
+      (el as unknown as { setAuthMethod: (m: string) => void }).setAuthMethod('pat');
+      await el.updateComplete;
+
+      expect((el as unknown as { authMethod: string }).authMethod).to.equal('pat');
+      expect(invokeHistory.some((h) => h.command === 'oauth_cancel_device_code'), 'flow cancelled on tab switch').to.be.true;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode).to.be.null;
+      expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.false;
+    });
+
+    it('opening Manage Accounts mid-sign-in abandons the device flow', async () => {
+      connectionResponse = mockConnectedStatus;
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          if (command === 'oauth_poll_device_code') {
+            return new Promise(() => { /* never resolves */ });
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      await el.updateComplete;
+
+      void (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode).to.not.be.null;
+
+      invokeHistory.length = 0;
+      (el as unknown as { handleManageAccounts: (e: Event) => void }).handleManageAccounts(new Event('manage'));
+      await el.updateComplete;
+
+      expect(invokeHistory.some((h) => h.command === 'oauth_cancel_device_code'), 'flow cancelled on manage-accounts').to.be.true;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode).to.be.null;
+      expect((el as unknown as { oauthPending: boolean }).oauthPending).to.be.false;
+    });
+
+    it('preserves a PAT-typed organization across an OAuth tab round-trip', async () => {
+      // No accounts so nothing is auto-selected (org clearing only applies when
+      // there's no selected account and no detected repo).
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      const api = el as unknown as {
+        setAuthMethod: (m: string) => void;
+        organizationInput: string;
+        selectedAccountId: string | null;
+      };
+      api.selectedAccountId = null;
+
+      // On the PAT tab the user typed an org (no account/repo context).
+      api.organizationInput = 'my-typed-org';
+
+      // Switch to OAuth: the org is stashed (not used for device-code resolution).
+      api.setAuthMethod('oauth');
+      await el.updateComplete;
+      expect(api.organizationInput, 'org hidden from OAuth resolution').to.equal('');
+
+      // Switch back to PAT: the typed org is restored, not lost.
+      api.setAuthMethod('pat');
+      await el.updateComplete;
+      expect(api.organizationInput, 'PAT org restored').to.equal('my-typed-org');
+    });
+
+    it('surfaces an error and stops the spinner when the device sign-in fails (not a stuck dead-end)', async () => {
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          if (command === 'oauth_start_device_code') {
+            throw new Error('Failed to start device sign-in');
           }
           return orig(command, args);
         };
@@ -930,21 +1122,185 @@ describe('lv-azure-devops-dialog', () => {
       `);
       await waitForLoad(el);
       (el as unknown as { organizationInput: string }).organizationInput = 'testorg';
-      (el as unknown as { oauthClientId: string }).oauthClientId = 'client-abc';
       (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
       await el.updateComplete;
 
       await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
       await el.updateComplete;
 
-      // The failure must clear the spinner, surface an error, and tear down the
-      // pending listener — not hang on "Waiting for Microsoft sign-in...".
+      // The failure must clear the spinner and surface an error — not hang.
       expect((el as unknown as { oauthPending: boolean }).oauthPending, 'spinner cleared on failure').to.be.false;
+      expect((el as unknown as { deviceCode: unknown }).deviceCode, 'device code cleared').to.be.null;
       expect((el as unknown as { error: string | null }).error, 'error surfaced').to.be.a('string').and.not.empty;
-      expect(
-        (el as unknown as { _pendingOAuthHandler?: EventListener })._pendingOAuthHandler,
-        'pending listener torn down'
-      ).to.be.undefined;
+    });
+  });
+
+  describe('Entra OAuth tab UI', () => {
+    it('renders a single "Sign in with Microsoft" button with no Client ID or Organization inputs', async () => {
+      connectionResponse = mockDisconnectedStatus;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { authMethod: string }).authMethod = 'oauth';
+      await el.updateComplete;
+
+      const tokenForm = el.shadowRoot!.querySelector('.token-form')!;
+      expect(tokenForm).to.not.be.null;
+
+      // The simplified OAuth path has NO inputs (no Client ID, no Organization).
+      expect(tokenForm.querySelectorAll('input').length).to.equal(0);
+
+      // Exactly the primary "Sign in with Microsoft" button is present.
+      const primaryBtn = tokenForm.querySelector('.btn-primary');
+      expect(primaryBtn).to.not.be.null;
+      expect(primaryBtn!.textContent?.trim()).to.include('Sign in with Microsoft');
+    });
+
+    it('renders an org picker when needsOrgSelection is true with availableOrgs set', async () => {
+      connectionResponse = mockDisconnectedStatus;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { authMethod: string }).authMethod = 'oauth';
+      (el as unknown as { availableOrgs: unknown[] }).availableOrgs = mockAdoOrganizations;
+      (el as unknown as { needsOrgSelection: boolean }).needsOrgSelection = true;
+      await el.updateComplete;
+
+      const tokenForm = el.shadowRoot!.querySelector('.token-form')!;
+      expect(tokenForm.textContent).to.include('Select an organization');
+
+      // One clickable button per available organization.
+      const orgButtons = Array.from(tokenForm.querySelectorAll('.btn')).filter((b) =>
+        ['contoso', 'fabrikam'].includes(b.textContent?.trim() ?? '')
+      );
+      expect(orgButtons.length).to.equal(2);
+
+      // The "Sign in with Microsoft" button is hidden while picking.
+      expect(tokenForm.querySelector('.btn-primary')).to.be.null;
+    });
+
+    it('shows the org picker after sign-in when the org cannot be detected (multiple orgs), and finalizes on selection', async () => {
+      connectionResponse = mockConnectedStatus;
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          if (command === 'list_ado_organizations') return mockAdoOrganizations;
+          if (command === 'save_global_account') {
+            const account = (args as { account?: IntegrationAccount } | undefined)?.account;
+            return account ?? null;
+          }
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      // No detected repo and no org typed → resolution must fall back to listing orgs.
+      (el as unknown as { organizationInput: string }).organizationInput = '';
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = null;
+      (el as unknown as { authMethod: string }).authMethod = 'oauth';
+      await el.updateComplete;
+
+      // Device-code poll resolves with a token; org resolution then lists orgs.
+      await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(invokeHistory.some((h) => h.command === 'list_ado_organizations')).to.be.true;
+      expect((el as unknown as { needsOrgSelection: boolean }).needsOrgSelection).to.be.true;
+
+      const orgButtons = Array.from(el.shadowRoot!.querySelectorAll('.btn')).filter((b) =>
+        ['contoso', 'fabrikam'].includes(b.textContent?.trim() ?? '')
+      );
+      expect(orgButtons.length).to.equal(2);
+
+      // Selecting an org verifies the connection and persists a new account.
+      invokeHistory.length = 0;
+      (orgButtons.find((b) => b.textContent?.trim() === 'fabrikam') as HTMLButtonElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(invokeHistory.some((h) => h.command === 'check_ado_connection')).to.be.true;
+      expect(invokeHistory.some((h) => h.command === 'save_global_account')).to.be.true;
+      expect(invokeHistory.some((h) => h.command === 'store_keyring_token')).to.be.true;
+      expect((el as unknown as { needsOrgSelection: boolean }).needsOrgSelection).to.be.false;
+      expect((el as unknown as { organizationInput: string }).organizationInput).to.equal('fabrikam');
+    });
+
+    it('Cancel in the org picker returns to the sign-in button without picking an org', async () => {
+      connectionResponse = mockDisconnectedStatus;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { authMethod: string }).authMethod = 'oauth';
+      (el as unknown as { availableOrgs: unknown[] }).availableOrgs = mockAdoOrganizations;
+      (el as unknown as { needsOrgSelection: boolean }).needsOrgSelection = true;
+      (el as unknown as { pendingTokens: unknown }).pendingTokens = { accessToken: 'tok' };
+      await el.updateComplete;
+
+      const cancelBtn = Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
+        (b) => b.textContent?.trim() === 'Cancel'
+      ) as HTMLButtonElement;
+      expect(cancelBtn, 'org picker has a Cancel button').to.not.be.undefined;
+
+      invokeHistory.length = 0;
+      cancelBtn.click();
+      await el.updateComplete;
+
+      // No account verified/persisted, picker torn down, and the primary button is back.
+      expect(invokeHistory.some((h) => h.command === 'check_ado_connection')).to.be.false;
+      expect((el as unknown as { needsOrgSelection: boolean }).needsOrgSelection).to.be.false;
+      expect((el as unknown as { pendingTokens: unknown }).pendingTokens).to.be.null;
+      expect((el as unknown as { availableOrgs: unknown[] }).availableOrgs).to.have.length(0);
+      const primaryBtn = el.shadowRoot!.querySelector('.token-form .btn-primary');
+      expect(primaryBtn?.textContent?.trim()).to.include('Sign in with Microsoft');
+    });
+
+    it('surfaces an error (not a silent dead-end) when the account has no organizations', async () => {
+      connectionResponse = mockConnectedStatus;
+      mockInvoke = (() => {
+        const orig = mockInvoke;
+        return async (command: string, args?: unknown) => {
+          if (command === 'get_unified_profiles_config') {
+            return { version: 3, profiles: [], accounts: [], repositoryAssignments: {} };
+          }
+          if (command === 'list_ado_organizations') return []; // no orgs for this account
+          return orig(command, args);
+        };
+      })();
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (el as unknown as { organizationInput: string }).organizationInput = '';
+      (el as unknown as { authMethod: string }).authMethod = 'oauth';
+      await el.updateComplete;
+
+      await (el as unknown as { handleStartEntraOAuth: () => Promise<void> }).handleStartEntraOAuth();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      // Error surfaced, spinner cleared, and no half-finished picker left behind.
+      expect((el as unknown as { error: string | null }).error, 'error surfaced').to.be.a('string').and.not.empty;
+      expect((el as unknown as { oauthPending: boolean }).oauthPending, 'spinner cleared').to.be.false;
+      expect((el as unknown as { needsOrgSelection: boolean }).needsOrgSelection).to.be.false;
+      expect(invokeHistory.some((h) => h.command === 'save_global_account')).to.be.false;
     });
   });
 

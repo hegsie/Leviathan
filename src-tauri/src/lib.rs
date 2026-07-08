@@ -573,6 +573,7 @@ pub fn run() {
             commands::azure_devops::query_ado_work_items,
             commands::azure_devops::create_azure_devops_work_item,
             commands::azure_devops::list_ado_pipeline_runs,
+            commands::azure_devops::list_ado_organizations,
             // GitLab integration
             commands::gitlab::check_gitlab_connection,
             commands::gitlab::detect_gitlab_repo,
@@ -664,6 +665,9 @@ pub fn run() {
             commands::oauth::oauth_refresh_token,
             commands::oauth::oauth_wait_for_callback,
             commands::oauth::oauth_wait_for_github_callback,
+            commands::oauth::oauth_start_device_code,
+            commands::oauth::oauth_poll_device_code,
+            commands::oauth::oauth_cancel_device_code,
             commands::oauth::discover_oidc_provider,
             commands::oauth::decode_oidc_id_token,
             // Git Flow

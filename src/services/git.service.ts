@@ -3327,6 +3327,12 @@ export interface DetectedAdoRepo {
   remoteName: string;
 }
 
+export interface AdoOrganization {
+  id: string;
+  name: string;
+  url: string;
+}
+
 export interface AdoPullRequest {
   pullRequestId: number;
   title: string;
@@ -3448,6 +3454,17 @@ export async function checkAdoConnectionWithToken(
     organization,
     token,
   });
+}
+
+/**
+ * List the Azure DevOps organizations the authenticated user belongs to.
+ * Used to auto-resolve the organization after an Entra sign-in when it can't be
+ * detected from the repo remote.
+ */
+export async function listAdoOrganizations(
+  token?: string | null,
+): Promise<CommandResult<AdoOrganization[]>> {
+  return invokeCommand<AdoOrganization[]>("list_ado_organizations", { token });
 }
 
 export async function detectAdoRepo(

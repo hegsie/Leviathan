@@ -118,6 +118,15 @@ pub struct AdoPipelineRun {
     pub url: String,
 }
 
+/// Azure DevOps organization (account) the signed-in user belongs to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoOrganization {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -1117,6 +1126,111 @@ pub async fn list_ado_pipeline_runs(
         .collect())
 }
 
+// ============================================================================
+// Organization Commands
+// ============================================================================
+
+/// List the Azure DevOps organizations the authenticated user is a member of.
+/// Used to auto-resolve the organization after an Entra sign-in when it cannot be
+/// detected from the repo remote. Uses the org-less vssps host so it works before
+/// any organization is known.
+#[command]
+pub async fn list_ado_organizations(token: Option<String>) -> Result<Vec<AdoOrganization>> {
+    let token = resolve_ado_token(token)?;
+
+    let client = reqwest::Client::new();
+
+    // Step 1: Resolve the member id via the org-less profile endpoint.
+    let profile_url =
+        "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1";
+    debug!("Requesting: {}", profile_url);
+
+    let profile_response = client
+        .get(profile_url)
+        .header("Authorization", get_auth_header(&token))
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| {
+            error!("HTTP request failed: {}", e);
+            LeviathanError::OperationFailed(format!("Failed to fetch profile: {}", e))
+        })?;
+
+    if !profile_response.status().is_success() {
+        let status = profile_response.status();
+        let body = profile_response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "Azure DevOps API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct ProfileData {
+        id: String,
+    }
+
+    let profile: ProfileData = profile_response.json().await.map_err(|e| {
+        error!("Failed to parse profile data: {}", e);
+        LeviathanError::OperationFailed(format!("Failed to parse profile data: {}", e))
+    })?;
+
+    // Step 2: List accounts for the resolved member id.
+    let accounts_url = format!(
+        "https://app.vssps.visualstudio.com/_apis/accounts?memberId={}&api-version=7.1",
+        profile.id
+    );
+    debug!("Requesting: {}", accounts_url);
+
+    let accounts_response = client
+        .get(&accounts_url)
+        .header("Authorization", get_auth_header(&token))
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| {
+            error!("HTTP request failed: {}", e);
+            LeviathanError::OperationFailed(format!("Failed to fetch accounts: {}", e))
+        })?;
+
+    if !accounts_response.status().is_success() {
+        let status = accounts_response.status();
+        let body = accounts_response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(format!(
+            "Azure DevOps API error {}: {}",
+            status, body
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct AccountsResponse {
+        value: Vec<ApiAccount>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiAccount {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        #[serde(rename = "accountName")]
+        account_name: String,
+    }
+
+    let data: AccountsResponse = accounts_response.json().await.map_err(|e| {
+        error!("Failed to parse accounts data: {}", e);
+        LeviathanError::OperationFailed(format!("Failed to parse accounts data: {}", e))
+    })?;
+
+    Ok(data
+        .value
+        .into_iter()
+        .map(|a| AdoOrganization {
+            id: a.account_id,
+            url: format!("https://dev.azure.com/{}", a.account_name),
+            name: a.account_name,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1471,5 +1585,65 @@ mod tests {
         let json = serde_json::to_string(&run).unwrap();
         assert!(json.contains("sourceBranch"));
         assert!(json.contains("finishedDate"));
+    }
+
+    #[test]
+    fn test_ado_organization_serialization() {
+        let org = AdoOrganization {
+            id: "acct-123".to_string(),
+            name: "mycompany".to_string(),
+            url: "https://dev.azure.com/mycompany".to_string(),
+        };
+
+        let json = serde_json::to_string(&org).unwrap();
+        assert!(json.contains("\"id\":\"acct-123\""));
+        assert!(json.contains("\"name\":\"mycompany\""));
+        assert!(json.contains("\"url\":\"https://dev.azure.com/mycompany\""));
+    }
+
+    #[test]
+    fn test_ado_accounts_response_deserialization() {
+        // Mirrors the accounts API `value` array shape used by list_ado_organizations.
+        #[derive(Deserialize)]
+        struct AccountsResponse {
+            value: Vec<ApiAccount>,
+        }
+
+        #[derive(Deserialize)]
+        struct ApiAccount {
+            #[serde(rename = "accountId")]
+            account_id: String,
+            #[serde(rename = "accountName")]
+            account_name: String,
+        }
+
+        let raw = r#"{
+            "count": 2,
+            "value": [
+                { "accountId": "id-1", "accountName": "orgOne" },
+                { "accountId": "id-2", "accountName": "orgTwo" }
+            ]
+        }"#;
+
+        let parsed: AccountsResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.value.len(), 2);
+        assert_eq!(parsed.value[0].account_id, "id-1");
+        assert_eq!(parsed.value[0].account_name, "orgOne");
+        assert_eq!(parsed.value[1].account_id, "id-2");
+        assert_eq!(parsed.value[1].account_name, "orgTwo");
+
+        // Verify the mapping list_ado_organizations performs.
+        let orgs: Vec<AdoOrganization> = parsed
+            .value
+            .into_iter()
+            .map(|a| AdoOrganization {
+                id: a.account_id,
+                url: format!("https://dev.azure.com/{}", a.account_name),
+                name: a.account_name,
+            })
+            .collect();
+        assert_eq!(orgs[0].name, "orgOne");
+        assert_eq!(orgs[0].url, "https://dev.azure.com/orgOne");
+        assert_eq!(orgs[1].id, "id-2");
     }
 }

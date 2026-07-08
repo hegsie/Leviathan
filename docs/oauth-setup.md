@@ -40,26 +40,29 @@ This guide covers how to register OAuth applications with each integration provi
 
 ## Azure DevOps (Microsoft Entra ID)
 
-1. Go to [Azure Portal](https://portal.azure.com/)
-2. Navigate to **Microsoft Entra ID** → **App registrations** → **New registration**
-3. Fill in:
-   - **Name**: Leviathan
-   - **Supported account types**: "Accounts in any organizational directory (Any Microsoft Entra ID tenant - Multitenant) and personal Microsoft accounts"
-   - **Redirect URI**:
-     - Platform: **Public client/native (mobile & desktop)**
-     - URI: `leviathan://oauth/azure/callback`
-4. Click **Register**
-5. After creation, go to **API permissions**:
-   - Click **Add a permission**
-   - Select **Azure DevOps**
-   - Check `user_impersonation`
-   - Click **Add permissions**
-6. Copy the **Application (client) ID** - this gets hardcoded in the app
+**No registration is required.** "Sign in with Microsoft" uses the OAuth 2.0
+**device-code flow** with an embedded, well-known public client ID (the Visual
+Studio client `872cd9fa-d31f-45e0-9eab-6e460a02d1f1`, which is multi-tenant and
+pre-authorized for Azure DevOps). The user clicks the button, a short code is
+shown, they approve it in the browser, and the app polls for the token — there is
+**no redirect URI and no PKCE**, so nothing needs to be configured per deployment.
+
+### Swapping in your own client ID (optional)
+If you'd rather ship your own Entra app instead of the embedded one:
+
+1. Go to [Azure Portal](https://portal.azure.com/) → **Microsoft Entra ID** →
+   **App registrations** → **New registration**.
+2. **Supported account types**: "Accounts in any organizational directory
+   (Multitenant) and personal Microsoft accounts".
+3. Under **Authentication** → **Advanced settings**, set **Allow public client
+   flows** to **Yes** (required for the device-code flow). No redirect URI is needed.
+4. Under **API permissions**, add **Azure DevOps → `user_impersonation`**.
+5. Copy the **Application (client) ID** and set it as `azure` in `OAUTH_CLIENT_IDS`.
 
 ### Notes
-- No admin consent is required for `user_impersonation`
-- The app uses PKCE for secure authorization
-- Microsoft's redirect URI validation requires exact matches, so ensure the URI is correct
+- No admin consent is required for `user_impersonation`.
+- The device-code flow needs no redirect URI, which is why the embedded public
+  client works without Leviathan owning its app registration.
 
 ---
 
@@ -98,7 +101,7 @@ Look for the `OAUTH_CLIENT_IDS` object near the top of the file:
 const OAUTH_CLIENT_IDS: Record<OAuthProvider, string> = {
   github: 'your-github-client-id',
   gitlab: 'your-gitlab-application-id',
-  azure: 'your-azure-application-client-id',
+  azure: 'your-azure-application-client-id', // optional: defaults to the embedded Visual Studio public client (device-code flow)
   bitbucket: 'your-bitbucket-key',
 };
 ```
