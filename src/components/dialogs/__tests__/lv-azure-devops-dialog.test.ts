@@ -673,6 +673,43 @@ describe('lv-azure-devops-dialog', () => {
       // Navigates back to the PR list on success.
       expect((el as unknown as { activeTab: string }).activeTab).to.equal('pull-requests');
     });
+
+    it('shows an inline error when create_ado_pull_request fails (not silent)', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'create_ado_pull_request') throw new Error('Source branch not found');
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      Object.assign(el as unknown as Record<string, unknown>, {
+        activeTab: 'create-pr',
+        createPrTitle: 'Will fail',
+        createPrSource: 'refs/heads/missing',
+        createPrTarget: 'refs/heads/main',
+      });
+      await el.updateComplete;
+
+      uiStore.getState().toasts.length = 0;
+      await (el as unknown as { handleCreatePr: () => Promise<void> }).handleCreatePr();
+      await el.updateComplete;
+
+      // Error surfaced inline; no success toast; still on the form (not navigated away).
+      const errorBanner = el.shadowRoot!.querySelector('.error');
+      expect(errorBanner, 'error banner shown').to.not.be.null;
+      expect(errorBanner!.textContent).to.include('Source branch not found');
+      expect(
+        uiStore.getState().toasts.some((t) => t.type === 'success'),
+        'no success toast on failure',
+      ).to.be.false;
+      expect((el as unknown as { activeTab: string }).activeTab).to.equal('create-pr');
+    });
   });
 
   describe('Pipelines Tab', () => {

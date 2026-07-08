@@ -248,9 +248,13 @@ export async function startOAuth(
     // Open the authorization URL in the browser
     await open(response.authorizeUrl);
 
-    // For providers using loopback server, poll for the callback
+    // For providers using loopback server, poll for the callback. Pass this
+    // flow's `state` captured HERE (synchronously, before any further await) as
+    // its identity — deriving it via a map lookup inside the callee would be
+    // racy, since a cancel+restart during `await open()` above can replace the
+    // pending entry before the poll runs.
     if (response.loopbackPort) {
-      pollLoopbackCallback(provider, response.loopbackPort).catch((e) => {
+      pollLoopbackCallback(provider, response.loopbackPort, response.state).catch((e) => {
         log.error(`OAuth polling error for ${provider}:`, e);
         pendingAuthByProvider.delete(provider);
         notifyStateChange({
@@ -273,12 +277,11 @@ export async function startOAuth(
 /**
  * Poll for loopback callback (works for GitHub, GitLab, and any provider using loopback server)
  */
-async function pollLoopbackCallback(provider: OAuthProvider, port: number): Promise<void> {
-  const pending = pendingAuthByProvider.get(provider);
-  if (!pending) {
-    return;
-  }
-
+async function pollLoopbackCallback(
+  provider: OAuthProvider,
+  port: number,
+  expectedState: string,
+): Promise<void> {
   try {
     // Wait for the callback on the loopback server. The backend validates the
     // provider-echoed `state` against the pending flow before returning (M11).
@@ -300,8 +303,9 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
     // restarted, so `current` is now a different, still-in-progress flow), drop
     // this stale callback SILENTLY. Do NOT delete `current` or surface an error —
     // that would clobber the newer flow's pending state and show a spurious
-    // "state mismatch" for the user's real, in-progress sign-in.
-    if (current.state !== pending.state) {
+    // "state mismatch" for the user's real, in-progress sign-in. Identity comes
+    // from `expectedState` (captured at start), not a racy re-read.
+    if (current.state !== expectedState) {
       return;
     }
 
@@ -362,7 +366,7 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
     // flow or delete the new flow's pending entry (which would silently drop the
     // user's real, in-progress sign-in).
     const current = pendingAuthByProvider.get(provider);
-    if (!current || current.state !== pending.state) {
+    if (!current || current.state !== expectedState) {
       return;
     }
     notifyStateChange({
