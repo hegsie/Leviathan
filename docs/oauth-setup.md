@@ -40,29 +40,48 @@ This guide covers how to register OAuth applications with each integration provi
 
 ## Azure DevOps (Microsoft Entra ID)
 
-**No registration is required.** "Sign in with Microsoft" uses the OAuth 2.0
-**device-code flow** with an embedded, well-known public client ID (the Visual
-Studio client `872cd9fa-d31f-45e0-9eab-6e460a02d1f1`, which is multi-tenant and
-pre-authorized for Azure DevOps). The user clicks the button, a short code is
-shown, they approve it in the browser, and the app polls for the token — there is
-**no redirect URI and no PKCE**, so nothing needs to be configured per deployment.
+"Sign in with Microsoft" uses the OAuth 2.0 **authorization-code + PKCE flow** over
+a **loopback redirect** — the same interactive flow as GitHub/GitLab — backed by a
+registered multi-tenant Entra **public client** (`a1b13ec5-3f32-4ec7-b07f-5dfc5acbd2a8`).
+The user clicks the button, signs in in the browser, and Entra redirects back to a
+short-lived local loopback server that captures the code and exchanges it. This
+interactive flow (unlike the earlier device-code flow) works under tenant
+Conditional Access policies that block device-code sign-in.
 
-### Swapping in your own client ID (optional)
-If you'd rather ship your own Entra app instead of the embedded one:
+The app requests the Azure DevOps `user_impersonation` scope (resource
+`499b84ac-1321-427f-aa17-267ca6975798`) plus `offline_access` (for refresh) under
+the `organizations` authority by default.
+
+### Registering your own Entra app
+The embedded client is a public client, so no per-user setup is required. To ship
+your own Entra app instead:
 
 1. Go to [Azure Portal](https://portal.azure.com/) → **Microsoft Entra ID** →
    **App registrations** → **New registration**.
 2. **Supported account types**: "Accounts in any organizational directory
-   (Multitenant) and personal Microsoft accounts".
-3. Under **Authentication** → **Advanced settings**, set **Allow public client
-   flows** to **Yes** (required for the device-code flow). No redirect URI is needed.
-4. Under **API permissions**, add **Azure DevOps → `user_impersonation`**.
-5. Copy the **Application (client) ID** and set it as `azure` in `OAUTH_CLIENT_IDS`.
+   (Any Microsoft Entra ID tenant — Multitenant)".
+3. Under **Authentication** → **Add a platform** → **Mobile and desktop
+   applications**, add the redirect URI **`http://localhost/callback`**.
+   - Use `localhost`, **not** `127.0.0.1`: Entra ignores the port only for a
+     `localhost` loopback redirect, and the app allocates its loopback port
+     dynamically. A single `http://localhost/callback` entry therefore matches
+     every port. (If the portal blocks the `http` loopback URI, add it via the
+     app manifest's `replyUrlsWithType` instead.)
+4. Under **Authentication** → **Advanced settings**, set **Allow public client
+   flows** to **Yes** (enables the public-client PKCE flow).
+5. Under **API permissions**, add **Azure DevOps → `user_impersonation`**. Grant
+   admin consent for the tenant only if your tenant restricts user consent
+   (users can otherwise self-consent to this delegated scope on first sign-in).
+6. Copy the **Application (client) ID** and set it as `azure` in `OAUTH_CLIENT_IDS`.
 
 ### Notes
-- No admin consent is required for `user_impersonation`.
-- The device-code flow needs no redirect URI, which is why the embedded public
-  client works without Leviathan owning its app registration.
+- The registered redirect URI must be `http://localhost/callback` (loopback,
+  port-agnostic). The loopback server binds `127.0.0.1` and, best-effort, the
+  IPv6 loopback `[::1]` on the same port, so the callback lands whether
+  `localhost` resolves to the IPv4 or IPv6 loopback (e.g. `::1` first on Windows).
+- `user_impersonation` is a delegated scope users can normally self-consent to
+  on first sign-in; tenant admin consent is only required if the tenant
+  restricts user consent.
 
 ---
 
@@ -101,7 +120,7 @@ Look for the `OAUTH_CLIENT_IDS` object near the top of the file:
 const OAUTH_CLIENT_IDS: Record<OAuthProvider, string> = {
   github: 'your-github-client-id',
   gitlab: 'your-gitlab-application-id',
-  azure: 'your-azure-application-client-id', // optional: defaults to the embedded Visual Studio public client (device-code flow)
+  azure: 'your-azure-application-client-id', // optional: defaults to the embedded Leviathan multi-tenant public client (auth-code + loopback)
   bitbucket: 'your-bitbucket-key',
 };
 ```

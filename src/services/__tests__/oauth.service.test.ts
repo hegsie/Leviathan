@@ -266,3 +266,108 @@ describe('oauth.service - refreshToken', () => {
     expect(tokens.refreshToken).to.equal('r3');
   });
 });
+
+describe('oauth.service - loopback cancel/restart guard', () => {
+  const defaultMock = mockInvoke;
+  afterEach(() => {
+    mockInvoke = defaultMock;
+    cancelOAuth();
+  });
+
+  it("a superseded flow's late callback does not error or clobber the newer flow", async () => {
+    const { startOAuth } = await import('../oauth.service.ts');
+
+    // Each start gets its own state + loopback port; oauth_wait_for_callback is
+    // held open per port so we control exactly when each flow's callback resolves.
+    const waiters = new Map<number, (v: { code: string; state: string }) => void>();
+    const states: string[] = [];
+    let n = 0;
+    const dispatched: unknown[] = [];
+    window.addEventListener('oauth-complete', (e) => dispatched.push((e as CustomEvent).detail));
+
+    mockInvoke = (command, args) => {
+      if (command === 'oauth_get_authorize_url') {
+        n += 1;
+        const state = `state-${n}`;
+        states.push(state);
+        return Promise.resolve({ authorizeUrl: 'https://login/authorize', state, loopbackPort: 8080 + n });
+      }
+      if (command === 'oauth_wait_for_callback') {
+        const port = (args as { port: number }).port;
+        return new Promise((resolve) => waiters.set(port, resolve));
+      }
+      if (command === 'oauth_exchange_code') {
+        return Promise.resolve({ accessToken: 'tok' });
+      }
+      return Promise.resolve(null);
+    };
+
+    const errors: string[] = [];
+    const unsub = onOAuthStateChange((s) => {
+      if (s.provider === 'azure' && s.status === 'error') errors.push(s.error ?? '');
+    });
+
+    // Flow A starts (state-1, port 8081), then the user cancels and restarts:
+    // flow B (state-2, port 8082) is now the current pending flow.
+    await startOAuth('azure', 'cid');
+    cancelOAuth('azure');
+    await startOAuth('azure', 'cid');
+
+    // Flow A's browser tab finally completes — its callback arrives on port 8081.
+    waiters.get(8081)!({ code: 'code-a', state: states[0] });
+    await new Promise((r) => setTimeout(r, 40));
+
+    // The stale callback is dropped silently: no error toast, no oauth-complete,
+    // and flow B remains the pending flow (its callback never fired).
+    expect(errors, 'no spurious state-mismatch error').to.have.length(0);
+    expect(dispatched, 'no oauth-complete for the abandoned flow').to.have.length(0);
+    expect(isPendingOAuth(), 'the newer flow is still pending').to.be.true;
+    expect(getPendingProvider()).to.equal('azure');
+
+    unsub();
+  });
+
+  it("a superseded flow's late error/timeout does not error or clobber the newer flow", async () => {
+    const { startOAuth } = await import('../oauth.service.ts');
+
+    // Flow A's wait rejects (timeout); flow B's wait is held open. cancelOAuth
+    // can't abort A's backend wait, so A's rejection arrives while B is pending.
+    const rejecters = new Map<number, (e: Error) => void>();
+    const states: string[] = [];
+    let n = 0;
+    mockInvoke = (command, args) => {
+      if (command === 'oauth_get_authorize_url') {
+        n += 1;
+        const state = `state-${n}`;
+        states.push(state);
+        return Promise.resolve({ authorizeUrl: 'https://login/authorize', state, loopbackPort: 8080 + n });
+      }
+      if (command === 'oauth_wait_for_callback') {
+        const port = (args as { port: number }).port;
+        return new Promise((_resolve, reject) => rejecters.set(port, reject));
+      }
+      return Promise.resolve(null);
+    };
+
+    const errors: string[] = [];
+    const unsub = onOAuthStateChange((s) => {
+      if (s.provider === 'azure' && s.status === 'error') errors.push(s.error ?? '');
+    });
+
+    // Flow A (port 8081), cancel, restart → flow B (port 8082) is current.
+    await startOAuth('azure', 'cid');
+    cancelOAuth('azure');
+    await startOAuth('azure', 'cid');
+
+    // Flow A's backend wait finally times out (rejects) minutes later.
+    rejecters.get(8081)!(new Error('OAuth callback timed out'));
+    await new Promise((r) => setTimeout(r, 40));
+
+    // No spurious error for the current flow, and flow B stays pending.
+    expect(errors, 'no spurious timeout error for the newer flow').to.have.length(0);
+    expect(isPendingOAuth(), 'the newer flow is still pending').to.be.true;
+    expect(getPendingProvider()).to.equal('azure');
+
+    unsub();
+  });
+});

@@ -57,25 +57,55 @@ impl LoopbackServer {
         Self::from_listener(listener)
     }
 
-    /// Create a loopback server from an existing listener
+    /// Best-effort bind of the IPv6 loopback (`[::1]`) on the SAME port as the
+    /// IPv4 listener. Azure's redirect uses the `localhost` host (Entra only
+    /// ignores the port for `localhost`), and `localhost` can resolve to `::1`
+    /// first (e.g. on Windows). Listening on `::1` too ensures the browser's
+    /// callback reaches us regardless of which family `localhost` resolves to.
+    /// Returns `None` (IPv4-only) when IPv6 is unavailable — a graceful degrade.
+    fn try_bind_ipv6_loopback(port: u16) -> Option<TcpListener> {
+        match TcpListener::bind(format!("[::1]:{}", port)) {
+            Ok(listener) => {
+                tracing::info!("OAuth loopback server also bound to [::1]:{}", port);
+                Some(listener)
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "IPv6 loopback ([::1]:{}) unavailable, IPv4 only: {}",
+                    port,
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    /// Create a loopback server from an existing IPv4 listener, also listening on
+    /// the IPv6 loopback (same port) when available.
     fn from_listener(listener: TcpListener) -> Result<Self, LeviathanError> {
         let port = listener
             .local_addr()
             .map_err(|e| LeviathanError::OAuth(format!("Failed to get local address: {}", e)))?
             .port();
 
+        let listener_v6 = Self::try_bind_ipv6_loopback(port);
+
         // Set up channels for shutdown and code reception
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
         let (code_tx, code_rx) = mpsc::channel::<Result<CallbackResult, String>>();
 
-        // Set non-blocking mode with timeout
+        // Set non-blocking mode so the accept loop can poll both listeners.
         listener
             .set_nonblocking(true)
             .map_err(|e| LeviathanError::OAuth(format!("Failed to set non-blocking: {}", e)))?;
+        if let Some(ref v6) = listener_v6 {
+            v6.set_nonblocking(true)
+                .map_err(|e| LeviathanError::OAuth(format!("Failed to set non-blocking: {}", e)))?;
+        }
 
         // Spawn server thread
         thread::spawn(move || {
-            Self::run_server(listener, shutdown_rx, code_tx);
+            Self::run_server(listener, listener_v6, shutdown_rx, code_tx);
         });
 
         Ok(Self {
@@ -155,9 +185,12 @@ impl LoopbackServer {
         }
     }
 
-    /// Run the server loop
+    /// Run the server loop, polling the IPv4 listener and (when present) the IPv6
+    /// loopback listener so the callback is received on whichever family the
+    /// browser used to reach `localhost`.
     fn run_server(
-        listener: TcpListener,
+        listener_v4: TcpListener,
+        mut listener_v6: Option<TcpListener>,
         shutdown_rx: mpsc::Receiver<()>,
         code_tx: mpsc::Sender<Result<CallbackResult, String>>,
     ) {
@@ -167,22 +200,50 @@ impl LoopbackServer {
                 break;
             }
 
-            // Try to accept a connection
-            match listener.accept() {
+            // Poll both loopback listeners (both non-blocking). `serviced` tracks
+            // whether either accepted a connection this pass, so we only sleep when
+            // both would-block.
+            let mut serviced = false;
+
+            // IPv4 loopback — the primary listener. A hard accept error here is fatal.
+            match listener_v4.accept() {
                 Ok((stream, _)) => {
+                    serviced = true;
                     if let Some(result) = Self::handle_connection(stream) {
                         let _ = code_tx.send(result);
-                        break;
+                        return;
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No connection yet, sleep briefly
-                    thread::sleep(Duration::from_millis(100));
-                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => {
                     let _ = code_tx.send(Err(format!("Accept error: {}", e)));
-                    break;
+                    return;
                 }
+            }
+
+            // IPv6 loopback — best-effort. A hard accept error just drops this
+            // listener (graceful degrade to IPv4-only, mirroring the bind-time
+            // fallback), never aborting the whole server mid-sign-in.
+            if let Some(v6) = listener_v6.as_ref() {
+                match v6.accept() {
+                    Ok((stream, _)) => {
+                        serviced = true;
+                        if let Some(result) = Self::handle_connection(stream) {
+                            let _ = code_tx.send(result);
+                            return;
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => {
+                        tracing::debug!("IPv6 loopback accept error, dropping to IPv4-only: {}", e);
+                        listener_v6 = None;
+                    }
+                }
+            }
+
+            if !serviced {
+                // No connection on either listener, sleep briefly.
+                thread::sleep(Duration::from_millis(100));
             }
         }
     }
@@ -422,6 +483,54 @@ mod tests {
         let server = LoopbackServer::new().unwrap();
         let uri = server.get_redirect_uri();
         assert!(uri.contains("/callback"));
+    }
+
+    /// The dual-listener accept loop must still receive a callback delivered over
+    /// IPv4 (the family GitHub/GitLab/Bitbucket redirect to, and one of the two
+    /// `localhost` may resolve to for Azure).
+    #[test]
+    fn test_wait_for_callback_receives_over_ipv4() {
+        let server = LoopbackServer::new().unwrap();
+        let port = server.port();
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(5)));
+
+        // Give the server thread a moment to start accepting.
+        thread::sleep(Duration::from_millis(150));
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"GET /callback?code=abc&state=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+
+        let result = handle.join().unwrap().unwrap();
+        assert_eq!(result.code, "abc");
+        assert_eq!(result.state, "xyz");
+    }
+
+    /// When IPv6 loopback is available, a callback delivered to `[::1]` (the family
+    /// `localhost` resolves to first on some hosts, e.g. Windows) must also be
+    /// received. Self-skips on hosts without IPv6 loopback.
+    #[test]
+    fn test_wait_for_callback_receives_over_ipv6_when_available() {
+        let server = LoopbackServer::new().unwrap();
+        let port = server.port();
+
+        // Skip if this host has no usable IPv6 loopback (the server binds it
+        // best-effort, so a connect here would fail for the same reason).
+        let Ok(mut stream) = TcpStream::connect(("::1", port)) else {
+            return;
+        };
+
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(5)));
+        thread::sleep(Duration::from_millis(150));
+        stream
+            .write_all(
+                b"GET /callback?code=v6code&state=v6state HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .unwrap();
+
+        let result = handle.join().unwrap().unwrap();
+        assert_eq!(result.code, "v6code");
+        assert_eq!(result.state, "v6state");
     }
 
     #[test]

@@ -2,7 +2,10 @@
  * OAuth service for provider authentication
  *
  * Handles OAuth authentication flows for GitHub, GitLab, Azure DevOps, and Bitbucket.
- * All providers (including Azure DevOps) use a loopback server (127.0.0.1:port) for the callback.
+ * All providers use a loopback server for the callback. GitHub/GitLab/Bitbucket
+ * register a `127.0.0.1:port` redirect; Azure DevOps registers a `localhost:port`
+ * redirect (Entra ignores the port only for `localhost`). The server binds
+ * `127.0.0.1` and, best-effort, `[::1]`, so a `localhost` callback lands either way.
  */
 
 import { onOpenUrl, getCurrent } from '@tauri-apps/plugin-deep-link';
@@ -245,9 +248,13 @@ export async function startOAuth(
     // Open the authorization URL in the browser
     await open(response.authorizeUrl);
 
-    // For providers using loopback server, poll for the callback
+    // For providers using loopback server, poll for the callback. Pass this
+    // flow's `state` captured HERE (synchronously, before any further await) as
+    // its identity — deriving it via a map lookup inside the callee would be
+    // racy, since a cancel+restart during `await open()` above can replace the
+    // pending entry before the poll runs.
     if (response.loopbackPort) {
-      pollLoopbackCallback(provider, response.loopbackPort).catch((e) => {
+      pollLoopbackCallback(provider, response.loopbackPort, response.state).catch((e) => {
         log.error(`OAuth polling error for ${provider}:`, e);
         pendingAuthByProvider.delete(provider);
         notifyStateChange({
@@ -270,12 +277,11 @@ export async function startOAuth(
 /**
  * Poll for loopback callback (works for GitHub, GitLab, and any provider using loopback server)
  */
-async function pollLoopbackCallback(provider: OAuthProvider, port: number): Promise<void> {
-  const pending = pendingAuthByProvider.get(provider);
-  if (!pending) {
-    return;
-  }
-
+async function pollLoopbackCallback(
+  provider: OAuthProvider,
+  port: number,
+  expectedState: string,
+): Promise<void> {
   try {
     // Wait for the callback on the loopback server. The backend validates the
     // provider-echoed `state` against the pending flow before returning (M11).
@@ -291,6 +297,16 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
     const current = pendingAuthByProvider.get(provider);
     if (!current) {
       return; // User cancelled or timeout
+    }
+
+    // If the flow THIS poll started was superseded (the user cancelled and
+    // restarted, so `current` is now a different, still-in-progress flow), drop
+    // this stale callback SILENTLY. Do NOT delete `current` or surface an error —
+    // that would clobber the newer flow's pending state and show a spurious
+    // "state mismatch" for the user's real, in-progress sign-in. Identity comes
+    // from `expectedState` (captured at start), not a racy re-read.
+    if (current.state !== expectedState) {
+      return;
     }
 
     // Guard against stale/overlapping flows: the callback's state must match the
@@ -343,6 +359,16 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
     pendingAuthByProvider.delete(provider);
   } catch (e) {
     log.error(`${provider} OAuth error:`, e);
+    // Same guard as the success path: only surface/clean up if the flow THIS poll
+    // served is still the current one. A superseded flow's late error/timeout
+    // (the user cancelled and restarted — cancelOAuth can't abort the backend
+    // wait, which runs to its timeout) must NOT fire a spurious error for the new
+    // flow or delete the new flow's pending entry (which would silently drop the
+    // user's real, in-progress sign-in).
+    const current = pendingAuthByProvider.get(provider);
+    if (!current || current.state !== expectedState) {
+      return;
+    }
     notifyStateChange({
       status: 'error',
       error: e instanceof Error ? e.message : `${provider} OAuth failed`,
