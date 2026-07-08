@@ -127,8 +127,10 @@ impl OAuthConfig {
     /// only ignores the port when matching a `localhost` loopback redirect — for the IP
     /// literal the port must match exactly, which is impossible with our dynamic
     /// loopback port. So the app registers `http://localhost/callback` and every port
-    /// matches it. The loopback server binds `127.0.0.1`, which `localhost` resolves to.
-    /// `tenant_id` (passed as instance_url) defaults to `organizations` (multi-tenant).
+    /// matches it. The loopback server binds `127.0.0.1` and, best-effort, `[::1]`
+    /// (see `LoopbackServer::try_bind_ipv6_loopback`), since `localhost` can resolve
+    /// to either family depending on the OS. `tenant_id` (passed as instance_url)
+    /// defaults to `organizations` (multi-tenant).
     pub fn azure(client_id: &str, tenant_id: Option<&str>, redirect_port: u16) -> Self {
         let tenant = tenant_id.unwrap_or("organizations");
         Self {

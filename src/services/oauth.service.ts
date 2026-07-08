@@ -2,7 +2,10 @@
  * OAuth service for provider authentication
  *
  * Handles OAuth authentication flows for GitHub, GitLab, Azure DevOps, and Bitbucket.
- * All providers (including Azure DevOps) use a loopback server (127.0.0.1:port) for the callback.
+ * All providers use a loopback server for the callback. GitHub/GitLab/Bitbucket
+ * register a `127.0.0.1:port` redirect; Azure DevOps registers a `localhost:port`
+ * redirect (Entra ignores the port only for `localhost`). The server binds
+ * `127.0.0.1` and, best-effort, `[::1]`, so a `localhost` callback lands either way.
  */
 
 import { onOpenUrl, getCurrent } from '@tauri-apps/plugin-deep-link';

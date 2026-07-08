@@ -75,8 +75,9 @@ your own Entra app instead:
 
 ### Notes
 - The registered redirect URI must be `http://localhost/callback` (loopback,
-  port-agnostic). The loopback server binds `127.0.0.1`, which `localhost`
-  resolves to.
+  port-agnostic). The loopback server binds `127.0.0.1` and, best-effort, the
+  IPv6 loopback `[::1]` on the same port, so the callback lands whether
+  `localhost` resolves to the IPv4 or IPv6 loopback (e.g. `::1` first on Windows).
 - `user_impersonation` requires tenant admin consent for the multi-tenant app.
 
 ---
