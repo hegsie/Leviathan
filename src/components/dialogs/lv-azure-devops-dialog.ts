@@ -20,6 +20,7 @@ import type {
   AdoPullRequest,
   AdoWorkItem,
   AdoPipelineRun,
+  AdoOrganization,
   CreateAdoPullRequestInput,
   CreateAdoWorkItemInput,
 } from '../../services/git.service.ts';
@@ -31,6 +32,13 @@ import './lv-modal.ts';
 import './lv-account-selector.ts';
 
 type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr' | 'create-work-item';
+
+/** OAuth tokens carried from an Entra sign-in through org resolution to persistence. */
+interface EntraTokens {
+  accessToken: string;
+  refreshToken?: string;
+  expiresIn?: number;
+}
 
 @customElement('lv-azure-devops-dialog')
 export class LvAzureDevOpsDialog extends LitElement {
@@ -161,6 +169,20 @@ export class LvAzureDevOpsDialog extends LitElement {
       .help-text {
         font-size: var(--font-size-xs);
         color: var(--color-text-muted);
+      }
+
+      .device-code {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-xl);
+        font-weight: var(--font-weight-semibold);
+        letter-spacing: 0.15em;
+        text-align: center;
+        padding: var(--spacing-md);
+        background: var(--color-bg-tertiary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        color: var(--color-text-primary);
+        user-select: all;
       }
 
       .help-link {
@@ -586,8 +608,25 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private organizationInput = '';
   @state() private hasStoredToken = false;
   @state() private authMethod: 'oauth' | 'pat' = 'pat';
-  @state() private oauthClientId = '';
+  /** True from the moment "Sign in with Microsoft" is clicked until the flow settles. */
   @state() private oauthPending = false;
+  /** The device code + verification URL to show the user while they sign in. */
+  @state() private deviceCode: { userCode: string; verificationUri: string } | null = null;
+  /** Handle for the in-flight device-code flow (used to poll/cancel it). */
+  private deviceFlowId: string | null = null;
+  /** Org typed on the PAT form, stashed while on the OAuth tab so it survives a round-trip. */
+  private savedPatOrg = '';
+  /** Last `${org}::${token}` written to the keyring git credential, to skip redundant re-syncs. */
+  private lastSyncedGitCredKey: string | null = null;
+  /**
+   * Bumped whenever an Entra sign-in should be abandoned (new start, cancel,
+   * close, disconnect). Async continuations capture the value at start and bail
+   * if it changed — so closing the dialog mid-finalize can't silently connect.
+   */
+  private entraGeneration = 0;
+  @state() private availableOrgs: AdoOrganization[] = [];
+  @state() private needsOrgSelection = false;
+  private pendingTokens: EntraTokens | null = null;
   @state() private prFilter: 'active' | 'completed' | 'abandoned' | 'all' = 'active';
   @state() private workItemFilter: string = '';
 
@@ -596,8 +635,6 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private selectedAccountId: string | null = null;
 
   private unsubscribeStore?: () => void;
-  private _pendingOAuthHandler?: EventListener;
-  private oauthStateUnsubscribe?: () => void;
   private loadGeneration = 0;
   // Set while the user is mid-"Add account" (selection intentionally cleared so
   // the next save creates a NEW account). Guards the store subscription from
@@ -653,31 +690,6 @@ export class LvAzureDevOpsDialog extends LitElement {
       }
     });
 
-    // Subscribe to OAuth state so a FAILED/denied Entra sign-in is surfaced
-    // (Azure is deep-link only and the success-path `oauth-complete` event never
-    // fires on failure — without this the dialog would spin forever). Mirrors
-    // the other provider dialogs.
-    this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
-      if (state.provider !== 'azure') return;
-      if (state.status === 'error') {
-        this.oauthPending = false;
-        this.error = state.error ?? 'Microsoft sign-in failed';
-        showToast(this.error, 'error');
-        // Tear down the pending success-listener INLINE. Do NOT call
-        // handleCancelEntraOAuth() here: this callback can fire synchronously
-        // from inside oauthService (during startOAuth's own error dispatch),
-        // and handleCancelEntraOAuth() re-enters oauthService.cancelOAuth(),
-        // which re-emits state from within the in-flight dispatch — a re-entrant
-        // cascade. Cleaning up locally keeps this idempotent and loop-free.
-        if (this._pendingOAuthHandler) {
-          window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
-          this._pendingOAuthHandler = undefined;
-        }
-      } else if (state.status === 'idle') {
-        this.oauthPending = false;
-      }
-    });
-
     // Initialize from current state
     this.accounts = getAccountsByType('azure-devops');
     if (this.accounts.length > 0 && !this.selectedAccountId) {
@@ -696,18 +708,19 @@ export class LvAzureDevOpsDialog extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribeStore?.();
-    this.oauthStateUnsubscribe?.();
-    // Clean up pending OAuth listener to prevent leak
-    if (this._pendingOAuthHandler) {
-      window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
-      this._pendingOAuthHandler = undefined;
-    }
+    // Cancel any in-flight device-code sign-in so it doesn't poll after unmount,
+    // and invalidate continuations so a late finalize can't mutate a dead element.
+    this.abandonPendingEntraFlow();
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
-      // Fresh open: clear selectedAccountId so loadInitialData() re-derives
-      // it from the current active profile's preferred account.
+      // Fresh open: abandon any sign-in left in-flight from a prior session
+      // (the host may hide the dialog without routing through handleClose, e.g.
+      // by setting its `open` prop false), so a reopen can't surface a stale
+      // device code or a stuck "Connecting..." spinner. Then clear
+      // selectedAccountId so loadInitialData() re-derives it.
+      this.abandonPendingEntraFlow();
       this.selectedAccountId = null;
       await this.loadInitialData();
     }
@@ -810,7 +823,7 @@ export class LvAzureDevOpsDialog extends LitElement {
     const org = this.detectedRepo?.organization || this.organizationInput;
     if (!org) return;
 
-    // Get token for selected account (or legacy token if no account)
+    // Get token for selected account (refresh-aware for OAuth accounts).
     const token = await this.getSelectedAccountToken();
     const result = await gitService.checkAdoConnectionWithToken(org, token);
     if (result.success && result.data) {
@@ -826,17 +839,10 @@ export class LvAzureDevOpsDialog extends LitElement {
         });
       }
 
-      // Ensure git credentials are stored in keyring for push/pull operations
-      if (result.data.connected && org && token) {
-        try {
-          // Store for both dev.azure.com and {org}.visualstudio.com formats
-          // Username must be non-empty for macOS Keychain - use 'pat' as a placeholder
-          await gitService.storeGitCredentials('https://dev.azure.com', 'pat', token);
-          await gitService.storeGitCredentials(`https://${org}.visualstudio.com`, 'pat', token);
-          log.debug(`Synced git credentials to keyring for dev.azure.com and ${org}.visualstudio.com`);
-        } catch (err) {
-          log.warn('Failed to sync git credentials to keyring:', err);
-        }
+      // Sync the keyring git credentials only with a VERIFIED-connected token, so
+      // external git push/pull get a valid credential (never a stale fallback).
+      if (result.data.connected && token) {
+        await this.syncGitCredentials(org, token);
       }
     } else if (!result.success) {
       log.error('checkConnection failed:', result.error?.message);
@@ -848,13 +854,20 @@ export class LvAzureDevOpsDialog extends LitElement {
   }
 
   /**
-   * Get the token for the currently selected account
+   * Get the token for the currently selected account, refreshing an expiring
+   * Entra OAuth token first (and re-syncing the keyring git credentials so
+   * push/pull stay valid). Non-OAuth (PAT) accounts return their stored token.
    */
   private async getSelectedAccountToken(): Promise<string | null> {
     if (!this.selectedAccountId) return null;
 
-    // Check account-specific token
-    let token = await credentialService.getAccountToken('azure-devops', this.selectedAccountId);
+    // Refresh-aware: for an OAuth account this returns a freshly-refreshed access
+    // token when the stored one is near expiry; for a PAT it returns it unchanged.
+    let token = await credentialService.getFreshAccountToken(
+      'azure-devops',
+      this.selectedAccountId,
+      'azure',
+    );
 
     // If not found, check legacy token and migrate it
     if (!token) {
@@ -871,10 +884,36 @@ export class LvAzureDevOpsDialog extends LitElement {
   }
 
   /**
+   * Write the git credentials for `org` to the OS keyring so git push/pull
+   * outside this dialog use a valid credential. Only call this with a token that
+   * has been VERIFIED to work (a connected check) — never a stale fallback, which
+   * would clobber a previously-valid credential. Deduped by (org, token) to avoid
+   * redundant keyring writes on hot paths.
+   */
+  private async syncGitCredentials(org: string, token: string): Promise<void> {
+    const syncKey = `${org}::${token}`;
+    if (syncKey === this.lastSyncedGitCredKey) return;
+    // storeGitCredentials resolves to a CommandResult (it never throws), so check
+    // .success and only mark synced on success — otherwise a failed write would be
+    // stickily suppressed and never retried.
+    const c1 = await gitService.storeGitCredentials('https://dev.azure.com', 'pat', token);
+    const c2 = await gitService.storeGitCredentials(`https://${org}.visualstudio.com`, 'pat', token);
+    if (c1.success && c2.success) {
+      this.lastSyncedGitCredKey = syncKey;
+    } else {
+      log.warn('Failed to sync Azure DevOps git credentials to keyring:', c1.error ?? c2.error);
+    }
+  }
+
+  /**
    * Handle account selection change
    */
   private async handleAccountChange(e: CustomEvent<{ account: IntegrationAccount }>): Promise<void> {
     const { account } = e.detail;
+    // Abandon any in-flight Entra sign-in BEFORE switching accounts, or a
+    // completing flow would persist its token/identity onto the newly selected
+    // account.
+    this.abandonPendingEntraFlow();
     // The user explicitly selected an existing account — re-enable the
     // subscription's auto-apply branch.
     this.isAddingAccount = false;
@@ -899,19 +938,30 @@ export class LvAzureDevOpsDialog extends LitElement {
    * Handle add account request
    */
   private handleAddAccount(): void {
+    // Abandon any in-flight Entra sign-in before clearing the selection, or a
+    // completing flow would create/overwrite an unexpected account.
+    this.abandonPendingEntraFlow();
     // Clear selection so the next token save creates a new account instead of
-    // overwriting the previously-selected account's token.
+    // overwriting the previously-selected account's token. Also clear the org:
+    // otherwise a new Entra sign-in would reuse the previous account's org and
+    // bypass the org picker (binding the new account to the wrong org). Rotating
+    // an existing selected account still uses that account's org.
     this.isAddingAccount = true;
     this.activeTab = 'connection';
     this.connectionStatus = null;
     this.selectedAccountId = null;
     this.tokenInput = '';
+    this.organizationInput = '';
   }
 
   /**
    * Handle manage accounts request
    */
   private handleManageAccounts(e: Event): void {
+    // Navigating to the Accounts view hides (but doesn't unmount) this dialog and
+    // can re-derive selectedAccountId on the way back, so abandon any in-flight
+    // Entra sign-in first — otherwise a late poll could write to the wrong account.
+    this.abandonPendingEntraFlow();
     // Consume the account-selector's bubbling/composed event so it can't ALSO
     // reach the host — otherwise the host would receive both it and our re-dispatch
     // below, firing its handler twice (the second pass corrupts reversible-Back state).
@@ -1023,139 +1073,325 @@ export class LvAzureDevOpsDialog extends LitElement {
     }
   }
 
+  /**
+   * Start the one-click Microsoft (Entra ID) sign-in via the OAuth device-code
+   * flow. Shows the user a short code to enter at a verification URL, opens that
+   * URL in the browser, then blocks on the backend poll until the user finishes.
+   * Uses the embedded public client — no per-user app registration and no
+   * redirect URI (device code needs neither).
+   */
   private async handleStartEntraOAuth(): Promise<void> {
-    if (!this.organizationInput.trim() || !this.oauthClientId.trim()) return;
+    // Guard against a double-click starting a second (orphaned) device flow.
+    if (this.oauthPending) return;
 
-    // Remove any existing listener from a prior sign-in attempt before
-    // registering a new one, to avoid orphaned 'oauth-complete' listeners.
-    if (this._pendingOAuthHandler) {
-      window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
-      this._pendingOAuthHandler = undefined;
-    }
-
+    const generation = ++this.entraGeneration;
     this.oauthPending = true;
     this.error = null;
+    this.deviceCode = null;
 
     try {
-      // Start OAuth flow with Entra ID
-      await oauthService.startOAuth('azure', this.oauthClientId);
-
-      // If the flow already failed synchronously, the OAuth-state subscription
-      // above has cleared the spinner and surfaced the error. Don't register the
-      // success-path listener for a flow that never opened — that would leave an
-      // orphaned 'oauth-complete' listener after a failed start.
-      if (!this.oauthPending) {
+      const start = await oauthService.startDeviceCode('azure', oauthService.getClientId('azure'));
+      if (generation !== this.entraGeneration) {
+        // Cancelled/closed while starting: abandonPendingEntraFlow ran before we
+        // knew the flow id, so cancel the now-orphaned backend flow here.
+        void oauthService.cancelDeviceCode(start.flowId);
         return;
       }
+      this.deviceFlowId = start.flowId;
+      this.deviceCode = { userCode: start.userCode, verificationUri: start.verificationUri };
 
-      // For Azure, deep link is used — wait for the oauth-complete event
-      const handleComplete = async (e: Event) => {
-        const detail = (e as CustomEvent).detail;
-        if (detail?.provider !== 'azure') return;
+      // Open the verification page so the user only has to enter the code.
+      openExternalUrl(start.verificationUri);
 
-        window.removeEventListener('oauth-complete', handleComplete);
-        this._pendingOAuthHandler = undefined;
-        this.oauthPending = false;
+      // Blocks until the user completes sign-in (or it is cancelled / times out).
+      const tokens = await oauthService.pollDeviceCode(start.flowId);
 
-        if (detail.error) {
-          this.error = detail.error;
-          showToast(`OAuth failed: ${detail.error}`, 'error');
-          return;
-        }
+      // The user may have cancelled (or started a new flow) while we waited.
+      if (generation !== this.entraGeneration) return;
 
-        if (detail.tokens?.accessToken) {
-          const accessToken = detail.tokens.accessToken;
-          const organization = this.organizationInput.trim();
-
-          // Verify connection BEFORE persisting anything
-          const result = await gitService.checkAdoConnectionWithToken(organization, accessToken);
-
-          if (result.success && result.data?.connected) {
-            const user = result.data.user;
-            const cachedUser = user
-              ? {
-                  username: user.displayName,
-                  displayName: user.displayName,
-                  email: null, // ADO API doesn't return email in this context
-                  avatarUrl: user.imageUrl ?? null,
-                }
-              : null;
-
-            if (this.selectedAccountId) {
-              // Rotating credentials on an existing account
-              await credentialService.storeAccountToken(
-                'azure-devops',
-                this.selectedAccountId,
-                accessToken,
-              );
-              if (cachedUser) {
-                await unifiedProfileService.updateGlobalAccountCachedUser(
-                  this.selectedAccountId,
-                  cachedUser,
-                );
-              }
-            } else {
-              // No account selected - create and persist a new global account
-              // (mirror the PAT path) BEFORE storing the token so the keyring
-              // entry is never orphaned.
-              const { createEmptyIntegrationAccount, generateId } = await import(
-                '../../types/unified-profile.types.ts'
-              );
-              const newAccount: IntegrationAccount = {
-                ...createEmptyIntegrationAccount('azure-devops', organization),
-                id: generateId(),
-                name: user?.displayName
-                  ? `Azure DevOps (${user.displayName})`
-                  : `Azure DevOps (${organization})`,
-                isDefault: this.accounts.length === 0,
-                cachedUser,
-              };
-
-              const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
-              await credentialService.storeAccountToken('azure-devops', savedAccount.id, accessToken);
-              this.selectedAccountId = savedAccount.id;
-              // The new account now exists and is selected — add flow complete.
-              this.isAddingAccount = false;
-
-              // Refresh accounts list
-              await unifiedProfileService.loadUnifiedProfiles();
-              this.accounts = getAccountsByType('azure-devops');
-            }
-
-            this.connectionStatus = result.data;
-            this.syncSharedConnectionStatus(true);
-            showToast('Connected to Azure DevOps via Microsoft Entra ID', 'success');
-          } else {
-            this.error = 'Connection verification failed';
-            showToast('OAuth token received but connection verification failed', 'error');
-          }
-        }
-      };
-
-      window.addEventListener('oauth-complete', handleComplete);
-      this._pendingOAuthHandler = handleComplete;
+      this.deviceCode = null;
+      this.deviceFlowId = null;
+      // resolveOrgAndFinalize owns the loading/error/oauthPending state from here.
+      await this.resolveOrgAndFinalize(
+        {
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          expiresIn: tokens.expiresIn,
+        },
+        generation,
+      );
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'OAuth flow failed';
+      // A cancel/close races the poll rejection; only surface if still current.
+      if (generation !== this.entraGeneration) return;
+      this.error = err instanceof Error ? err.message : 'Microsoft sign-in failed';
       showToast(this.error, 'error');
+      this.deviceCode = null;
+      this.deviceFlowId = null;
       this.oauthPending = false;
     }
   }
 
   /**
-   * Cancel a pending Entra ID OAuth sign-in.
+   * Resolve which Azure DevOps organization to use after an Entra sign-in, then
+   * finalize. Prefer the org detected from the repo remote; otherwise list the
+   * user's orgs — 1 is used automatically, >1 shows an in-dialog picker, 0 errors.
+   */
+  private async resolveOrgAndFinalize(tokens: EntraTokens, generation: number): Promise<void> {
+    this.isLoading = true;
+    this.error = null;
+    try {
+      let org = this.detectedRepo?.organization || this.organizationInput.trim();
+      if (!org) {
+        const orgsResult = await gitService.listAdoOrganizations(tokens.accessToken);
+        if (generation !== this.entraGeneration) return; // dialog closed/cancelled
+        if (!orgsResult.success || !orgsResult.data) {
+          this.error = orgsResult.error?.message ?? 'Failed to list Azure DevOps organizations';
+          showToast(this.error, 'error');
+          return;
+        }
+        if (orgsResult.data.length === 1) {
+          org = orgsResult.data[0].name;
+        } else if (orgsResult.data.length > 1) {
+          // Defer: let the user pick. Stash tokens + orgs and show the picker.
+          this.availableOrgs = orgsResult.data;
+          this.pendingTokens = tokens;
+          this.needsOrgSelection = true;
+          return;
+        } else {
+          this.error = 'No Azure DevOps organizations found for this Microsoft account';
+          showToast(this.error, 'error');
+          return;
+        }
+      }
+      this.organizationInput = org;
+      await this.finalizeEntraLogin(tokens, org, generation);
+    } catch (err) {
+      if (generation !== this.entraGeneration) return;
+      this.error = err instanceof Error ? err.message : 'Failed to complete Microsoft sign-in';
+      showToast(this.error, 'error');
+    } finally {
+      // Only reset shared state if this flow is still current — a superseding
+      // flow (close→reopen→restart) may already own oauthPending/isLoading.
+      if (generation === this.entraGeneration) {
+        this.oauthPending = false;
+        this.isLoading = false;
+      }
+    }
+  }
+
+  /**
+   * Complete an in-dialog org selection: finalize the sign-in with the chosen
+   * organization. The picker is only dismissed on success — on failure the token
+   * and org list are retained so the user can pick another org without re-signing.
+   */
+  private async handleSelectOrg(org: AdoOrganization): Promise<void> {
+    const tokens = this.pendingTokens;
+    if (!tokens) return;
+    const generation = this.entraGeneration;
+    this.isLoading = true;
+    this.error = null;
+    try {
+      this.organizationInput = org.name;
+      await this.finalizeEntraLogin(tokens, org.name, generation);
+      if (generation !== this.entraGeneration) return; // dialog closed while finalizing
+      // finalizeEntraLogin sets this.error on verification failure without throwing.
+      if (!this.error) {
+        this.needsOrgSelection = false;
+        this.pendingTokens = null;
+        this.availableOrgs = [];
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to complete Microsoft sign-in';
+      showToast(this.error, 'error');
+      // Keep the picker + tokens so the user can retry or choose another org.
+    } finally {
+      if (generation === this.entraGeneration) {
+        this.isLoading = false;
+      }
+    }
+  }
+
+  /**
+   * Abandon a pending org selection and return to the "Sign in with Microsoft"
+   * button, discarding the unused token and org list.
+   */
+  private handleCancelOrgSelection(): void {
+    this.needsOrgSelection = false;
+    this.pendingTokens = null;
+    this.availableOrgs = [];
+    this.error = null;
+  }
+
+  /**
+   * Verify the Entra token against `organization`, then persist the account,
+   * OAuth token (with refresh token + expiry), and git credentials. Handles both
+   * rotating an existing account and creating a new one (mirrors the PAT path).
+   */
+  private async finalizeEntraLogin(
+    tokens: EntraTokens,
+    organization: string,
+    generation: number,
+  ): Promise<void> {
+    const accessToken = tokens.accessToken;
+    // Verify connection BEFORE persisting anything
+    const result = await gitService.checkAdoConnectionWithToken(organization, accessToken);
+
+    // If the dialog was closed/cancelled during verification, do NOT persist an
+    // account, store credentials, or show a success toast for a dismissed flow.
+    if (generation !== this.entraGeneration) return;
+
+    if (result.success && result.data?.connected) {
+      const user = result.data.user;
+      const cachedUser = user
+        ? {
+            username: user.displayName,
+            displayName: user.displayName,
+            email: null, // ADO API doesn't return email in this context
+            avatarUrl: user.imageUrl ?? null,
+          }
+        : null;
+
+      if (this.selectedAccountId) {
+        // Rotating credentials on an existing account. Store the full OAuth
+        // bundle (access + refresh + expiry) so the token can be refreshed —
+        // Entra access tokens are short-lived (~1h).
+        await credentialService.storeAccountOAuthToken(
+          'azure-devops',
+          this.selectedAccountId,
+          accessToken,
+          tokens.refreshToken,
+          tokens.expiresIn,
+        );
+        if (cachedUser) {
+          await unifiedProfileService.updateGlobalAccountCachedUser(
+            this.selectedAccountId,
+            cachedUser,
+          );
+        }
+      } else {
+        // No account selected - create and persist a new global account
+        // (mirror the PAT path) BEFORE storing the token so the keyring
+        // entry is never orphaned.
+        const { createEmptyIntegrationAccount, generateId } = await import(
+          '../../types/unified-profile.types.ts'
+        );
+        const newAccount: IntegrationAccount = {
+          ...createEmptyIntegrationAccount('azure-devops', organization),
+          id: generateId(),
+          name: user?.displayName
+            ? `Azure DevOps (${user.displayName})`
+            : `Azure DevOps (${organization})`,
+          isDefault: this.accounts.length === 0,
+          cachedUser,
+        };
+
+        const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
+        await credentialService.storeAccountOAuthToken(
+          'azure-devops',
+          savedAccount.id,
+          accessToken,
+          tokens.refreshToken,
+          tokens.expiresIn,
+        );
+        this.selectedAccountId = savedAccount.id;
+        // The new account now exists and is selected — add flow complete.
+        this.isAddingAccount = false;
+
+        // Refresh accounts list
+        await unifiedProfileService.loadUnifiedProfiles();
+        this.accounts = getAccountsByType('azure-devops');
+      }
+
+      // Store git credentials in keyring for push/pull operations. Non-fatal:
+      // a keyring failure must not undo an otherwise-successful sign-in.
+      // The stored access token (~1h) is refreshed on-demand by getFreshAccountToken
+      // (using the refresh token persisted above via storeAccountOAuthToken), so
+      // in-app git push/pull keep working past expiry.
+      // storeGitCredentials resolves to a CommandResult (it never throws), so
+      // check .success rather than relying on a catch.
+      const cred1 = await gitService.storeGitCredentials('https://dev.azure.com', 'pat', accessToken);
+      const cred2 = await gitService.storeGitCredentials(`https://${organization}.visualstudio.com`, 'pat', accessToken);
+      if (cred1.success && cred2.success) {
+        // Record the synced (org, token) so checkConnection doesn't re-write it.
+        this.lastSyncedGitCredKey = `${organization}::${accessToken}`;
+      } else {
+        log.warn('Failed to store Azure DevOps git credentials for push/pull:', cred1.error ?? cred2.error);
+        showToast('Signed in, but saving git credentials failed — push/pull may prompt for credentials', 'error');
+      }
+
+      this.connectionStatus = result.data;
+      this.syncSharedConnectionStatus(true);
+      showToast('Connected to Azure DevOps via Microsoft Entra ID', 'success');
+
+      // Populate the PR / work-item / pipeline tabs immediately (mirror the PAT
+      // path) so they aren't empty until the user clicks each tab.
+      if (this.connectionStatus?.connected && this.detectedRepo) {
+        await this.loadAllData(accessToken);
+      }
+    } else {
+      this.error = 'Connection verification failed';
+      showToast('OAuth token received but connection verification failed', 'error');
+    }
+  }
+
+  /**
+   * Cancel a pending Entra ID device-code sign-in.
    *
-   * Azure uses a deep-link callback, so simply clearing `oauthPending` would
-   * leave the 'oauth-complete' listener registered — if the browser sign-in
-   * later completed, the deep link would silently verify/persist/connect an
-   * account. Cancel the underlying flow AND remove the listener.
+   * Clearing `deviceFlowId` first makes the in-flight poll's result be ignored
+   * (see handleStartEntraOAuth), and cancelDeviceCode stops the server-side poll.
    */
   private handleCancelEntraOAuth(): void {
-    oauthService.cancelOAuth('azure');
-    if (this._pendingOAuthHandler) {
-      window.removeEventListener('oauth-complete', this._pendingOAuthHandler);
-      this._pendingOAuthHandler = undefined;
-    }
+    this.abandonPendingEntraFlow();
+  }
+
+  /**
+   * Abandon any in-flight Entra sign-in: bump the generation so async
+   * continuations (poll/finalize) bail, cancel the backend device flow, and
+   * clear all transient sign-in UI state. Safe to call when no flow is active.
+   * MUST be called before anything that changes the target account
+   * (selectedAccountId) mid-flow, or a completing flow would write to the wrong
+   * account.
+   */
+  private abandonPendingEntraFlow(): void {
+    this.entraGeneration++;
+    const flowId = this.deviceFlowId;
+    this.deviceFlowId = null;
+    this.deviceCode = null;
     this.oauthPending = false;
+    // Bumping the generation makes resolveOrgAndFinalize's finally skip its own
+    // reset, so clear isLoading here too — otherwise cancelling during
+    // "Connecting..." would leave the sign-in button disabled forever.
+    this.isLoading = false;
+    this.needsOrgSelection = false;
+    this.pendingTokens = null;
+    this.availableOrgs = [];
+    if (flowId) {
+      void oauthService.cancelDeviceCode(flowId);
+    }
+  }
+
+  /**
+   * Switch between the "Sign in with Microsoft" and PAT tabs. Abandons any
+   * in-flight Entra sign-in so it can't complete underneath the other view, and
+   * when entering the OAuth tab without a selected account or detected repo,
+   * drops any org left over from the PAT form so device-code sign-in goes through
+   * org detection/listing instead of silently reusing a stray value.
+   */
+  private setAuthMethod(method: 'oauth' | 'pat'): void {
+    if (this.oauthPending || this.deviceCode || this.needsOrgSelection) {
+      this.abandonPendingEntraFlow();
+    }
+    if (method === 'oauth' && !this.selectedAccountId && !this.detectedRepo) {
+      // The OAuth path resolves the org from the repo/picker, not a typed value.
+      // Stash (don't destroy) any org typed on the PAT form so it survives a
+      // round-trip back to the PAT tab.
+      this.savedPatOrg = this.organizationInput;
+      this.organizationInput = '';
+    } else if (method === 'pat' && !this.organizationInput && this.savedPatOrg) {
+      this.organizationInput = this.savedPatOrg;
+      this.savedPatOrg = '';
+    }
+    this.authMethod = method;
   }
 
   private async handleConnectWithStoredToken(): Promise<void> {
@@ -1333,6 +1569,10 @@ export class LvAzureDevOpsDialog extends LitElement {
       if (this.organizationInput) {
         await gitService.deleteGitCredentials(`https://${this.organizationInput}.visualstudio.com`);
       }
+      // Deleted creds — force a re-sync on the next connect even if the token
+      // matches, both here and in the git.service token path (external git).
+      this.lastSyncedGitCredKey = null;
+      gitService.resetAdoGitCredentialSyncCache();
       log.debug('Deleted git credentials from keyring');
 
       this.syncSharedConnectionStatus(false);
@@ -1392,6 +1632,8 @@ export class LvAzureDevOpsDialog extends LitElement {
         if (organization) {
           await gitService.deleteGitCredentials(`https://${organization}.visualstudio.com`);
         }
+        this.lastSyncedGitCredKey = null;
+        gitService.resetAdoGitCredentialSyncCache();
       } catch (tokenErr) {
         const msg =
           tokenErr instanceof Error
@@ -1519,6 +1761,12 @@ export class LvAzureDevOpsDialog extends LitElement {
   }
 
   private handleClose(): void {
+    // The element stays mounted (only `open` toggles), so disconnectedCallback
+    // does NOT fire on close. Abandon any in-flight sign-in here so a background
+    // poll OR a still-running finalize can't silently connect an account after
+    // the user dismissed the dialog, and discard org-picker state so nothing
+    // reappears stale on reopen.
+    this.abandonPendingEntraFlow();
     this.dispatchEvent(new CustomEvent('close'));
   }
 
@@ -1585,56 +1833,66 @@ export class LvAzureDevOpsDialog extends LitElement {
         <div class="auth-method-toggle" style="display:flex;gap:0;margin-bottom:12px;border:1px solid var(--color-border);border-radius:6px;overflow:hidden">
           <button
             style="flex:1;padding:8px;border:none;cursor:pointer;font-size:13px;background:${this.authMethod === 'oauth' ? 'var(--color-accent)' : 'transparent'};color:${this.authMethod === 'oauth' ? 'white' : 'var(--color-text-secondary)'}"
-            @click=${() => { this.authMethod = 'oauth'; }}
+            @click=${() => this.setAuthMethod('oauth')}
           >Sign in with Microsoft</button>
           <button
             style="flex:1;padding:8px;border:none;border-left:1px solid var(--color-border);cursor:pointer;font-size:13px;background:${this.authMethod === 'pat' ? 'var(--color-accent)' : 'transparent'};color:${this.authMethod === 'pat' ? 'white' : 'var(--color-text-secondary)'}"
-            @click=${() => { this.authMethod = 'pat'; }}
+            @click=${() => this.setAuthMethod('pat')}
           >Personal Access Token</button>
         </div>
 
         ${this.authMethod === 'oauth' ? html`
-          <!-- Entra ID OAuth -->
-          <div class="form-group">
-            <label>Organization</label>
-            <input
-              type="text"
-              placeholder="my-organization"
-              .value=${this.organizationInput}
-              @input=${(e: Event) => this.organizationInput = (e.target as HTMLInputElement).value}
-            />
-          </div>
-          <div class="form-group">
-            <label>Entra ID Client ID</label>
-            <input
-              type="text"
-              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-              .value=${this.oauthClientId}
-              @input=${(e: Event) => this.oauthClientId = (e.target as HTMLInputElement).value}
-            />
-            <span class="help-text">
-              Register an app at
-              <a class="help-link" href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" @click=${handleExternalLink}>Azure Portal</a>
-              → Entra ID → App registrations. Add redirect URI: <code>leviathan://oauth/azure/callback</code> (Public client/native).
-              Add API permission: Azure DevOps → user_impersonation.
-            </span>
-          </div>
-          ${this.oauthPending ? html`
+          <!-- Entra ID OAuth (device-code flow) -->
+          ${this.deviceCode ? html`
+            <div class="form-group">
+              <label>Sign in with Microsoft</label>
+              <p class="help-text">
+                Open
+                <a class="help-link" href=${this.deviceCode.verificationUri} @click=${handleExternalLink}>${this.deviceCode.verificationUri}</a>
+                (it should open automatically) and enter this code:
+              </p>
+              <div class="device-code" aria-label="Device code">${this.deviceCode.userCode}</div>
+              <div style="display:flex;align-items:center;gap:8px;padding-top:8px;color:var(--color-text-secondary)">
+                <div style="width:16px;height:16px;border:2px solid var(--color-border);border-top-color:var(--color-accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
+                Waiting for you to sign in...
+                <button class="btn" @click=${this.handleCancelEntraOAuth}>Cancel</button>
+              </div>
+            </div>
+          ` : this.oauthPending ? html`
             <div style="display:flex;align-items:center;gap:8px;padding:12px;color:var(--color-text-secondary)">
               <div style="width:16px;height:16px;border:2px solid var(--color-border);border-top-color:var(--color-accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
-              Waiting for Microsoft sign-in...
+              Connecting to Azure DevOps...
               <button class="btn" @click=${this.handleCancelEntraOAuth}>Cancel</button>
+            </div>
+          ` : this.needsOrgSelection ? html`
+            <div class="form-group">
+              <label>Select an organization</label>
+              ${this.availableOrgs.map(org => html`
+                <button class="btn" @click=${() => this.handleSelectOrg(org)} ?disabled=${this.isLoading}>${org.name}</button>
+              `)}
+              ${this.isLoading ? html`
+                <div style="display:flex;align-items:center;gap:8px;padding-top:4px;color:var(--color-text-secondary)">
+                  <div style="width:16px;height:16px;border:2px solid var(--color-border);border-top-color:var(--color-accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
+                  Connecting...
+                </div>
+              ` : nothing}
+              <div class="btn-row">
+                <button class="btn" @click=${this.handleCancelOrgSelection} ?disabled=${this.isLoading}>Cancel</button>
+              </div>
             </div>
           ` : html`
             <div class="btn-row">
               <button
                 class="btn btn-primary"
                 @click=${this.handleStartEntraOAuth}
-                ?disabled=${this.isLoading || !this.organizationInput.trim() || !this.oauthClientId.trim()}
+                ?disabled=${this.isLoading || this.oauthPending}
               >
                 Sign in with Microsoft
               </button>
             </div>
+            <span class="help-text">
+              Signs in with your Microsoft work or school account via the browser. No setup required.
+            </span>
           `}
         ` : html`
           <!-- PAT Form -->

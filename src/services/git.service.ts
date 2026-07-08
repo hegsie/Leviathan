@@ -897,6 +897,34 @@ export async function getFetchStatus(
   return invokeCommand<RemoteFetchStatus[]>("get_fetch_status", { path });
 }
 
+/** Last `${org}::${token}` written to the keyring ADO git credential (dedup). */
+let lastSyncedAdoGitCredKey: string | null = null;
+
+/**
+ * Reset the ADO git-credential sync dedup cache. Call this after deleting the
+ * keyring credential (disconnect/delete) so a subsequent connect with the same
+ * token value re-writes the (now-deleted) keyring entry instead of being skipped.
+ */
+export function resetAdoGitCredentialSyncCache(): void {
+  lastSyncedAdoGitCredKey = null;
+}
+
+/**
+ * Write the Azure DevOps git credentials to the OS keyring for both dev.azure.com
+ * and {org}.visualstudio.com so external git CLI operations use a valid token.
+ * Best-effort and deduped by (org, token); storeGitCredentials never throws.
+ * Only call with a token verified to work for `org`.
+ */
+export async function syncAdoGitCredentials(org: string, token: string): Promise<void> {
+  const key = `${org}::${token}`;
+  if (key === lastSyncedAdoGitCredKey) return;
+  const c1 = await storeGitCredentials("https://dev.azure.com", "pat", token);
+  const c2 = await storeGitCredentials(`https://${org}.visualstudio.com`, "pat", token);
+  if (c1.success && c2.success) {
+    lastSyncedAdoGitCredKey = key;
+  }
+}
+
 /**
  * Helper to get authentication token for a repository
  * Tries the multi-account system first, then falls back to legacy single-token methods
@@ -938,8 +966,23 @@ async function getRepoToken(
     ) {
       const account = selectDefaultGlobalAccount("azure-devops");
       if (account) {
-        const token = await AccountCredentials.getToken("azure-devops", account.id);
-        if (token) return token;
+        // Refresh the Entra OAuth access token if it is expiring, so push/pull/
+        // fetch (which pass this token directly) keep working past the ~1h expiry.
+        const { getFreshAccountToken } = await import("./credential.service.ts");
+        const token = await getFreshAccountToken("azure-devops", account.id, "azure");
+        if (token) {
+          // Keep the OS keyring git credential fresh too, so EXTERNAL git CLI
+          // operations (which read the keyring, not this returned token) also work
+          // after a refresh. Only sync when the default account actually belongs
+          // to THIS repo's org — otherwise, in a multi-account setup, a different
+          // org's token would clobber the keyring credential for the repo's org.
+          const accountOrg =
+            account.config.type === "azure-devops" ? account.config.organization : undefined;
+          if (accountOrg && accountOrg === adoRepoResult.data.organization) {
+            await syncAdoGitCredentials(adoRepoResult.data.organization, token);
+          }
+          return token;
+        }
       }
       // Legacy fallback for Azure DevOps
       const tokenResult = await getAdoToken();
@@ -3327,6 +3370,12 @@ export interface DetectedAdoRepo {
   remoteName: string;
 }
 
+export interface AdoOrganization {
+  id: string;
+  name: string;
+  url: string;
+}
+
 export interface AdoPullRequest {
   pullRequestId: number;
   title: string;
@@ -3391,10 +3440,11 @@ export async function getAdoToken(): Promise<CommandResult<string | null>> {
   try {
     // Try account-based keyring credentials first (new system)
     const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
-    const { AccountCredentials } = await import("./credential.service.ts");
+    const { getFreshAccountToken } = await import("./credential.service.ts");
     const account = selectDefaultGlobalAccount("azure-devops");
     if (account) {
-      const token = await AccountCredentials.getToken("azure-devops", account.id);
+      // Refresh an expiring Entra OAuth token so callers get a valid one.
+      const token = await getFreshAccountToken("azure-devops", account.id, "azure");
       if (token) return { success: true, data: token };
     }
     // Fall back to legacy single-account credentials
@@ -3448,6 +3498,17 @@ export async function checkAdoConnectionWithToken(
     organization,
     token,
   });
+}
+
+/**
+ * List the Azure DevOps organizations the authenticated user belongs to.
+ * Used to auto-resolve the organization after an Entra sign-in when it can't be
+ * detected from the repo remote.
+ */
+export async function listAdoOrganizations(
+  token?: string | null,
+): Promise<CommandResult<AdoOrganization[]>> {
+  return invokeCommand<AdoOrganization[]>("list_ado_organizations", { token });
 }
 
 export async function detectAdoRepo(

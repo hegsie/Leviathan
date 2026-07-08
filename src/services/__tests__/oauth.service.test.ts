@@ -56,6 +56,9 @@ import {
   isPendingOAuth,
   getPendingProvider,
   exchangeCode,
+  startDeviceCode,
+  pollDeviceCode,
+  cancelDeviceCode,
 } from '../oauth.service.ts';
 import type { OAuthFlowState } from '../../types/oauth.types.ts';
 
@@ -201,7 +204,6 @@ describe('oauth.service - exchangeCode server-side PKCE contract (M5/M11)', () =
 
     mockInvoke = (command) => {
       if (command === 'oauth_exchange_code') {
-        // eslint-disable-next-line camelcase
         return Promise.resolve({ access_token: 'a', id_token: 'h2.p2.s2' });
       }
       return Promise.resolve(null);
@@ -231,5 +233,138 @@ describe('oauth.service - Provider Types', () => {
   it('should handle bitbucket provider type', () => {
     const provider = 'bitbucket' as const;
     expect(provider).to.equal('bitbucket');
+  });
+});
+
+describe('oauth.service - device-code flow (Azure DevOps)', () => {
+  const defaultMock = mockInvoke;
+  afterEach(() => {
+    mockInvoke = defaultMock;
+  });
+
+  it('startDeviceCode returns the flow details and sends provider/clientId', async () => {
+    let captured: Record<string, unknown> | undefined;
+    mockInvoke = (command, args) => {
+      if (command === 'oauth_start_device_code') {
+        captured = args as Record<string, unknown>;
+        return Promise.resolve({
+          flowId: 'flow-1',
+          userCode: 'ABCD-EFGH',
+          verificationUri: 'https://microsoft.com/devicelogin',
+          expiresIn: 900,
+          interval: 5,
+          message: 'Enter the code',
+        });
+      }
+      return Promise.resolve(null);
+    };
+
+    const res = await startDeviceCode('azure', 'client-abc');
+    expect(res.flowId).to.equal('flow-1');
+    expect(res.userCode).to.equal('ABCD-EFGH');
+    expect(res.verificationUri).to.equal('https://microsoft.com/devicelogin');
+    expect(captured!.provider).to.equal('azure');
+    expect(captured!.clientId).to.equal('client-abc');
+  });
+
+  it('startDeviceCode throws when the backend returns failure', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_start_device_code') return Promise.resolve(null); // null → failure
+      return Promise.resolve(null);
+    };
+    let threw = false;
+    try {
+      await startDeviceCode('azure', 'client-abc');
+    } catch {
+      threw = true;
+    }
+    expect(threw).to.be.true;
+  });
+
+  it('pollDeviceCode normalizes snake_case token fields to camelCase', async () => {
+    mockInvoke = (command, args) => {
+      if (command === 'oauth_poll_device_code') {
+        expect((args as Record<string, unknown>).flowId).to.equal('flow-1');
+        return Promise.resolve({ access_token: 'tok', refresh_token: 'ref', expires_in: 3600 });
+      }
+      return Promise.resolve(null);
+    };
+    const tokens = await pollDeviceCode('flow-1');
+    expect(tokens.accessToken).to.equal('tok');
+    expect(tokens.refreshToken).to.equal('ref');
+    expect(tokens.expiresIn).to.equal(3600);
+  });
+
+  it('pollDeviceCode accepts camelCase token fields', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_poll_device_code') {
+        return Promise.resolve({ accessToken: 'tok2', tokenType: 'bearer' });
+      }
+      return Promise.resolve(null);
+    };
+    const tokens = await pollDeviceCode('flow-1');
+    expect(tokens.accessToken).to.equal('tok2');
+    expect(tokens.tokenType).to.equal('bearer');
+  });
+
+  it('pollDeviceCode throws when the backend returns failure (cancelled/expired)', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_poll_device_code') return Promise.resolve(null);
+      return Promise.resolve(null);
+    };
+    let threw = false;
+    try {
+      await pollDeviceCode('flow-1');
+    } catch {
+      threw = true;
+    }
+    expect(threw).to.be.true;
+  });
+
+  it('cancelDeviceCode invokes the cancel command with the flow id', async () => {
+    let captured: Record<string, unknown> | undefined;
+    mockInvoke = (command, args) => {
+      if (command === 'oauth_cancel_device_code') {
+        captured = args as Record<string, unknown>;
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    };
+    await cancelDeviceCode('flow-9');
+    expect(captured!.flowId).to.equal('flow-9');
+  });
+});
+
+describe('oauth.service - refreshToken', () => {
+  const defaultMock = mockInvoke;
+  afterEach(() => {
+    mockInvoke = defaultMock;
+  });
+
+  it('normalizes snake_case token fields returned by the backend', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_refresh_token') {
+        return Promise.resolve({ access_token: 'a2', refresh_token: 'r2', expires_in: 1800 });
+      }
+      return Promise.resolve(null);
+    };
+    const { refreshToken } = await import('../oauth.service.ts');
+    const tokens = await refreshToken('azure', 'old-refresh');
+    expect(tokens.accessToken).to.equal('a2');
+    expect(tokens.refreshToken).to.equal('r2');
+    expect(tokens.expiresIn).to.equal(1800);
+  });
+
+  it('accepts camelCase token fields', async () => {
+    mockInvoke = (command) => {
+      if (command === 'oauth_refresh_token') {
+        return Promise.resolve({ accessToken: 'a3', refreshToken: 'r3', expiresIn: 3600 });
+      }
+      return Promise.resolve(null);
+    };
+    const { refreshToken } = await import('../oauth.service.ts');
+    const tokens = await refreshToken('azure', 'old-refresh');
+    expect(tokens.accessToken).to.equal('a3');
+    expect(tokens.refreshToken).to.equal('r3');
   });
 });

@@ -663,8 +663,17 @@ export async function refreshAccountCachedUser(
   const store = unifiedProfileStore.getState();
 
   try {
-    // Get the token for this account
-    const token = await AccountCredentials.getToken(account.integrationType, account.id);
+    // Get the token for this account. For Azure DevOps OAuth accounts, refresh an
+    // expiring Entra access token first — otherwise the ~1h expiry would make this
+    // path (periodic validation, "Refresh account", profile manager) mark the
+    // account disconnected even though a valid refresh token exists.
+    let token: string | null;
+    if (account.integrationType === 'azure-devops') {
+      const { getFreshAccountToken } = await import('./credential.service.ts');
+      token = await getFreshAccountToken('azure-devops', account.id, 'azure');
+    } else {
+      token = await AccountCredentials.getToken(account.integrationType, account.id);
+    }
     if (!token) {
       log.debug(` No token for account ${account.id}, skipping refresh`);
       store.setAccountConnectionStatus(account.id, 'disconnected');
@@ -725,6 +734,11 @@ export async function refreshAccountCachedUser(
               avatarUrl: null,
               email: result.data.user.uniqueName || null,
             };
+            // Token verified for this org — keep the keyring git credential fresh
+            // too, so external git push/pull work after a background refresh even
+            // without an in-app git operation. (token is non-null here.)
+            const { syncAdoGitCredentials } = await import('./git.service.ts');
+            await syncAdoGitCredentials(organization, token);
           }
         }
         break;
