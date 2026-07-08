@@ -2,8 +2,7 @@
  * OAuth service for provider authentication
  *
  * Handles OAuth authentication flows for GitHub, GitLab, Azure DevOps, and Bitbucket.
- * - GitHub, GitLab, Bitbucket use a loopback server (127.0.0.1:port) for the callback.
- * - Azure DevOps uses the device-code flow (no redirect); see startDeviceCode/pollDeviceCode.
+ * All providers (including Azure DevOps) use a loopback server (127.0.0.1:port) for the callback.
  */
 
 import { onOpenUrl, getCurrent } from '@tauri-apps/plugin-deep-link';
@@ -27,9 +26,9 @@ import type {
 const OAUTH_CLIENT_IDS: Partial<Record<OAuthProvider, string>> = {
   github: 'Ov23liQxX14fxt3fRq4u',
   gitlab: '90d3d02fefb79e0303aaa54e8c6794bf806e9e8a1de7526bebc4f14288e12fec',
-  // Well-known Visual Studio public client ID: multi-tenant and pre-authorized for
-  // Azure DevOps, so Entra sign-in works out-of-the-box with no per-user app registration.
-  azure: '872cd9fa-d31f-45e0-9eab-6e460a02d1f1',
+  // Registered Leviathan multi-tenant Entra app (public client, loopback redirect
+  // http://localhost/callback, Azure DevOps user_impersonation).
+  azure: 'a1b13ec5-3f32-4ec7-b07f-5dfc5acbd2a8',
   bitbucket: 'Tv5UjEqLKK7GSYjAJn',
 };
 
@@ -315,6 +314,17 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
     // Server derives verifier/redirect/instance from the stored flow keyed by state.
     const tokens = await exchangeCode(provider, state, code);
 
+    // The user may have cancelled — or cancelled AND restarted — during the token
+    // exchange network round-trip (after the pre-exchange re-check above). If the
+    // pending flow for this provider is gone (cancelled) or has been replaced by a
+    // newer flow (different state), do NOT dispatch: otherwise this abandoned
+    // flow's tokens would surface as if they belonged to the current flow. Only
+    // delete our own entry (the still-current flow below); leave a newer one alone.
+    const afterExchange = pendingAuthByProvider.get(provider);
+    if (!afterExchange || afterExchange.state !== state) {
+      return;
+    }
+
     notifyStateChange({
       status: 'success',
       provider,
@@ -389,73 +399,6 @@ export async function exchangeCode(
 }
 
 /**
- * Response from starting a device-code flow.
- */
-export interface StartDeviceCodeResponse {
-  flowId: string;
-  userCode: string;
-  verificationUri: string;
-  expiresIn: number;
-  interval: number;
-  message: string;
-}
-
-/**
- * Start an OAuth 2.0 device-code flow (used by Azure DevOps / Entra ID).
- *
- * Returns the user code + verification URL to display. The device_code secret
- * stays server-side, keyed by the returned `flowId`, which is passed to
- * {@link pollDeviceCode}. Needs no redirect URI, so it works with the embedded
- * public client whose registered redirects we don't control.
- */
-export async function startDeviceCode(
-  provider: OAuthProvider,
-  clientId: string,
-  instanceUrl?: string
-): Promise<StartDeviceCodeResponse> {
-  const result = await invokeCommand<StartDeviceCodeResponse>('oauth_start_device_code', {
-    provider,
-    clientId,
-    instanceUrl,
-  });
-  if (!result.success || !result.data) {
-    throw new Error(result.error?.message ?? 'Failed to start device sign-in');
-  }
-  return result.data;
-}
-
-/**
- * Poll a device-code flow until the user finishes signing in (or it is cancelled
- * or times out). The backend blocks on the provider's poll interval, so this
- * resolves once with the tokens.
- */
-export async function pollDeviceCode(flowId: string): Promise<OAuthTokenResponse> {
-  const result = await invokeCommand<OAuthTokenResponse>('oauth_poll_device_code', { flowId });
-  if (!result.success || !result.data) {
-    throw new Error(result.error?.message ?? 'Device sign-in failed');
-  }
-
-  // Normalize snake_case/camelCase like exchangeCode (serde serialization edge case).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = result.data as any;
-  return {
-    accessToken: raw.accessToken || raw.access_token,
-    refreshToken: raw.refreshToken || raw.refresh_token,
-    expiresIn: raw.expiresIn || raw.expires_in,
-    tokenType: raw.tokenType || raw.token_type,
-    scope: raw.scope,
-    idToken: raw.idToken || raw.id_token,
-  };
-}
-
-/**
- * Cancel an in-flight device-code flow so its server-side poll stops.
- */
-export async function cancelDeviceCode(flowId: string): Promise<void> {
-  await invokeCommand<void>('oauth_cancel_device_code', { flowId });
-}
-
-/**
  * Refresh an OAuth token
  */
 export async function refreshToken(
@@ -475,7 +418,7 @@ export async function refreshToken(
     throw new Error(result.error?.message ?? 'Failed to refresh OAuth token');
   }
 
-  // Normalize snake_case/camelCase like exchangeCode/pollDeviceCode (serde edge case),
+  // Normalize snake_case/camelCase like exchangeCode (serde edge case),
   // so callers reliably read accessToken/refreshToken/expiresIn.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const raw = result.data as any;

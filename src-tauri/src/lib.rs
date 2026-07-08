@@ -665,9 +665,6 @@ pub fn run() {
             commands::oauth::oauth_refresh_token,
             commands::oauth::oauth_wait_for_callback,
             commands::oauth::oauth_wait_for_github_callback,
-            commands::oauth::oauth_start_device_code,
-            commands::oauth::oauth_poll_device_code,
-            commands::oauth::oauth_cancel_device_code,
             commands::oauth::discover_oidc_provider,
             commands::oauth::decode_oidc_id_token,
             // Git Flow

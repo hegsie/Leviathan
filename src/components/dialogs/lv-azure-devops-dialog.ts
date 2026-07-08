@@ -12,6 +12,7 @@ import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { loggers, openExternalUrl, handleExternalLink } from '../../utils/index.ts';
 import * as oauthService from '../../services/oauth.service.ts';
+import type { OAuthTokenResponse } from '../../types/oauth.types.ts';
 
 const log = loggers.azureDevOps;
 import type {
@@ -171,18 +172,38 @@ export class LvAzureDevOpsDialog extends LitElement {
         color: var(--color-text-muted);
       }
 
-      .device-code {
-        font-family: var(--font-family-mono);
-        font-size: var(--font-size-xl);
-        font-weight: var(--font-weight-semibold);
-        letter-spacing: 0.15em;
-        text-align: center;
-        padding: var(--spacing-md);
-        background: var(--color-bg-tertiary);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-md);
-        color: var(--color-text-primary);
-        user-select: all;
+      /* Official Microsoft-branded sign-in button (light variant). Kept close to
+         Microsoft's brand guidelines: white background, square corners, the
+         four-square logo, "Sign in with Microsoft" in Segoe UI. */
+      .ms-signin-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        height: 41px;
+        padding: 0 12px;
+        background: #ffffff;
+        border: 1px solid #8c8c8c;
+        border-radius: 0;
+        color: #5e5e5e;
+        font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background var(--transition-fast);
+      }
+
+      .ms-signin-btn:hover:not(:disabled) {
+        background: #f5f5f5;
+      }
+
+      .ms-signin-btn:focus-visible {
+        outline: 2px solid #0067b8;
+        outline-offset: 1px;
+      }
+
+      .ms-signin-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
       }
 
       .help-link {
@@ -610,10 +631,16 @@ export class LvAzureDevOpsDialog extends LitElement {
   @state() private authMethod: 'oauth' | 'pat' = 'pat';
   /** True from the moment "Sign in with Microsoft" is clicked until the flow settles. */
   @state() private oauthPending = false;
-  /** The device code + verification URL to show the user while they sign in. */
-  @state() private deviceCode: { userCode: string; verificationUri: string } | null = null;
-  /** Handle for the in-flight device-code flow (used to poll/cancel it). */
-  private deviceFlowId: string | null = null;
+  /** `oauth-complete` window listener for the interactive loopback flow. */
+  private oauthCompleteHandler?: EventListener;
+  /** Unsubscribe handle for the OAuth state-change subscription (error surfacing). */
+  private oauthStateUnsubscribe?: () => void;
+  /**
+   * The `entraGeneration` captured when the current sign-in was started. The
+   * global `oauth-complete` event carries no generation, so the handler compares
+   * this against `entraGeneration` to ignore a callback for an abandoned flow.
+   */
+  private entraFlowGeneration = 0;
   /** Org typed on the PAT form, stashed while on the OAuth tab so it survives a round-trip. */
   private savedPatOrg = '';
   /** Last `${org}::${token}` written to the keyring git credential, to skip redundant re-syncs. */
@@ -656,6 +683,28 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+
+    // Interactive Entra sign-in (auth-code + loopback) completes asynchronously
+    // via a global `oauth-complete` window event dispatched by the OAuth service.
+    // Route the azure one into org resolution + finalize.
+    this.oauthCompleteHandler = ((e: CustomEvent<{ provider: string; tokens: OAuthTokenResponse; instanceUrl?: string }>) => {
+      if (e.detail.provider === 'azure') {
+        void this.handleOAuthComplete(e.detail.tokens);
+      }
+    }) as unknown as EventListener;
+    window.addEventListener('oauth-complete', this.oauthCompleteHandler);
+
+    // Surface a failed/denied sign-in so the pending spinner clears with feedback.
+    this.oauthStateUnsubscribe = oauthService.onOAuthStateChange((state) => {
+      if (state.provider !== 'azure') return;
+      // Ignore state for a flow the dialog already abandoned (cancel/close/switch).
+      if (this.entraFlowGeneration !== this.entraGeneration) return;
+      if (state.status === 'error') {
+        this.oauthPending = false;
+        this.error = state.error ?? 'Microsoft sign-in failed';
+        showToast(this.error, 'error');
+      }
+    });
 
     // Subscribe to unified profile store. When the active profile changes,
     // re-derive the preferred account so a profile switch is reflected here.
@@ -708,18 +757,22 @@ export class LvAzureDevOpsDialog extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribeStore?.();
-    // Cancel any in-flight device-code sign-in so it doesn't poll after unmount,
-    // and invalidate continuations so a late finalize can't mutate a dead element.
+    // Cancel any in-flight sign-in so its callback can't fire after unmount, and
+    // invalidate continuations so a late finalize can't mutate a dead element.
     this.abandonPendingEntraFlow();
+    if (this.oauthCompleteHandler) {
+      window.removeEventListener('oauth-complete', this.oauthCompleteHandler);
+    }
+    this.oauthStateUnsubscribe?.();
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
       // Fresh open: abandon any sign-in left in-flight from a prior session
       // (the host may hide the dialog without routing through handleClose, e.g.
-      // by setting its `open` prop false), so a reopen can't surface a stale
-      // device code or a stuck "Connecting..." spinner. Then clear
-      // selectedAccountId so loadInitialData() re-derives it.
+      // by setting its `open` prop false), so a reopen can't surface a stuck
+      // "Connecting..." spinner. Then clear selectedAccountId so
+      // loadInitialData() re-derives it.
       this.abandonPendingEntraFlow();
       this.selectedAccountId = null;
       await this.loadInitialData();
@@ -1074,61 +1127,44 @@ export class LvAzureDevOpsDialog extends LitElement {
   }
 
   /**
-   * Start the one-click Microsoft (Entra ID) sign-in via the OAuth device-code
-   * flow. Shows the user a short code to enter at a verification URL, opens that
-   * URL in the browser, then blocks on the backend poll until the user finishes.
-   * Uses the embedded public client — no per-user app registration and no
-   * redirect URI (device code needs neither).
+   * Start the one-click Microsoft (Entra ID) sign-in via the interactive
+   * authorization-code + loopback flow (the same path GitHub/GitLab use). Opens
+   * the Microsoft sign-in page in the browser; the OAuth service waits on the
+   * loopback callback, exchanges the code, and dispatches a global
+   * `oauth-complete` event that `handleOAuthComplete` picks up. Uses the embedded
+   * registered public client — no per-user app registration.
    */
   private async handleStartEntraOAuth(): Promise<void> {
-    // Guard against a double-click starting a second (orphaned) device flow.
+    // Guard against a double-click starting a second (orphaned) flow.
     if (this.oauthPending) return;
 
-    const generation = ++this.entraGeneration;
+    this.entraFlowGeneration = ++this.entraGeneration;
     this.oauthPending = true;
     this.error = null;
-    this.deviceCode = null;
 
-    try {
-      const start = await oauthService.startDeviceCode('azure', oauthService.getClientId('azure'));
-      if (generation !== this.entraGeneration) {
-        // Cancelled/closed while starting: abandonPendingEntraFlow ran before we
-        // knew the flow id, so cancel the now-orphaned backend flow here.
-        void oauthService.cancelDeviceCode(start.flowId);
-        return;
-      }
-      this.deviceFlowId = start.flowId;
-      this.deviceCode = { userCode: start.userCode, verificationUri: start.verificationUri };
+    // Fire-and-forget: startOAuth opens the browser and drives the loopback
+    // callback → code exchange, then dispatches `oauth-complete`. Errors surface
+    // through the onOAuthStateChange subscription registered in connectedCallback.
+    await oauthService.startOAuth('azure', oauthService.getClientId('azure'));
+  }
 
-      // Open the verification page so the user only has to enter the code.
-      openExternalUrl(start.verificationUri);
-
-      // Blocks until the user completes sign-in (or it is cancelled / times out).
-      const tokens = await oauthService.pollDeviceCode(start.flowId);
-
-      // The user may have cancelled (or started a new flow) while we waited.
-      if (generation !== this.entraGeneration) return;
-
-      this.deviceCode = null;
-      this.deviceFlowId = null;
-      // resolveOrgAndFinalize owns the loading/error/oauthPending state from here.
-      await this.resolveOrgAndFinalize(
-        {
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
-          expiresIn: tokens.expiresIn,
-        },
-        generation,
-      );
-    } catch (err) {
-      // A cancel/close races the poll rejection; only surface if still current.
-      if (generation !== this.entraGeneration) return;
-      this.error = err instanceof Error ? err.message : 'Microsoft sign-in failed';
-      showToast(this.error, 'error');
-      this.deviceCode = null;
-      this.deviceFlowId = null;
-      this.oauthPending = false;
-    }
+  /**
+   * Handle a completed interactive Entra sign-in: route the exchanged tokens into
+   * org resolution + finalize. Ignores a callback for a flow the dialog already
+   * abandoned (the user cancelled/closed or switched accounts mid-flow).
+   */
+  private async handleOAuthComplete(tokens: OAuthTokenResponse): Promise<void> {
+    const generation = this.entraFlowGeneration;
+    if (generation !== this.entraGeneration) return;
+    // resolveOrgAndFinalize owns the loading/error/oauthPending state from here.
+    await this.resolveOrgAndFinalize(
+      {
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresIn: tokens.expiresIn,
+      },
+      generation,
+    );
   }
 
   /**
@@ -1335,10 +1371,11 @@ export class LvAzureDevOpsDialog extends LitElement {
   }
 
   /**
-   * Cancel a pending Entra ID device-code sign-in.
+   * Cancel a pending Entra ID sign-in.
    *
-   * Clearing `deviceFlowId` first makes the in-flight poll's result be ignored
-   * (see handleStartEntraOAuth), and cancelDeviceCode stops the server-side poll.
+   * Bumping the generation makes any in-flight `oauth-complete` callback be
+   * ignored (see handleOAuthComplete), and cancelOAuth tears down the loopback
+   * server / pending flow in the OAuth service.
    */
   private handleCancelEntraOAuth(): void {
     this.abandonPendingEntraFlow();
@@ -1346,17 +1383,15 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   /**
    * Abandon any in-flight Entra sign-in: bump the generation so async
-   * continuations (poll/finalize) bail, cancel the backend device flow, and
+   * continuations (oauth-complete/finalize) bail, cancel the loopback flow, and
    * clear all transient sign-in UI state. Safe to call when no flow is active.
    * MUST be called before anything that changes the target account
    * (selectedAccountId) mid-flow, or a completing flow would write to the wrong
    * account.
    */
   private abandonPendingEntraFlow(): void {
+    const wasPending = this.oauthPending;
     this.entraGeneration++;
-    const flowId = this.deviceFlowId;
-    this.deviceFlowId = null;
-    this.deviceCode = null;
     this.oauthPending = false;
     // Bumping the generation makes resolveOrgAndFinalize's finally skip its own
     // reset, so clear isLoading here too — otherwise cancelling during
@@ -1365,8 +1400,8 @@ export class LvAzureDevOpsDialog extends LitElement {
     this.needsOrgSelection = false;
     this.pendingTokens = null;
     this.availableOrgs = [];
-    if (flowId) {
-      void oauthService.cancelDeviceCode(flowId);
+    if (wasPending) {
+      oauthService.cancelOAuth('azure');
     }
   }
 
@@ -1374,11 +1409,11 @@ export class LvAzureDevOpsDialog extends LitElement {
    * Switch between the "Sign in with Microsoft" and PAT tabs. Abandons any
    * in-flight Entra sign-in so it can't complete underneath the other view, and
    * when entering the OAuth tab without a selected account or detected repo,
-   * drops any org left over from the PAT form so device-code sign-in goes through
+   * drops any org left over from the PAT form so OAuth sign-in goes through
    * org detection/listing instead of silently reusing a stray value.
    */
   private setAuthMethod(method: 'oauth' | 'pat'): void {
-    if (this.oauthPending || this.deviceCode || this.needsOrgSelection) {
+    if (this.oauthPending || this.needsOrgSelection) {
       this.abandonPendingEntraFlow();
     }
     if (method === 'oauth' && !this.selectedAccountId && !this.detectedRepo) {
@@ -1842,26 +1877,11 @@ export class LvAzureDevOpsDialog extends LitElement {
         </div>
 
         ${this.authMethod === 'oauth' ? html`
-          <!-- Entra ID OAuth (device-code flow) -->
-          ${this.deviceCode ? html`
-            <div class="form-group">
-              <label>Sign in with Microsoft</label>
-              <p class="help-text">
-                Open
-                <a class="help-link" href=${this.deviceCode.verificationUri} @click=${handleExternalLink}>${this.deviceCode.verificationUri}</a>
-                (it should open automatically) and enter this code:
-              </p>
-              <div class="device-code" aria-label="Device code">${this.deviceCode.userCode}</div>
-              <div style="display:flex;align-items:center;gap:8px;padding-top:8px;color:var(--color-text-secondary)">
-                <div style="width:16px;height:16px;border:2px solid var(--color-border);border-top-color:var(--color-accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
-                Waiting for you to sign in...
-                <button class="btn" @click=${this.handleCancelEntraOAuth}>Cancel</button>
-              </div>
-            </div>
-          ` : this.oauthPending ? html`
+          <!-- Entra ID OAuth (interactive authorization-code + loopback flow) -->
+          ${this.oauthPending ? html`
             <div style="display:flex;align-items:center;gap:8px;padding:12px;color:var(--color-text-secondary)">
               <div style="width:16px;height:16px;border:2px solid var(--color-border);border-top-color:var(--color-accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
-              Connecting to Azure DevOps...
+              ${this.isLoading ? 'Connecting to Azure DevOps...' : 'Complete sign-in in your browser...'}
               <button class="btn" @click=${this.handleCancelEntraOAuth}>Cancel</button>
             </div>
           ` : this.needsOrgSelection ? html`
@@ -1883,10 +1903,17 @@ export class LvAzureDevOpsDialog extends LitElement {
           ` : html`
             <div class="btn-row">
               <button
-                class="btn btn-primary"
+                class="ms-signin-btn"
                 @click=${this.handleStartEntraOAuth}
                 ?disabled=${this.isLoading || this.oauthPending}
+                aria-label="Sign in with Microsoft"
               >
+                <svg width="21" height="21" viewBox="0 0 21 21" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                  <rect x="1" y="1" width="9" height="9" fill="#f25022" />
+                  <rect x="1" y="11" width="9" height="9" fill="#00a4ef" />
+                  <rect x="11" y="1" width="9" height="9" fill="#7fba00" />
+                  <rect x="11" y="11" width="9" height="9" fill="#ffb900" />
+                </svg>
                 Sign in with Microsoft
               </button>
             </div>

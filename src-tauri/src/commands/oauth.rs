@@ -211,13 +211,25 @@ pub async fn oauth_get_authorize_url(
             (config, Some(port))
         }
         OAuthProvider::Azure => {
-            // Azure DevOps (Entra ID) does not use the redirect/authorization-code
-            // flow: the embedded public client doesn't own our redirect URIs, so
-            // Entra would reject them (AADSTS50011). Sign-in goes through the
-            // device-code flow instead (oauth_start_device_code / oauth_poll_device_code).
-            return Err(LeviathanError::OAuth(
-                "Azure DevOps uses device-code sign-in — call oauth_start_device_code".to_string(),
-            ));
+            // Azure DevOps (Entra ID): interactive auth-code + loopback (like GitHub/GitLab),
+            // using the embedded registered public client. instance_url carries the optional tenant.
+            let server = LoopbackServer::new()?;
+            let port = server.port();
+            let config = OAuthConfig::azure(&client_id, instance_url.as_deref(), port);
+
+            let mut servers = PENDING_SERVERS
+                .lock()
+                .map_err(|e| LeviathanError::OAuth(format!("Failed to store server: {}", e)))?;
+            cleanup_expired_pending_servers(&mut servers);
+            servers.insert(
+                port,
+                PendingServer {
+                    server,
+                    created_at: std::time::Instant::now(),
+                },
+            );
+
+            (config, Some(port))
         }
         OAuthProvider::Bitbucket => {
             // Bitbucket requires http/https redirect URIs and only allows ONE callback URL
@@ -327,6 +339,18 @@ pub async fn oauth_start_github_flow(client_id: String) -> Result<StartOAuthResp
 /// NOT accepted from the frontend. This both validates the `state` (it must
 /// match an in-flight flow this process issued) and prevents the PKCE secret
 /// from round-tripping through the client.
+/// Build the Azure (Entra ID) token endpoint for a given tenant. Defaults to
+/// `organizations` so the code is redeemed at the SAME authority segment the
+/// authorize URL was built with (see `OAuthConfig::azure`) — redeeming under a
+/// different segment (e.g. `common`) can be rejected by Entra.
+fn azure_token_url(instance_url: Option<&str>) -> String {
+    let tenant = instance_url.unwrap_or("organizations");
+    format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        tenant
+    )
+}
+
 #[tauri::command]
 pub async fn oauth_exchange_code(
     state: String,
@@ -362,13 +386,7 @@ pub async fn oauth_exchange_code(
             let base = instance_url.as_deref().unwrap_or("https://gitlab.com");
             format!("{}/oauth/token", base)
         }
-        OAuthProvider::Azure => {
-            let tenant = instance_url.as_deref().unwrap_or("common");
-            format!(
-                "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-                tenant
-            )
-        }
+        OAuthProvider::Azure => azure_token_url(instance_url.as_deref()),
         OAuthProvider::Bitbucket => "https://bitbucket.org/site/oauth2/access_token".to_string(),
         OAuthProvider::Oidc => {
             // For OIDC, discover the token endpoint from the issuer URL
@@ -467,13 +485,7 @@ pub async fn oauth_refresh_token(
             let base = instance_url.as_deref().unwrap_or("https://gitlab.com");
             format!("{}/oauth/token", base)
         }
-        OAuthProvider::Azure => {
-            let tenant = instance_url.as_deref().unwrap_or("common");
-            format!(
-                "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-                tenant
-            )
-        }
+        OAuthProvider::Azure => azure_token_url(instance_url.as_deref()),
         OAuthProvider::Bitbucket => "https://bitbucket.org/site/oauth2/access_token".to_string(),
         OAuthProvider::Oidc => {
             let issuer = instance_url
@@ -598,311 +610,6 @@ fn validate_callback_state(state: &str) -> Result<()> {
 #[tauri::command]
 pub async fn oauth_wait_for_github_callback(port: u16) -> Result<CallbackResponse> {
     oauth_wait_for_callback(port).await
-}
-
-// ========================================================================
-// Device Authorization Grant (OAuth 2.0 Device Code) — used by Azure DevOps
-// ========================================================================
-//
-// The device-code flow needs no redirect URI, so it works with the embedded
-// public client (whose registered redirects we don't control). The user is shown
-// a short code to enter at a verification URL; the backend polls the token
-// endpoint until they finish. This is how `az devops` / Git Credential Manager
-// authenticate against Azure DevOps.
-
-/// Server-side state for an in-flight device-code flow, keyed by a generated flow id.
-struct PendingDeviceFlow {
-    provider: OAuthProvider,
-    /// Client ID used to start the flow (reused for polling).
-    client_id: String,
-    /// Instance / tenant (Azure). Determines the token endpoint.
-    instance_url: Option<String>,
-    /// The device_code secret returned by the authorization server.
-    device_code: String,
-    /// Poll interval in seconds (may be increased on `slow_down`).
-    interval: u64,
-    /// Absolute expiry — polling stops after this.
-    expires_at: std::time::Instant,
-}
-
-static DEVICE_FLOWS: Lazy<Mutex<HashMap<String, PendingDeviceFlow>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// Response returned to the frontend when a device-code flow starts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StartDeviceCodeResponse {
-    /// Handle used to poll this flow (the device_code itself stays server-side).
-    pub flow_id: String,
-    /// Short code the user types at the verification URL.
-    pub user_code: String,
-    /// URL the user opens to enter the code.
-    pub verification_uri: String,
-    /// Seconds until the code expires.
-    pub expires_in: u64,
-    /// Suggested seconds between polls.
-    pub interval: u64,
-    /// Human-readable instruction message from the provider.
-    pub message: String,
-}
-
-/// Azure DevOps scopes requested for the device-code flow.
-const AZURE_DEVICE_SCOPES: &str =
-    "499b84ac-1321-427f-aa17-267ca6975798/user_impersonation offline_access";
-
-fn azure_tenant_base(instance_url: Option<&str>) -> String {
-    let tenant = instance_url.unwrap_or("common");
-    format!("https://login.microsoftonline.com/{}/oauth2/v2.0", tenant)
-}
-
-/// Start a device-code flow. Currently only Azure (Entra ID) is supported.
-#[tauri::command]
-pub async fn oauth_start_device_code(
-    provider: String,
-    client_id: String,
-    instance_url: Option<String>,
-) -> Result<StartDeviceCodeResponse> {
-    let provider_enum: OAuthProvider = provider
-        .parse()
-        .map_err(|e: String| LeviathanError::OAuth(e))?;
-
-    let (device_url, scopes) = match provider_enum {
-        OAuthProvider::Azure => (
-            format!("{}/devicecode", azure_tenant_base(instance_url.as_deref())),
-            AZURE_DEVICE_SCOPES,
-        ),
-        _ => {
-            return Err(LeviathanError::OAuth(
-                "Device-code flow is not supported for this provider".to_string(),
-            ))
-        }
-    };
-
-    #[derive(Deserialize)]
-    struct DeviceCodeApiResponse {
-        device_code: String,
-        user_code: String,
-        verification_uri: String,
-        expires_in: u64,
-        interval: u64,
-        message: Option<String>,
-    }
-
-    let client = reqwest::Client::new();
-    let response = client
-        .post(&device_url)
-        .header("Accept", "application/json")
-        .form(&[("client_id", client_id.as_str()), ("scope", scopes)])
-        .send()
-        .await
-        .map_err(|e| LeviathanError::OAuth(format!("Device code request failed: {}", e)))?;
-
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        // Surface the provider's error field without echoing the whole body.
-        let msg = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| {
-                v.get("error_description")
-                    .or_else(|| v.get("error"))
-                    .and_then(|d| d.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| format!("HTTP {}", status));
-        return Err(LeviathanError::OAuth(format!(
-            "Failed to start device sign-in: {}",
-            msg
-        )));
-    }
-
-    let data: DeviceCodeApiResponse = serde_json::from_str(&text).map_err(|e| {
-        LeviathanError::OAuth(format!("Failed to parse device code response: {}", e))
-    })?;
-
-    let flow_id = generate_state();
-    let expires_at = std::time::Instant::now() + Duration::from_secs(data.expires_in);
-
-    {
-        let mut flows = DEVICE_FLOWS
-            .lock()
-            .map_err(|e| LeviathanError::OAuth(format!("Failed to store device flow: {}", e)))?;
-        // Evict expired flows opportunistically.
-        let now = std::time::Instant::now();
-        flows.retain(|_, f| f.expires_at > now);
-        flows.insert(
-            flow_id.clone(),
-            PendingDeviceFlow {
-                provider: provider_enum,
-                client_id,
-                instance_url,
-                device_code: data.device_code,
-                interval: data.interval,
-                expires_at,
-            },
-        );
-    }
-
-    Ok(StartDeviceCodeResponse {
-        flow_id,
-        user_code: data.user_code,
-        verification_uri: data.verification_uri,
-        expires_in: data.expires_in,
-        interval: data.interval,
-        message: data
-            .message
-            .unwrap_or_else(|| "Sign in with the code shown.".to_string()),
-    })
-}
-
-/// Poll a device-code flow until the user completes sign-in, it is cancelled, or
-/// it expires. Blocks server-side (polling the token endpoint at the provider's
-/// interval) so the frontend only awaits once.
-#[tauri::command]
-pub async fn oauth_poll_device_code(flow_id: String) -> Result<OAuthTokenResponse> {
-    // Snapshot the flow parameters (do not hold the lock across awaits).
-    let (token_url, client_id, device_code, mut interval) = {
-        let flows = DEVICE_FLOWS
-            .lock()
-            .map_err(|e| LeviathanError::OAuth(format!("Failed to access device flow: {}", e)))?;
-        let flow = flows.get(&flow_id).ok_or_else(|| {
-            LeviathanError::OAuth("Device sign-in flow not found or already finished".to_string())
-        })?;
-        let token_url = match flow.provider {
-            OAuthProvider::Azure => {
-                format!("{}/token", azure_tenant_base(flow.instance_url.as_deref()))
-            }
-            _ => {
-                return Err(LeviathanError::OAuth(
-                    "Device-code flow is not supported for this provider".to_string(),
-                ))
-            }
-        };
-        (
-            token_url,
-            flow.client_id.clone(),
-            flow.device_code.clone(),
-            flow.interval,
-        )
-    };
-
-    let client = reqwest::Client::new();
-
-    loop {
-        // Bail if the flow was cancelled (removed) or has expired.
-        {
-            let mut flows = DEVICE_FLOWS.lock().map_err(|e| {
-                LeviathanError::OAuth(format!("Failed to access device flow: {}", e))
-            })?;
-            match flows.get(&flow_id) {
-                None => {
-                    return Err(LeviathanError::OAuth(
-                        "Device sign-in was cancelled".to_string(),
-                    ))
-                }
-                Some(f) if f.expires_at <= std::time::Instant::now() => {
-                    // Remove the expired flow so its device_code secret doesn't
-                    // linger until the next start's opportunistic cleanup.
-                    flows.remove(&flow_id);
-                    return Err(LeviathanError::OAuth(
-                        "Device sign-in timed out — please try again".to_string(),
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(interval.max(1))).await;
-
-        // A transient transport error (wifi drop, sleep/resume, VPN reconnect)
-        // must NOT abort a flow the user is still completing — retry on the next
-        // tick (bounded by the expiry check at the top of the loop).
-        let response = match client
-            .post(&token_url)
-            .header("Accept", "application/json")
-            .form(&[
-                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                ("client_id", client_id.as_str()),
-                ("device_code", device_code.as_str()),
-            ])
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!("Device token poll transient error (will retry): {}", e);
-                continue;
-            }
-        };
-
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-
-        if status.is_success() {
-            // This flow is terminal now — remove it BEFORE parsing so a 2xx body
-            // that fails to deserialize doesn't leave the entry (and its
-            // device_code secret) lingering in the map until expiry.
-            DEVICE_FLOWS.lock().ok().map(|mut f| f.remove(&flow_id));
-            let tokens: OAuthTokenResponse = serde_json::from_str(&text).map_err(|e| {
-                LeviathanError::OAuth(format!("Failed to parse token response: {}", e))
-            })?;
-            return Ok(tokens);
-        }
-
-        // Non-success: inspect the OAuth error code to decide whether to keep polling.
-        let error_code = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-            .unwrap_or_default();
-
-        match classify_device_poll_error(&error_code, status.as_u16()) {
-            DevicePollAction::KeepWaiting => { /* authorization_pending */ }
-            DevicePollAction::SlowDown => interval += 5,
-            DevicePollAction::Fail(msg) => {
-                DEVICE_FLOWS.lock().ok().map(|mut f| f.remove(&flow_id));
-                return Err(LeviathanError::OAuth(msg));
-            }
-        }
-    }
-}
-
-/// What the device-code poll loop should do for a given token-endpoint error.
-#[derive(Debug, PartialEq)]
-enum DevicePollAction {
-    /// Authorization still pending — poll again on the next tick.
-    KeepWaiting,
-    /// Provider asked us to back off — increase the interval and poll again.
-    SlowDown,
-    /// Terminal failure — stop polling and surface this message.
-    Fail(String),
-}
-
-/// Classify a device-code token-poll error (RFC 8628 §3.5) into a poll action.
-/// Pure function so the state machine is unit-testable without an HTTP server.
-fn classify_device_poll_error(error_code: &str, status: u16) -> DevicePollAction {
-    match error_code {
-        "authorization_pending" => DevicePollAction::KeepWaiting,
-        "slow_down" => DevicePollAction::SlowDown,
-        "authorization_declined" => DevicePollAction::Fail("Sign-in was declined".to_string()),
-        "expired_token" => {
-            DevicePollAction::Fail("Device sign-in timed out — please try again".to_string())
-        }
-        // No recognized OAuth error field. A 5xx is a transient server blip —
-        // keep polling (same tolerance as a transport error) instead of aborting
-        // a flow the user is still completing; a 4xx is a genuine terminal error.
-        "" if status >= 500 => DevicePollAction::KeepWaiting,
-        "" => DevicePollAction::Fail(format!("Token poll failed (HTTP {})", status)),
-        other => DevicePollAction::Fail(other.to_string()),
-    }
-}
-
-/// Cancel an in-flight device-code flow so its poll stops.
-#[tauri::command]
-pub async fn oauth_cancel_device_code(flow_id: String) -> Result<()> {
-    if let Ok(mut flows) = DEVICE_FLOWS.lock() {
-        flows.remove(&flow_id);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1078,15 +785,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_oauth_get_authorize_url_azure_rejected() {
-        // Azure DevOps uses the device-code flow, not the redirect/authorize path,
-        // so the authorize-url command must reject it (pointing at device-code).
+    async fn test_oauth_get_authorize_url_azure() {
         let result =
             oauth_get_authorize_url("azure".to_string(), None, "test-client-id".to_string()).await;
 
-        assert!(result.is_err());
-        let msg = format!("{:?}", result.unwrap_err());
-        assert!(msg.contains("device-code"));
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("login.microsoftonline.com"));
+        assert!(response.authorize_url.contains("organizations"));
+        assert!(response.loopback_port.is_some());
+        // The redirect URI (localhost loopback) is urlencoded into the URL.
+        assert!(
+            response.authorize_url.contains("127.0.0.1")
+                || response.authorize_url.contains("localhost")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_get_authorize_url_azure_custom_tenant() {
+        let result = oauth_get_authorize_url(
+            "azure".to_string(),
+            Some("my-tenant-id".to_string()),
+            "test-client-id".to_string(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        assert!(response.authorize_url.contains("my-tenant-id"));
+    }
+
+    #[test]
+    fn test_azure_token_url_default_tenant_matches_authorize() {
+        // The exchange/refresh token endpoint must default to the SAME tenant
+        // segment (`organizations`) the authorize URL is built with, or Entra can
+        // reject redeeming the code under a mismatched authority.
+        let authorize = OAuthConfig::azure("cid", None, 8080).authorize_url;
+        assert!(authorize.contains("/organizations/"));
+        assert_eq!(
+            azure_token_url(None),
+            "https://login.microsoftonline.com/organizations/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn test_azure_token_url_specific_tenant() {
+        assert_eq!(
+            azure_token_url(Some("my-tenant-id")),
+            "https://login.microsoftonline.com/my-tenant-id/oauth2/v2.0/token"
+        );
     }
 
     #[tokio::test]
@@ -1118,7 +867,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_oauth_get_authorize_url_generates_unique_state() {
-        // Use a redirect-flow provider (Azure uses device-code and has no authorize URL).
         let result1 =
             oauth_get_authorize_url("gitlab".to_string(), None, "test-client-id".to_string()).await;
         let result2 =
@@ -1500,130 +1248,6 @@ mod tests {
             deserialized.instance_url,
             Some("https://auth.example.com".to_string())
         );
-    }
-
-    // ==========================================================================
-    // Device Code Flow Tests
-    // ==========================================================================
-
-    #[test]
-    fn test_azure_tenant_base_default() {
-        let base = azure_tenant_base(None);
-        assert_eq!(base, "https://login.microsoftonline.com/common/oauth2/v2.0");
-    }
-
-    #[test]
-    fn test_azure_tenant_base_specific() {
-        let base = azure_tenant_base(Some("my-tenant"));
-        assert_eq!(
-            base,
-            "https://login.microsoftonline.com/my-tenant/oauth2/v2.0"
-        );
-    }
-
-    #[test]
-    fn test_start_device_code_response_serializes_camel_case() {
-        let response = StartDeviceCodeResponse {
-            flow_id: "flow-1".to_string(),
-            user_code: "ABCD-EFGH".to_string(),
-            verification_uri: "https://microsoft.com/devicelogin".to_string(),
-            expires_in: 900,
-            interval: 5,
-            message: "Enter the code".to_string(),
-        };
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("flowId"));
-        assert!(json.contains("userCode"));
-        assert!(json.contains("verificationUri"));
-        assert!(json.contains("expiresIn"));
-    }
-
-    #[tokio::test]
-    async fn test_start_device_code_rejects_unsupported_provider() {
-        // Only Azure supports device code; GitHub must be rejected before any network call.
-        let result =
-            oauth_start_device_code("github".to_string(), "client".to_string(), None).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_start_device_code_rejects_invalid_provider() {
-        let result =
-            oauth_start_device_code("nonsense".to_string(), "client".to_string(), None).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_poll_device_code_unknown_flow_errors() {
-        // A flow id that was never started (or already consumed) must error, not hang.
-        let result = oauth_poll_device_code("does-not-exist".to_string()).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_cancel_device_code_is_ok_for_missing_flow() {
-        // Cancelling a non-existent flow is a no-op success (idempotent).
-        assert!(oauth_cancel_device_code("no-such-flow".to_string())
-            .await
-            .is_ok());
-    }
-
-    #[test]
-    fn test_classify_device_poll_pending_keeps_waiting() {
-        assert_eq!(
-            classify_device_poll_error("authorization_pending", 400),
-            DevicePollAction::KeepWaiting
-        );
-    }
-
-    #[test]
-    fn test_classify_device_poll_slow_down() {
-        assert_eq!(
-            classify_device_poll_error("slow_down", 400),
-            DevicePollAction::SlowDown
-        );
-    }
-
-    #[test]
-    fn test_classify_device_poll_declined_fails() {
-        match classify_device_poll_error("authorization_declined", 400) {
-            DevicePollAction::Fail(msg) => assert!(msg.contains("declined")),
-            other => panic!("expected Fail, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_classify_device_poll_expired_fails() {
-        match classify_device_poll_error("expired_token", 400) {
-            DevicePollAction::Fail(msg) => assert!(msg.contains("timed out")),
-            other => panic!("expected Fail, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_classify_device_poll_empty_error_4xx_terminates_with_status() {
-        // A non-JSON / empty error body on a 4xx terminates, surfacing the status.
-        match classify_device_poll_error("", 400) {
-            DevicePollAction::Fail(msg) => assert!(msg.contains("400")),
-            other => panic!("expected Fail, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_classify_device_poll_empty_error_5xx_retries() {
-        // A transient 5xx blip must be retried, not treated as terminal.
-        assert_eq!(
-            classify_device_poll_error("", 503),
-            DevicePollAction::KeepWaiting
-        );
-    }
-
-    #[test]
-    fn test_classify_device_poll_unknown_error_passed_through() {
-        match classify_device_poll_error("invalid_grant", 400) {
-            DevicePollAction::Fail(msg) => assert_eq!(msg, "invalid_grant"),
-            other => panic!("expected Fail, got {:?}", other),
-        }
     }
 }
 
