@@ -293,6 +293,15 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
       return; // User cancelled or timeout
     }
 
+    // If the flow THIS poll started was superseded (the user cancelled and
+    // restarted, so `current` is now a different, still-in-progress flow), drop
+    // this stale callback SILENTLY. Do NOT delete `current` or surface an error —
+    // that would clobber the newer flow's pending state and show a spurious
+    // "state mismatch" for the user's real, in-progress sign-in.
+    if (current.state !== pending.state) {
+      return;
+    }
+
     // Guard against stale/overlapping flows: the callback's state must match the
     // flow we started for this provider. The backend validates state too, but
     // checking here avoids exchanging the wrong flow when callbacks interleave.

@@ -123,10 +123,12 @@ impl OAuthConfig {
     }
 
     /// Get Azure DevOps (Microsoft Entra ID) OAuth configuration for the interactive
-    /// authorization-code + loopback flow. Uses `127.0.0.1` (the address the loopback
-    /// server binds; Entra ignores the port for loopback) with the `/callback` path the
-    /// loopback server serves — matching the other providers. `tenant_id` (passed as
-    /// instance_url) defaults to `organizations` (multi-tenant work/school).
+    /// authorization-code + loopback flow. Uses `localhost` (NOT `127.0.0.1`): Entra
+    /// only ignores the port when matching a `localhost` loopback redirect — for the IP
+    /// literal the port must match exactly, which is impossible with our dynamic
+    /// loopback port. So the app registers `http://localhost/callback` and every port
+    /// matches it. The loopback server binds `127.0.0.1`, which `localhost` resolves to.
+    /// `tenant_id` (passed as instance_url) defaults to `organizations` (multi-tenant).
     pub fn azure(client_id: &str, tenant_id: Option<&str>, redirect_port: u16) -> Self {
         let tenant = tenant_id.unwrap_or("organizations");
         Self {
@@ -145,7 +147,7 @@ impl OAuthConfig {
                 "openid".to_string(),
                 "profile".to_string(),
             ],
-            redirect_uri: format!("http://127.0.0.1:{}/callback", redirect_port),
+            redirect_uri: format!("http://localhost:{}/callback", redirect_port),
         }
     }
 
@@ -611,7 +613,9 @@ mod tests {
         let config = OAuthConfig::azure("cid", None, 8080);
 
         assert!(config.authorize_url.contains("/organizations/"));
-        assert_eq!(config.redirect_uri, "http://127.0.0.1:8080/callback");
+        // MUST be localhost (not 127.0.0.1): Entra only ignores the port for a
+        // `localhost` loopback redirect, and our loopback port is dynamic.
+        assert_eq!(config.redirect_uri, "http://localhost:8080/callback");
         assert!(config
             .scopes
             .contains(&"499b84ac-1321-427f-aa17-267ca6975798/user_impersonation".to_string()));

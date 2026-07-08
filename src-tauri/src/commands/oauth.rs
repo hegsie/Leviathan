@@ -795,11 +795,11 @@ mod tests {
         assert!(response.authorize_url.contains("login.microsoftonline.com"));
         assert!(response.authorize_url.contains("organizations"));
         assert!(response.loopback_port.is_some());
-        // The redirect URI (localhost loopback) is urlencoded into the URL.
-        assert!(
-            response.authorize_url.contains("127.0.0.1")
-                || response.authorize_url.contains("localhost")
-        );
+        // The redirect URI must be a `localhost` loopback (urlencoded into the URL),
+        // NOT 127.0.0.1 — Entra only ignores the port for localhost, and the port is
+        // dynamic. `localhost%3A` is `localhost:` percent-encoded.
+        assert!(response.authorize_url.contains("localhost"));
+        assert!(!response.authorize_url.contains("127.0.0.1"));
     }
 
     #[tokio::test]
