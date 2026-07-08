@@ -314,6 +314,17 @@ async function pollLoopbackCallback(provider: OAuthProvider, port: number): Prom
     // Server derives verifier/redirect/instance from the stored flow keyed by state.
     const tokens = await exchangeCode(provider, state, code);
 
+    // The user may have cancelled — or cancelled AND restarted — during the token
+    // exchange network round-trip (after the pre-exchange re-check above). If the
+    // pending flow for this provider is gone (cancelled) or has been replaced by a
+    // newer flow (different state), do NOT dispatch: otherwise this abandoned
+    // flow's tokens would surface as if they belonged to the current flow. Only
+    // delete our own entry (the still-current flow below); leave a newer one alone.
+    const afterExchange = pendingAuthByProvider.get(provider);
+    if (!afterExchange || afterExchange.state !== state) {
+      return;
+    }
+
     notifyStateChange({
       status: 'success',
       provider,

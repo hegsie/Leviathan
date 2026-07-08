@@ -339,6 +339,18 @@ pub async fn oauth_start_github_flow(client_id: String) -> Result<StartOAuthResp
 /// NOT accepted from the frontend. This both validates the `state` (it must
 /// match an in-flight flow this process issued) and prevents the PKCE secret
 /// from round-tripping through the client.
+/// Build the Azure (Entra ID) token endpoint for a given tenant. Defaults to
+/// `organizations` so the code is redeemed at the SAME authority segment the
+/// authorize URL was built with (see `OAuthConfig::azure`) — redeeming under a
+/// different segment (e.g. `common`) can be rejected by Entra.
+fn azure_token_url(instance_url: Option<&str>) -> String {
+    let tenant = instance_url.unwrap_or("organizations");
+    format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        tenant
+    )
+}
+
 #[tauri::command]
 pub async fn oauth_exchange_code(
     state: String,
@@ -374,13 +386,7 @@ pub async fn oauth_exchange_code(
             let base = instance_url.as_deref().unwrap_or("https://gitlab.com");
             format!("{}/oauth/token", base)
         }
-        OAuthProvider::Azure => {
-            let tenant = instance_url.as_deref().unwrap_or("common");
-            format!(
-                "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-                tenant
-            )
-        }
+        OAuthProvider::Azure => azure_token_url(instance_url.as_deref()),
         OAuthProvider::Bitbucket => "https://bitbucket.org/site/oauth2/access_token".to_string(),
         OAuthProvider::Oidc => {
             // For OIDC, discover the token endpoint from the issuer URL
@@ -479,13 +485,7 @@ pub async fn oauth_refresh_token(
             let base = instance_url.as_deref().unwrap_or("https://gitlab.com");
             format!("{}/oauth/token", base)
         }
-        OAuthProvider::Azure => {
-            let tenant = instance_url.as_deref().unwrap_or("common");
-            format!(
-                "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-                tenant
-            )
-        }
+        OAuthProvider::Azure => azure_token_url(instance_url.as_deref()),
         OAuthProvider::Bitbucket => "https://bitbucket.org/site/oauth2/access_token".to_string(),
         OAuthProvider::Oidc => {
             let issuer = instance_url
@@ -815,6 +815,27 @@ mod tests {
         let response = result.unwrap();
 
         assert!(response.authorize_url.contains("my-tenant-id"));
+    }
+
+    #[test]
+    fn test_azure_token_url_default_tenant_matches_authorize() {
+        // The exchange/refresh token endpoint must default to the SAME tenant
+        // segment (`organizations`) the authorize URL is built with, or Entra can
+        // reject redeeming the code under a mismatched authority.
+        let authorize = OAuthConfig::azure("cid", None, 8080).authorize_url;
+        assert!(authorize.contains("/organizations/"));
+        assert_eq!(
+            azure_token_url(None),
+            "https://login.microsoftonline.com/organizations/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn test_azure_token_url_specific_tenant() {
+        assert_eq!(
+            azure_token_url(Some("my-tenant-id")),
+            "https://login.microsoftonline.com/my-tenant-id/oauth2/v2.0/token"
+        );
     }
 
     #[tokio::test]

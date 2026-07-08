@@ -1881,7 +1881,7 @@ export class LvAzureDevOpsDialog extends LitElement {
           ${this.oauthPending ? html`
             <div style="display:flex;align-items:center;gap:8px;padding:12px;color:var(--color-text-secondary)">
               <div style="width:16px;height:16px;border:2px solid var(--color-border);border-top-color:var(--color-accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
-              Complete sign-in in your browser...
+              ${this.isLoading ? 'Connecting to Azure DevOps...' : 'Complete sign-in in your browser...'}
               <button class="btn" @click=${this.handleCancelEntraOAuth}>Cancel</button>
             </div>
           ` : this.needsOrgSelection ? html`
