@@ -690,6 +690,10 @@ export class LvCommitPanel extends LitElement {
 
   private boundHandleTriggerAmend = this.handleTriggerAmend.bind(this);
   private boundHandleAiSettingsChanged = () => this.checkAiAvailability();
+  // Reload the author identity when the repo refreshes (e.g. after applying a
+  // profile that rewrote user.name/user.email in the repo's git config), so the
+  // {{author}} template placeholder reflects the new identity.
+  private boundHandleRepositoryRefresh = () => this.loadAuthorName();
   private unsubscribeStore?: () => void;
   private aiRetryTimer?: ReturnType<typeof setTimeout>;
   private modelCompleteUnlisten?: UnlistenFn;
@@ -718,6 +722,9 @@ export class LvCommitPanel extends LitElement {
     // Re-check AI availability when settings change (browser event from settings dialog)
     window.addEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
 
+    // Reload author identity after a repository refresh (e.g. profile applied).
+    window.addEventListener('repository-refresh', this.boundHandleRepositoryRefresh);
+
     // Also listen for Tauri backend event when a model download completes and auto-loads
     listen<{ modelId: string; loaded?: boolean }>('model-download-complete', (event) => {
       if (event.payload.loaded) {
@@ -737,6 +744,7 @@ export class LvCommitPanel extends LitElement {
     document.removeEventListener('click', this._onDocumentClick);
     window.removeEventListener('trigger-amend', this.boundHandleTriggerAmend);
     window.removeEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
+    window.removeEventListener('repository-refresh', this.boundHandleRepositoryRefresh);
     this.modelCompleteUnlisten?.();
     if (this.aiRetryTimer) clearTimeout(this.aiRetryTimer);
     this.unsubscribeStore?.();
@@ -1131,15 +1139,22 @@ export class LvCommitPanel extends LitElement {
 
     this.isAnalyzing = true;
     this.vibeCheckResult = null;
+    this.generationError = null;
 
-    const result = await aiService.analyzeStagedChanges(this.repositoryPath);
+    try {
+      const result = await aiService.analyzeStagedChanges(this.repositoryPath);
 
-    if (result.success && result.data) {
-      this.vibeCheckResult = result.data;
-      this.showVibeDetails = result.data.findings.length > 0;
+      if (result.success && result.data) {
+        this.vibeCheckResult = result.data;
+        this.showVibeDetails = result.data.findings.length > 0;
+      } else {
+        this.generationError = result.error?.message ?? 'Vibe check failed';
+      }
+    } catch (err) {
+      this.generationError = err instanceof Error ? err.message : 'Vibe check failed';
+    } finally {
+      this.isAnalyzing = false;
     }
-
-    this.isAnalyzing = false;
   }
 
   private async handleSuggestSplits(): Promise<void> {
@@ -1147,21 +1162,53 @@ export class LvCommitPanel extends LitElement {
 
     this.isAnalyzingSplit = true;
     this.splitSuggestion = null;
+    this.generationError = null;
 
-    const result = await aiService.suggestCommitSplits(this.repositoryPath);
+    try {
+      const result = await aiService.suggestCommitSplits(this.repositoryPath);
 
-    if (result.success && result.data) {
-      this.splitSuggestion = result.data;
-      this.showSplitDetails = result.data.shouldSplit;
+      if (result.success && result.data) {
+        this.splitSuggestion = result.data;
+        this.showSplitDetails = result.data.shouldSplit;
+        if (!result.data.shouldSplit) {
+          // Success path with nothing to render otherwise — give explicit feedback.
+          showToast('Staged changes look cohesive — no split needed', 'info');
+        }
+      } else {
+        this.generationError = result.error?.message ?? 'Split check failed';
+      }
+    } catch (err) {
+      this.generationError = err instanceof Error ? err.message : 'Split check failed';
+    } finally {
+      this.isAnalyzingSplit = false;
     }
-
-    this.isAnalyzingSplit = false;
   }
 
   private async handleStageGroup(files: string[]): Promise<void> {
     if (!this.repositoryPath) return;
 
-    // Unstage everything first, then stage only this group
+    // Isolate this group so the next commit contains ONLY its files. Unstage
+    // every currently-staged file that isn't in this group — deriving the set
+    // from the real index (not just the other AI-suggested groups, which may
+    // not cover every staged file when the diff was truncated for the model).
+    const groupSet = new Set(files);
+    const status = await gitService.getStatus(this.repositoryPath);
+    if (!status.success) {
+      showToast(status.error?.message ?? 'Failed to isolate group', 'error');
+      return;
+    }
+    const otherStaged = (status.data ?? [])
+      .filter(e => e.isStaged && !groupSet.has(e.path))
+      .map(e => e.path);
+
+    if (otherStaged.length > 0) {
+      const unstage = await gitService.unstageFiles(this.repositoryPath, { paths: otherStaged });
+      if (!unstage.success) {
+        showToast(unstage.error?.message ?? 'Failed to isolate group', 'error');
+        return;
+      }
+    }
+
     const result = await gitService.stageFiles(this.repositoryPath, { paths: files });
     if (result.success) {
       showToast(`Staged ${files.length} files`, 'success');

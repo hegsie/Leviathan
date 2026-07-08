@@ -1130,9 +1130,14 @@ export class LvGitHubDialog extends LitElement {
 
       if (result.success && result.data) {
         this.workflowRuns = result.data;
+      } else if (!result.success) {
+        // Use the shared error banner (like loadPullRequests) rather than a
+        // toast, so a shared failure across the batched loads doesn't stack
+        // four near-identical toasts on open.
+        this.error = result.error?.message ?? 'Failed to load workflow runs';
       }
-    } catch {
-      // Silently fail for workflow runs
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load workflow runs';
     }
   }
 
@@ -1152,9 +1157,11 @@ export class LvGitHubDialog extends LitElement {
 
       if (result.success && result.data) {
         this.issues = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load issues';
       }
-    } catch {
-      // Silently fail for issues
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load issues';
     }
   }
 
@@ -1172,9 +1179,11 @@ export class LvGitHubDialog extends LitElement {
 
       if (result.success && result.data) {
         this.repoLabels = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load labels';
       }
-    } catch {
-      // Silently fail for labels
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load labels';
     }
   }
 
@@ -1192,9 +1201,11 @@ export class LvGitHubDialog extends LitElement {
 
       if (result.success && result.data) {
         this.releases = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load releases';
       }
-    } catch {
-      // Silently fail for releases
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load releases';
     }
   }
 

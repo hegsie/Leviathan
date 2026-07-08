@@ -163,6 +163,16 @@ fn build_api_url_with_params(
     )
 }
 
+/// Build the `searchCriteria.status` query fragment for a PR status filter.
+///
+/// Azure DevOps returns pull requests in *all* states when
+/// `searchCriteria.status` is omitted. A `None` status therefore means "All"
+/// and must not append any status filter (previously this defaulted to
+/// `active`, hiding completed/abandoned PRs from the "All" filter).
+fn ado_pr_status_param(status: Option<&str>) -> Option<String> {
+    status.map(|s| format!("searchCriteria.status={}", s))
+}
+
 // ============================================================================
 // Connection Commands
 // ============================================================================
@@ -495,13 +505,11 @@ pub async fn list_ado_pull_requests(
 ) -> Result<Vec<AdoPullRequest>> {
     let token = resolve_ado_token(token)?;
 
-    let status_param = status.unwrap_or_else(|| "active".to_string());
-    let url = build_api_url_with_params(
-        &organization,
-        &project,
-        &format!("git/repositories/{}/pullrequests", repository),
-        &format!("searchCriteria.status={}", status_param),
-    );
+    let path = format!("git/repositories/{}/pullrequests", repository);
+    let url = match ado_pr_status_param(status.as_deref()) {
+        Some(params) => build_api_url_with_params(&organization, &project, &path, &params),
+        None => build_api_url(&organization, &project, &path),
+    };
 
     let client = reqwest::Client::new();
     let response = client
@@ -1234,6 +1242,21 @@ pub async fn list_ado_organizations(token: Option<String>) -> Result<Vec<AdoOrga
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ado_pr_status_param() {
+        // A concrete status yields the searchCriteria fragment.
+        assert_eq!(
+            ado_pr_status_param(Some("active")).as_deref(),
+            Some("searchCriteria.status=active")
+        );
+        assert_eq!(
+            ado_pr_status_param(Some("completed")).as_deref(),
+            Some("searchCriteria.status=completed")
+        );
+        // "All" (None) omits the filter so every PR state is returned.
+        assert_eq!(ado_pr_status_param(None), None);
+    }
 
     #[test]
     fn test_parse_ado_url_https_standard() {

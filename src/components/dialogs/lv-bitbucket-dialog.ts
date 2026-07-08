@@ -1006,9 +1006,13 @@ export class LvBitbucketDialog extends LitElement {
 
       if (result.success && result.data) {
         this.issues = result.data;
+      } else if (!result.success) {
+        // The backend returns an empty list when issues are disabled (404); a
+        // non-404 error (bad token/server) is surfaced rather than swallowed.
+        this.error = result.error?.message ?? 'Failed to load issues';
       }
-    } catch {
-      // Silent fail - issues might not be enabled
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load issues';
     }
   }
 
@@ -1024,9 +1028,11 @@ export class LvBitbucketDialog extends LitElement {
 
       if (result.success && result.data) {
         this.pipelines = result.data;
+      } else if (!result.success) {
+        this.error = result.error?.message ?? 'Failed to load pipelines';
       }
-    } catch {
-      // Silent fail - pipelines might not be enabled
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load pipelines';
     }
   }
 

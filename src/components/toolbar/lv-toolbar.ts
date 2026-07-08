@@ -436,10 +436,15 @@ export class LvToolbar extends LitElement {
             console.error('Failed to build embedding index:', err);
           });
         } else {
-          store.setError(result.error?.message ?? 'Failed to open repository');
+          const message = result.error?.message ?? 'Failed to open repository';
+          store.setError(message);
+          // repositoryStore.error has no render sink, so surface it directly.
+          showToast(message, 'error');
         }
       } catch (err) {
-        store.setError(err instanceof Error ? err.message : 'Unknown error');
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        store.setError(message);
+        showToast(message, 'error');
       } finally {
         store.setLoading(false);
       }

@@ -1449,4 +1449,28 @@ describe('lv-azure-devops-dialog', () => {
       expect(stores(), 'new org re-syncs').to.equal(6);
     });
   });
+
+  describe('load-failure feedback', () => {
+    it('surfaces an error banner when loading work items fails (parity with other providers)', async () => {
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      dialog.detectedRepo = { organization: 'org', project: 'proj', repo: 'r' };
+      dialog.connectionStatus = { connected: true };
+      dialog.error = null;
+
+      mockInvoke = async (command: string) => {
+        if (command === 'query_ado_work_items') throw new Error('unauthorized');
+        return null;
+      };
+
+      await dialog.loadWorkItems('tok');
+
+      expect(dialog.error, 'a failed work-items load is surfaced').to.contain('unauthorized');
+    });
+  });
 });

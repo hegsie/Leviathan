@@ -1691,6 +1691,30 @@ describe('lv-profile-manager-dialog', () => {
       expect((applyCalls[0].args as { path: string; profileId: string }).path).to.equal('/test/repo');
       expect((applyCalls[0].args as { path: string; profileId: string }).profileId).to.equal('profile-1');
     });
+
+    it('dispatches repository-refresh after a successful apply', async () => {
+      const el = await renderDialog({ repoPath: '/test/repo' });
+
+      let refreshed = false;
+      const listener = () => { refreshed = true; };
+      window.addEventListener('repository-refresh', listener);
+
+      try {
+        const firstItem = el.shadowRoot!.querySelectorAll('.profile-item')[0];
+        const applyBtn = Array.from(firstItem.querySelectorAll('.action-btn')).find(
+          (btn) => btn.getAttribute('title') === 'Apply to current repository'
+        ) as HTMLButtonElement;
+        applyBtn.click();
+        await new Promise((r) => setTimeout(r, 100));
+        await el.updateComplete;
+
+        // Without the refresh event the displayed git identity would be stale
+        // until the tab is re-switched.
+        expect(refreshed).to.be.true;
+      } finally {
+        window.removeEventListener('repository-refresh', listener);
+      }
+    });
   });
 
   // ── Default checkbox ───────────────────────────────────────────────────
