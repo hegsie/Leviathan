@@ -69,8 +69,9 @@ your own Entra app instead:
      app manifest's `replyUrlsWithType` instead.)
 4. Under **Authentication** → **Advanced settings**, set **Allow public client
    flows** to **Yes** (enables the public-client PKCE flow).
-5. Under **API permissions**, add **Azure DevOps → `user_impersonation`** and
-   grant admin consent for the tenant.
+5. Under **API permissions**, add **Azure DevOps → `user_impersonation`**. Grant
+   admin consent for the tenant only if your tenant restricts user consent
+   (users can otherwise self-consent to this delegated scope on first sign-in).
 6. Copy the **Application (client) ID** and set it as `azure` in `OAUTH_CLIENT_IDS`.
 
 ### Notes
@@ -78,7 +79,9 @@ your own Entra app instead:
   port-agnostic). The loopback server binds `127.0.0.1` and, best-effort, the
   IPv6 loopback `[::1]` on the same port, so the callback lands whether
   `localhost` resolves to the IPv4 or IPv6 loopback (e.g. `::1` first on Windows).
-- `user_impersonation` requires tenant admin consent for the multi-tenant app.
+- `user_impersonation` is a delegated scope users can normally self-consent to
+  on first sign-in; tenant admin consent is only required if the tenant
+  restricts user consent.
 
 ---
 

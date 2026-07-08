@@ -190,7 +190,7 @@ impl LoopbackServer {
     /// browser used to reach `localhost`.
     fn run_server(
         listener_v4: TcpListener,
-        listener_v6: Option<TcpListener>,
+        mut listener_v6: Option<TcpListener>,
         shutdown_rx: mpsc::Receiver<()>,
         code_tx: mpsc::Sender<Result<CallbackResult, String>>,
     ) {
@@ -204,8 +204,28 @@ impl LoopbackServer {
             // whether either accepted a connection this pass, so we only sleep when
             // both would-block.
             let mut serviced = false;
-            for listener in std::iter::once(&listener_v4).chain(listener_v6.iter()) {
-                match listener.accept() {
+
+            // IPv4 loopback — the primary listener. A hard accept error here is fatal.
+            match listener_v4.accept() {
+                Ok((stream, _)) => {
+                    serviced = true;
+                    if let Some(result) = Self::handle_connection(stream) {
+                        let _ = code_tx.send(result);
+                        return;
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => {
+                    let _ = code_tx.send(Err(format!("Accept error: {}", e)));
+                    return;
+                }
+            }
+
+            // IPv6 loopback — best-effort. A hard accept error just drops this
+            // listener (graceful degrade to IPv4-only, mirroring the bind-time
+            // fallback), never aborting the whole server mid-sign-in.
+            if let Some(v6) = listener_v6.as_ref() {
+                match v6.accept() {
                     Ok((stream, _)) => {
                         serviced = true;
                         if let Some(result) = Self::handle_connection(stream) {
@@ -215,8 +235,8 @@ impl LoopbackServer {
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(e) => {
-                        let _ = code_tx.send(Err(format!("Accept error: {}", e)));
-                        return;
+                        tracing::debug!("IPv6 loopback accept error, dropping to IPv4-only: {}", e);
+                        listener_v6 = None;
                     }
                 }
             }

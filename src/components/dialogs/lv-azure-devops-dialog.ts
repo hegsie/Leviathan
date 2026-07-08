@@ -1747,6 +1747,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.createPrDraft = false;
         this.activeTab = 'pull-requests';
         await this.loadPullRequests();
+        showToast('Pull request created successfully', 'success');
       } else {
         this.error = result.error?.message ?? 'Failed to create pull request';
       }
