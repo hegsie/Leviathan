@@ -122,6 +122,32 @@ impl OAuthConfig {
         }
     }
 
+    /// Get Azure DevOps (Microsoft Entra ID) OAuth configuration for the interactive
+    /// authorization-code + loopback flow. Uses `localhost` (Entra ignores the port for
+    /// loopback) with the `/callback` path the loopback server serves. `tenant_id`
+    /// (passed as instance_url) defaults to `organizations` (multi-tenant work/school).
+    pub fn azure(client_id: &str, tenant_id: Option<&str>, redirect_port: u16) -> Self {
+        let tenant = tenant_id.unwrap_or("organizations");
+        Self {
+            client_id: client_id.to_string(),
+            authorize_url: format!(
+                "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
+                tenant
+            ),
+            token_url: format!(
+                "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+                tenant
+            ),
+            scopes: vec![
+                "499b84ac-1321-427f-aa17-267ca6975798/user_impersonation".to_string(),
+                "offline_access".to_string(),
+                "openid".to_string(),
+                "profile".to_string(),
+            ],
+            redirect_uri: format!("http://localhost:{}/callback", redirect_port),
+        }
+    }
+
     /// Get Bitbucket OAuth configuration
     /// Bitbucket requires http/https redirect URIs, so we use the loopback server
     pub fn bitbucket(client_id: &str, redirect_port: u16) -> Self {
@@ -577,6 +603,24 @@ mod tests {
         assert_eq!(config.redirect_uri, "http://127.0.0.1:8085/callback");
         assert!(config.scopes.contains(&"repository".to_string()));
         assert!(config.scopes.contains(&"pullrequest".to_string()));
+    }
+
+    #[test]
+    fn test_azure_config_default_tenant() {
+        let config = OAuthConfig::azure("cid", None, 8080);
+
+        assert!(config.authorize_url.contains("/organizations/"));
+        assert_eq!(config.redirect_uri, "http://localhost:8080/callback");
+        assert!(config
+            .scopes
+            .contains(&"499b84ac-1321-427f-aa17-267ca6975798/user_impersonation".to_string()));
+        assert!(config.scopes.contains(&"offline_access".to_string()));
+    }
+
+    #[test]
+    fn test_azure_config_specific_tenant() {
+        let config = OAuthConfig::azure("cid", Some("my-tenant"), 8080);
+        assert!(config.authorize_url.contains("/my-tenant/"));
     }
 
     // ==========================================================================
