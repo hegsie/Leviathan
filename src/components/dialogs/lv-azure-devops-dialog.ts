@@ -1131,8 +1131,9 @@ export class LvAzureDevOpsDialog extends LitElement {
    * authorization-code + loopback flow (the same path GitHub/GitLab use). Opens
    * the Microsoft sign-in page in the browser; the OAuth service waits on the
    * loopback callback, exchanges the code, and dispatches a global
-   * `oauth-complete` event that `handleOAuthComplete` picks up. Uses the embedded
-   * registered public client — no per-user app registration.
+   * `oauth-complete` event that `handleOAuthComplete` picks up. Uses Microsoft's
+   * Visual Studio first-party public client — no per-user app registration and no
+   * admin consent.
    */
   private async handleStartEntraOAuth(): Promise<void> {
     // Guard against a double-click starting a second (orphaned) flow.

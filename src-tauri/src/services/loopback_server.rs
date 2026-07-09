@@ -279,11 +279,13 @@ impl LoopbackServer {
         // Identify the OAuth callback by its query, not a fixed path: providers
         // differ in the redirect PATH they register — GitHub/GitLab/Bitbucket use
         // `/callback`, while Azure DevOps rides Microsoft's Visual Studio client
-        // whose registered redirect is bare `http://localhost` (root `/`). Gating
-        // on the presence of `code`/`error` accepts both and ignores incidental
-        // requests (e.g. `/favicon.ico`, or a bare `/` with no query) rather than
-        // mis-parsing them as a failed callback.
-        if !(query.contains("code=") || query.contains("error=")) {
+        // whose registered redirect is bare `http://localhost` (root `/`). Match on
+        // an EXACT `code`/`error` query KEY (see `query_is_callback`; a raw
+        // substring would also match `zipcode=`/`errorcode=`/… and mis-handle an
+        // unrelated request as a failed callback, tearing down the listener).
+        // Incidental requests (`/favicon.ico`, or a bare `/` with no query) are
+        // ignored.
+        if !query_is_callback(query) {
             Self::send_error_response(&mut stream, "Not found");
             return None; // Continue listening
         }
@@ -419,6 +421,18 @@ fn url_decode_component(s: &str) -> String {
         // Fall back to the raw value if it isn't valid percent-encoding.
         Err(_) => s,
     }
+}
+
+/// True if `query` carries an OAuth callback — i.e. it has an EXACT `code` or
+/// `error` parameter key. Used to distinguish the real redirect from incidental
+/// loopback requests (favicon, a bare `/`) regardless of the request path, so
+/// both the `/callback` path (GitHub/GitLab/Bitbucket) and the root `/` path
+/// (Azure's Visual Studio client) work. Matching the parsed key (not a raw
+/// substring) avoids false positives from keys like `zipcode`/`errorcode`.
+fn query_is_callback(query: &str) -> bool {
+    query
+        .split('&')
+        .any(|pair| matches!(pair.split('=').next(), Some("code") | Some("error")))
 }
 
 /// Parse and validate an OAuth callback query string.
@@ -596,6 +610,24 @@ mod tests {
         let result = parse_callback_query("code=abc123&state=xyz789").unwrap();
         assert_eq!(result.code, "abc123");
         assert_eq!(result.state, "xyz789");
+    }
+
+    #[test]
+    fn test_query_is_callback_matches_exact_key_only() {
+        // Real callbacks (any key order) are recognised.
+        assert!(query_is_callback("code=abc&state=xyz"));
+        assert!(query_is_callback("state=xyz&code=abc"));
+        assert!(query_is_callback(
+            "error=access_denied&error_description=nope"
+        ));
+        // Substrings inside unrelated keys must NOT be treated as a callback,
+        // otherwise a stray request would tear down the listener.
+        assert!(!query_is_callback("zipcode=90210"));
+        assert!(!query_is_callback("barcode=1&errorcode=200"));
+        assert!(!query_is_callback("decode=1"));
+        // No query / unrelated query is ignored.
+        assert!(!query_is_callback(""));
+        assert!(!query_is_callback("state=only"));
     }
 
     #[test]

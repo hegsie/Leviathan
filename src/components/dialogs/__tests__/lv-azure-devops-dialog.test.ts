@@ -212,7 +212,7 @@ function setupMockInvoke(): void {
     if (command === 'oauth_get_authorize_url') {
       return {
         authorizeUrl:
-          'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fcallback',
+          'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2F',
         state: 'state-xyz',
         loopbackPort: 8080,
       };
