@@ -14,14 +14,15 @@
 //!
 //! ## Layout
 //! - A separate metadata entry `"{account}__lvmeta"` holds `"{count}:{slot}"` when
-//!   the secret is chunked, and is ABSENT for a plain (unchunked) secret. Keeping
-//!   the chunk marker out-of-band means a plain secret can never be misread as a
-//!   marker, no matter its contents (relevant for the arbitrary git-password path).
+//!   the secret is chunked, and is ABSENT for a plain (unchunked) secret. Reads
+//!   consult it first, so removing/writing it is the atomic COMMIT point of a
+//!   store. Keeping the chunk marker out-of-band also means a plain secret can
+//!   never be misread as a marker, whatever its contents (the arbitrary
+//!   git-password path shares this code).
 //! - Chunks live under `"{account}__lvchunk{slot}_{i}"`. `slot` (0/1) alternates
 //!   on each rewrite so a new generation is written to fresh keys, leaving the old
 //!   generation fully intact until the metadata write commits the switch. A write
-//!   failure mid-sequence therefore preserves the previously-stored value rather
-//!   than destroying it.
+//!   failure before the commit therefore preserves the previously-stored value.
 //!
 //! macOS is handled separately by the callers (via the `security` CLI, which
 //! reads the secret from stdin and has no such small limit), so this module is
@@ -36,6 +37,10 @@ use keyring::{Entry, Error};
 /// characters (2 units each), which matters because the arbitrary git-password
 /// path shares this code. 1200 units = 2400 bytes, comfortably below 2560.
 const MAX_UTF16_UNITS_PER_ENTRY: usize = 1200;
+
+/// Upper bound on chunk indices swept during cleanup — a safety stop so a corrupt
+/// state can never spin forever. 4096 chunks is ~4 MB, far beyond any real token.
+const MAX_CHUNKS: usize = 4096;
 
 /// Keyring account name of the out-of-band chunk metadata for `account`.
 fn meta_account(account: &str) -> String {
@@ -83,40 +88,74 @@ fn entry(service: &str, account: &str) -> Result<Entry, Error> {
     Entry::new(service, account)
 }
 
-/// Best-effort delete of a single credential (missing is fine).
-fn delete_quietly(service: &str, account: &str) {
-    if let Ok(e) = entry(service, account) {
-        let _ = e.delete_credential();
+/// Delete one credential, reporting whether it existed. `Ok(false)` = already
+/// absent; a real backend error propagates.
+fn delete_one(service: &str, account: &str) -> Result<bool, Error> {
+    match entry(service, account)?.delete_credential() {
+        Ok(()) => Ok(true),
+        Err(Error::NoEntry) => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
-/// Read the chunk metadata for `account`, if present.
-fn read_meta(service: &str, account: &str) -> Option<(usize, u8)> {
-    let value = entry(service, &meta_account(account))
-        .ok()?
-        .get_password()
-        .ok()?;
-    parse_meta(&value)
+/// Best-effort delete used only for non-critical cleanup (orphan/old-generation
+/// entries). A real failure is logged — never silently swallowed — but does not
+/// abort the operation, since reads no longer depend on these entries.
+fn delete_quietly(service: &str, account: &str) {
+    match delete_one(service, account) {
+        Ok(_) => {}
+        Err(e) => tracing::warn!("keyring: failed to delete stale entry {account}: {e}"),
+    }
+}
+
+/// Best-effort sweep of the contiguous chunk entries of `slot` starting at index
+/// `from`, stopping at the first missing index (or on error). Chunks are always
+/// written 0..N contiguously, so this removes a whole (or leftover) generation.
+fn sweep_chunks(service: &str, account: &str, slot: u8, from: usize) {
+    for i in from..MAX_CHUNKS {
+        match delete_one(service, &chunk_account(account, slot, i)) {
+            Ok(true) => {}
+            Ok(false) => break, // no more chunks in this slot
+            Err(e) => {
+                tracing::warn!("keyring: failed sweeping chunk {slot}/{i} of {account}: {e}");
+                break;
+            }
+        }
+    }
+}
+
+/// Read the chunk metadata for `account`. `Ok(None)` when absent (plain secret);
+/// a real backend error propagates rather than masquerading as "not chunked".
+fn read_meta(service: &str, account: &str) -> Result<Option<(usize, u8)>, Error> {
+    match entry(service, &meta_account(account))?.get_password() {
+        Ok(value) => Ok(parse_meta(&value)),
+        Err(Error::NoEntry) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Store `secret`, chunking transparently when it exceeds one entry's capacity.
 ///
-/// Failure-atomic: the previously-stored value stays readable until the switch is
-/// committed (metadata write for a chunked secret; primary overwrite for a plain
-/// one), so a mid-sequence keyring error never leaves the account without a token.
+/// Failure-atomic: reads resolve via the metadata entry, so the previously-stored
+/// value stays readable until that metadata write/delete commits the switch. A
+/// mid-sequence keyring error before the commit leaves the old value intact, and a
+/// failed commit is propagated as `Err` (never silently leaving reads stale).
 pub fn set(service: &str, account: &str, secret: &str) -> Result<(), Error> {
-    let old = read_meta(service, account);
+    let old = read_meta(service, account)?;
 
     if secret.encode_utf16().count() <= MAX_UTF16_UNITS_PER_ENTRY {
-        // Plain: overwrite the primary key atomically (in-place replace). Only
-        // AFTER that succeeds do we drop any prior chunked generation, so a
-        // failure here leaves the old value intact.
+        // Plain: overwrite the primary key in place (atomic). If the old value was
+        // chunked, the COMMIT is deleting its metadata (reads check meta first) —
+        // that delete MUST succeed, else reads keep returning the old chunked value.
         entry(service, account)?.set_password(secret)?;
-        if let Some((count, slot)) = old {
-            delete_quietly(service, &meta_account(account));
-            for i in 0..count {
-                delete_quietly(service, &chunk_account(account, slot, i));
+        if old.is_some() {
+            match entry(service, &meta_account(account))?.delete_credential() {
+                Ok(()) | Err(Error::NoEntry) => {}
+                Err(e) => return Err(e),
             }
+            // Now committed to plain; best-effort remove both generations' chunks.
+            sweep_chunks(service, account, 0, 0);
+            sweep_chunks(service, account, 1, 0);
         }
         return Ok(());
     }
@@ -135,19 +174,19 @@ pub fn set(service: &str, account: &str, secret: &str) -> Result<(), Error> {
     // COMMIT — from here reads resolve to the new generation.
     entry(service, &meta_account(account))?.set_password(&format_meta(chunks.len(), new_slot))?;
 
-    // Best-effort cleanup of the previous generation and any stale plain primary.
+    // Best-effort cleanup: any stale plain primary, the previous generation, and
+    // any leftover higher-index chunks in the reused slot.
     delete_quietly(service, account);
-    if let Some((count, slot)) = old {
-        for i in 0..count {
-            delete_quietly(service, &chunk_account(account, slot, i));
-        }
+    if let Some((_, old_slot)) = old {
+        sweep_chunks(service, account, old_slot, 0);
     }
+    sweep_chunks(service, account, new_slot, chunks.len());
     Ok(())
 }
 
 /// Read a secret, reassembling chunks when present. `Ok(None)` if absent.
 pub fn get(service: &str, account: &str) -> Result<Option<String>, Error> {
-    if let Some((count, slot)) = read_meta(service, account) {
+    if let Some((count, slot)) = read_meta(service, account)? {
         let mut out = String::new();
         for i in 0..count {
             match entry(service, &chunk_account(account, slot, i))?.get_password() {
@@ -168,14 +207,13 @@ pub fn get(service: &str, account: &str) -> Result<Option<String>, Error> {
     }
 }
 
-/// Delete a secret and any chunk/metadata entries it owns.
+/// Delete a secret and every chunk/metadata entry it could own. Sweeps BOTH
+/// generations so a partially-failed prior rotation can't leave token fragments
+/// behind in the OS credential store.
 pub fn delete(service: &str, account: &str) -> Result<(), Error> {
-    if let Some((count, slot)) = read_meta(service, account) {
-        for i in 0..count {
-            delete_quietly(service, &chunk_account(account, slot, i));
-        }
-        delete_quietly(service, &meta_account(account));
-    }
+    sweep_chunks(service, account, 0, 0);
+    sweep_chunks(service, account, 1, 0);
+    delete_quietly(service, &meta_account(account));
     match entry(service, account)?.delete_credential() {
         Ok(()) | Err(Error::NoEntry) => Ok(()),
         Err(e) => Err(e),
@@ -242,8 +280,6 @@ mod tests {
 
     #[test]
     fn test_parse_meta_rejects_junk() {
-        // A real secret in the primary key is never parsed as metadata (metadata
-        // lives under a separate account), but parse_meta must still be strict.
         assert_eq!(parse_meta("eyJhbGciOiJSUzI1NiJ9.abc"), None);
         assert_eq!(parse_meta("{\"accessToken\":\"x\"}"), None);
         assert_eq!(parse_meta("3"), None); // no slot
