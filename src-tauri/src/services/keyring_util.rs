@@ -108,19 +108,26 @@ fn delete_quietly(service: &str, account: &str) {
     }
 }
 
-/// Best-effort sweep of the contiguous chunk entries of `slot` starting at index
-/// `from`, stopping at the first missing index (or on error). Chunks are always
-/// written 0..N contiguously, so this removes a whole (or leftover) generation.
-fn sweep_chunks(service: &str, account: &str, slot: u8, from: usize) {
+/// Sweep the contiguous chunk entries of `slot` starting at index `from`,
+/// stopping at the first missing index. Chunks are always written 0..N
+/// contiguously, so this removes a whole (or leftover) generation. Returns the
+/// first backend error encountered (callers decide whether to propagate or log).
+fn sweep_chunks(service: &str, account: &str, slot: u8, from: usize) -> Result<(), Error> {
     for i in from..MAX_CHUNKS {
         match delete_one(service, &chunk_account(account, slot, i)) {
             Ok(true) => {}
-            Ok(false) => break, // no more chunks in this slot
-            Err(e) => {
-                tracing::warn!("keyring: failed sweeping chunk {slot}/{i} of {account}: {e}");
-                break;
-            }
+            Ok(false) => return Ok(()), // no more chunks in this slot
+            Err(e) => return Err(e),
         }
+    }
+    Ok(())
+}
+
+/// Best-effort sweep for post-commit cleanup: the store already succeeded, so a
+/// leftover-chunk removal failure is logged, not surfaced.
+fn sweep_chunks_logged(service: &str, account: &str, slot: u8, from: usize) {
+    if let Err(e) = sweep_chunks(service, account, slot, from) {
+        tracing::warn!("keyring: failed sweeping chunks {slot} of {account}: {e}");
     }
 }
 
@@ -149,14 +156,22 @@ pub fn set(service: &str, account: &str, secret: &str) -> Result<(), Error> {
         // that delete MUST succeed, else reads keep returning the old chunked value.
         entry(service, account)?.set_password(secret)?;
         if old.is_some() {
+            // Committed chunked value: reads check meta first, so deleting it is the
+            // real COMMIT of the switch to plain — it MUST succeed.
             match entry(service, &meta_account(account))?.delete_credential() {
                 Ok(()) | Err(Error::NoEntry) => {}
                 Err(e) => return Err(e),
             }
-            // Now committed to plain; best-effort remove both generations' chunks.
-            sweep_chunks(service, account, 0, 0);
-            sweep_chunks(service, account, 1, 0);
+        } else {
+            // No committed metadata, but a prior chunked write that failed before
+            // committing could have left a stray meta/chunks — tidy them up.
+            delete_quietly(service, &meta_account(account));
         }
+        // Always sweep orphan chunks (both generations) — cheap when none exist
+        // (breaks on the first missing index). This also collects fragments left
+        // by a previously-failed, never-committed chunked write.
+        sweep_chunks_logged(service, account, 0, 0);
+        sweep_chunks_logged(service, account, 1, 0);
         return Ok(());
     }
 
@@ -174,13 +189,13 @@ pub fn set(service: &str, account: &str, secret: &str) -> Result<(), Error> {
     // COMMIT — from here reads resolve to the new generation.
     entry(service, &meta_account(account))?.set_password(&format_meta(chunks.len(), new_slot))?;
 
-    // Best-effort cleanup: any stale plain primary, the previous generation, and
-    // any leftover higher-index chunks in the reused slot.
+    // Best-effort cleanup (store already committed): any stale plain primary, the
+    // previous generation, and any leftover higher-index chunks in the reused slot.
     delete_quietly(service, account);
     if let Some((_, old_slot)) = old {
-        sweep_chunks(service, account, old_slot, 0);
+        sweep_chunks_logged(service, account, old_slot, 0);
     }
-    sweep_chunks(service, account, new_slot, chunks.len());
+    sweep_chunks_logged(service, account, new_slot, chunks.len());
     Ok(())
 }
 
@@ -209,14 +224,26 @@ pub fn get(service: &str, account: &str) -> Result<Option<String>, Error> {
 
 /// Delete a secret and every chunk/metadata entry it could own. Sweeps BOTH
 /// generations so a partially-failed prior rotation can't leave token fragments
-/// behind in the OS credential store.
+/// behind. Attempts every removal and, if any failed, returns the first error —
+/// so a caller is never told the secret is gone while fragments remain.
 pub fn delete(service: &str, account: &str) -> Result<(), Error> {
-    sweep_chunks(service, account, 0, 0);
-    sweep_chunks(service, account, 1, 0);
-    delete_quietly(service, &meta_account(account));
-    match entry(service, account)?.delete_credential() {
-        Ok(()) | Err(Error::NoEntry) => Ok(()),
-        Err(e) => Err(e),
+    let mut first_err: Option<Error> = None;
+    let mut record = |result: Result<(), Error>| {
+        if let Err(e) = result {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+    };
+
+    record(sweep_chunks(service, account, 0, 0));
+    record(sweep_chunks(service, account, 1, 0));
+    record(delete_one(service, &meta_account(account)).map(|_| ()));
+    record(delete_one(service, account).map(|_| ()));
+
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
 }
 
