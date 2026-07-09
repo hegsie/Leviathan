@@ -703,10 +703,9 @@ pub async fn store_keyring_token(key: String, value: String) -> Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let entry = keyring::Entry::new(INTEGRATION_SERVICE, &key)
-            .map_err(|e| LeviathanError::OperationFailed(format!("Keyring error: {e}")))?;
-        entry
-            .set_password(&value)
+        // Chunk transparently: Windows Credential Manager caps a secret at 2560
+        // bytes, which large Entra tokens exceed.
+        crate::services::keyring_util::set(INTEGRATION_SERVICE, &key, &value)
             .map_err(|e| LeviathanError::OperationFailed(format!("Failed to store token: {e}")))?;
     }
 
@@ -746,15 +745,8 @@ pub async fn get_keyring_token(key: String) -> Result<Option<String>> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let entry = keyring::Entry::new(INTEGRATION_SERVICE, &key)
-            .map_err(|e| LeviathanError::OperationFailed(format!("Keyring error: {e}")))?;
-        match entry.get_password() {
-            Ok(password) => Ok(Some(password)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(LeviathanError::OperationFailed(format!(
-                "Failed to get token: {e}"
-            ))),
-        }
+        crate::services::keyring_util::get(INTEGRATION_SERVICE, &key)
+            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to get token: {e}")))
     }
 }
 
@@ -776,17 +768,9 @@ pub async fn delete_keyring_token(key: String) -> Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let entry = keyring::Entry::new(INTEGRATION_SERVICE, &key)
-            .map_err(|e| LeviathanError::OperationFailed(format!("Keyring error: {e}")))?;
-        match entry.delete_credential() {
-            Ok(()) => (),
-            Err(keyring::Error::NoEntry) => (),
-            Err(e) => {
-                return Err(LeviathanError::OperationFailed(format!(
-                    "Failed to delete token: {e}"
-                )))
-            }
-        }
+        // Removes the primary entry and any chunk entries a large token created.
+        crate::services::keyring_util::delete(INTEGRATION_SERVICE, &key)
+            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to delete token: {e}")))?;
     }
 
     tracing::debug!("Deleted keyring token for key: {}", key);

@@ -11,6 +11,8 @@ pub mod credentials_service;
 pub mod embedding;
 pub mod git_service;
 pub mod github_app;
+#[cfg(not(target_os = "macos"))]
+pub mod keyring_util;
 pub mod loopback_server;
 pub mod oauth;
 pub mod update_service;
