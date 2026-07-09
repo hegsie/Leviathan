@@ -212,7 +212,8 @@ pub async fn oauth_get_authorize_url(
         }
         OAuthProvider::Azure => {
             // Azure DevOps (Entra ID): interactive auth-code + loopback (like GitHub/GitLab),
-            // using the embedded registered public client. instance_url carries the optional tenant.
+            // using Microsoft's Visual Studio first-party public client (no admin consent /
+            // app registration). instance_url carries the optional tenant.
             let server = LoopbackServer::new()?;
             let port = server.port();
             let config = OAuthConfig::azure(&client_id, instance_url.as_deref(), port);

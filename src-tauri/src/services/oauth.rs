@@ -123,14 +123,19 @@ impl OAuthConfig {
     }
 
     /// Get Azure DevOps (Microsoft Entra ID) OAuth configuration for the interactive
-    /// authorization-code + loopback flow. Uses `localhost` (NOT `127.0.0.1`): Entra
-    /// only ignores the port when matching a `localhost` loopback redirect — for the IP
-    /// literal the port must match exactly, which is impossible with our dynamic
-    /// loopback port. So the app registers `http://localhost/callback` and every port
-    /// matches it. The loopback server binds `127.0.0.1` and, best-effort, `[::1]`
-    /// (see `LoopbackServer::try_bind_ipv6_loopback`), since `localhost` can resolve
-    /// to either family depending on the OS. `tenant_id` (passed as instance_url)
-    /// defaults to `organizations` (multi-tenant).
+    /// authorization-code + loopback flow, using Microsoft's Visual Studio first-party
+    /// public client (pre-authorized for Azure DevOps — no admin consent, no app
+    /// registration; the same client Git Credential Manager uses).
+    ///
+    /// The redirect is `http://localhost:{port}/` at the ROOT path — that VS client
+    /// registers bare `http://localhost`, and Entra matches the path (so `/callback`
+    /// would NOT match) while ignoring the port for `localhost`. Host must be
+    /// `localhost` (not `127.0.0.1`): Entra only ignores the port for `localhost`, and
+    /// that is what VS registered. The loopback server binds `127.0.0.1` and,
+    /// best-effort, `[::1]` (see `LoopbackServer::try_bind_ipv6_loopback`), since
+    /// `localhost` can resolve to either family. `tenant_id` (passed as instance_url)
+    /// defaults to `organizations` (work/school accounts; personal MSAs are rejected
+    /// by this client).
     pub fn azure(client_id: &str, tenant_id: Option<&str>, redirect_port: u16) -> Self {
         let tenant = tenant_id.unwrap_or("organizations");
         Self {
@@ -149,7 +154,7 @@ impl OAuthConfig {
                 "openid".to_string(),
                 "profile".to_string(),
             ],
-            redirect_uri: format!("http://localhost:{}/callback", redirect_port),
+            redirect_uri: format!("http://localhost:{}/", redirect_port),
         }
     }
 
@@ -615,9 +620,10 @@ mod tests {
         let config = OAuthConfig::azure("cid", None, 8080);
 
         assert!(config.authorize_url.contains("/organizations/"));
-        // MUST be localhost (not 127.0.0.1): Entra only ignores the port for a
-        // `localhost` loopback redirect, and our loopback port is dynamic.
-        assert_eq!(config.redirect_uri, "http://localhost:8080/callback");
+        // MUST be localhost (not 127.0.0.1) at the ROOT path: the Visual Studio
+        // client registers bare `http://localhost`; Entra matches the path and
+        // ignores the port only for `localhost`.
+        assert_eq!(config.redirect_uri, "http://localhost:8080/");
         assert!(config
             .scopes
             .contains(&"499b84ac-1321-427f-aa17-267ca6975798/user_impersonation".to_string()));
