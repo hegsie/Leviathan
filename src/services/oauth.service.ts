@@ -29,9 +29,13 @@ import type {
 const OAUTH_CLIENT_IDS: Partial<Record<OAuthProvider, string>> = {
   github: 'Ov23liQxX14fxt3fRq4u',
   gitlab: '90d3d02fefb79e0303aaa54e8c6794bf806e9e8a1de7526bebc4f14288e12fec',
-  // Registered Leviathan multi-tenant Entra app (public client, loopback redirect
-  // http://localhost/callback, Azure DevOps user_impersonation).
-  azure: 'a1b13ec5-3f32-4ec7-b07f-5dfc5acbd2a8',
+  // Microsoft's Visual Studio first-party public client. It is pre-authorized for
+  // the Azure DevOps resource in every tenant, so interactive sign-in needs NO
+  // per-tenant admin consent and NO app registration — the same client Microsoft's
+  // own Git Credential Manager embeds (redirect http://localhost, root path). Work
+  // or school accounts only (the /organizations authority; personal MSAs are not
+  // supported by this client).
+  azure: '872cd9fa-d31f-45e0-9eab-6e460a02d1f1',
   bitbucket: 'Tv5UjEqLKK7GSYjAJn',
 };
 

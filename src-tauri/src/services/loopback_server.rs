@@ -274,9 +274,16 @@ impl LoopbackServer {
         }
 
         let path = parts[1];
+        let query = path.split('?').nth(1).unwrap_or("");
 
-        // Check if this is the callback path
-        if !path.starts_with("/callback") {
+        // Identify the OAuth callback by its query, not a fixed path: providers
+        // differ in the redirect PATH they register — GitHub/GitLab/Bitbucket use
+        // `/callback`, while Azure DevOps rides Microsoft's Visual Studio client
+        // whose registered redirect is bare `http://localhost` (root `/`). Gating
+        // on the presence of `code`/`error` accepts both and ignores incidental
+        // requests (e.g. `/favicon.ico`, or a bare `/` with no query) rather than
+        // mis-parsing them as a failed callback.
+        if !(query.contains("code=") || query.contains("error=")) {
             Self::send_error_response(&mut stream, "Not found");
             return None; // Continue listening
         }
@@ -285,7 +292,6 @@ impl LoopbackServer {
         // (pure, unit-tested below) BEFORE we tell the browser anything, so a
         // callback missing its `state` shows a failure page rather than a
         // misleading "Authorization Successful".
-        let query = path.split('?').nth(1).unwrap_or("");
         match parse_callback_query(query) {
             Ok(result) => {
                 Self::send_success_response(&mut stream);
@@ -504,6 +510,26 @@ mod tests {
         let result = handle.join().unwrap().unwrap();
         assert_eq!(result.code, "abc");
         assert_eq!(result.state, "xyz");
+    }
+
+    /// Azure DevOps rides Microsoft's Visual Studio client, whose registered
+    /// redirect is bare `http://localhost` — so the callback lands on the ROOT
+    /// path `/`, not `/callback`. The server must still recognise it.
+    #[test]
+    fn test_wait_for_callback_receives_on_root_path() {
+        let server = LoopbackServer::new().unwrap();
+        let port = server.port();
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(5)));
+
+        thread::sleep(Duration::from_millis(150));
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"GET /?code=rootcode&state=rootstate HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+
+        let result = handle.join().unwrap().unwrap();
+        assert_eq!(result.code, "rootcode");
+        assert_eq!(result.state, "rootstate");
     }
 
     /// When IPv6 loopback is available, a callback delivered to `[::1]` (the family
