@@ -4,8 +4,6 @@
 //! via the `security` CLI tool (avoids permission prompts that the keyring crate triggers).
 
 use git2::{Cred, CredentialType, RemoteCallbacks};
-#[cfg(not(target_os = "macos"))]
-use keyring::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -93,8 +91,10 @@ fn keyring_get(service: &str, account: &str) -> Option<String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let entry = Entry::new(service, account).ok()?;
-        entry.get_password().ok()
+        // Reassembles a chunked secret (large Entra token) transparently.
+        crate::services::keyring_util::get(service, account)
+            .ok()
+            .flatten()
     }
 }
 
@@ -162,11 +162,9 @@ fn keyring_set(service: &str, account: &str, password: &str) -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let entry = match Entry::new(service, account) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-        entry.set_password(password).is_ok()
+        // Chunk transparently so a large Entra token doesn't exceed the Windows
+        // Credential Manager 2560-byte per-secret limit.
+        crate::services::keyring_util::set(service, account, password).is_ok()
     }
 }
 
@@ -182,11 +180,7 @@ fn keyring_delete(service: &str, account: &str) -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let entry = match Entry::new(service, account) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-        entry.delete_credential().is_ok()
+        crate::services::keyring_util::delete(service, account).is_ok()
     }
 }
 
