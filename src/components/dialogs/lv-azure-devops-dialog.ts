@@ -34,6 +34,13 @@ import './lv-account-selector.ts';
 
 type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr' | 'create-work-item';
 
+/**
+ * Max work items the backend returns for the "My Work Items" list (kept in sync
+ * with WORK_ITEMS_LIMIT in commands/azure_devops.rs). When the list is exactly
+ * this long, more may exist and the tab shows a "capped" hint.
+ */
+const WORK_ITEMS_PAGE_SIZE = 50;
+
 /** OAuth tokens carried from an Entra sign-in through org resolution to persistence. */
 interface EntraTokens {
   accessToken: string;
@@ -1794,11 +1801,18 @@ export class LvAzureDevOpsDialog extends LitElement {
       );
 
       if (result.success && result.data) {
+        const created = result.data;
         this.createWorkItemType = 'Task';
         this.createWorkItemTitle = '';
         this.createWorkItemDescription = '';
         this.activeTab = 'work-items';
         await this.loadWorkItems();
+        // Ensure the just-created item is visible even in the edge case where it
+        // couldn't be self-assigned (no UPN), so it isn't reloaded out of the
+        // @Me-scoped list and replaced by a confusing "none assigned" empty state.
+        if (!this.workItems.some((w) => w.id === created.id)) {
+          this.workItems = [created, ...this.workItems];
+        }
         showToast('Work item created successfully', 'success');
       } else {
         this.error = result.error?.message ?? 'Failed to create work item';
@@ -2131,6 +2145,16 @@ export class LvAzureDevOpsDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.workItems.length >= WORK_ITEMS_PAGE_SIZE ? html`
+        <p class="help-text" style="text-align:center;padding-top:8px">
+          Showing your ${WORK_ITEMS_PAGE_SIZE} most recent.
+          ${this.detectedRepo ? html`<a
+            class="help-link"
+            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_workitems/"
+            @click=${handleExternalLink}
+          >Open in Azure DevOps</a> for the full list.` : nothing}
+        </p>
+      ` : nothing}
     `;
   }
 

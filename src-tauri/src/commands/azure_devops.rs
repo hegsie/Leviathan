@@ -843,6 +843,10 @@ pub async fn get_ado_work_items(
         .collect())
 }
 
+/// Max work items fetched for the "My Work Items" list. When the caller receives
+/// exactly this many, more may exist — the dialog surfaces a "capped" hint.
+const WORK_ITEMS_LIMIT: usize = 50;
+
 /// Build the WIQL for the work-items list.
 ///
 /// Scoped to the signed-in user's assigned items (`@Me`): a project-wide flat
@@ -935,8 +939,15 @@ pub async fn query_ado_work_items(
         LeviathanError::OperationFailed(format!("Failed to parse WIQL response: {}", e))
     })?;
 
-    // Get first 50 work items
-    let ids: Vec<u32> = data.work_items.into_iter().take(50).map(|w| w.id).collect();
+    // Fetch full details for at most WORK_ITEMS_LIMIT of the user's most-recent
+    // items. The dialog flags the list as capped when it receives this many (kept
+    // in sync with WORK_ITEMS_PAGE_SIZE on the frontend).
+    let ids: Vec<u32> = data
+        .work_items
+        .into_iter()
+        .take(WORK_ITEMS_LIMIT)
+        .map(|w| w.id)
+        .collect();
 
     if ids.is_empty() {
         return Ok(vec![]);
