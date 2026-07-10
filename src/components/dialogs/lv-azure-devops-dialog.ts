@@ -1770,6 +1770,10 @@ export class LvAzureDevOpsDialog extends LitElement {
         workItemType: this.createWorkItemType || 'Task',
         title: this.createWorkItemTitle,
         description: this.createWorkItemDescription || undefined,
+        // Assign to the signed-in user so the new item appears in the
+        // @Me-scoped Work Items list (otherwise it's created unassigned and
+        // would be absent from the list that's reloaded right after).
+        assignedTo: this.connectionStatus?.user?.uniqueName || undefined,
       };
 
       const token = await this.getSelectedAccountToken();
@@ -2091,7 +2095,7 @@ export class LvAzureDevOpsDialog extends LitElement {
             <path d="M9 11l3 3L22 4"></path>
             <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
           </svg>
-          <p>No work items found</p>
+          <p>No work items assigned to you</p>
         </div>
       `;
     }
@@ -2358,7 +2362,7 @@ export class LvAzureDevOpsDialog extends LitElement {
               class="tab ${this.activeTab === 'work-items' ? 'active' : ''}"
               @click=${() => { this.activeTab = 'work-items'; this.loadWorkItems(); }}
             >
-              Work Items
+              My Work Items
             </button>
             <button
               class="tab ${this.activeTab === 'pipelines' ? 'active' : ''}"

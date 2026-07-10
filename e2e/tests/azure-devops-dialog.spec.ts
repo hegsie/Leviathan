@@ -97,7 +97,7 @@ test.describe('Azure DevOps Dialog - Display', () => {
           targetRefName: 'refs/heads/main',
         },
       ],
-      list_ado_work_items: [
+      query_ado_work_items: [
         {
           id: 45,
           title: 'Bug: Application crashes',
@@ -352,7 +352,7 @@ test.describe('Azure DevOps Dialog - Tabs Content', () => {
           targetRefName: 'refs/heads/main',
         },
       ],
-      list_ado_work_items: [
+      query_ado_work_items: [
         {
           id: 45,
           title: 'Bug: Application crashes',

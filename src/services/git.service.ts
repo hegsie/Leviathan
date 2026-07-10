@@ -3601,6 +3601,8 @@ export interface CreateAdoWorkItemInput {
   workItemType?: string;
   title: string;
   description?: string;
+  /** Identity (unique name / UPN) to assign the new work item to. */
+  assignedTo?: string;
 }
 
 export async function createAzureDevOpsWorkItem(

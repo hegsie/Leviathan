@@ -284,7 +284,7 @@ describe('lv-azure-devops-dialog', () => {
       const tabTexts = Array.from(tabs).map((t) => t.textContent?.trim());
       expect(tabTexts).to.include('Connection');
       expect(tabTexts).to.include('Pull Requests');
-      expect(tabTexts).to.include('Work Items');
+      expect(tabTexts).to.include('My Work Items');
       expect(tabTexts).to.include('Pipelines');
     });
 
@@ -481,7 +481,7 @@ describe('lv-azure-devops-dialog', () => {
 
       // Switch to Work Items tab
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      const wiTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement;
+      const wiTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement;
       wiTab.click();
       await waitForLoad(el);
 
@@ -510,7 +510,7 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement).click();
       await waitForLoad(el);
 
       const newBtn = Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
@@ -529,7 +529,7 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement).click();
       await waitForLoad(el);
       (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
         (b) => b.textContent?.trim().includes('New Work Item')
@@ -567,7 +567,7 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement).click();
       await waitForLoad(el);
       (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
         (b) => b.textContent?.trim().includes('New Work Item')
@@ -617,7 +617,7 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement).click();
       await waitForLoad(el);
       (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
         (b) => b.textContent?.trim().includes('New Work Item')
