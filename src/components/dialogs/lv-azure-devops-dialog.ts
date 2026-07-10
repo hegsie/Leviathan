@@ -1085,6 +1085,10 @@ export class LvAzureDevOpsDialog extends LitElement {
   private async loadWorkItems(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
+    // Clear any stale error (e.g. from another tab) so a successful load starts
+    // clean — matches loadPullRequests.
+    this.error = null;
+
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.queryAdoWorkItems(
@@ -1772,8 +1776,13 @@ export class LvAzureDevOpsDialog extends LitElement {
         description: this.createWorkItemDescription || undefined,
         // Assign to the signed-in user so the new item appears in the
         // @Me-scoped Work Items list (otherwise it's created unassigned and
-        // would be absent from the list that's reloaded right after).
-        assignedTo: this.connectionStatus?.user?.uniqueName || undefined,
+        // would be absent from the list that's reloaded right after). Only use a
+        // UPN-like identity (uniqueName can fall back to a non-unique display
+        // name when the profile has no email — assigning by that is ambiguous, so
+        // leave the item unassigned rather than risk the wrong person).
+        assignedTo: this.connectionStatus?.user?.uniqueName?.includes('@')
+          ? this.connectionStatus.user.uniqueName
+          : undefined,
       };
 
       const token = await this.getSelectedAccountToken();
@@ -2083,7 +2092,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       `;
     }
 
-    if (this.workItems.length === 0) {
+    if (this.workItems.length === 0 && !this.error) {
       return html`
         <div class="filter-row">
           <button class="btn" @click=${() => this.activeTab = 'create-work-item'}>

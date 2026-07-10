@@ -546,6 +546,8 @@ describe('lv-azure-devops-dialog', () => {
       expect(el.shadowRoot!.querySelector('.error')?.textContent).to.include(
         'too many assigned work items'
       );
+      // The empty state must NOT render alongside the error (contradictory copy).
+      expect(el.shadowRoot!.querySelector('.empty-state')).to.be.null;
     });
   });
 
