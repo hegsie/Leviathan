@@ -1118,6 +1118,10 @@ export class LvAzureDevOpsDialog extends LitElement {
   private async loadPipelineRuns(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
+    // Clear any stale error (e.g. from another tab) so a successful load starts
+    // clean — matches loadPullRequests / loadWorkItems.
+    this.error = null;
+
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.listAdoPipelineRuns(

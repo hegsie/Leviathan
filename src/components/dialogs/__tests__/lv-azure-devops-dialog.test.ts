@@ -657,6 +657,53 @@ describe('lv-azure-devops-dialog', () => {
       expect(invokeHistory.some((c) => c.command === 'query_ado_work_items')).to.be.true;
     });
 
+    it('shows a just-created item even when it is not in the @Me-scoped reload (no-UPN identity)', async () => {
+      // A connected user whose uniqueName is not UPN-like (no '@') → the create
+      // handler omits assignedTo, so the created item is unassigned and absent
+      // from the @Me reload. It must still be shown (prepended).
+      connectionResponse = {
+        connected: true,
+        user: { id: 'u', displayName: 'Legacy User', uniqueName: 'DOMAIN\\legacy', imageUrl: null },
+        organization: 'testorg',
+      };
+      detectedRepoResponse = mockDetectedRepo;
+      const createdItem = {
+        id: 4242,
+        title: 'Orphan task',
+        workItemType: 'Task',
+        state: 'New',
+        assignedTo: null,
+        createdDate: '2025-03-01T10:00:00Z',
+        url: 'https://dev.azure.com/testorg/test-project/_workitems/edit/4242',
+      };
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'create_azure_devops_work_item') return createdItem;
+        // The @Me reload never returns the (unassigned) created item.
+        if (command === 'query_ado_work_items') return [];
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      Object.assign(el as unknown as Record<string, unknown>, {
+        activeTab: 'create-work-item',
+        createWorkItemTitle: 'Orphan task',
+      });
+      await el.updateComplete;
+      await (el as unknown as { handleCreateWorkItem: () => Promise<void> }).handleCreateWorkItem();
+      await el.updateComplete;
+
+      // assignedTo was omitted (non-UPN identity), yet the created item is shown.
+      const createCall = invokeHistory.find((c) => c.command === 'create_azure_devops_work_item');
+      expect((createCall!.args as { input: Record<string, unknown> }).input.assignedTo).to.be.undefined;
+      const titles = Array.from(el.shadowRoot!.querySelectorAll('.work-item-title')).map((n) => n.textContent);
+      expect(titles.some((t) => t?.includes('Orphan task'))).to.be.true;
+    });
+
     it('shows an error when create_azure_devops_work_item fails (not silent)', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
