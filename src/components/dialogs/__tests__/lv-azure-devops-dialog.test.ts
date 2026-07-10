@@ -497,6 +497,56 @@ describe('lv-azure-devops-dialog', () => {
       const secondItem = workItems[1];
       expect(secondItem.querySelector('.work-item-type')?.textContent).to.include('Bug');
     });
+
+    it('shows the @Me-scoped empty state when the user has no assigned work items', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'query_ado_work_items') return [];
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'My Work Items'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      // Empty-state copy makes the @Me scope explicit (not a generic "none found").
+      expect(el.shadowRoot!.querySelector('.empty-state')?.textContent).to.include(
+        'No work items assigned to you'
+      );
+    });
+
+    it('surfaces the friendly size-limit message when the query exceeds the cap', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const origMock = mockInvoke;
+      // The backend maps VS402337 to this actionable message; the dialog must show it.
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'query_ado_work_items') {
+          throw new Error('You have too many assigned work items to list here. Open this project in Azure DevOps to view them.');
+        }
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'My Work Items'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelector('.error')?.textContent).to.include(
+        'too many assigned work items'
+      );
+    });
   });
 
   describe('Create Work Item', () => {
@@ -597,6 +647,9 @@ describe('lv-azure-devops-dialog', () => {
       expect(input.title).to.equal('New task');
       expect(input.workItemType).to.equal('Task');
       expect(input.description).to.equal('Do it');
+      // Assigns the new item to the signed-in user so it appears in the
+      // @Me-scoped list instead of being created unassigned and vanishing.
+      expect(input.assignedTo).to.equal(mockAdoUser.uniqueName);
 
       // Refreshes work items list
       expect(invokeHistory.some((c) => c.command === 'query_ado_work_items')).to.be.true;
