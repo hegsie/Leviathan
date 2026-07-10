@@ -102,6 +102,10 @@ pub struct CreateAdoWorkItemInput {
     pub work_item_type: Option<String>,
     pub title: String,
     pub description: Option<String>,
+    /// Identity (unique name / UPN) to assign the new work item to. The dialog
+    /// passes the signed-in user so a created item shows up in the `@Me`-scoped
+    /// Work Items list instead of being created unassigned and vanishing.
+    pub assigned_to: Option<String>,
 }
 
 /// Pipeline run summary
@@ -839,6 +843,42 @@ pub async fn get_ado_work_items(
         .collect())
 }
 
+/// Max work items fetched for the "My Work Items" list. When the caller receives
+/// exactly this many, more may exist — the dialog surfaces a "capped" hint.
+const WORK_ITEMS_LIMIT: usize = 50;
+
+/// Build the WIQL for the work-items list.
+///
+/// Scoped to the signed-in user's assigned items (`@Me`): a project-wide flat
+/// query returns every work item, which Azure DevOps rejects with VS402337
+/// ("size limit of 20000") on large projects — and "my work items" is the
+/// intended result anyway. `@Me` keeps the result set well under the cap. The
+/// optional `state` value is single-quote-escaped so it can't break out of the
+/// WIQL string literal.
+fn build_work_items_wiql(state: Option<&str>) -> String {
+    let state_clause = state
+        .map(|s| format!(" AND [System.State] = '{}'", s.replace('\'', "''")))
+        .unwrap_or_default();
+    format!(
+        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.AssignedTo] = @Me{} ORDER BY [System.CreatedDate] DESC",
+        state_clause
+    )
+}
+
+/// Map an Azure DevOps WIQL error body to a friendly, actionable message.
+/// Returns `None` when the body is not a recognized size-limit error.
+fn map_wiql_error_body(body: &str) -> Option<String> {
+    if body.contains("VS402337") || body.contains("QueryResultSizeLimitExceeded") {
+        // The list is already scoped to the signed-in user, so this only happens
+        // with an unusually large personal backlog — point the user at the web UI.
+        Some(
+            "You have too many assigned work items to list here. Open this project in Azure DevOps to view them.".to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 /// Query work items assigned to current user
 #[command]
 pub async fn query_ado_work_items(
@@ -849,14 +889,7 @@ pub async fn query_ado_work_items(
 ) -> Result<Vec<AdoWorkItem>> {
     let token = resolve_ado_token(token)?;
 
-    let state_clause = state
-        .map(|s| format!(" AND [System.State] = '{}'", s))
-        .unwrap_or_default();
-
-    let wiql = format!(
-        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project{} ORDER BY [System.CreatedDate] DESC",
-        state_clause
-    );
+    let wiql = build_work_items_wiql(state.as_deref());
 
     let url = build_api_url(&organization, &project, "wit/wiql");
 
@@ -880,6 +913,11 @@ pub async fn query_ado_work_items(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        // Azure DevOps caps a flat WIQL result at 20000 work items (VS402337).
+        // Surface a clear, actionable message instead of the raw API JSON.
+        if let Some(message) = map_wiql_error_body(&body) {
+            return Err(LeviathanError::OperationFailed(message));
+        }
         return Err(LeviathanError::OperationFailed(format!(
             "Azure DevOps API error {}: {}",
             status, body
@@ -901,8 +939,15 @@ pub async fn query_ado_work_items(
         LeviathanError::OperationFailed(format!("Failed to parse WIQL response: {}", e))
     })?;
 
-    // Get first 50 work items
-    let ids: Vec<u32> = data.work_items.into_iter().take(50).map(|w| w.id).collect();
+    // Fetch full details for at most WORK_ITEMS_LIMIT of the user's most-recent
+    // items. The dialog flags the list as capped when it receives this many (kept
+    // in sync with WORK_ITEMS_PAGE_SIZE on the frontend).
+    let ids: Vec<u32> = data
+        .work_items
+        .into_iter()
+        .take(WORK_ITEMS_LIMIT)
+        .map(|w| w.id)
+        .collect();
 
     if ids.is_empty() {
         return Ok(vec![]);
@@ -926,6 +971,18 @@ fn build_create_work_item_patch(input: &CreateAdoWorkItemInput) -> serde_json::V
                 "op": "add",
                 "path": "/fields/System.Description",
                 "value": description,
+            }));
+        }
+    }
+
+    // Assign to the given identity so a created item appears in the @Me-scoped
+    // Work Items list (the dialog passes the signed-in user).
+    if let Some(assigned_to) = &input.assigned_to {
+        if !assigned_to.is_empty() {
+            ops.push(serde_json::json!({
+                "op": "add",
+                "path": "/fields/System.AssignedTo",
+                "value": assigned_to,
             }));
         }
     }
@@ -1244,6 +1301,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_build_work_items_wiql_scopes_to_me() {
+        let wiql = build_work_items_wiql(None);
+        // Must scope to the current user so a large project's flat query can't
+        // exceed Azure DevOps' 20000-item WIQL limit (VS402337).
+        assert!(wiql.contains("[System.AssignedTo] = @Me"));
+        assert!(wiql.contains("[System.TeamProject] = @project"));
+        // No state filter when none is given.
+        assert!(!wiql.contains("[System.State]"));
+    }
+
+    #[test]
+    fn test_build_work_items_wiql_adds_and_escapes_state() {
+        let wiql = build_work_items_wiql(Some("Active"));
+        assert!(wiql.contains("[System.State] = 'Active'"));
+        // A single quote in the state value is escaped (doubled) so it can't
+        // break out of the WIQL string literal.
+        let injected = build_work_items_wiql(Some("O'Brien"));
+        assert!(injected.contains("'O''Brien'"));
+    }
+
+    #[test]
+    fn test_build_work_items_wiql_orders_by_created_date() {
+        // Must match the date the UI displays (System.CreatedDate) so the list
+        // isn't sorted by a hidden key.
+        assert!(build_work_items_wiql(None).contains("ORDER BY [System.CreatedDate] DESC"));
+    }
+
+    #[test]
+    fn test_map_wiql_error_body() {
+        assert!(map_wiql_error_body("...\"message\":\"VS402337: ...\"").is_some());
+        assert!(map_wiql_error_body("QueryResultSizeLimitExceededException").is_some());
+        // Unrelated errors are not swallowed by the friendly mapping.
+        assert_eq!(map_wiql_error_body("TF401019: project not found"), None);
+        assert_eq!(map_wiql_error_body(""), None);
+    }
+
+    #[test]
+    fn test_create_work_item_patch_includes_assigned_to() {
+        let input = CreateAdoWorkItemInput {
+            work_item_type: Some("Task".into()),
+            title: "T".into(),
+            description: None,
+            assigned_to: Some("user@example.com".into()),
+        };
+        let patch = build_create_work_item_patch(&input).to_string();
+        assert!(patch.contains("/fields/System.AssignedTo"));
+        assert!(patch.contains("user@example.com"));
+
+        // Omitted when not provided.
+        let unassigned = CreateAdoWorkItemInput {
+            assigned_to: None,
+            ..input
+        };
+        assert!(!build_create_work_item_patch(&unassigned)
+            .to_string()
+            .contains("System.AssignedTo"));
+    }
+
+    #[test]
     fn test_ado_pr_status_param() {
         // A concrete status yields the searchCriteria fragment.
         assert_eq!(
@@ -1533,6 +1649,7 @@ mod tests {
             work_item_type: Some("Bug".to_string()),
             title: "Fix the thing".to_string(),
             description: Some("It is broken".to_string()),
+            assigned_to: None,
         };
 
         let json = serde_json::to_string(&input).unwrap();
@@ -1547,6 +1664,7 @@ mod tests {
             work_item_type: Some("Task".to_string()),
             title: "My Task".to_string(),
             description: Some("Do the work".to_string()),
+            assigned_to: None,
         };
 
         let patch = build_create_work_item_patch(&input);
@@ -1570,6 +1688,7 @@ mod tests {
             work_item_type: None,
             title: "Title only".to_string(),
             description: None,
+            assigned_to: None,
         };
 
         let patch = build_create_work_item_patch(&input);
@@ -1585,6 +1704,7 @@ mod tests {
             work_item_type: Some("Task".to_string()),
             title: "Title".to_string(),
             description: Some(String::new()),
+            assigned_to: None,
         };
 
         let patch = build_create_work_item_patch(&input);

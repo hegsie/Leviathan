@@ -34,6 +34,13 @@ import './lv-account-selector.ts';
 
 type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr' | 'create-work-item';
 
+/**
+ * Max work items the backend returns for the "My Work Items" list (kept in sync
+ * with WORK_ITEMS_LIMIT in commands/azure_devops.rs). When the list is exactly
+ * this long, more may exist and the tab shows a "capped" hint.
+ */
+const WORK_ITEMS_PAGE_SIZE = 50;
+
 /** OAuth tokens carried from an Entra sign-in through org resolution to persistence. */
 interface EntraTokens {
   accessToken: string;
@@ -1085,6 +1092,10 @@ export class LvAzureDevOpsDialog extends LitElement {
   private async loadWorkItems(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
+    // Clear any stale error (e.g. from another tab) so a successful load starts
+    // clean — matches loadPullRequests.
+    this.error = null;
+
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.queryAdoWorkItems(
@@ -1106,6 +1117,10 @@ export class LvAzureDevOpsDialog extends LitElement {
 
   private async loadPipelineRuns(providedToken?: string): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
+
+    // Clear any stale error (e.g. from another tab) so a successful load starts
+    // clean — matches loadPullRequests / loadWorkItems.
+    this.error = null;
 
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
@@ -1770,6 +1785,15 @@ export class LvAzureDevOpsDialog extends LitElement {
         workItemType: this.createWorkItemType || 'Task',
         title: this.createWorkItemTitle,
         description: this.createWorkItemDescription || undefined,
+        // Assign to the signed-in user so the new item appears in the
+        // @Me-scoped Work Items list (otherwise it's created unassigned and
+        // would be absent from the list that's reloaded right after). Only use a
+        // UPN-like identity (uniqueName can fall back to a non-unique display
+        // name when the profile has no email — assigning by that is ambiguous, so
+        // leave the item unassigned rather than risk the wrong person).
+        assignedTo: this.connectionStatus?.user?.uniqueName?.includes('@')
+          ? this.connectionStatus.user.uniqueName
+          : undefined,
       };
 
       const token = await this.getSelectedAccountToken();
@@ -1781,11 +1805,18 @@ export class LvAzureDevOpsDialog extends LitElement {
       );
 
       if (result.success && result.data) {
+        const created = result.data;
         this.createWorkItemType = 'Task';
         this.createWorkItemTitle = '';
         this.createWorkItemDescription = '';
         this.activeTab = 'work-items';
         await this.loadWorkItems();
+        // Ensure the just-created item is visible even in the edge case where it
+        // couldn't be self-assigned (no UPN), so it isn't reloaded out of the
+        // @Me-scoped list and replaced by a confusing "none assigned" empty state.
+        if (!this.workItems.some((w) => w.id === created.id)) {
+          this.workItems = [created, ...this.workItems];
+        }
         showToast('Work item created successfully', 'success');
       } else {
         this.error = result.error?.message ?? 'Failed to create work item';
@@ -2079,7 +2110,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       `;
     }
 
-    if (this.workItems.length === 0) {
+    if (this.workItems.length === 0 && !this.error) {
       return html`
         <div class="filter-row">
           <button class="btn" @click=${() => this.activeTab = 'create-work-item'}>
@@ -2091,7 +2122,7 @@ export class LvAzureDevOpsDialog extends LitElement {
             <path d="M9 11l3 3L22 4"></path>
             <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
           </svg>
-          <p>No work items found</p>
+          <p>No work items assigned to you</p>
         </div>
       `;
     }
@@ -2118,6 +2149,16 @@ export class LvAzureDevOpsDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.workItems.length >= WORK_ITEMS_PAGE_SIZE ? html`
+        <p class="help-text" style="text-align:center;padding-top:8px">
+          Showing your ${WORK_ITEMS_PAGE_SIZE} most recent.
+          ${this.detectedRepo ? html`<a
+            class="help-link"
+            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_workitems/"
+            @click=${handleExternalLink}
+          >Open in Azure DevOps</a> for the full list.` : nothing}
+        </p>
+      ` : nothing}
     `;
   }
 
@@ -2358,7 +2399,7 @@ export class LvAzureDevOpsDialog extends LitElement {
               class="tab ${this.activeTab === 'work-items' ? 'active' : ''}"
               @click=${() => { this.activeTab = 'work-items'; this.loadWorkItems(); }}
             >
-              Work Items
+              My Work Items
             </button>
             <button
               class="tab ${this.activeTab === 'pipelines' ? 'active' : ''}"

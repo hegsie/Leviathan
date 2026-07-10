@@ -284,7 +284,7 @@ describe('lv-azure-devops-dialog', () => {
       const tabTexts = Array.from(tabs).map((t) => t.textContent?.trim());
       expect(tabTexts).to.include('Connection');
       expect(tabTexts).to.include('Pull Requests');
-      expect(tabTexts).to.include('Work Items');
+      expect(tabTexts).to.include('My Work Items');
       expect(tabTexts).to.include('Pipelines');
     });
 
@@ -481,7 +481,7 @@ describe('lv-azure-devops-dialog', () => {
 
       // Switch to Work Items tab
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      const wiTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement;
+      const wiTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement;
       wiTab.click();
       await waitForLoad(el);
 
@@ -497,6 +497,58 @@ describe('lv-azure-devops-dialog', () => {
       const secondItem = workItems[1];
       expect(secondItem.querySelector('.work-item-type')?.textContent).to.include('Bug');
     });
+
+    it('shows the @Me-scoped empty state when the user has no assigned work items', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'query_ado_work_items') return [];
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'My Work Items'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      // Empty-state copy makes the @Me scope explicit (not a generic "none found").
+      expect(el.shadowRoot!.querySelector('.empty-state')?.textContent).to.include(
+        'No work items assigned to you'
+      );
+    });
+
+    it('surfaces the friendly size-limit message when the query exceeds the cap', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const origMock = mockInvoke;
+      // The backend maps VS402337 to this actionable message; the dialog must show it.
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'query_ado_work_items') {
+          throw new Error('You have too many assigned work items to list here. Open this project in Azure DevOps to view them.');
+        }
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'My Work Items'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelector('.error')?.textContent).to.include(
+        'too many assigned work items'
+      );
+      // The empty state must NOT render alongside the error (contradictory copy).
+      expect(el.shadowRoot!.querySelector('.empty-state')).to.be.null;
+    });
   });
 
   describe('Create Work Item', () => {
@@ -510,7 +562,7 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement).click();
       await waitForLoad(el);
 
       const newBtn = Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
@@ -529,7 +581,7 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement).click();
       await waitForLoad(el);
       (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
         (b) => b.textContent?.trim().includes('New Work Item')
@@ -567,7 +619,7 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement).click();
       await waitForLoad(el);
       (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
         (b) => b.textContent?.trim().includes('New Work Item')
@@ -597,9 +649,59 @@ describe('lv-azure-devops-dialog', () => {
       expect(input.title).to.equal('New task');
       expect(input.workItemType).to.equal('Task');
       expect(input.description).to.equal('Do it');
+      // Assigns the new item to the signed-in user so it appears in the
+      // @Me-scoped list instead of being created unassigned and vanishing.
+      expect(input.assignedTo).to.equal(mockAdoUser.uniqueName);
 
       // Refreshes work items list
       expect(invokeHistory.some((c) => c.command === 'query_ado_work_items')).to.be.true;
+    });
+
+    it('shows a just-created item even when it is not in the @Me-scoped reload (no-UPN identity)', async () => {
+      // A connected user whose uniqueName is not UPN-like (no '@') → the create
+      // handler omits assignedTo, so the created item is unassigned and absent
+      // from the @Me reload. It must still be shown (prepended).
+      connectionResponse = {
+        connected: true,
+        user: { id: 'u', displayName: 'Legacy User', uniqueName: 'DOMAIN\\legacy', imageUrl: null },
+        organization: 'testorg',
+      };
+      detectedRepoResponse = mockDetectedRepo;
+      const createdItem = {
+        id: 4242,
+        title: 'Orphan task',
+        workItemType: 'Task',
+        state: 'New',
+        assignedTo: null,
+        createdDate: '2025-03-01T10:00:00Z',
+        url: 'https://dev.azure.com/testorg/test-project/_workitems/edit/4242',
+      };
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'create_azure_devops_work_item') return createdItem;
+        // The @Me reload never returns the (unassigned) created item.
+        if (command === 'query_ado_work_items') return [];
+        return origMock(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      Object.assign(el as unknown as Record<string, unknown>, {
+        activeTab: 'create-work-item',
+        createWorkItemTitle: 'Orphan task',
+      });
+      await el.updateComplete;
+      await (el as unknown as { handleCreateWorkItem: () => Promise<void> }).handleCreateWorkItem();
+      await el.updateComplete;
+
+      // assignedTo was omitted (non-UPN identity), yet the created item is shown.
+      const createCall = invokeHistory.find((c) => c.command === 'create_azure_devops_work_item');
+      expect((createCall!.args as { input: Record<string, unknown> }).input.assignedTo).to.be.undefined;
+      const titles = Array.from(el.shadowRoot!.querySelectorAll('.work-item-title')).map((n) => n.textContent);
+      expect(titles.some((t) => t?.includes('Orphan task'))).to.be.true;
     });
 
     it('shows an error when create_azure_devops_work_item fails (not silent)', async () => {
@@ -617,7 +719,7 @@ describe('lv-azure-devops-dialog', () => {
       await waitForLoad(el);
 
       const tabs = el.shadowRoot!.querySelectorAll('.tab');
-      (Array.from(tabs).find((t) => t.textContent?.trim() === 'Work Items') as HTMLButtonElement).click();
+      (Array.from(tabs).find((t) => t.textContent?.trim() === 'My Work Items') as HTMLButtonElement).click();
       await waitForLoad(el);
       (Array.from(el.shadowRoot!.querySelectorAll('.btn')).find(
         (b) => b.textContent?.trim().includes('New Work Item')
