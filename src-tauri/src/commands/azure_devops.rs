@@ -839,6 +839,24 @@ pub async fn get_ado_work_items(
         .collect())
 }
 
+/// Build the WIQL for the work-items list.
+///
+/// Scoped to the signed-in user's assigned items (`@Me`): a project-wide flat
+/// query returns every work item, which Azure DevOps rejects with VS402337
+/// ("size limit of 20000") on large projects — and "my work items" is the
+/// intended result anyway. `@Me` keeps the result set well under the cap. The
+/// optional `state` value is single-quote-escaped so it can't break out of the
+/// WIQL string literal.
+fn build_work_items_wiql(state: Option<&str>) -> String {
+    let state_clause = state
+        .map(|s| format!(" AND [System.State] = '{}'", s.replace('\'', "''")))
+        .unwrap_or_default();
+    format!(
+        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.AssignedTo] = @Me{} ORDER BY [System.ChangedDate] DESC",
+        state_clause
+    )
+}
+
 /// Query work items assigned to current user
 #[command]
 pub async fn query_ado_work_items(
@@ -849,14 +867,7 @@ pub async fn query_ado_work_items(
 ) -> Result<Vec<AdoWorkItem>> {
     let token = resolve_ado_token(token)?;
 
-    let state_clause = state
-        .map(|s| format!(" AND [System.State] = '{}'", s))
-        .unwrap_or_default();
-
-    let wiql = format!(
-        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project{} ORDER BY [System.CreatedDate] DESC",
-        state_clause
-    );
+    let wiql = build_work_items_wiql(state.as_deref());
 
     let url = build_api_url(&organization, &project, "wit/wiql");
 
@@ -880,6 +891,13 @@ pub async fn query_ado_work_items(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        // Azure DevOps caps a flat WIQL result at 20000 work items (VS402337).
+        // Surface a clear, actionable message instead of the raw API JSON.
+        if body.contains("VS402337") || body.contains("QueryResultSizeLimitExceeded") {
+            return Err(LeviathanError::OperationFailed(
+                "This project has too many work items to list. Try filtering by state to narrow the results.".to_string(),
+            ));
+        }
         return Err(LeviathanError::OperationFailed(format!(
             "Azure DevOps API error {}: {}",
             status, body
@@ -1242,6 +1260,27 @@ pub async fn list_ado_organizations(token: Option<String>) -> Result<Vec<AdoOrga
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_work_items_wiql_scopes_to_me() {
+        let wiql = build_work_items_wiql(None);
+        // Must scope to the current user so a large project's flat query can't
+        // exceed Azure DevOps' 20000-item WIQL limit (VS402337).
+        assert!(wiql.contains("[System.AssignedTo] = @Me"));
+        assert!(wiql.contains("[System.TeamProject] = @project"));
+        // No state filter when none is given.
+        assert!(!wiql.contains("[System.State]"));
+    }
+
+    #[test]
+    fn test_build_work_items_wiql_adds_and_escapes_state() {
+        let wiql = build_work_items_wiql(Some("Active"));
+        assert!(wiql.contains("[System.State] = 'Active'"));
+        // A single quote in the state value is escaped (doubled) so it can't
+        // break out of the WIQL string literal.
+        let injected = build_work_items_wiql(Some("O'Brien"));
+        assert!(injected.contains("'O''Brien'"));
+    }
 
     #[test]
     fn test_ado_pr_status_param() {
