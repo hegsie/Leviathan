@@ -85,6 +85,22 @@ export interface RenderTheme {
     draft: string;
     draftText: string;
   };
+  /** Row highlight colors for selection/hover (theme-aware washes) */
+  rowColors: {
+    selectedBg: string;
+    hoveredBg: string;
+  };
+  /** Stats column colors */
+  statsColors: {
+    additions: string;
+    deletions: string;
+  };
+  /** Signature badge colors */
+  badgeColors: {
+    verified: string;
+    unverified: string;
+    icon: string;
+  };
 }
 
 const DEFAULT_CONFIG: RenderConfig = {
@@ -161,10 +177,23 @@ export function getThemeFromCSS(): RenderTheme {
       openText: getCSSVar('--color-success', '#4caf50'),
       closed: getCSSVar('--color-error-bg', '#3d1a1a'),
       closedText: getCSSVar('--color-error', '#ef5350'),
-      merged: '#2d1f4e',
-      mergedText: '#a371f7',
+      merged: getCSSVar('--pr-merged-bg', '#2d1f4e'),
+      mergedText: getCSSVar('--pr-merged-text', '#a371f7'),
       draft: getCSSVar('--color-bg-hover', '#2d2d2d'),
       draftText: getCSSVar('--color-text-muted', '#888888'),
+    },
+    rowColors: {
+      selectedBg: getCSSVar('--graph-row-selected-bg', 'rgba(255, 255, 255, 0.15)'),
+      hoveredBg: getCSSVar('--graph-row-hovered-bg', 'rgba(255, 255, 255, 0.05)'),
+    },
+    statsColors: {
+      additions: getCSSVar('--graph-stat-additions', '#3fb950'),
+      deletions: getCSSVar('--graph-stat-deletions', '#f85149'),
+    },
+    badgeColors: {
+      verified: getCSSVar('--badge-verified-bg', '#238636'),
+      unverified: getCSSVar('--badge-unverified-bg', '#8b949e'),
+      icon: getCSSVar('--badge-icon-color', '#ffffff'),
     },
   };
 }
@@ -205,6 +234,19 @@ const DEFAULT_THEME: RenderTheme = {
     mergedText: '#a371f7',
     draft: '#2d2d2d',
     draftText: '#888888',
+  },
+  rowColors: {
+    selectedBg: 'rgba(255, 255, 255, 0.15)',
+    hoveredBg: 'rgba(255, 255, 255, 0.05)',
+  },
+  statsColors: {
+    additions: '#3fb950',
+    deletions: '#f85149',
+  },
+  badgeColors: {
+    verified: '#238636',
+    unverified: '#8b949e',
+    icon: '#ffffff',
   },
 };
 
@@ -276,6 +318,9 @@ export class CanvasRenderer {
   private config: RenderConfig;
   private theme: RenderTheme;
   private dpr: number;
+  private dprMediaQuery: MediaQueryList | null = null;
+  private lastCssWidth = 0;
+  private lastCssHeight = 0;
 
   private perfMonitor = new PerformanceMonitor();
 
@@ -363,7 +408,29 @@ export class CanvasRenderer {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.theme = { ...DEFAULT_THEME, ...theme };
     this.dpr = window.devicePixelRatio || 1;
+    this.watchDprChanges();
   }
+
+  /**
+   * Track devicePixelRatio changes (window dragged to a monitor with a
+   * different pixel density, OS zoom) so the canvas doesn't go blurry.
+   * The media query only matches the CURRENT ratio, so it is re-armed
+   * after every change.
+   */
+  private watchDprChanges(): void {
+    if (typeof window.matchMedia !== 'function') return;
+    this.dprMediaQuery?.removeEventListener('change', this.handleDprChange);
+    this.dprMediaQuery = window.matchMedia(`(resolution: ${this.dpr}dppx)`);
+    this.dprMediaQuery.addEventListener('change', this.handleDprChange);
+  }
+
+  private handleDprChange = (): void => {
+    this.dpr = window.devicePixelRatio || 1;
+    if (this.lastCssWidth > 0 && this.lastCssHeight > 0) {
+      this.resize(this.lastCssWidth, this.lastCssHeight);
+    }
+    this.watchDprChanges();
+  };
 
   /**
    * Update configuration
@@ -608,17 +675,17 @@ export class CanvasRenderer {
    * Draw a verified signature badge (checkmark icon)
    */
   private drawVerifiedBadge(x: number, y: number, isValid: boolean): void {
-    const { ctx } = this;
+    const { ctx, theme } = this;
     const size = 12;
 
-    // Badge background
-    ctx.fillStyle = isValid ? '#238636' : '#8b949e'; // Green for verified, gray for unverified
+    // Badge background: green for verified, gray for unverified
+    ctx.fillStyle = isValid ? theme.badgeColors.verified : theme.badgeColors.unverified;
     ctx.beginPath();
     ctx.arc(x, y, size / 2 + 1, 0, Math.PI * 2);
     ctx.fill();
 
     // Checkmark icon
-    ctx.strokeStyle = '#ffffff';
+    ctx.strokeStyle = theme.badgeColors.icon;
     ctx.lineWidth = 1.5;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -640,6 +707,8 @@ export class CanvasRenderer {
    * Resize canvas
    */
   resize(width: number, height: number): void {
+    this.lastCssWidth = width;
+    this.lastCssHeight = height;
     // Setting canvas dimensions resets the context state, including transforms
     this.canvas.width = width * this.dpr;
     this.canvas.height = height * this.dpr;
@@ -877,6 +946,21 @@ export class CanvasRenderer {
         ctx.globalAlpha = 0.25;
       }
 
+      // History continues below (parents not loaded / filtered out):
+      // draw a short fading stub instead of dead-ending the line
+      if (node.hasMissingParents) {
+        const stubLength = config.rowHeight * 0.8;
+        const gradient = ctx.createLinearGradient(x, y, x, y + radius + stubLength);
+        gradient.addColorStop(0, color);
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.strokeStyle = gradient;
+        ctx.lineWidth = config.lineWidth;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, y + radius + stubLength);
+        ctx.stroke();
+      }
+
       // Get author email for avatar
       const authorEmail = authorEmails?.[node.oid];
 
@@ -948,7 +1032,7 @@ export class CanvasRenderer {
       // Draw initials if no avatar and node is large enough
       if (!avatarDrawn && radius >= 12 && authorEmail) {
         const initials = this.getInitials(node.commit.author);
-        ctx.fillStyle = isSelected ? color : '#ffffff';
+        ctx.fillStyle = isSelected ? color : this.getContrastingIconColor(color);
         ctx.font = `bold ${Math.floor(radius * 0.8)}px -apple-system, BlinkMacSystemFont, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -1084,7 +1168,7 @@ export class CanvasRenderer {
       // Draw subtle row highlighting for selected/hovered rows
       if (isSelected || isHovered) {
         const rowTop = y - config.rowHeight / 2;
-        ctx.fillStyle = isSelected ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.05)';
+        ctx.fillStyle = isSelected ? theme.rowColors.selectedBg : theme.rowColors.hoveredBg;
         ctx.fillRect(0, rowTop, canvasWidth, config.rowHeight);
 
         // Draw left border stripe matching lane color
@@ -1365,12 +1449,12 @@ export class CanvasRenderer {
             const delText = `-${stats.deletions}`;
 
             // Draw deletions first (further right)
-            ctx.fillStyle = '#f85149'; // Red for deletions
+            ctx.fillStyle = theme.statsColors.deletions;
             const delWidth = ctx.measureText(delText).width;
             ctx.fillText(delText, statsColumnX + statsColumnWidth, y);
 
             // Draw additions
-            ctx.fillStyle = '#3fb950'; // Green for additions
+            ctx.fillStyle = theme.statsColors.additions;
             ctx.fillText(addText + ' ', statsColumnX + statsColumnWidth - delWidth - 4, y);
           }
         }
@@ -1530,6 +1614,30 @@ export class CanvasRenderer {
   }
 
   /**
+   * Convert HSL components to RGB (0-255 per channel)
+   */
+  private hslToRgb(h: number, s: number, l: number): { r: number; g: number; b: number } {
+    const sat = s / 100;
+    const light = l / 100;
+    const c = (1 - Math.abs(2 * light - 1)) * sat;
+    const hp = ((h % 360) + 360) % 360 / 60;
+    const x = c * (1 - Math.abs((hp % 2) - 1));
+    let r1 = 0, g1 = 0, b1 = 0;
+    if (hp < 1) [r1, g1, b1] = [c, x, 0];
+    else if (hp < 2) [r1, g1, b1] = [x, c, 0];
+    else if (hp < 3) [r1, g1, b1] = [0, c, x];
+    else if (hp < 4) [r1, g1, b1] = [0, x, c];
+    else if (hp < 5) [r1, g1, b1] = [x, 0, c];
+    else [r1, g1, b1] = [c, 0, x];
+    const m = light - c / 2;
+    return {
+      r: Math.round((r1 + m) * 255),
+      g: Math.round((g1 + m) * 255),
+      b: Math.round((b1 + m) * 255),
+    };
+  }
+
+  /**
    * Get a contrasting icon color based on the background
    */
   private getContrastingIconColor(bgColor: string): string {
@@ -1549,6 +1657,19 @@ export class CanvasRenderer {
         r = parseInt(match[1], 10);
         g = parseInt(match[2], 10);
         b = parseInt(match[3], 10);
+      }
+    }
+    // Parse hsl/hsla color — getUserColor produces hsl(), which previously
+    // fell through as black and made this function always return white
+    else if (bgColor.startsWith('hsl')) {
+      const match = bgColor.match(/hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%/);
+      if (match) {
+        const rgb = this.hslToRgb(
+          parseFloat(match[1]),
+          parseFloat(match[2]),
+          parseFloat(match[3])
+        );
+        ({ r, g, b } = rgb);
       }
     }
 
@@ -1929,6 +2050,8 @@ export class CanvasRenderer {
    */
   destroy(): void {
     this.cancelRender();
+    this.dprMediaQuery?.removeEventListener('change', this.handleDprChange);
+    this.dprMediaQuery = null;
     // Abort pending avatar loads to release closure references
     for (const img of this.pendingAvatarImages) {
       img.onload = null;

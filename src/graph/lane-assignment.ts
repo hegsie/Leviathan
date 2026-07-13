@@ -36,6 +36,13 @@ export interface LayoutNode {
    * different colors. Index 0 is the HEAD mainline.
    */
   colorIndex: number;
+  /**
+   * True when the commit has parents that are NOT in the laid-out set
+   * (outside the loaded pagination window or hidden by a branch filter).
+   * The renderer draws a fading "history continues" stub below such nodes
+   * so the history doesn't look like it dead-ends.
+   */
+  hasMissingParents: boolean;
 }
 
 export interface LayoutEdge {
@@ -313,6 +320,7 @@ export function assignLanes(
       childLanes,
       parentLanes: [],
       colorIndex,
+      hasMissingParents: false,
     };
     nodes.set(commit.oid, node);
 
@@ -357,11 +365,12 @@ export function assignLanes(
     }
   }
 
-  // Second pass: fill in parent lanes
+  // Second pass: fill in parent lanes and flag parents outside the set
   for (const node of nodes.values()) {
     node.parentLanes = node.commit.parentIds
       .map((pid) => oidToLane.get(pid))
       .filter((l): l is number => l !== undefined);
+    node.hasMissingParents = node.commit.parentIds.some((pid) => !nodes.has(pid));
   }
 
   // Calculate max lane (find highest used lane)

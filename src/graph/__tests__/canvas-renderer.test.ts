@@ -211,6 +211,61 @@ describe('CanvasRenderer state getters', () => {
   });
 });
 
+describe('CanvasRenderer contrast color', () => {
+  type ContrastInternals = {
+    getContrastingIconColor(bgColor: string): string;
+  };
+
+  it('returns a dark color for light hsl() backgrounds', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as ContrastInternals;
+
+    // Very light background — must NOT return white
+    const color = internals.getContrastingIconColor('hsl(210, 100%, 90%)');
+    expect(color).to.not.equal('#ffffff');
+    renderer.destroy();
+  });
+
+  it('returns white for dark hsl() backgrounds', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as ContrastInternals;
+
+    expect(internals.getContrastingIconColor('hsl(210, 35%, 20%)')).to.equal('#ffffff');
+    renderer.destroy();
+  });
+
+  it('still handles hex backgrounds', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as ContrastInternals;
+
+    expect(internals.getContrastingIconColor('#101010')).to.equal('#ffffff');
+    expect(internals.getContrastingIconColor('#f0f0f0')).to.not.equal('#ffffff');
+    renderer.destroy();
+  });
+});
+
+describe('CanvasRenderer theme', () => {
+  it('exposes theme-derived row/stats/badge colors with dark fallbacks', async () => {
+    const { getThemeFromCSS } = await import('../canvas-renderer.ts');
+    const theme = getThemeFromCSS();
+
+    expect(theme.rowColors.selectedBg).to.be.a('string').and.to.not.equal('');
+    expect(theme.rowColors.hoveredBg).to.be.a('string').and.to.not.equal('');
+    expect(theme.statsColors.additions).to.be.a('string').and.to.not.equal('');
+    expect(theme.statsColors.deletions).to.be.a('string').and.to.not.equal('');
+    expect(theme.badgeColors.verified).to.be.a('string').and.to.not.equal('');
+    expect(theme.prColors.merged).to.be.a('string').and.to.not.equal('');
+  });
+
+  it('uses 16 distinct branch colors (no duplicated palette entries)', async () => {
+    const { getThemeFromCSS } = await import('../canvas-renderer.ts');
+    const theme = getThemeFromCSS();
+
+    expect(theme.laneColors).to.have.length(16);
+    expect(new Set(theme.laneColors).size).to.equal(16);
+  });
+});
+
 describe('CanvasRenderer text truncation cache', () => {
   type TruncationInternals = {
     ctx: CanvasRenderingContext2D;

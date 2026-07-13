@@ -220,6 +220,29 @@ describe('assignLanes', () => {
     expect(validateLayout(layout, commits)).to.deep.equal([]);
   });
 
+  it('flags commits whose parents are outside the loaded window', () => {
+    const commits = [
+      makeCommit('c2', ['c1'], 2000),
+      makeCommit('c1', ['not-loaded'], 1000),
+    ];
+    const layout = assignLanes(commits, { headOid: 'c2' });
+
+    // c1's parent is beyond the pagination window — history continues
+    expect(layout.nodes.get('c1')!.hasMissingParents).to.be.true;
+    // c2's parent (c1) is loaded
+    expect(layout.nodes.get('c2')!.hasMissingParents).to.be.false;
+  });
+
+  it('does not flag true root commits as having missing parents', () => {
+    const commits = [
+      makeCommit('c2', ['c1'], 2000),
+      makeCommit('c1', [], 1000),
+    ];
+    const layout = assignLanes(commits, { headOid: 'c2' });
+
+    expect(layout.nodes.get('c1')!.hasMissingParents).to.be.false;
+  });
+
   it('produces a valid layout for a complex branchy history', () => {
     const commits = [
       makeCommit('h', ['g', 'f'], 9000),

@@ -514,6 +514,8 @@ export class LvGraphCanvas extends LitElement {
   private refsByCommit: RefsByCommit = {};
   private loadVersion = 0; // Incremented on each load to cancel stale requests
   private statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Periodic repaint so relative timestamps ("2m", "5h") don't go stale
+  private relativeTimeTimer: ReturnType<typeof setInterval> | null = null;
   private lastLoadedRepoPath: string | null = null; // Track the last repo that completed loading
   private inFlightLoadPath: string | null = null; // Repo whose loadCommits is currently in flight
   // A refresh arrived while a load was in flight; that load's snapshot may
@@ -681,6 +683,13 @@ export class LvGraphCanvas extends LitElement {
     });
     this.resizeObserver.observe(this.containerEl);
 
+    // The TIME column renders relative timestamps against "now" — repaint
+    // periodically so they don't freeze at their initial values
+    this.relativeTimeTimer = setInterval(() => {
+      this.renderer?.markDirty();
+      this.scheduleRender();
+    }, 30_000);
+
     // Initial resize
     this.onResize();
   }
@@ -723,6 +732,10 @@ export class LvGraphCanvas extends LitElement {
     }
     if (this.statsDebounceTimer) {
       clearTimeout(this.statsDebounceTimer);
+    }
+    if (this.relativeTimeTimer) {
+      clearInterval(this.relativeTimeTimer);
+      this.relativeTimeTimer = null;
     }
     // Clean up resize listeners if still attached
     document.removeEventListener('mousemove', this.handleResizeMove);
