@@ -78,6 +78,14 @@
   --color-branch-6: #00838f;
   --color-branch-7: #d84315;
   --color-branch-8: #558b2f;
+  --color-branch-9: #d01884;
+  --color-branch-10: #00796b;
+  --color-branch-11: #3f51b5;
+  --color-branch-12: #6d4c41;
+  --color-branch-13: #9e9d24;
+  --color-branch-14: #455a64;
+  --color-branch-15: #f9a825;
+  --color-branch-16: #5e35b1;
 
   /* Graph node/text colors */
   --graph-background: var(--color-bg-primary);
@@ -203,6 +211,14 @@
     --color-branch-6: #5bb5b5;  /* Muted teal */
     --color-branch-7: #cc8866;  /* Muted peach */
     --color-branch-8: #8eb86e;  /* Muted sage */
+    --color-branch-9: #c980ac;  /* Muted pink */
+    --color-branch-10: #6bb2a4; /* Muted sea green */
+    --color-branch-11: #8a92cf; /* Muted indigo */
+    --color-branch-12: #b3927f; /* Muted brown */
+    --color-branch-13: #b0b16a; /* Muted olive */
+    --color-branch-14: #8fa3ae; /* Muted blue-grey */
+    --color-branch-15: #d4c05a; /* Muted yellow */
+    --color-branch-16: #9d86c9; /* Muted violet */
 
     /* Graph node/text colors */
     --graph-text-color: #c8c8c8;
@@ -270,6 +286,14 @@
   --color-branch-6: #5bb5b5;  /* Muted teal */
   --color-branch-7: #cc8866;  /* Muted peach */
   --color-branch-8: #8eb86e;  /* Muted sage */
+  --color-branch-9: #c980ac;  /* Muted pink */
+  --color-branch-10: #6bb2a4; /* Muted sea green */
+  --color-branch-11: #8a92cf; /* Muted indigo */
+  --color-branch-12: #b3927f; /* Muted brown */
+  --color-branch-13: #b0b16a; /* Muted olive */
+  --color-branch-14: #8fa3ae; /* Muted blue-grey */
+  --color-branch-15: #d4c05a; /* Muted yellow */
+  --color-branch-16: #9d86c9; /* Muted violet */
 
   /* Graph node/text colors */
   --graph-text-color: #c8c8c8;

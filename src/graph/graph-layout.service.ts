@@ -7,7 +7,6 @@
 
 import {
   assignLanes,
-  assignLanesOptimized,
   validateLayout,
   type GraphCommit,
   type GraphLayout,
@@ -16,8 +15,8 @@ import {
 } from './lane-assignment.ts';
 
 export interface GraphLayoutOptions {
-  /** Use optimized algorithm (better quality, slightly slower) */
-  optimized?: boolean;
+  /** OID of the HEAD commit — its first-parent chain is pinned to lane 0 */
+  headOid?: string;
   /** Enable validation checks (development only) */
   validate?: boolean;
 }
@@ -48,12 +47,12 @@ export function computeGraphLayout(
   commits: GraphCommit[],
   options: GraphLayoutOptions = {}
 ): GraphLayoutResult {
-  const { optimized = true, validate = false } = options;
+  const { headOid, validate = false } = options;
 
   const startTime = performance.now();
 
   // Compute layout
-  const layout = optimized ? assignLanesOptimized(commits) : assignLanes(commits);
+  const layout = assignLanes(commits, { headOid });
 
   const computeTimeMs = performance.now() - startTime;
 

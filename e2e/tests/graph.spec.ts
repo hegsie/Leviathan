@@ -170,10 +170,11 @@ test.describe('Graph with Multiple Commits', () => {
   let graph: GraphPanelPage;
   let rightPanel: RightPanelPage;
 
+  // commit0 is the newest tip; commit2 is the root
   const commits = [
-    makeCommit(0, []),
-    makeCommit(1, ['commit0']),
-    makeCommit(2, ['commit1']),
+    makeCommit(0, ['commit1']),
+    makeCommit(1, ['commit2']),
+    makeCommit(2, []),
   ];
 
   test.beforeEach(async ({ page }) => {
@@ -455,9 +456,10 @@ test.describe('Blame Overlay', () => {
 test.describe('Graph Scrolling', () => {
   let graph: GraphPanelPage;
 
-  // Create 50 commits in a linear chain
+  // Create 50 commits in a linear chain; commit0 is the newest tip and
+  // commit49 the root, matching the descending fixture timestamps
   const commits = Array.from({ length: 50 }, (_, i) =>
-    makeCommit(i, i > 0 ? [`commit${i - 1}`] : [])
+    makeCommit(i, i < 49 ? [`commit${i + 1}`] : [])
   );
 
   test.beforeEach(async ({ page }) => {
@@ -560,10 +562,11 @@ test.describe('Graph - UI Outcome Verification', () => {
   let graph: GraphPanelPage;
   let rightPanel: RightPanelPage;
 
+  // commit0 is the newest tip; commit2 is the root
   const commits = [
-    makeCommit(0, []),
-    makeCommit(1, ['commit0']),
-    makeCommit(2, ['commit1']),
+    makeCommit(0, ['commit1']),
+    makeCommit(1, ['commit2']),
+    makeCommit(2, []),
   ];
 
   test.beforeEach(async ({ page }) => {

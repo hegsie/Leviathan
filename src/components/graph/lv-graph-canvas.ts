@@ -1123,9 +1123,21 @@ export class LvGraphCanvas extends LitElement {
     return this.commits.filter((c) => visible.has(c.oid));
   }
 
+  /**
+   * OID of the commit HEAD points at, from the loaded refs.
+   * The layout pins its first-parent chain to lane 0.
+   */
+  private getHeadOid(): string | undefined {
+    for (const [oid, refs] of Object.entries(this.refsByCommit)) {
+      if (refs.some((ref) => ref.isHead)) {
+        return oid;
+      }
+    }
+    return undefined;
+  }
+
   private processLayout(): void {
-    // Compute layout (use simple algorithm for cleaner one-commit-per-row layout)
-    const result = computeGraphLayout(this.getVisibleCommits(), { optimized: false });
+    const result = computeGraphLayout(this.getVisibleCommits(), { headOid: this.getHeadOid() });
     this.layout = result.layout;
 
     // Build sorted nodes array for keyboard navigation
@@ -2286,7 +2298,7 @@ export class LvGraphCanvas extends LitElement {
       const fromY = offsetY + edge.fromRow * this.ROW_HEIGHT;
       const toX = offsetX + (maxLane - edge.toLane) * this.LANE_WIDTH;
       const toY = offsetY + edge.toRow * this.ROW_HEIGHT;
-      const color = theme.laneColors[edge.fromLane % theme.laneColors.length];
+      const color = theme.laneColors[edge.colorIndex % theme.laneColors.length];
 
       if (edge.fromLane === edge.toLane) {
         svgParts.push(`<line x1="${fromX}" y1="${fromY}" x2="${toX}" y2="${toY}" stroke="${color}" stroke-width="2" stroke-linecap="round"/>`);
@@ -2300,7 +2312,7 @@ export class LvGraphCanvas extends LitElement {
     for (const node of this.layout.nodes.values()) {
       const x = offsetX + (maxLane - node.lane) * this.LANE_WIDTH;
       const y = offsetY + node.row * this.ROW_HEIGHT;
-      const color = theme.laneColors[node.lane % theme.laneColors.length];
+      const color = theme.laneColors[node.colorIndex % theme.laneColors.length];
       const commit = this.realCommits.get(node.oid);
       const isMerge = commit && commit.parentIds.length > 1;
 

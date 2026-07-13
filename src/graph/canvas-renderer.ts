@@ -128,15 +128,14 @@ export function getThemeFromCSS(): RenderTheme {
       getCSSVar('--color-branch-6', '#4dd0e1'),
       getCSSVar('--color-branch-7', '#ff8a65'),
       getCSSVar('--color-branch-8', '#aed581'),
-      // Extended colors - derived from base colors
-      getCSSVar('--color-branch-1', '#4fc3f7'),
-      getCSSVar('--color-branch-2', '#81c784'),
-      getCSSVar('--color-branch-3', '#ef5350'),
-      getCSSVar('--color-branch-4', '#ffb74d'),
-      getCSSVar('--color-branch-5', '#ce93d8'),
-      getCSSVar('--color-branch-6', '#4dd0e1'),
-      getCSSVar('--color-branch-7', '#ff8a65'),
-      getCSSVar('--color-branch-8', '#aed581'),
+      getCSSVar('--color-branch-9', '#f48fb1'),
+      getCSSVar('--color-branch-10', '#80cbc4'),
+      getCSSVar('--color-branch-11', '#9fa8da'),
+      getCSSVar('--color-branch-12', '#bcaaa4'),
+      getCSSVar('--color-branch-13', '#dce775'),
+      getCSSVar('--color-branch-14', '#90a4ae'),
+      getCSSVar('--color-branch-15', '#ffd54f'),
+      getCSSVar('--color-branch-16', '#b39ddb'),
     ],
     textColor: getCSSVar('--graph-text-color', '#c8c8c8'),
     selectedColor: getCSSVar('--graph-selected-color', '#ffffff'),
@@ -177,8 +176,8 @@ const DEFAULT_THEME: RenderTheme = {
   laneColors: [
     '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
     '#ce93d8', '#4dd0e1', '#ff8a65', '#aed581',
-    '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
-    '#ce93d8', '#4dd0e1', '#ff8a65', '#aed581',
+    '#f48fb1', '#80cbc4', '#9fa8da', '#bcaaa4',
+    '#dce775', '#90a4ae', '#ffd54f', '#b39ddb',
   ],
   textColor: '#c8c8c8',
   selectedColor: '#ffffff',
@@ -763,7 +762,7 @@ export class CanvasRenderer {
       const toX = graphEndX - (edge.toLane + 1) * config.laneWidth + config.laneWidth / 2;
       const toY = offsetY + edge.toRow * config.rowHeight + this.HEADER_HEIGHT;
 
-      ctx.strokeStyle = this.getLaneColor(edge.fromLane);
+      ctx.strokeStyle = this.getBranchColor(edge.colorIndex);
       ctx.beginPath();
 
       if (edge.fromLane === edge.toLane) {
@@ -836,7 +835,7 @@ export class CanvasRenderer {
     for (const node of nodes) {
       const x = graphEndX - (node.lane + 1) * config.laneWidth + config.laneWidth / 2;
       const y = offsetY + node.row * config.rowHeight + this.HEADER_HEIGHT;
-      const color = this.getLaneColor(node.lane);
+      const color = this.getBranchColor(node.colorIndex);
       const radius = this.getNodeRadius(node.oid);
 
       const isSelected = this.selectedOids.has(node.oid);
@@ -1041,7 +1040,7 @@ export class CanvasRenderer {
     for (const node of nodes) {
       const y = offsetY + node.row * config.rowHeight + this.HEADER_HEIGHT;
       const refs = refsByCommit?.[node.oid] ?? [];
-      const laneColor = this.getLaneColor(node.lane);
+      const laneColor = this.getBranchColor(node.colorIndex);
 
       const isSelected = this.selectedOids.has(node.oid);
       const isHovered = node.oid === this.hoveredOid;
@@ -1756,10 +1755,10 @@ export class CanvasRenderer {
   }
 
   /**
-   * Get color for a lane
+   * Get color for a branch line by its stable color index
    */
-  private getLaneColor(lane: number): string {
-    return this.theme.laneColors[lane % this.theme.laneColors.length];
+  private getBranchColor(colorIndex: number): string {
+    return this.theme.laneColors[colorIndex % this.theme.laneColors.length];
   }
 
   /**
