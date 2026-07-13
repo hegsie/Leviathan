@@ -527,6 +527,22 @@ describe('lv-graph-canvas', () => {
       expect(hidden.size).to.equal(0);
     });
 
+    it('clears search highlighting when switching repositories', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      // Simulate an active search in the current repo
+      const internals = el as unknown as { matchedCommitOids: Set<string> };
+      internals.matchedCommitOids.add(mainCommit.oid);
+
+      // Switching repos must clear the matches synchronously — a stale
+      // non-empty set dims the entire cached graph of the next repo
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+
+      expect(internals.matchedCommitOids.size).to.equal(0);
+    });
+
     it('clears multi-selection state when switching repositories', async () => {
       setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
       const el = await renderCanvas();

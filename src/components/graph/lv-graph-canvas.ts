@@ -837,6 +837,13 @@ export class LvGraphCanvas extends LitElement {
       this.renderer?.setCommitStats(this.commitStatsMap);
       this.renderer?.setCommitSignatures(this.commitSignaturesMap);
 
+      // The previous repo's search matches must not dim the new repo's
+      // cached graph (a stale non-empty set dims EVERY node because none of
+      // the new repo's OIDs are in it). loadCommits clears this too, but
+      // only after its IPC round-trip — the cached render is synchronous.
+      this.matchedCommitOids.clear();
+      this.renderer?.setHighlightedCommits(this.matchedCommitOids);
+
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
 
