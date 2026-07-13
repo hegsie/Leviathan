@@ -863,6 +863,12 @@ export class LvGraphCanvas extends LitElement {
       this.githubRepo = null;
       this.virtualScroll?.setPullRequests(this.pullRequestsByCommit);
 
+      // Toolbar dropdowns belong to the previous repo's context — don't
+      // leave them floating open over the new repo's graph
+      this.showBranchPanel = false;
+      this.showExportMenu = false;
+      this.showColumnsMenu = false;
+
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
 
@@ -1535,9 +1541,10 @@ export class LvGraphCanvas extends LitElement {
 
   /**
    * OID of the commit HEAD points at, from the loaded refs.
-   * The layout pins its first-parent chain to lane 0.
+   * The layout pins its first-parent chain to lane 0. Public so callers of
+   * jumpToHead() can give accurate feedback on a miss.
    */
-  private getHeadOid(): string | undefined {
+  public getHeadOid(): string | undefined {
     for (const [oid, refs] of Object.entries(this.refsByCommit)) {
       if (refs.some((ref) => ref.isHead)) {
         return oid;
@@ -2455,17 +2462,25 @@ export class LvGraphCanvas extends LitElement {
   }
 
   private handleJumpToHeadClick = (): void => {
-    if (!this.jumpToHead()) {
-      // The component can't toast itself — app-shell listens for
-      // graph-notice (same wiring as copy-sha) and shows the toast
-      this.dispatchEvent(
-        new CustomEvent('graph-notice', {
-          detail: { message: 'HEAD commit is not loaded in the graph', type: 'info' },
-          bubbles: true,
-          composed: true,
-        })
-      );
+    if (this.jumpToHead()) {
+      return;
     }
+    // Same loaded-but-filtered vs not-loaded distinction as the shared
+    // revealCommitInGraph path in app-shell (sibling reveal flows must give
+    // consistent guidance). The component can't toast itself — app-shell
+    // listens for graph-notice (same wiring as copy-sha).
+    const headOid = this.getHeadOid();
+    const message =
+      headOid !== undefined && this.hasLoadedCommit(headOid)
+        ? 'HEAD commit is hidden by the branch visibility filter — show its branch to reveal it'
+        : 'HEAD commit is not loaded in the graph';
+    this.dispatchEvent(
+      new CustomEvent('graph-notice', {
+        detail: { message, type: 'info' },
+        bubbles: true,
+        composed: true,
+      })
+    );
   };
 
   /**

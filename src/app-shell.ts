@@ -2355,7 +2355,15 @@ export class AppShell extends LitElement {
         category: 'navigation',
         icon: 'commit',
         action: this.requiresRepository(() => {
-          if (!this.graphCanvas?.jumpToHead()) {
+          if (this.graphCanvas?.jumpToHead()) {
+            return;
+          }
+          // Route the miss through the shared reveal helper so the toast
+          // distinguishes loaded-but-filtered from not-loaded
+          const headOid = this.graphCanvas?.getHeadOid();
+          if (headOid !== undefined) {
+            this.revealCommitInGraph(headOid);
+          } else {
             showToast('HEAD commit is not loaded in the graph', 'info', 4000);
           }
         }),

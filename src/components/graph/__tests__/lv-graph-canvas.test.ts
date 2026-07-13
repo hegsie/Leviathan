@@ -527,6 +527,23 @@ describe('lv-graph-canvas', () => {
       expect(hidden.size).to.equal(0);
     });
 
+    it('closes toolbar dropdowns when switching repositories', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      const branchBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('Branches'));
+      branchBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.branch-panel')).to.not.be.null;
+
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.branch-panel')).to.be.null;
+    });
+
     it('clears pull-request badges when switching repositories', async () => {
       setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
       const el = await renderCanvas();
