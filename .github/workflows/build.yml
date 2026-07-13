@@ -10,6 +10,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      release:
+        description: 'Create the vX.Y.Z tag and draft release from the version in tauri.conf.json'
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,7 +29,7 @@ env:
 jobs:
   test-e2e:
     name: E2E Tests
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
     runs-on: ubuntu-latest
 
     steps:
@@ -121,12 +126,14 @@ jobs:
 
       # Build without release for non-tag pushes (skip signing, use specific bundles)
       - name: Build Tauri app
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)) }}
         run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --no-sign
 
-      # Build with release for tagged pushes
+      # Build with release for tagged pushes, or a manual dispatch with the
+      # release input — tauri-action then creates the v__VERSION__ tag (from
+      # tauri.conf.json) and the draft release itself.
       - name: Build Tauri app (Release)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
