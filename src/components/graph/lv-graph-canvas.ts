@@ -1624,6 +1624,58 @@ export class LvGraphCanvas extends LitElement {
   }
 
   /**
+   * Fetch stats and signatures for the given OIDs in batches, accumulating
+   * into the per-repo maps. Aborts silently on a repo switch; failed
+   * batches are unmarked so a later fetch retries them.
+   */
+  private async fetchCommitDataBatches(
+    repoPath: string,
+    statsOids: string[],
+    signatureOids: string[]
+  ): Promise<void> {
+    // Mark as requested up-front so overlapping fetches don't duplicate
+    for (const oid of statsOids) this.statsFetchedOids.add(oid);
+    for (const oid of signatureOids) this.signaturesFetchedOids.add(oid);
+
+    const statsBatchSize = 100;
+    for (let i = 0; i < statsOids.length; i += statsBatchSize) {
+      // Abort if we switched to a different repository
+      if (this.repositoryPath !== repoPath) return;
+
+      const batch = statsOids.slice(i, i + statsBatchSize);
+      const result = await getCommitsStats(repoPath, batch);
+      if (result.success && result.data) {
+        for (const stat of result.data) {
+          this.commitStatsMap.set(stat.oid, {
+            additions: stat.additions,
+            deletions: stat.deletions,
+            filesChanged: stat.filesChanged,
+          });
+        }
+      } else {
+        log.warn(`fetchCommitDataBatches: stats batch failed: ${result.error}`);
+        // Allow a retry on the next fetch for this range
+        for (const oid of batch) this.statsFetchedOids.delete(oid);
+      }
+    }
+
+    const signatureBatchSize = 50;
+    for (let i = 0; i < signatureOids.length; i += signatureBatchSize) {
+      if (this.repositoryPath !== repoPath) return;
+
+      const batch = signatureOids.slice(i, i + signatureBatchSize);
+      const result = await getCommitsSignatures(repoPath, batch);
+      if (result.success && result.data) {
+        for (const [oid, sig] of result.data) {
+          this.commitSignaturesMap.set(oid, { signed: sig.signed, valid: sig.valid });
+        }
+      } else {
+        for (const oid of batch) this.signaturesFetchedOids.delete(oid);
+      }
+    }
+  }
+
+  /**
    * OIDs of the commits in the visible row range plus overscan
    */
   private getVisibleDataOids(): string[] {
@@ -1652,10 +1704,6 @@ export class LvGraphCanvas extends LitElement {
     const signatureOids = visibleOids.filter((oid) => !this.signaturesFetchedOids.has(oid));
     if (statsOids.length === 0 && signatureOids.length === 0) return;
 
-    // Mark as requested up-front so overlapping scroll events don't refetch
-    for (const oid of statsOids) this.statsFetchedOids.add(oid);
-    for (const oid of signatureOids) this.signaturesFetchedOids.add(oid);
-
     // Only the very first fetch for a repo shows the spinner — subsequent
     // scroll-driven fetches are incremental and shouldn't flash UI
     const isInitialFetch = this.commitStatsMap.size === 0 && statsOids.length > 0;
@@ -1666,42 +1714,7 @@ export class LvGraphCanvas extends LitElement {
     }
 
     try {
-      const statsBatchSize = 100;
-      for (let i = 0; i < statsOids.length; i += statsBatchSize) {
-        // Abort if we switched to a different repository
-        if (this.repositoryPath !== repoPath) return;
-
-        const batch = statsOids.slice(i, i + statsBatchSize);
-        const result = await getCommitsStats(repoPath, batch);
-        if (result.success && result.data) {
-          for (const stat of result.data) {
-            this.commitStatsMap.set(stat.oid, {
-              additions: stat.additions,
-              deletions: stat.deletions,
-              filesChanged: stat.filesChanged,
-            });
-          }
-        } else {
-          log.warn(`fetchVisibleCommitData: stats batch failed: ${result.error}`);
-          // Allow a retry on the next fetch for this range
-          for (const oid of batch) this.statsFetchedOids.delete(oid);
-        }
-      }
-
-      const signatureBatchSize = 50;
-      for (let i = 0; i < signatureOids.length; i += signatureBatchSize) {
-        if (this.repositoryPath !== repoPath) return;
-
-        const batch = signatureOids.slice(i, i + signatureBatchSize);
-        const result = await getCommitsSignatures(repoPath, batch);
-        if (result.success && result.data) {
-          for (const [oid, sig] of result.data) {
-            this.commitSignaturesMap.set(oid, { signed: sig.signed, valid: sig.valid });
-          }
-        } else {
-          for (const oid of batch) this.signaturesFetchedOids.delete(oid);
-        }
-      }
+      await this.fetchCommitDataBatches(repoPath, statsOids, signatureOids);
 
       if (this.repositoryPath === repoPath) {
         this.renderer?.setCommitStats(this.commitStatsMap);
@@ -2865,8 +2878,34 @@ export class LvGraphCanvas extends LitElement {
   /**
    * Export graph as PNG image
    */
-  public exportAsImage(): void {
+  public async exportAsImage(): Promise<void> {
     if (!this.renderer || !this.virtualScroll || !this.layout) return;
+    const repoPath = this.repositoryPath;
+
+    // Viewport-lazy fetching may not have covered all loaded rows yet — the
+    // export renders EVERY loaded row, so fill in missing stats/signature
+    // data first or unscrolled rows would export with blank stats columns
+    const allOids = [...this.layout.nodes.keys()];
+    const missingStats = allOids.filter((oid) => !this.statsFetchedOids.has(oid));
+    const missingSignatures = allOids.filter((oid) => !this.signaturesFetchedOids.has(oid));
+    if (missingStats.length > 0 || missingSignatures.length > 0) {
+      this.isLoadingStats = true;
+      try {
+        await this.fetchCommitDataBatches(repoPath, missingStats, missingSignatures);
+        if (this.repositoryPath === repoPath) {
+          this.renderer.setCommitStats(this.commitStatsMap);
+          this.renderer.setCommitSignatures(this.commitSignaturesMap);
+        }
+      } finally {
+        if (this.repositoryPath === repoPath) {
+          this.isLoadingStats = false;
+        }
+      }
+      // The repository changed while fetching — abort the export
+      if (this.repositoryPath !== repoPath || !this.layout) {
+        return;
+      }
+    }
 
     const contentSize = this.virtualScroll.getContentSize();
 

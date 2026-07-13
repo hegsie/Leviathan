@@ -499,6 +499,28 @@ describe('CanvasRenderer avatar cache', () => {
     renderer.destroy();
   });
 
+  it('bounds the failed-avatar map when loads keep failing', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals & {
+      pendingAvatarImages: Set<HTMLImageElement>;
+    };
+
+    // Simulate a long offline session with many distinct failed authors
+    for (let i = 0; i < 500; i++) {
+      internals.failedAvatars.set(`author${i}@example.com`, Date.now());
+    }
+
+    // The next failure must evict rather than grow unbounded
+    internals.loadAvatar('one-more@example.com');
+    const img = [...internals.pendingAvatarImages][0];
+    expect(img).to.not.be.undefined;
+    img.onerror?.(new Event('error'));
+
+    expect(internals.failedAvatars.size).to.be.at.most(500);
+    expect(internals.failedAvatars.has('one-more@example.com')).to.be.true;
+    renderer.destroy();
+  });
+
   it('returns undefined for uncached avatars without touching the cache', () => {
     const renderer = makeRenderer();
     const internals = renderer as unknown as RendererInternals;

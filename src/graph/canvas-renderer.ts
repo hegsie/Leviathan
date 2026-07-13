@@ -573,6 +573,13 @@ export class CanvasRenderer {
       this.pendingAvatarImages.delete(img);
       this.failedAvatars.set(email, Date.now());
       this.avatarLoadingSet.delete(email);
+      // Bound the failure map like the success cache — offline sessions
+      // with many distinct authors must not grow it for the renderer's
+      // lifetime
+      if (this.failedAvatars.size > CanvasRenderer.MAX_AVATAR_CACHE_SIZE) {
+        const firstKey = this.failedAvatars.keys().next().value;
+        if (firstKey) this.failedAvatars.delete(firstKey);
+      }
     };
 
     img.src = this.getGravatarUrl(email, 64);

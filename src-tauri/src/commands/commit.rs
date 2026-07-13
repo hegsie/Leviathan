@@ -27,8 +27,11 @@ fn walk_cache() -> &'static Mutex<HashMap<String, WalkCache>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Fingerprint of the repository's ref state (HEAD + every ref name/target)
-fn refs_fingerprint(repo: &git2::Repository) -> u64 {
+/// One consistent snapshot of the repository's ref state: the fingerprint
+/// and the walk tips come from the SAME enumeration, so a ref changing
+/// between "compute fingerprint" and "seed the walk" can't produce a cache
+/// entry whose fingerprint matches a different ref state than its walk.
+fn refs_snapshot(repo: &git2::Repository) -> (u64, Vec<git2::Oid>) {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     if let Ok(head) = repo.head() {
@@ -37,15 +40,18 @@ fn refs_fingerprint(repo: &git2::Repository) -> u64 {
             oid.as_bytes().hash(&mut hasher);
         }
     }
+
+    let mut tips: Vec<git2::Oid> = Vec::new();
     if let Ok(refs) = repo.references() {
         for reference in refs.flatten() {
             reference.name().unwrap_or("").hash(&mut hasher);
             if let Some(oid) = reference.target() {
                 oid.as_bytes().hash(&mut hasher);
+                tips.push(oid);
             }
         }
     }
-    hasher.finish()
+    (hasher.finish(), tips)
 }
 
 /// Get one page of the all-branches walk plus the true total commit count,
@@ -56,7 +62,7 @@ fn cached_walk_page(
     skip: usize,
     limit: usize,
 ) -> Result<(Vec<git2::Oid>, usize)> {
-    let fingerprint = refs_fingerprint(repo);
+    let (fingerprint, tips) = refs_snapshot(repo);
 
     // Fast path: serve a warm entry under a short lock
     {
@@ -78,10 +84,9 @@ fn cached_walk_page(
     // identical result).
     let mut revwalk = repo.revwalk()?;
     revwalk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
-    for reference in repo.references()?.flatten() {
-        if let Some(oid) = reference.target() {
-            let _ = revwalk.push(oid);
-        }
+    // Seed from the SAME snapshot the fingerprint was computed from
+    for tip in &tips {
+        let _ = revwalk.push(*tip);
     }
     let oids: Vec<git2::Oid> = revwalk.flatten().collect();
     let total = oids.len();

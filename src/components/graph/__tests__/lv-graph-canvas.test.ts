@@ -1586,6 +1586,26 @@ describe('lv-graph-canvas', () => {
       expect(requestedOids.size).to.be.lessThan(500);
     });
 
+    it('PNG export fills in stats for rows the user never scrolled past', async () => {
+      // 300 loaded commits; the viewport-lazy fetch only covers the first
+      // ~viewport+overscan rows
+      const manyCommits = makeMoreCommits(300, 0);
+      setupDefaultMocks({ commits: manyCommits, refs: {}, total: 300 });
+
+      const el = await renderCanvas();
+      await new Promise((r) => setTimeout(r, 600));
+
+      const internals = el as unknown as {
+        statsFetchedOids: Set<string>;
+        exportAsImage(): Promise<void>;
+      };
+      expect(internals.statsFetchedOids.size).to.be.lessThan(300);
+
+      // The export renders EVERY loaded row, so it must fetch the rest first
+      await internals.exportAsImage();
+      expect(internals.statsFetchedOids.size).to.equal(300);
+    });
+
     it('does not refetch stats for already-fetched commits', async () => {
       setupDefaultMocks();
       const el = await renderCanvas();
