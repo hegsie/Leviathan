@@ -913,8 +913,11 @@ describe('lv-graph-canvas', () => {
       columnsBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await el.updateComplete;
 
-      const menu = el.shadowRoot!.querySelector('.columns-menu');
+      const menu = el.shadowRoot!.querySelector('.columns-menu') as HTMLElement;
       expect(menu).to.not.be.null;
+      // The menu anchors to its own trigger button (measured at open time),
+      // not the hardcoded offset shared with the export menu
+      expect(menu.style.right).to.match(/px$/);
       const checkboxes = menu!.querySelectorAll('input[type="checkbox"]');
       expect(checkboxes.length).to.equal(2);
       // Off by default

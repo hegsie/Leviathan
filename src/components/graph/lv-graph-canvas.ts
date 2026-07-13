@@ -522,6 +522,21 @@ export class LvGraphCanvas extends LitElement {
   // Export
   @state() private showExportMenu = false;
 
+  // Dropdown menus anchor to the toolbar button that opened them. Measured
+  // at open time (not hardcoded) so adding/reordering toolbar buttons can't
+  // silently detach a menu from its trigger.
+  @state() private exportMenuRight: number | null = null;
+  @state() private columnsMenuRight: number | null = null;
+
+  /** Distance from the container's right edge to the trigger's right edge */
+  private menuRightOffset(e: MouseEvent): number {
+    const button = e.currentTarget as HTMLElement | null;
+    if (!button || !this.containerEl) return 0;
+    const containerRect = this.containerEl.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    return Math.max(0, containerRect.right - buttonRect.right);
+  }
+
   // Optional columns (author name, absolute date)
   @state() private showColumnsMenu = false;
   @state() private showAuthorColumn = false;
@@ -3089,7 +3104,10 @@ export class LvGraphCanvas extends LitElement {
 
   private renderExportMenu() {
     return html`
-      <div class="export-menu">
+      <div
+        class="export-menu"
+        style=${this.exportMenuRight !== null ? `right: ${this.exportMenuRight}px` : ''}
+      >
         <button class="export-menu-item" @click=${() => this.exportAsImage()}>
           Export as PNG
         </button>
@@ -3102,7 +3120,10 @@ export class LvGraphCanvas extends LitElement {
 
   private renderColumnsMenu() {
     return html`
-      <div class="export-menu columns-menu">
+      <div
+        class="export-menu columns-menu"
+        style=${this.columnsMenuRight !== null ? `right: ${this.columnsMenuRight}px` : ''}
+      >
         <label class="branch-item">
           <input
             type="checkbox"
@@ -3240,7 +3261,8 @@ export class LvGraphCanvas extends LitElement {
             <button
               class="toolbar-btn ${this.showColumnsMenu ? 'active' : ''}"
               title="Toggle optional columns"
-              @click=${() => {
+              @click=${(e: MouseEvent) => {
+                this.columnsMenuRight = this.menuRightOffset(e);
                 this.showColumnsMenu = !this.showColumnsMenu;
                 this.showBranchPanel = false;
                 this.showExportMenu = false;
@@ -3269,7 +3291,12 @@ export class LvGraphCanvas extends LitElement {
             <button
               class="toolbar-btn ${this.showExportMenu ? 'active' : ''}"
               title="Export graph"
-              @click=${() => { this.showExportMenu = !this.showExportMenu; this.showBranchPanel = false; this.showColumnsMenu = false; }}
+              @click=${(e: MouseEvent) => {
+                this.exportMenuRight = this.menuRightOffset(e);
+                this.showExportMenu = !this.showExportMenu;
+                this.showBranchPanel = false;
+                this.showColumnsMenu = false;
+              }}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path>
