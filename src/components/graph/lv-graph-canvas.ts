@@ -1334,7 +1334,12 @@ export class LvGraphCanvas extends LitElement {
    * Maps PRs to their head commit SHA for display
    */
   private async loadPullRequests(): Promise<void> {
-    if (!this.githubRepo) {
+    // Capture the repo identity at the start: a repo switch while the
+    // fetches are in flight must not attach this repo's PRs to the new
+    // repo's commits (the branch-name fallback below would happily match
+    // a same-named branch like "main" in an unrelated repository)
+    const requestedRepo = this.githubRepo;
+    if (!requestedRepo) {
       return;
     }
 
@@ -1347,9 +1352,14 @@ export class LvGraphCanvas extends LitElement {
 
       // Fetch open PRs (and recently closed for context)
       const [openPrs, closedPrs] = await Promise.all([
-        listPullRequests(this.githubRepo.owner, this.githubRepo.repo, 'open', 50),
-        listPullRequests(this.githubRepo.owner, this.githubRepo.repo, 'closed', 20),
+        listPullRequests(requestedRepo.owner, requestedRepo.repo, 'open', 50),
+        listPullRequests(requestedRepo.owner, requestedRepo.repo, 'closed', 20),
       ]);
+
+      // Abort if the repository changed while the fetches were in flight
+      if (this.githubRepo !== requestedRepo) {
+        return;
+      }
 
       const prsByCommit: Record<string, GraphPullRequest[]> = {};
 

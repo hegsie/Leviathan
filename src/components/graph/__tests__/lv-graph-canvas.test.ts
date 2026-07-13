@@ -1185,6 +1185,70 @@ describe('lv-graph-canvas', () => {
     });
   });
 
+  describe('pull request loading race', () => {
+    it('discards PRs fetched for a previously active repository', async () => {
+      let resolvePrs: ((v: unknown) => void) | null = null;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_commit_history':
+            return defaultCommits;
+          case 'get_refs_by_commit':
+            return defaultRefs;
+          case 'detect_github_repo':
+            return { owner: 'acme', repo: 'repo-a' };
+          case 'check_github_connection':
+            return { connected: true };
+          case 'list_pull_requests':
+            // Stall the PR fetch so a repo switch can happen mid-flight
+            return new Promise((r) => {
+              resolvePrs = r;
+            });
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderCanvas();
+      expect(resolvePrs).to.not.be.null;
+
+      // Switch to a non-GitHub repository while repo A's PR fetch is stalled
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_commit_history':
+            return defaultCommits;
+          case 'get_refs_by_commit':
+            return defaultRefs;
+          case 'detect_github_repo':
+            return null;
+          default:
+            return null;
+        }
+      };
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Now repo A's stalled fetch resolves with a PR whose head ref matches
+      // a branch name ("main") that also exists in repo B
+      resolvePrs!([
+        {
+          number: 7,
+          state: 'open',
+          draft: false,
+          headSha: 'nonexistent-sha',
+          headRef: 'main',
+          htmlUrl: 'https://example.com/pr/7',
+        },
+      ]);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const prs = (el as unknown as {
+        pullRequestsByCommit: Record<string, unknown[]>;
+      }).pullRequestsByCommit;
+      expect(Object.keys(prs)).to.have.length(0);
+    });
+  });
+
   describe('minimap', () => {
     it('shows the minimap by default and toggles it via the toolbar', async () => {
       const el = await renderCanvas();
