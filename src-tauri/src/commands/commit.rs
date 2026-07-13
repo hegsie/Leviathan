@@ -57,50 +57,57 @@ fn cached_walk_page(
     limit: usize,
 ) -> Result<(Vec<git2::Oid>, usize)> {
     let fingerprint = refs_fingerprint(repo);
-    let mut cache = walk_cache().lock().unwrap_or_else(|e| e.into_inner());
 
-    let is_valid = cache
-        .get(path)
-        .map(|entry| entry.fingerprint == fingerprint)
-        .unwrap_or(false);
-
-    if !is_valid {
-        let mut revwalk = repo.revwalk()?;
-        revwalk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
-        for reference in repo.references()?.flatten() {
-            if let Some(oid) = reference.target() {
-                let _ = revwalk.push(oid);
+    // Fast path: serve a warm entry under a short lock
+    {
+        let mut cache = walk_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache.get_mut(path) {
+            if entry.fingerprint == fingerprint {
+                entry.last_used = std::time::Instant::now();
+                let total = entry.oids.len();
+                let page = entry.oids.iter().skip(skip).take(limit).copied().collect();
+                return Ok((page, total));
             }
         }
-        let oids: Vec<git2::Oid> = revwalk.flatten().collect();
-
-        if cache.len() >= WALK_CACHE_MAX_ENTRIES && !cache.contains_key(path) {
-            // Evict the least-recently-used entry (HashMap iteration order
-            // is arbitrary, so recency is tracked explicitly)
-            if let Some(lru_key) = cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(key, _)| key.clone())
-            {
-                cache.remove(&lru_key);
-            }
-        }
-        cache.insert(
-            path.to_string(),
-            WalkCache {
-                fingerprint,
-                oids,
-                last_used: std::time::Instant::now(),
-            },
-        );
     }
 
-    let entry = cache
-        .get_mut(path)
-        .expect("walk cache entry inserted above must exist");
-    entry.last_used = std::time::Instant::now();
-    let total = entry.oids.len();
-    let page = entry.oids.iter().skip(skip).take(limit).copied().collect();
+    // Cold or stale: walk WITHOUT holding the lock — a multi-second walk on
+    // a large repository must not block history/total calls for every OTHER
+    // open repository whose entry is warm. A concurrent duplicate walk of
+    // the same repo is possible and acceptable (last writer wins with an
+    // identical result).
+    let mut revwalk = repo.revwalk()?;
+    revwalk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
+    for reference in repo.references()?.flatten() {
+        if let Some(oid) = reference.target() {
+            let _ = revwalk.push(oid);
+        }
+    }
+    let oids: Vec<git2::Oid> = revwalk.flatten().collect();
+    let total = oids.len();
+    let page = oids.iter().skip(skip).take(limit).copied().collect();
+
+    let mut cache = walk_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= WALK_CACHE_MAX_ENTRIES && !cache.contains_key(path) {
+        // Evict the least-recently-used entry (HashMap iteration order is
+        // arbitrary, so recency is tracked explicitly)
+        if let Some(lru_key) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&lru_key);
+        }
+    }
+    cache.insert(
+        path.to_string(),
+        WalkCache {
+            fingerprint,
+            oids,
+            last_used: std::time::Instant::now(),
+        },
+    );
+
     Ok((page, total))
 }
 
