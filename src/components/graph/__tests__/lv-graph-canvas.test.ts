@@ -557,6 +557,21 @@ describe('lv-graph-canvas', () => {
       expect(selected).to.be.null;
     });
 
+    it('reports filtered-out commits as loaded but not selectable', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      // The commit is fetched but hidden by the filter: selectCommit misses
+      // while hasLoadedCommit still reports it — callers use this to give
+      // accurate guidance (unhide the branch vs. load more history)
+      expect(el.selectCommit(featureCommit.oid)).to.be.false;
+      expect(el.hasLoadedCommit(featureCommit.oid)).to.be.true;
+      expect(el.hasLoadedCommit('0000000000000000000000000000000000000000')).to.be.false;
+    });
+
     it('keeps the selection when the selected commit stays visible', async () => {
       setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
       const el = await renderCanvas();

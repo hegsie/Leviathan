@@ -2350,6 +2350,16 @@ export class LvGraphCanvas extends LitElement {
   }
 
   /**
+   * Whether a commit is loaded (fetched from the backend), regardless of
+   * whether the branch-visibility filter currently shows it. Lets callers
+   * distinguish "not loaded yet — scroll/load more" from "loaded but
+   * hidden by a filter" when selectCommit() returns false.
+   */
+  public hasLoadedCommit(oid: string): boolean {
+    return this.realCommits.has(oid);
+  }
+
+  /**
    * Public method to select and scroll to a commit by OID
    * Used by other components (like commit details panel) to navigate the graph
    */

@@ -3046,7 +3046,14 @@ export class AppShell extends LitElement {
    * silently doing nothing. ALL reveal-in-graph flows must go through this.
    */
   private revealCommitInGraph(oid: string): void {
-    if (!this.graphCanvas?.selectCommit(oid)) {
+    if (this.graphCanvas?.selectCommit(oid)) {
+      return;
+    }
+    // Two distinct miss cases need different guidance: a commit hidden by
+    // the branch-visibility filter will NEVER appear through scrolling
+    if (this.graphCanvas?.hasLoadedCommit(oid)) {
+      showToast('Commit is hidden by the branch visibility filter — show its branch to reveal it', 'info', 4000);
+    } else {
       showToast('Commit is not loaded in the graph yet — scroll further back to load it', 'info', 4000);
     }
   }
