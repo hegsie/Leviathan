@@ -444,6 +444,19 @@ export class LvGraphCanvas extends LitElement {
         background: var(--color-bg-hover);
       }
 
+      .minimap-canvas {
+        position: absolute;
+        top: 28px; /* Below the column headers */
+        bottom: 0;
+        right: 12px; /* Left of the scrollbar */
+        width: 56px;
+        background: var(--color-bg-secondary);
+        border-left: 1px solid var(--color-border);
+        opacity: 0.92;
+        z-index: 4;
+        cursor: pointer;
+      }
+
       /* Visually hidden but exposed to assistive technology */
       .sr-only {
         position: absolute;
@@ -510,6 +523,14 @@ export class LvGraphCanvas extends LitElement {
   @state() private showDateColumn = false;
   private readonly OPTIONAL_COLUMNS_KEY = 'leviathan-graph-optional-columns';
 
+  // Minimap
+  @state() private showMinimap = true;
+  private readonly MINIMAP_KEY = 'leviathan-graph-minimap';
+  private readonly MINIMAP_WIDTH = 56;
+  /** Offscreen layer with one dot per commit, rebuilt on layout changes */
+  private minimapDots: HTMLCanvasElement | null = null;
+  private minimapDragging = false;
+
   // Infinite scroll pagination
   @state() private isLoadingMore = false;
   @state() private hasMoreCommits = true;
@@ -534,8 +555,9 @@ export class LvGraphCanvas extends LitElement {
   private readonly BRANCH_VISIBILITY_KEY = 'leviathan-hidden-branches';
 
   @query('.canvas-container') private containerEl!: HTMLDivElement;
-  @query('canvas') private canvasEl!: HTMLCanvasElement;
+  @query('canvas[role="img"]') private canvasEl!: HTMLCanvasElement;
   @query('.scroll-container') private scrollEl!: HTMLDivElement;
+  @query('.minimap-canvas') private minimapEl?: HTMLCanvasElement;
 
   private commits: GraphCommit[] = [];
   private realCommits: Map<string, Commit> = new Map();
@@ -602,6 +624,34 @@ export class LvGraphCanvas extends LitElement {
     this.loadHiddenBranches();
     this.loadZoomLevel();
     this.loadOptionalColumns();
+    this.loadMinimapPreference();
+  }
+
+  private loadMinimapPreference(): void {
+    try {
+      const saved = localStorage.getItem(this.MINIMAP_KEY);
+      if (saved !== null) {
+        this.showMinimap = saved === 'true';
+      }
+    } catch {
+      // Ignore storage errors, keep default
+    }
+  }
+
+  /** Toggle the minimap overview strip */
+  public async toggleMinimap(): Promise<void> {
+    this.showMinimap = !this.showMinimap;
+    try {
+      localStorage.setItem(this.MINIMAP_KEY, String(this.showMinimap));
+    } catch {
+      // Ignore storage errors
+    }
+    await this.updateComplete;
+    if (this.showMinimap) {
+      this.resizeMinimap();
+      this.rebuildMinimapDots();
+      this.renderMinimap();
+    }
   }
 
   private loadOptionalColumns(): void {
@@ -831,6 +881,8 @@ export class LvGraphCanvas extends LitElement {
     // Listen for theme changes via data-theme attribute
     this.themeObserver = new MutationObserver(() => {
       this.renderer?.setTheme(getThemeFromCSS());
+      this.rebuildMinimapDots();
+      this.scheduleRender();
     });
     this.themeObserver.observe(document.documentElement, {
       attributes: true,
@@ -909,6 +961,8 @@ export class LvGraphCanvas extends LitElement {
     // Clean up resize listeners if still attached
     document.removeEventListener('mousemove', this.handleResizeMove);
     document.removeEventListener('mouseup', this.handleResizeEnd);
+    document.removeEventListener('mousemove', this.handleMinimapPointerMove);
+    document.removeEventListener('mouseup', this.handleMinimapPointerUp);
     this.renderer?.destroy();
     this.scrollState?.destroy();
     this.resizeObserver?.disconnect();
@@ -1402,6 +1456,10 @@ export class LvGraphCanvas extends LitElement {
     // Build spatial index (once per layout — scroll-independent)
     this.buildSpatialIndex();
 
+    // Refresh the minimap dots for the new layout
+    this.resizeMinimap();
+    this.rebuildMinimapDots();
+
     // Set highlighted commits for search results
     this.renderer?.setHighlightedCommits(this.matchedCommitOids);
 
@@ -1550,6 +1608,129 @@ export class LvGraphCanvas extends LitElement {
     this.updateScrollContentSize();
   }
 
+  // ── Minimap ──────────────────────────────────────────────────────────
+
+  /** Rows the minimap spans (matches the scrollable area, incl. unloaded) */
+  private getMinimapTotalRows(): number {
+    const loaded = this.layout?.totalRows ?? 0;
+    const unfiltered = this.hiddenBranches.size === 0 && !this.hasActiveSearch();
+    const virtual = unfiltered && this.hasMoreCommits ? this.commitTotal ?? 0 : 0;
+    return Math.max(1, loaded, virtual);
+  }
+
+  private resizeMinimap(): void {
+    if (!this.minimapEl || !this.containerEl) return;
+    this.minimapEl.width = this.MINIMAP_WIDTH;
+    this.minimapEl.height = Math.max(0, this.containerEl.clientHeight - this.HEADER_HEIGHT);
+  }
+
+  /**
+   * Rebuild the offscreen dots layer: one branch-colored dot per commit,
+   * positioned by row (vertically, over the FULL history span) and lane
+   * (horizontally, mirrored like the graph). Rebuilt on layout changes;
+   * per-frame rendering just composites it under the viewport indicator.
+   */
+  private rebuildMinimapDots(): void {
+    if (!this.showMinimap || !this.minimapEl || !this.layout) return;
+
+    const width = this.minimapEl.width;
+    const height = this.minimapEl.height;
+    if (width === 0 || height === 0) return;
+
+    const dots = document.createElement('canvas');
+    dots.width = width;
+    dots.height = height;
+    const ctx = dots.getContext('2d');
+    if (!ctx) return;
+
+    const theme = getThemeFromCSS();
+    const totalRows = this.getMinimapTotalRows();
+    const laneCount = this.layout.maxLane + 1;
+    const usableWidth = width - 10;
+
+    for (const node of this.layout.nodes.values()) {
+      const y = ((node.row + 0.5) / totalRows) * height;
+      // Mirrored like the graph: lane 0 on the right
+      const x = width - 5 - ((node.lane + 0.5) / laneCount) * usableWidth;
+      ctx.fillStyle = theme.laneColors[node.colorIndex % theme.laneColors.length];
+      ctx.fillRect(x - 1, y - 1, 2, 2);
+    }
+
+    this.minimapDots = dots;
+  }
+
+  /** Composite the dots layer with the viewport indicator */
+  private renderMinimap(): void {
+    if (!this.showMinimap || !this.minimapEl || !this.virtualScroll) return;
+    const ctx = this.minimapEl.getContext('2d');
+    if (!ctx) return;
+
+    const width = this.minimapEl.width;
+    const height = this.minimapEl.height;
+    ctx.clearRect(0, 0, width, height);
+
+    if (this.minimapDots) {
+      ctx.drawImage(this.minimapDots, 0, 0);
+    }
+
+    // Viewport indicator
+    const contentHeight = this.virtualScroll.getContentSize().height;
+    if (contentHeight <= 0) return;
+    const viewport = this.getViewport();
+    const indicatorY = (viewport.scrollTop / contentHeight) * height;
+    const indicatorH = Math.max(8, (viewport.height / contentHeight) * height);
+
+    const theme = getThemeFromCSS();
+    ctx.fillStyle = theme.textColor;
+    ctx.globalAlpha = 0.12;
+    ctx.fillRect(0, indicatorY, width, indicatorH);
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = theme.textColor;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, indicatorY + 0.5, width - 1, indicatorH - 1);
+    ctx.globalAlpha = 1.0;
+  }
+
+  /** Map a minimap Y coordinate to a scrollTop (viewport centered on it) */
+  private minimapYToScrollTop(y: number): number {
+    if (!this.minimapEl || !this.virtualScroll) return 0;
+    const height = this.minimapEl.height;
+    if (height <= 0) return 0;
+    const contentHeight = this.virtualScroll.getContentSize().height;
+    const viewport = this.getViewport();
+    const target = (y / height) * contentHeight - viewport.height / 2;
+    const maxScroll = Math.max(0, contentHeight - viewport.height);
+    return Math.max(0, Math.min(target, maxScroll));
+  }
+
+  private handleMinimapPointerDown = (e: MouseEvent): void => {
+    e.preventDefault();
+    this.minimapDragging = true;
+    this.scrollMinimapTo(e);
+    document.addEventListener('mousemove', this.handleMinimapPointerMove);
+    document.addEventListener('mouseup', this.handleMinimapPointerUp);
+  };
+
+  private handleMinimapPointerMove = (e: MouseEvent): void => {
+    if (!this.minimapDragging) return;
+    this.scrollMinimapTo(e);
+  };
+
+  private handleMinimapPointerUp = (): void => {
+    this.minimapDragging = false;
+    document.removeEventListener('mousemove', this.handleMinimapPointerMove);
+    document.removeEventListener('mouseup', this.handleMinimapPointerUp);
+  };
+
+  private scrollMinimapTo(e: MouseEvent): void {
+    if (!this.minimapEl || !this.scrollState) return;
+    const rect = this.minimapEl.getBoundingClientRect();
+    const scrollTop = this.minimapYToScrollTop(e.clientY - rect.top);
+    const scroll = this.scrollState.getScroll();
+    this.scrollState.setScroll(scrollTop, scroll.scrollLeft);
+    this.syncScrollbarPosition();
+  }
+
   private updateScrollContentSize(): void {
     if (!this.virtualScroll || !this.scrollEl) return;
 
@@ -1601,6 +1782,8 @@ export class LvGraphCanvas extends LitElement {
     const height = this.containerEl.clientHeight;
 
     this.renderer.resize(width, height);
+    this.resizeMinimap();
+    this.rebuildMinimapDots();
     this.scheduleRender();
   }
 
@@ -2703,6 +2886,7 @@ export class LvGraphCanvas extends LitElement {
 
     this.lastRenderData = renderData;
     this.visibleNodes = renderData.nodes.length;
+    this.renderMinimap();
 
     // Refresh the screen-reader mirror only when the visible window changed
     const mirrorKey = `${renderData.range.startRow}-${renderData.range.endRow}-${this.layout.totalRows}`;
@@ -2825,6 +3009,16 @@ export class LvGraphCanvas extends LitElement {
               : 'Loading commit graph...'}"
           ></canvas>
 
+          ${this.showMinimap
+            ? html`
+                <canvas
+                  class="minimap-canvas"
+                  aria-hidden="true"
+                  @mousedown=${this.handleMinimapPointerDown}
+                ></canvas>
+              `
+            : ''}
+
           ${handlePositions
             ? html`
                 <div
@@ -2896,6 +3090,19 @@ export class LvGraphCanvas extends LitElement {
                 <line x1="19" y1="12" x2="23" y2="12"></line>
               </svg>
               HEAD
+            </button>
+            <button
+              class="toolbar-btn ${this.showMinimap ? 'active' : ''}"
+              title="Toggle minimap"
+              @click=${() => this.toggleMinimap()}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                <line x1="16" y1="3" x2="16" y2="21"></line>
+                <line x1="19" y1="7" x2="19" y2="9"></line>
+                <line x1="19" y1="13" x2="19" y2="16"></line>
+              </svg>
+              Map
             </button>
             <button
               class="toolbar-btn ${this.showColumnsMenu ? 'active' : ''}"

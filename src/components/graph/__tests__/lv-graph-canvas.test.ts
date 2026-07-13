@@ -189,6 +189,7 @@ describe('lv-graph-canvas', () => {
       localStorage.removeItem(`leviathan-hidden-branches-${REPO_PATH}`);
       localStorage.removeItem('leviathan-graph-zoom');
       localStorage.removeItem('leviathan-graph-optional-columns');
+      localStorage.removeItem('leviathan-graph-minimap');
     } catch {
       // Ignore
     }
@@ -221,7 +222,7 @@ describe('lv-graph-canvas', () => {
       expect(toolbar).to.not.be.null;
 
       const buttons = toolbar!.querySelectorAll('.toolbar-btn');
-      expect(buttons.length).to.equal(4); // HEAD, Columns, Branches, Export
+      expect(buttons.length).to.equal(5); // HEAD, Map, Columns, Branches, Export
 
       const buttonTexts = Array.from(buttons).map((b) => b.textContent?.trim());
       expect(buttonTexts).to.include('Branches');
@@ -1127,6 +1128,65 @@ describe('lv-graph-canvas', () => {
       const appended = internals.sortedNodesByRow[3];
       expect(appended.oid).to.equal(commitD.oid);
       expect(appended.lane).to.equal(0);
+    });
+  });
+
+  describe('minimap', () => {
+    it('shows the minimap by default and toggles it via the toolbar', async () => {
+      const el = await renderCanvas();
+
+      expect(el.shadowRoot!.querySelector('.minimap-canvas')).to.not.be.null;
+
+      const mapBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('Map'));
+      expect(mapBtn).to.not.be.undefined;
+
+      mapBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+      expect(el.shadowRoot!.querySelector('.minimap-canvas')).to.be.null;
+      expect(localStorage.getItem('leviathan-graph-minimap')).to.equal('false');
+
+      mapBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+      expect(el.shadowRoot!.querySelector('.minimap-canvas')).to.not.be.null;
+      expect(localStorage.getItem('leviathan-graph-minimap')).to.equal('true');
+    });
+
+    it('restores the persisted minimap preference on connect', async () => {
+      localStorage.setItem('leviathan-graph-minimap', 'false');
+      const el = await renderCanvas();
+
+      expect(el.shadowRoot!.querySelector('.minimap-canvas')).to.be.null;
+    });
+
+    it('maps minimap clicks to proportional scroll positions', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      // Give the minimap a deterministic size (the test container has no
+      // layout height)
+      const minimap = el.shadowRoot!.querySelector('.minimap-canvas') as HTMLCanvasElement;
+      minimap.width = 56;
+      minimap.height = 200;
+
+      const internals = el as unknown as {
+        minimapYToScrollTop(y: number): number;
+        virtualScroll: { getContentSize(): { height: number } };
+      };
+      const contentHeight = internals.virtualScroll.getContentSize().height;
+      expect(contentHeight).to.equal(500 * 22 + 40);
+
+      // Clicking the middle maps to ~half of the content height (viewport
+      // height is 0 in the unlaid-out test container)
+      const scrollTop = internals.minimapYToScrollTop(100);
+      expect(scrollTop).to.be.closeTo(contentHeight / 2, 1);
+
+      // Top and bottom clamp within the scrollable range
+      expect(internals.minimapYToScrollTop(0)).to.equal(0);
+      expect(internals.minimapYToScrollTop(200)).to.be.at.most(contentHeight);
     });
   });
 

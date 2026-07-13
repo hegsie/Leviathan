@@ -120,7 +120,7 @@ async function waitForNoSelectedNode(page: import('@playwright/test').Page): Pro
  * Uses Playwright's auto-piercing locator instead of manual shadowRoot traversal.
  */
 async function focusGraphInternalCanvas(page: import('@playwright/test').Page): Promise<void> {
-  const internalCanvas = page.locator('lv-graph-canvas canvas');
+  const internalCanvas = page.locator('lv-graph-canvas canvas[role="img"]');
   await expect(internalCanvas).toBeAttached();
   await internalCanvas.focus();
 }
@@ -160,7 +160,7 @@ test.describe('Commit Graph', () => {
   test('graph canvas should be the main content area', async () => {
     await app.waitForReady();
     await expect(graph.canvas).toBeVisible();
-    const canvasElement = graph.canvas.locator('canvas');
+    const canvasElement = graph.canvas.locator('canvas[role="img"]');
     await expect(canvasElement).toBeAttached();
   });
 });
