@@ -1106,6 +1106,8 @@ export class LvGraphCanvas extends LitElement {
         if (totalResult.success && typeof totalResult.data === 'number') {
           this.commitTotal = totalResult.data;
           this.hasMoreCommits = this.totalLoadedCommits < totalResult.data;
+          // Grow the scrollbar to span the full history
+          this.updateVirtualTotalRows();
         }
       });
       // Cache this page so switching back to the tab renders instantly
@@ -1192,14 +1194,21 @@ export class LvGraphCanvas extends LitElement {
     } finally {
       this.isLoadingMore = false;
     }
+
+    // The scrollbar spans the FULL history, so the user may have scrolled
+    // far past the loaded rows — keep loading pages until the viewport is
+    // caught up (each call loads one batch, then re-checks)
+    this.checkLoadMore();
   }
 
   private checkLoadMore(): void {
     if (!this.virtualScroll || !this.hasMoreCommits || this.isLoadingMore) return;
-    const contentSize = this.virtualScroll.getContentSize();
     const scrollTop = this.scrollState?.getScroll().scrollTop ?? 0;
     const viewportHeight = this.containerEl?.clientHeight ?? 0;
-    if (contentSize.height - (scrollTop + viewportHeight) < 500) {
+    // Distance from the bottom of the viewport to the end of the LOADED
+    // rows (the content height itself now spans the full history)
+    const loadedBottom = this.PADDING + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
+    if (loadedBottom - (scrollTop + viewportHeight) < 500) {
       this.loadMoreCommits();
     }
   }
@@ -1387,8 +1396,8 @@ export class LvGraphCanvas extends LitElement {
     this.virtualScroll?.setAuthorEmails(authorEmails);
     this.virtualScroll?.setPullRequests(this.pullRequestsByCommit);
 
-    // Update scroll content size
-    this.updateScrollContentSize();
+    // Update scroll content size (spans the full history when unfiltered)
+    this.updateVirtualTotalRows();
 
     // Build spatial index (once per layout — scroll-independent)
     this.buildSpatialIndex();
@@ -1525,6 +1534,20 @@ export class LvGraphCanvas extends LitElement {
         // spinner never sticks for the new repo
       }
     }
+  }
+
+  /**
+   * Make the scrollable area span the TRUE history length (not just the
+   * loaded rows) so the scrollbar is honest about repo size. Only when the
+   * graph is unfiltered — a branch filter or search changes which commits
+   * are shown, so the backend total no longer matches the row count.
+   */
+  private updateVirtualTotalRows(): void {
+    const unfiltered = this.hiddenBranches.size === 0 && !this.hasActiveSearch();
+    this.virtualScroll?.setVirtualTotalRows(
+      unfiltered && this.hasMoreCommits ? this.commitTotal : null
+    );
+    this.updateScrollContentSize();
   }
 
   private updateScrollContentSize(): void {

@@ -184,9 +184,11 @@ describe('lv-graph-canvas', () => {
   beforeEach(() => {
     clearHistory();
     setupDefaultMocks();
-    // Clear localStorage for branch visibility tests
+    // Clear persisted graph settings so tests don't leak into each other
     try {
       localStorage.removeItem(`leviathan-hidden-branches-${REPO_PATH}`);
+      localStorage.removeItem('leviathan-graph-zoom');
+      localStorage.removeItem('leviathan-graph-optional-columns');
     } catch {
       // Ignore
     }
@@ -1125,6 +1127,58 @@ describe('lv-graph-canvas', () => {
       const appended = internals.sortedNodesByRow[3];
       expect(appended.oid).to.equal(commitD.oid);
       expect(appended.lane).to.equal(0);
+    });
+  });
+
+  describe('full-history scrollbar', () => {
+    it('sizes the scroll area to the full history, not just the loaded rows', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      const content = el.shadowRoot!.querySelector('.scroll-content') as HTMLDivElement;
+      // 500 virtual rows at 22px + 2x20px padding
+      expect(content.style.height).to.equal(`${500 * 22 + 40}px`);
+    });
+
+    it('keeps the loaded height once everything is loaded', async () => {
+      setupDefaultMocks({ total: 3 });
+      const el = await renderCanvas();
+
+      const content = el.shadowRoot!.querySelector('.scroll-content') as HTMLDivElement;
+      expect(content.style.height).to.equal(`${3 * 22 + 40}px`);
+    });
+
+    it('uses the filtered row count while a branch filter is active', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      // Hiding a branch makes the backend total meaningless for row math
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      const content = el.shadowRoot!.querySelector('.scroll-content') as HTMLDivElement;
+      const internals = el as unknown as { sortedNodesByRow: unknown[] };
+      expect(content.style.height).to.equal(
+        `${internals.sortedNodesByRow.length * 22 + 40}px`
+      );
+    });
+
+    it('loads more pages when scrolled past the loaded rows', async () => {
+      setupDefaultMocks({ total: 500, moreCommits: makeMoreCommits(3, 100) });
+      const el = await renderCanvas();
+      clearHistory();
+
+      // Scroll deep into the unloaded region — the catch-up loader kicks in
+      const internals = el as unknown as {
+        scrollState: { setScroll(top: number, left: number): void };
+      };
+      internals.scrollState.setScroll(400 * 22, 0);
+      await new Promise((r) => setTimeout(r, 100));
+
+      const catchUpLoads = findCommands('get_commit_history').filter(
+        (c) => ((c.args as { skip?: number } | undefined)?.skip ?? 0) > 0
+      );
+      expect(catchUpLoads.length).to.be.greaterThan(0);
     });
   });
 

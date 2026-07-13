@@ -86,6 +86,7 @@ const DEFAULT_CONFIG: VirtualScrollConfig = {
 export class VirtualScrollManager {
   private config: VirtualScrollConfig;
   private layout: GraphLayout | null = null;
+  private virtualTotalRows: number | null = null;
   private nodesByRow: Map<number, LayoutNode[]> = new Map();
   // Edges sorted by their min row so visibility queries can early-exit —
   // numeric fields instead of parsed string keys
@@ -135,6 +136,21 @@ export class VirtualScrollManager {
   }
 
   /**
+   * Rows not yet loaded but known to exist (true history total). When set,
+   * the content height covers them so the scrollbar reflects the real
+   * history length; scrolling into the unloaded region is the caller's cue
+   * to load more pages.
+   */
+  setVirtualTotalRows(totalRows: number | null): void {
+    this.virtualTotalRows = totalRows;
+  }
+
+  private effectiveTotalRows(): number {
+    const loaded = this.layout?.totalRows ?? 0;
+    return Math.max(loaded, this.virtualTotalRows ?? 0);
+  }
+
+  /**
    * Build row-based indices for fast lookup
    */
   private buildIndices(): void {
@@ -175,7 +191,7 @@ export class VirtualScrollManager {
     const width =
       (this.layout.maxLane + 1) * this.config.laneWidth + this.config.padding * 2;
     const height =
-      this.layout.totalRows * this.config.rowHeight + this.config.padding * 2;
+      this.effectiveTotalRows() * this.config.rowHeight + this.config.padding * 2;
 
     return { width, height };
   }

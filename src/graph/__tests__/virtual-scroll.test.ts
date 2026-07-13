@@ -120,3 +120,55 @@ describe('ScrollStateManager', () => {
     manager.destroy();
   });
 });
+
+describe('VirtualScrollManager virtual total rows', () => {
+  const ROW_HEIGHT = 22;
+  const PADDING = 20;
+
+  function makeManager(loadedRows: number): VirtualScrollManager {
+    const manager = new VirtualScrollManager({
+      rowHeight: ROW_HEIGHT,
+      laneWidth: 14,
+      padding: PADDING,
+      overscanRows: 2,
+    });
+    manager.setLayout(assignLanes(makeChain(loadedRows)));
+    return manager;
+  }
+
+  it('extends the content height to the virtual total', () => {
+    const manager = makeManager(10);
+    expect(manager.getContentSize().height).to.equal(10 * ROW_HEIGHT + PADDING * 2);
+
+    manager.setVirtualTotalRows(500);
+    expect(manager.getContentSize().height).to.equal(500 * ROW_HEIGHT + PADDING * 2);
+  });
+
+  it('never shrinks below the loaded rows', () => {
+    const manager = makeManager(10);
+    manager.setVirtualTotalRows(5); // stale/smaller total
+    expect(manager.getContentSize().height).to.equal(10 * ROW_HEIGHT + PADDING * 2);
+  });
+
+  it('clearing the virtual total restores the loaded height', () => {
+    const manager = makeManager(10);
+    manager.setVirtualTotalRows(500);
+    manager.setVirtualTotalRows(null);
+    expect(manager.getContentSize().height).to.equal(10 * ROW_HEIGHT + PADDING * 2);
+  });
+
+  it('does not render rows in the unloaded region', () => {
+    const manager = makeManager(10);
+    manager.setVirtualTotalRows(500);
+
+    // Viewport scrolled deep into the unloaded region
+    const data = manager.getRenderData({
+      scrollTop: 300 * ROW_HEIGHT,
+      scrollLeft: 0,
+      width: 800,
+      height: 10 * ROW_HEIGHT,
+    });
+    expect(data.nodes).to.have.length(0);
+    expect(data.edges).to.have.length(0);
+  });
+});
