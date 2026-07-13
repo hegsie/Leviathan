@@ -500,3 +500,72 @@ describe('appendLanes', () => {
     expect(() => appendLanes(layout, [makeCommit('x', [], 1)])).to.throw();
   });
 });
+
+describe('appendLanes lane continuation collisions', () => {
+  /** Fails if any same-lane edge passes straight through an unrelated node */
+  function assertNoEdgeThroughNode(layout: ReturnType<typeof assignLanes>): void {
+    for (const edge of layout.edges) {
+      if (edge.fromLane !== edge.toLane) continue;
+      const minRow = Math.min(edge.fromRow, edge.toRow);
+      const maxRow = Math.max(edge.fromRow, edge.toRow);
+      for (const node of layout.nodes.values()) {
+        if (node.oid === edge.fromOid || node.oid === edge.toOid) continue;
+        expect(
+          node.lane === edge.fromLane && node.row > minRow && node.row < maxRow,
+          `edge ${edge.fromOid}->${edge.toOid} in lane ${edge.fromLane} passes through ${node.oid} at row ${node.row}`
+        ).to.be.false;
+      }
+    }
+  }
+
+  it('does not route two continuations of a time-shared lane into the same lane', () => {
+    // Page 1: A and B both branch off the mainline; each one's parent is
+    // beyond the window, so each released its lane and they time-share
+    // lane 1 at different rows
+    const page1 = [
+      makeCommit('m0', ['m1'], 9000),
+      makeCommit('A', ['pA'], 8500),
+      makeCommit('m1', ['m2'], 8000),
+      makeCommit('B', ['pB'], 7500),
+      makeCommit('m2', ['pM'], 7000),
+    ];
+    const layout = assignLanes(page1, { headOid: 'm0' });
+    expect(layout.nodes.get('A')!.lane).to.equal(layout.nodes.get('B')!.lane);
+
+    // Page 2: both parents arrive. Only ONE continuation may keep the
+    // shared lane; the other must take a free lane or its edge would be a
+    // straight line THROUGH the other branch's commit
+    appendLanes(layout, [
+      makeCommit('pA', [], 3000),
+      makeCommit('pB', [], 2000),
+      makeCommit('pM', [], 1000),
+    ]);
+
+    expect(layout.nodes.get('pA')!.lane).to.not.equal(layout.nodes.get('pB')!.lane);
+    assertNoEdgeThroughNode(layout);
+
+    // Both continuations keep their branch line's COLOR even when re-laned
+    expect(layout.nodes.get('pA')!.colorIndex).to.equal(layout.nodes.get('A')!.colorIndex);
+    expect(layout.nodes.get('pB')!.colorIndex).to.equal(layout.nodes.get('B')!.colorIndex);
+    // Mainline continuation unaffected
+    expect(layout.nodes.get('pM')!.lane).to.equal(0);
+  });
+
+  it('still inherits the lane for an uncontested continuation', () => {
+    const page1 = [
+      makeCommit('m0', ['m1'], 9000),
+      makeCommit('side', ['pSide'], 8500),
+      makeCommit('m1', ['pM'], 8000),
+    ];
+    const layout = assignLanes(page1, { headOid: 'm0' });
+    const sideLane = layout.nodes.get('side')!.lane;
+
+    appendLanes(layout, [
+      makeCommit('pSide', [], 2000),
+      makeCommit('pM', [], 1000),
+    ]);
+
+    expect(layout.nodes.get('pSide')!.lane).to.equal(sideLane);
+    assertNoEdgeThroughNode(layout);
+  });
+});

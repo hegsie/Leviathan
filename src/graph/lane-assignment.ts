@@ -405,8 +405,19 @@ function layoutInto(
           if (childNode.lane === 0 && reservedLanes > 0) {
             continue;
           }
-          lane = childNode.lane;
+          // The branch COLOR always continues through this commit
           colorIndex = childNode.colorIndex;
+          // ...but the LANE only continues when no OTHER line claimed it.
+          // Two boundary commits can time-share a lane in an earlier page
+          // (each released it when its parent was beyond the window); when
+          // both parents arrive later, inheriting unconditionally would put
+          // both continuations in that lane and draw one branch's edge
+          // straight through the other's commits. The loser keeps its color
+          // and takes a free lane — its edge routes diagonally instead.
+          const occupant = lanes[childNode.lane];
+          if (occupant == null || occupant === childOid) {
+            lane = childNode.lane;
+          }
           break;
         }
       }
