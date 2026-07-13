@@ -34,14 +34,19 @@ fn walk_cache() -> &'static Mutex<HashMap<String, WalkCache>> {
 fn refs_snapshot(repo: &git2::Repository) -> (u64, Vec<git2::Oid>) {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut tips: Vec<git2::Oid> = Vec::new();
+
+    // HEAD is a pseudo-ref that references() does NOT enumerate. It must be
+    // a walk tip too: commits created on a detached HEAD are reachable from
+    // nothing else and would otherwise vanish from the graph and the total.
     if let Ok(head) = repo.head() {
         head.name().unwrap_or("").hash(&mut hasher);
         if let Some(oid) = head.target() {
             oid.as_bytes().hash(&mut hasher);
+            tips.push(oid);
         }
     }
 
-    let mut tips: Vec<git2::Oid> = Vec::new();
     if let Ok(refs) = repo.references() {
         for reference in refs.flatten() {
             reference.name().unwrap_or("").hash(&mut hasher);
@@ -1544,6 +1549,27 @@ mod tests {
             .unwrap();
         assert_eq!(after.len(), 3);
         assert_eq!(after[0].summary, "Third");
+        assert_eq!(get_commit_total(repo.path_str()).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_commit_history_includes_detached_head_commits() {
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid();
+        repo.create_commit("On branch", &[("a.txt", "a")]);
+
+        // Detach HEAD at the older commit and commit while detached — the
+        // new commit is reachable ONLY from HEAD, not from any ref
+        repo.repo().set_head_detached(base).unwrap();
+        let detached = repo.create_commit("Detached work", &[("d.txt", "d")]);
+
+        let commits = get_commit_history(repo.path_str(), None, Some(100), None, Some(true))
+            .await
+            .unwrap();
+        assert!(
+            commits.iter().any(|c| c.oid == detached.to_string()),
+            "detached-HEAD commit must appear in the all-branches walk"
+        );
         assert_eq!(get_commit_total(repo.path_str()).await.unwrap(), 3);
     }
 

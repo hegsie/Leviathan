@@ -1618,9 +1618,24 @@ export class LvGraphCanvas extends LitElement {
       this.statsDebounceTimer = null;
       // Check if repo is still the same before fetching
       if (this.repositoryPath === repoPath) {
-        this.fetchVisibleCommitData();
+        this.queueDataFetch(() => this.fetchVisibleCommitData());
       }
     }, 300);
+  }
+
+  // All stats/signature fetches run through this queue. The fetched-OID
+  // marker sets are claimed synchronously at fetch START (to dedupe), so a
+  // consumer that needs the DATA (e.g. export) must not race a fetch that
+  // has claimed OIDs but hasn't resolved — serializing the jobs makes
+  // "claimed by a completed job" equivalent to "data present or unclaimed
+  // again after failure".
+  private dataFetchQueue: Promise<void> = Promise.resolve();
+
+  private queueDataFetch(job: () => Promise<void>): Promise<void> {
+    const run = this.dataFetchQueue.then(job, job);
+    // Keep the chain alive even if a job rejects
+    this.dataFetchQueue = run.catch(() => undefined);
+    return run;
   }
 
   /**
@@ -2881,30 +2896,39 @@ export class LvGraphCanvas extends LitElement {
   public async exportAsImage(): Promise<void> {
     if (!this.renderer || !this.virtualScroll || !this.layout) return;
     const repoPath = this.repositoryPath;
+    // Close the menu immediately — the data fill below is async and leaving
+    // the item clickable would allow overlapping exports
+    this.showExportMenu = false;
 
     // Viewport-lazy fetching may not have covered all loaded rows yet — the
     // export renders EVERY loaded row, so fill in missing stats/signature
-    // data first or unscrolled rows would export with blank stats columns
+    // data first or unscrolled rows would export with blank stats columns.
+    // Queued behind any in-flight fetch: the marker sets are claimed at
+    // fetch START, so checking them outside the queue could skip OIDs that
+    // are claimed but whose data hasn't arrived yet.
     const allOids = [...this.layout.nodes.keys()];
-    const missingStats = allOids.filter((oid) => !this.statsFetchedOids.has(oid));
-    const missingSignatures = allOids.filter((oid) => !this.signaturesFetchedOids.has(oid));
-    if (missingStats.length > 0 || missingSignatures.length > 0) {
-      this.isLoadingStats = true;
-      try {
+    this.isLoadingStats = true;
+    try {
+      await this.queueDataFetch(async () => {
+        const missingStats = allOids.filter((oid) => !this.statsFetchedOids.has(oid));
+        const missingSignatures = allOids.filter(
+          (oid) => !this.signaturesFetchedOids.has(oid)
+        );
+        if (missingStats.length === 0 && missingSignatures.length === 0) return;
         await this.fetchCommitDataBatches(repoPath, missingStats, missingSignatures);
-        if (this.repositoryPath === repoPath) {
-          this.renderer.setCommitStats(this.commitStatsMap);
-          this.renderer.setCommitSignatures(this.commitSignaturesMap);
-        }
-      } finally {
-        if (this.repositoryPath === repoPath) {
-          this.isLoadingStats = false;
-        }
+      });
+      if (this.repositoryPath === repoPath) {
+        this.renderer.setCommitStats(this.commitStatsMap);
+        this.renderer.setCommitSignatures(this.commitSignaturesMap);
       }
-      // The repository changed while fetching — abort the export
-      if (this.repositoryPath !== repoPath || !this.layout) {
-        return;
+    } finally {
+      if (this.repositoryPath === repoPath) {
+        this.isLoadingStats = false;
       }
+    }
+    // The repository changed while fetching — abort the export
+    if (this.repositoryPath !== repoPath || !this.layout) {
+      return;
     }
 
     const contentSize = this.virtualScroll.getContentSize();

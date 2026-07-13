@@ -1606,6 +1606,55 @@ describe('lv-graph-canvas', () => {
       expect(internals.statsFetchedOids.size).to.equal(300);
     });
 
+    it('PNG export waits for an in-flight stats fetch instead of skipping claimed OIDs', async () => {
+      const manyCommits = makeMoreCommits(150, 0);
+
+      // Stall every stats fetch until released
+      let releaseStats: (() => void) | null = null;
+      const stallGate = new Promise<void>((r) => {
+        releaseStats = () => r();
+      });
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_commit_history':
+            return manyCommits;
+          case 'get_commit_total':
+            return 150;
+          case 'get_refs_by_commit':
+            return {};
+          case 'detect_github_repo':
+            return null;
+          case 'get_commits_stats': {
+            await stallGate;
+            const oids = (args as { commitOids: string[] }).commitOids;
+            return oids.map((oid) => ({ oid, additions: 1, deletions: 1, filesChanged: 1 }));
+          }
+          case 'get_commits_signatures':
+            return [];
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderCanvas();
+      // Let the debounced visible fetch start (it claims OIDs, then stalls)
+      await new Promise((r) => setTimeout(r, 400));
+
+      const internals = el as unknown as {
+        exportAsImage(): Promise<void>;
+        commitStatsMap: Map<string, unknown>;
+      };
+      const exportDone = internals.exportAsImage();
+
+      // Release the stalled fetches; the export must wait for the data
+      releaseStats!();
+      await exportDone;
+
+      // Every loaded commit has stats after the export — none skipped
+      // because another fetch had merely CLAIMED them
+      expect(internals.commitStatsMap.size).to.equal(150);
+    });
+
     it('does not refetch stats for already-fetched commits', async () => {
       setupDefaultMocks();
       const el = await renderCanvas();
