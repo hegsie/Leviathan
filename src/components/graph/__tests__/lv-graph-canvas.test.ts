@@ -1336,27 +1336,49 @@ describe('lv-graph-canvas', () => {
       setupDefaultMocks({ total: 500 });
       const el = await renderCanvas();
 
-      // Give the minimap a deterministic size (the test container has no
-      // layout height)
-      const minimap = el.shadowRoot!.querySelector('.minimap-canvas') as HTMLCanvasElement;
-      minimap.width = 56;
-      minimap.height = 200;
+      // Give the component real layout height so the minimap has a size
+      el.style.height = '228px';
+      await new Promise((r) => setTimeout(r, 30));
+      (el as unknown as { resizeMinimap(): void }).resizeMinimap();
 
       const internals = el as unknown as {
         minimapYToScrollTop(y: number): number;
+        getMinimapCssSize(): { width: number; height: number };
         virtualScroll: { getContentSize(): { height: number } };
+        containerEl: HTMLElement;
       };
+      const cssHeight = internals.getMinimapCssSize().height;
+      expect(cssHeight).to.be.greaterThan(0);
+
       const contentHeight = internals.virtualScroll.getContentSize().height;
       expect(contentHeight).to.equal(500 * 22 + 40);
+      const viewportHeight = internals.containerEl.clientHeight;
 
-      // Clicking the middle maps to ~half of the content height (viewport
-      // height is 0 in the unlaid-out test container)
-      const scrollTop = internals.minimapYToScrollTop(100);
-      expect(scrollTop).to.be.closeTo(contentHeight / 2, 1);
+      // Clicking the middle centers the viewport around the midpoint
+      const scrollTop = internals.minimapYToScrollTop(cssHeight / 2);
+      expect(scrollTop).to.be.closeTo(contentHeight / 2 - viewportHeight / 2, 2);
 
       // Top and bottom clamp within the scrollable range
       expect(internals.minimapYToScrollTop(0)).to.equal(0);
-      expect(internals.minimapYToScrollTop(200)).to.be.at.most(contentHeight);
+      expect(internals.minimapYToScrollTop(cssHeight)).to.be.at.most(contentHeight);
+    });
+
+    it('scales the minimap backing store by devicePixelRatio', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      el.style.height = '228px';
+      await new Promise((r) => setTimeout(r, 30));
+      (el as unknown as { resizeMinimap(): void }).resizeMinimap();
+
+      const internals = el as unknown as {
+        getMinimapCssSize(): { width: number; height: number };
+      };
+      const cssSize = internals.getMinimapCssSize();
+      const minimap = el.shadowRoot!.querySelector('.minimap-canvas') as HTMLCanvasElement;
+      const dpr = window.devicePixelRatio || 1;
+      expect(minimap.width).to.equal(Math.round(cssSize.width * dpr));
+      expect(minimap.height).to.equal(Math.round(cssSize.height * dpr));
     });
   });
 

@@ -666,12 +666,19 @@ export class CanvasRenderer {
     }
   }
 
+  /** Minimum usable commit-message width before optional columns yield */
+  private static readonly MIN_MESSAGE_WIDTH = 160;
+
   /**
    * X positions of the right-aligned columns (time, stats, and the optional
    * date/author columns), plus the right edge available to the message
    * column. Shared by headers, row rendering, and resize-handle placement.
+   *
+   * When `messageColumnX` is provided, an optional column is only reserved
+   * if the message column keeps a usable width — on narrow windows the
+   * author/date columns yield rather than squeezing the message to nothing.
    */
-  private getRightColumnLayout(): {
+  private getRightColumnLayout(messageColumnX?: number): {
     timeColumnX: number;
     timeColumnWidth: number;
     statsColumnX: number;
@@ -687,16 +694,26 @@ export class CanvasRenderer {
     const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
     const statsColumnX = timeColumnX - statsColumnWidth - 8;
 
+    const fitsMessage = (edge: number): boolean =>
+      messageColumnX === undefined ||
+      edge - 8 - messageColumnX >= CanvasRenderer.MIN_MESSAGE_WIDTH;
+
     let cursor = statsColumnX;
     let dateColumnX: number | null = null;
     if (this.config.showDateColumn) {
-      dateColumnX = cursor - CanvasRenderer.DATE_COLUMN_WIDTH - 8;
-      cursor = dateColumnX;
+      const candidate = cursor - CanvasRenderer.DATE_COLUMN_WIDTH - 8;
+      if (fitsMessage(candidate)) {
+        dateColumnX = candidate;
+        cursor = candidate;
+      }
     }
     let authorColumnX: number | null = null;
     if (this.config.showAuthorColumn) {
-      authorColumnX = cursor - CanvasRenderer.AUTHOR_COLUMN_WIDTH - 8;
-      cursor = authorColumnX;
+      const candidate = cursor - CanvasRenderer.AUTHOR_COLUMN_WIDTH - 8;
+      if (fitsMessage(candidate)) {
+        authorColumnX = candidate;
+        cursor = candidate;
+      }
     }
 
     return {
@@ -871,10 +888,14 @@ export class CanvasRenderer {
     const avatarColumnX = graphEndX + 20;
     const avatarSize = 22;
     const messageColumnX = avatarColumnX + avatarSize + 12;
+    // Rows start the message AFTER the refs column — the optional-column
+    // drop decision must use the same origin as renderRefLabels or headers
+    // and cells could disagree about which columns exist
+    const rowMessageColumnX = avatarColumnX + avatarSize + 8 + config.refsColumnWidth + 12;
 
     // Right-aligned columns (use config values)
     const { timeColumnX, timeColumnWidth, statsColumnX, dateColumnX, authorColumnX } =
-      this.getRightColumnLayout();
+      this.getRightColumnLayout(rowMessageColumnX);
     const statsColumnWidth = config.statsColumnWidth;
 
     // Draw header background
@@ -1234,7 +1255,7 @@ export class CanvasRenderer {
       dateColumnX,
       authorColumnX,
       messageRightEdge,
-    } = this.getRightColumnLayout();
+    } = this.getRightColumnLayout(messageColumnX);
     const statsColumnWidth = config.statsColumnWidth;
 
     // Message column fills space up to the first right-aligned column

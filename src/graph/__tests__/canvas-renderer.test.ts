@@ -348,6 +348,41 @@ describe('CanvasRenderer optional columns', () => {
     renderer.destroy();
   });
 
+  it('drops optional columns instead of squeezing the message on narrow canvases', () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 900;
+    canvas.height = 100;
+    const renderer = new CanvasRenderer(canvas, {
+      showAuthorColumn: true,
+      showDateColumn: true,
+    });
+    const internals = renderer as unknown as ColumnInternals & {
+      getRightColumnLayout(messageColumnX?: number): {
+        statsColumnX: number;
+        dateColumnX: number | null;
+        authorColumnX: number | null;
+        messageRightEdge: number;
+      };
+    };
+
+    // Plenty of room: both columns reserved
+    const roomy = internals.getRightColumnLayout(100);
+    expect(roomy.dateColumnX).to.be.a('number');
+    expect(roomy.authorColumnX).to.be.a('number');
+
+    // Message starts late: the author column yields first
+    const tight = internals.getRightColumnLayout(450);
+    expect(tight.dateColumnX).to.be.a('number');
+    expect(tight.authorColumnX).to.be.null;
+
+    // Tighter still: both optional columns yield, message keeps its width
+    const cramped = internals.getRightColumnLayout(620);
+    expect(cramped.dateColumnX).to.be.null;
+    expect(cramped.authorColumnX).to.be.null;
+    expect(cramped.messageRightEdge - 620).to.be.at.least(0);
+    renderer.destroy();
+  });
+
   it('formats and caches absolute dates', () => {
     const renderer = makeRenderer();
     const internals = renderer as unknown as ColumnInternals;

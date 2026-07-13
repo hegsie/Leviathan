@@ -799,6 +799,10 @@ export class LvGraphCanvas extends LitElement {
 
     this.renderer?.markDirty();
     this.scheduleRender();
+    // zoomLevel is not a reactive property, but the DOM resize handles are
+    // positioned from renderer config inside render() — re-render so their
+    // hit targets track the new column boundaries
+    this.requestUpdate();
   }
 
   async firstUpdated(): Promise<void> {
@@ -843,6 +847,13 @@ export class LvGraphCanvas extends LitElement {
       // only after its IPC round-trip — the cached render is synchronous.
       this.matchedCommitOids.clear();
       this.renderer?.setHighlightedCommits(this.matchedCommitOids);
+
+      // Keyboard navigation and the SR mirror must not act on the previous
+      // repo's rows during the load gap (an arrow key would select a node
+      // whose commit no longer exists in realCommits)
+      this.sortedNodesByRow = [];
+      this.mirrorNodes = [];
+      this.lastMirrorKey = '';
 
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
@@ -1691,7 +1702,11 @@ export class LvGraphCanvas extends LitElement {
           if (elapsed < MIN_LOADING_DISPLAY_MS) {
             await new Promise(resolve => setTimeout(resolve, MIN_LOADING_DISPLAY_MS - elapsed));
           }
-          this.isLoadingStats = false;
+          // Re-check AFTER the delay: a repo switch during it means the
+          // spinner now belongs to the NEW repo's fetch and must stay on
+          if (this.repositoryPath === repoPath) {
+            this.isLoadingStats = false;
+          }
         }
         // A repo switch mid-fetch resets the flag in willUpdate, so the
         // spinner never sticks for the new repo
@@ -1723,10 +1738,22 @@ export class LvGraphCanvas extends LitElement {
     return Math.max(1, loaded, virtual);
   }
 
+  /** CSS-pixel size of the minimap (backing store is DPR-scaled) */
+  private getMinimapCssSize(): { width: number; height: number } {
+    const height = this.containerEl
+      ? Math.max(0, this.containerEl.clientHeight - this.HEADER_HEIGHT)
+      : 0;
+    return { width: this.MINIMAP_WIDTH, height };
+  }
+
   private resizeMinimap(): void {
     if (!this.minimapEl || !this.containerEl) return;
-    this.minimapEl.width = this.MINIMAP_WIDTH;
-    this.minimapEl.height = Math.max(0, this.containerEl.clientHeight - this.HEADER_HEIGHT);
+    // DPR-scaled backing store so the minimap is crisp on HiDPI displays
+    // (drawing code works in CSS pixels via a scaled transform)
+    const dpr = window.devicePixelRatio || 1;
+    const { width, height } = this.getMinimapCssSize();
+    this.minimapEl.width = Math.round(width * dpr);
+    this.minimapEl.height = Math.round(height * dpr);
   }
 
   /**
@@ -1738,15 +1765,16 @@ export class LvGraphCanvas extends LitElement {
   private rebuildMinimapDots(): void {
     if (!this.showMinimap || !this.minimapEl || !this.layout) return;
 
-    const width = this.minimapEl.width;
-    const height = this.minimapEl.height;
+    const dpr = window.devicePixelRatio || 1;
+    const { width, height } = this.getMinimapCssSize();
     if (width === 0 || height === 0) return;
 
     const dots = document.createElement('canvas');
-    dots.width = width;
-    dots.height = height;
+    dots.width = Math.round(width * dpr);
+    dots.height = Math.round(height * dpr);
     const ctx = dots.getContext('2d');
     if (!ctx) return;
+    ctx.scale(dpr, dpr);
 
     const theme = getThemeFromCSS();
     const totalRows = this.getMinimapTotalRows();
@@ -1770,12 +1798,13 @@ export class LvGraphCanvas extends LitElement {
     const ctx = this.minimapEl.getContext('2d');
     if (!ctx) return;
 
-    const width = this.minimapEl.width;
-    const height = this.minimapEl.height;
+    const dpr = window.devicePixelRatio || 1;
+    const { width, height } = this.getMinimapCssSize();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
 
     if (this.minimapDots) {
-      ctx.drawImage(this.minimapDots, 0, 0);
+      ctx.drawImage(this.minimapDots, 0, 0, width, height);
     }
 
     // Viewport indicator
@@ -1796,10 +1825,10 @@ export class LvGraphCanvas extends LitElement {
     ctx.globalAlpha = 1.0;
   }
 
-  /** Map a minimap Y coordinate to a scrollTop (viewport centered on it) */
+  /** Map a minimap Y coordinate (CSS px) to a scrollTop (viewport centered) */
   private minimapYToScrollTop(y: number): number {
     if (!this.minimapEl || !this.virtualScroll) return 0;
-    const height = this.minimapEl.height;
+    const height = this.getMinimapCssSize().height;
     if (height <= 0) return 0;
     const contentHeight = this.virtualScroll.getContentSize().height;
     const viewport = this.getViewport();
@@ -3318,7 +3347,7 @@ export class LvGraphCanvas extends LitElement {
           ${this.showExportMenu ? this.renderExportMenu() : ''}
           ${this.showColumnsMenu ? this.renderColumnsMenu() : ''}
 
-          <div class="sr-only" role="listbox" aria-label="Commits">
+          <div class="sr-only" role="listbox" aria-label="Commits" aria-multiselectable="true">
             ${this.mirrorNodes.map((node) => {
               const commit = this.realCommits.get(node.oid);
               return html`
