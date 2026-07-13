@@ -313,6 +313,52 @@ describe('CanvasRenderer text truncation cache', () => {
   });
 });
 
+describe('CanvasRenderer optional columns', () => {
+  type ColumnInternals = {
+    getRightColumnLayout(): {
+      timeColumnX: number;
+      statsColumnX: number;
+      dateColumnX: number | null;
+      authorColumnX: number | null;
+      messageRightEdge: number;
+    };
+    formatAbsoluteDate(timestamp: number): string;
+  };
+
+  it('reserves no space for author/date when disabled', () => {
+    const renderer = makeRenderer();
+    const layout = (renderer as unknown as ColumnInternals).getRightColumnLayout();
+
+    expect(layout.authorColumnX).to.be.null;
+    expect(layout.dateColumnX).to.be.null;
+    expect(layout.messageRightEdge).to.equal(layout.statsColumnX - 8);
+    renderer.destroy();
+  });
+
+  it('places author and date columns left of the stats column when enabled', () => {
+    const renderer = makeRenderer({ showAuthorColumn: true, showDateColumn: true });
+    const layout = (renderer as unknown as ColumnInternals).getRightColumnLayout();
+
+    expect(layout.dateColumnX).to.be.a('number');
+    expect(layout.authorColumnX).to.be.a('number');
+    expect(layout.dateColumnX!).to.be.lessThan(layout.statsColumnX);
+    expect(layout.authorColumnX!).to.be.lessThan(layout.dateColumnX!);
+    // Message space shrinks to end before the author column
+    expect(layout.messageRightEdge).to.equal(layout.authorColumnX! - 8);
+    renderer.destroy();
+  });
+
+  it('formats and caches absolute dates', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as ColumnInternals;
+
+    const first = internals.formatAbsoluteDate(1700000000);
+    expect(first).to.be.a('string').and.to.not.equal('');
+    expect(internals.formatAbsoluteDate(1700000000)).to.equal(first);
+    renderer.destroy();
+  });
+});
+
 describe('CanvasRenderer merge edge dashing', () => {
   it('draws merge edges dashed and first-parent edges solid', () => {
     const renderer = makeRenderer();

@@ -504,6 +504,12 @@ export class LvGraphCanvas extends LitElement {
   // Export
   @state() private showExportMenu = false;
 
+  // Optional columns (author name, absolute date)
+  @state() private showColumnsMenu = false;
+  @state() private showAuthorColumn = false;
+  @state() private showDateColumn = false;
+  private readonly OPTIONAL_COLUMNS_KEY = 'leviathan-graph-optional-columns';
+
   // Infinite scroll pagination
   @state() private isLoadingMore = false;
   @state() private hasMoreCommits = true;
@@ -595,6 +601,47 @@ export class LvGraphCanvas extends LitElement {
     this.loadColumnWidths();
     this.loadHiddenBranches();
     this.loadZoomLevel();
+    this.loadOptionalColumns();
+  }
+
+  private loadOptionalColumns(): void {
+    try {
+      const saved = localStorage.getItem(this.OPTIONAL_COLUMNS_KEY);
+      if (saved) {
+        const { author, date } = JSON.parse(saved);
+        this.showAuthorColumn = author === true;
+        this.showDateColumn = date === true;
+      }
+    } catch {
+      // Ignore parse errors, keep defaults
+    }
+  }
+
+  private saveOptionalColumns(): void {
+    try {
+      localStorage.setItem(
+        this.OPTIONAL_COLUMNS_KEY,
+        JSON.stringify({ author: this.showAuthorColumn, date: this.showDateColumn })
+      );
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  /** Toggle the optional author/date columns */
+  public toggleOptionalColumn(column: 'author' | 'date'): void {
+    if (column === 'author') {
+      this.showAuthorColumn = !this.showAuthorColumn;
+    } else {
+      this.showDateColumn = !this.showDateColumn;
+    }
+    this.saveOptionalColumns();
+    this.renderer?.setConfig({
+      showAuthorColumn: this.showAuthorColumn,
+      showDateColumn: this.showDateColumn,
+    });
+    this.renderer?.markDirty();
+    this.scheduleRender();
   }
 
   private loadZoomLevel(): void {
@@ -775,6 +822,8 @@ export class LvGraphCanvas extends LitElement {
         showFps: false, // We show our own FPS
         refsColumnWidth: this.refsColumnWidth,
         statsColumnWidth: this.statsColumnWidth,
+        showAuthorColumn: this.showAuthorColumn,
+        showDateColumn: this.showDateColumn,
       },
       getThemeFromCSS()
     );
@@ -2439,6 +2488,8 @@ export class LvGraphCanvas extends LitElement {
         fetchAvatars: false,
         refsColumnWidth: this.refsColumnWidth,
         statsColumnWidth: this.statsColumnWidth,
+        showAuthorColumn: this.showAuthorColumn,
+        showDateColumn: this.showDateColumn,
       },
       getThemeFromCSS()
     );
@@ -2709,6 +2760,29 @@ export class LvGraphCanvas extends LitElement {
     `;
   }
 
+  private renderColumnsMenu() {
+    return html`
+      <div class="export-menu columns-menu">
+        <label class="branch-item">
+          <input
+            type="checkbox"
+            .checked=${this.showAuthorColumn}
+            @change=${() => this.toggleOptionalColumn('author')}
+          />
+          <span class="branch-name">Author</span>
+        </label>
+        <label class="branch-item">
+          <input
+            type="checkbox"
+            .checked=${this.showDateColumn}
+            @change=${() => this.toggleOptionalColumn('date')}
+          />
+          <span class="branch-name">Date</span>
+        </label>
+      </div>
+    `;
+  }
+
   render() {
     const handlePositions = this.getResizeHandlePositions();
 
@@ -2801,9 +2875,25 @@ export class LvGraphCanvas extends LitElement {
               HEAD
             </button>
             <button
+              class="toolbar-btn ${this.showColumnsMenu ? 'active' : ''}"
+              title="Toggle optional columns"
+              @click=${() => {
+                this.showColumnsMenu = !this.showColumnsMenu;
+                this.showBranchPanel = false;
+                this.showExportMenu = false;
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                <line x1="9" y1="3" x2="9" y2="21"></line>
+                <line x1="15" y1="3" x2="15" y2="21"></line>
+              </svg>
+              Columns
+            </button>
+            <button
               class="toolbar-btn ${this.showBranchPanel ? 'active' : ''}"
               title="Toggle branch visibility"
-              @click=${() => { this.showBranchPanel = !this.showBranchPanel; this.showExportMenu = false; }}
+              @click=${() => { this.showBranchPanel = !this.showBranchPanel; this.showExportMenu = false; this.showColumnsMenu = false; }}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="6" y1="3" x2="6" y2="15"></line>
@@ -2816,7 +2906,7 @@ export class LvGraphCanvas extends LitElement {
             <button
               class="toolbar-btn ${this.showExportMenu ? 'active' : ''}"
               title="Export graph"
-              @click=${() => { this.showExportMenu = !this.showExportMenu; this.showBranchPanel = false; }}
+              @click=${() => { this.showExportMenu = !this.showExportMenu; this.showBranchPanel = false; this.showColumnsMenu = false; }}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path>
@@ -2829,6 +2919,7 @@ export class LvGraphCanvas extends LitElement {
 
           ${this.showBranchPanel ? this.renderBranchPanel() : ''}
           ${this.showExportMenu ? this.renderExportMenu() : ''}
+          ${this.showColumnsMenu ? this.renderColumnsMenu() : ''}
 
           <div class="sr-only" role="listbox" aria-label="Commits">
             ${this.mirrorNodes.map((node) => {

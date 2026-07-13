@@ -42,6 +42,10 @@ export interface RenderConfig {
   refsColumnWidth: number;
   /** Width of the stats column in pixels (default 80) */
   statsColumnWidth: number;
+  /** Show the author-name column */
+  showAuthorColumn: boolean;
+  /** Show the absolute-date column */
+  showDateColumn: boolean;
 }
 
 export interface RenderTheme {
@@ -117,6 +121,8 @@ const DEFAULT_CONFIG: RenderConfig = {
   showRefIcons: true,
   refsColumnWidth: 200,
   statsColumnWidth: 80,
+  showAuthorColumn: false,
+  showDateColumn: false,
 };
 
 /**
@@ -359,6 +365,13 @@ export class CanvasRenderer {
 
   // Header height for offsetting content
   private readonly HEADER_HEIGHT = 28;
+
+  // Optional right-aligned column widths
+  private static readonly AUTHOR_COLUMN_WIDTH = 110;
+  private static readonly DATE_COLUMN_WIDTH = 85;
+
+  // Formatted absolute dates cached per timestamp
+  private absoluteDateCache: Map<number, string> = new Map();
 
   // Avatar hitboxes for tooltip detection
   private avatarHitboxes: Array<{
@@ -654,6 +667,69 @@ export class CanvasRenderer {
   }
 
   /**
+   * X positions of the right-aligned columns (time, stats, and the optional
+   * date/author columns), plus the right edge available to the message
+   * column. Shared by headers, row rendering, and resize-handle placement.
+   */
+  private getRightColumnLayout(): {
+    timeColumnX: number;
+    timeColumnWidth: number;
+    statsColumnX: number;
+    dateColumnX: number | null;
+    authorColumnX: number | null;
+    messageRightEdge: number;
+  } {
+    const canvasWidth = this.canvas.width / this.dpr;
+    const rightPadding = 16;
+    const timeColumnWidth = 40;
+    const statsColumnWidth = this.config.statsColumnWidth;
+
+    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
+    const statsColumnX = timeColumnX - statsColumnWidth - 8;
+
+    let cursor = statsColumnX;
+    let dateColumnX: number | null = null;
+    if (this.config.showDateColumn) {
+      dateColumnX = cursor - CanvasRenderer.DATE_COLUMN_WIDTH - 8;
+      cursor = dateColumnX;
+    }
+    let authorColumnX: number | null = null;
+    if (this.config.showAuthorColumn) {
+      authorColumnX = cursor - CanvasRenderer.AUTHOR_COLUMN_WIDTH - 8;
+      cursor = authorColumnX;
+    }
+
+    return {
+      timeColumnX,
+      timeColumnWidth,
+      statsColumnX,
+      dateColumnX,
+      authorColumnX,
+      messageRightEdge: cursor - 8,
+    };
+  }
+
+  /**
+   * Format a timestamp as an absolute date (e.g. "12 Jan 25"), cached per
+   * timestamp
+   */
+  private formatAbsoluteDate(timestamp: number): string {
+    const cached = this.absoluteDateCache.get(timestamp);
+    if (cached !== undefined) return cached;
+
+    const formatted = new Date(timestamp * 1000).toLocaleDateString(undefined, {
+      day: '2-digit',
+      month: 'short',
+      year: '2-digit',
+    });
+    if (this.absoluteDateCache.size >= 5000) {
+      this.absoluteDateCache.clear();
+    }
+    this.absoluteDateCache.set(timestamp, formatted);
+    return formatted;
+  }
+
+  /**
    * Format commit stats as "+N -M" string, or special cases for no changes
    */
   private formatStats(oid: string): string | null {
@@ -789,7 +865,6 @@ export class CanvasRenderer {
 
     const headerY = this.HEADER_HEIGHT / 2;
     const canvasWidth = this.canvas.width / this.dpr;
-    const rightPadding = 16;
 
     // Calculate column positions
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
@@ -798,10 +873,9 @@ export class CanvasRenderer {
     const messageColumnX = avatarColumnX + avatarSize + 12;
 
     // Right-aligned columns (use config values)
-    const timeColumnWidth = 40;
+    const { timeColumnX, timeColumnWidth, statsColumnX, dateColumnX, authorColumnX } =
+      this.getRightColumnLayout();
     const statsColumnWidth = config.statsColumnWidth;
-    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
-    const statsColumnX = timeColumnX - statsColumnWidth - 8;
 
     // Draw header background
     ctx.fillStyle = theme.background;
@@ -820,6 +894,14 @@ export class CanvasRenderer {
     // Commit message header
     ctx.textAlign = 'left';
     ctx.fillText('COMMIT', messageColumnX, headerY);
+
+    // Optional author/date headers
+    if (authorColumnX !== null) {
+      ctx.fillText('AUTHOR', authorColumnX, headerY);
+    }
+    if (dateColumnX !== null) {
+      ctx.fillText('DATE', dateColumnX, headerY);
+    }
 
     // Stats header - center aligned in its column
     ctx.textAlign = 'center';
@@ -1135,7 +1217,6 @@ export class CanvasRenderer {
 
     // Get canvas width for responsive layout
     const canvasWidth = this.canvas.width / this.dpr;
-    const rightPadding = 16;
 
     // Calculate column positions (left to right)
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
@@ -1146,13 +1227,18 @@ export class CanvasRenderer {
     const messageColumnX = refsColumnX + refsColumnWidth + 12;
 
     // Right-aligned columns (use config values)
-    const timeColumnWidth = 40;
+    const {
+      timeColumnX,
+      timeColumnWidth,
+      statsColumnX,
+      dateColumnX,
+      authorColumnX,
+      messageRightEdge,
+    } = this.getRightColumnLayout();
     const statsColumnWidth = config.statsColumnWidth;
-    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
-    const statsColumnX = timeColumnX - statsColumnWidth - 8;
 
-    // Message column fills space up to stats column
-    const availableMessageWidth = statsColumnX - messageColumnX - 8;
+    // Message column fills space up to the first right-aligned column
+    const availableMessageWidth = messageRightEdge - messageColumnX;
 
     // Check if search highlighting is active
     const hasHighlighting = this.highlightedOids.size > 0;
@@ -1432,6 +1518,32 @@ export class CanvasRenderer {
             hiddenLabels,
           });
         }
+      }
+
+      // Render optional author column
+      if (authorColumnX !== null) {
+        ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.fillStyle = theme.textColor;
+        ctx.globalAlpha = 0.75;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        const authorName = this.truncateToWidth(
+          node.commit.author,
+          CanvasRenderer.AUTHOR_COLUMN_WIDTH
+        );
+        ctx.fillText(authorName, authorColumnX, y);
+        ctx.globalAlpha = 1.0;
+      }
+
+      // Render optional absolute-date column
+      if (dateColumnX !== null) {
+        ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.fillStyle = theme.textColor;
+        ctx.globalAlpha = 0.75;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(this.formatAbsoluteDate(node.commit.timestamp), dateColumnX, y);
+        ctx.globalAlpha = 1.0;
       }
 
       // Render stats column (right-aligned)
@@ -2027,13 +2139,7 @@ export class CanvasRenderer {
     const refsColumnX = avatarColumnX + avatarSize + 8;
     const refsColumnWidth = config.refsColumnWidth;
 
-    // Right-aligned columns
-    const canvasWidth = this.canvas.width / this.dpr;
-    const rightPadding = 16;
-    const timeColumnWidth = 40;
-    const statsColumnWidth = config.statsColumnWidth;
-    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
-    const statsColumnX = timeColumnX - statsColumnWidth - 8;
+    const { statsColumnX } = this.getRightColumnLayout();
 
     return {
       refsEnd: refsColumnX + refsColumnWidth,
@@ -2072,6 +2178,7 @@ export class CanvasRenderer {
     this.commitSignatures.clear();
     this.highlightedOids.clear();
     this.truncationCache.clear();
+    this.absoluteDateCache.clear();
   }
 }
 

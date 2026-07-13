@@ -219,7 +219,7 @@ describe('lv-graph-canvas', () => {
       expect(toolbar).to.not.be.null;
 
       const buttons = toolbar!.querySelectorAll('.toolbar-btn');
-      expect(buttons.length).to.equal(3); // HEAD, Branches, Export
+      expect(buttons.length).to.equal(4); // HEAD, Columns, Branches, Export
 
       const buttonTexts = Array.from(buttons).map((b) => b.textContent?.trim());
       expect(buttonTexts).to.include('Branches');
@@ -839,6 +839,71 @@ describe('lv-graph-canvas', () => {
   });
 
   // ── Per-repo graph cache ─────────────────────────────────────────────
+  describe('optional columns', () => {
+    beforeEach(() => {
+      try {
+        localStorage.removeItem('leviathan-graph-optional-columns');
+      } catch {
+        // Ignore
+      }
+    });
+
+    it('opens the Columns menu with author/date checkboxes', async () => {
+      const el = await renderCanvas();
+
+      const columnsBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('Columns'));
+      expect(columnsBtn).to.not.be.undefined;
+
+      columnsBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+
+      const menu = el.shadowRoot!.querySelector('.columns-menu');
+      expect(menu).to.not.be.null;
+      const checkboxes = menu!.querySelectorAll('input[type="checkbox"]');
+      expect(checkboxes.length).to.equal(2);
+      // Off by default
+      for (const cb of checkboxes) {
+        expect((cb as HTMLInputElement).checked).to.be.false;
+      }
+    });
+
+    it('toggling a column updates the renderer config and persists', async () => {
+      const el = await renderCanvas();
+
+      el.toggleOptionalColumn('author');
+      await el.updateComplete;
+
+      const renderer = (el as unknown as {
+        renderer: { getColumnWidths(): unknown } & { config?: unknown };
+      }).renderer;
+      const config = (renderer as unknown as {
+        config: { showAuthorColumn: boolean; showDateColumn: boolean };
+      }).config;
+      expect(config.showAuthorColumn).to.be.true;
+      expect(config.showDateColumn).to.be.false;
+
+      const saved = JSON.parse(localStorage.getItem('leviathan-graph-optional-columns')!);
+      expect(saved).to.deep.equal({ author: true, date: false });
+    });
+
+    it('restores persisted column visibility on connect', async () => {
+      localStorage.setItem(
+        'leviathan-graph-optional-columns',
+        JSON.stringify({ author: true, date: true })
+      );
+      const el = await renderCanvas();
+
+      const internals = el as unknown as {
+        showAuthorColumn: boolean;
+        showDateColumn: boolean;
+      };
+      expect(internals.showAuthorColumn).to.be.true;
+      expect(internals.showDateColumn).to.be.true;
+    });
+  });
+
   describe('screen-reader support', () => {
     it('mirrors the visible commits into a hidden listbox', async () => {
       setupDefaultMocks();
