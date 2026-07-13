@@ -941,7 +941,7 @@ export class AppShell extends LitElement {
   private handleShowCommitEvent = (e: Event): void => {
     const customEvent = e as CustomEvent<{ oid: string }>;
     if (customEvent.detail?.oid) {
-      this.graphCanvas?.selectCommit(customEvent.detail.oid);
+      this.revealCommitInGraph(customEvent.detail.oid);
     }
   };
 
@@ -2012,7 +2012,7 @@ export class AppShell extends LitElement {
   }
 
   private handleSelectCommit(e: CustomEvent<{ oid: string }>): void {
-    this.graphCanvas?.selectCommit(e.detail.oid);
+    this.revealCommitInGraph(e.detail.oid);
   }
 
   private async handleCheckoutBranchFromGraph(e: CustomEvent<{ branchName: string }>): Promise<void> {
@@ -2033,6 +2033,11 @@ export class AppShell extends LitElement {
   private handleCopySha(e: CustomEvent<{ sha: string }>): void {
     // Show brief feedback that SHA was copied
     showToast(`Copied SHA ${e.detail.sha} to clipboard`, 'success');
+  }
+
+  private handleGraphNotice(e: CustomEvent<{ message: string; type?: 'info' | 'success' | 'error' }>): void {
+    // User-facing notices from the graph canvas (it has no toast of its own)
+    showToast(e.detail.message, e.detail.type ?? 'info', 4000);
   }
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry; isPartiallyStaged?: boolean }>): void {
@@ -2070,14 +2075,14 @@ export class AppShell extends LitElement {
   private handleTagSelected(e: CustomEvent<{ tag: Tag }>): void {
     const tag = e.detail.tag;
     if (tag.targetOid) {
-      this.graphCanvas?.selectCommit(tag.targetOid);
+      this.revealCommitInGraph(tag.targetOid);
     }
   }
 
   private handleBranchSelected(e: CustomEvent<{ branch: Branch }>): void {
     const branch = e.detail.branch;
     if (branch.targetOid) {
-      this.graphCanvas?.selectCommit(branch.targetOid);
+      this.revealCommitInGraph(branch.targetOid);
     }
   }
 
@@ -2248,7 +2253,7 @@ export class AppShell extends LitElement {
 
   private handleBlameCommitClick(e: CustomEvent<{ oid: string }>): void {
     this.showBlame = false;
-    this.graphCanvas?.selectCommit(e.detail.oid);
+    this.revealCommitInGraph(e.detail.oid);
   }
 
   private handleCloseBlame(): void {
@@ -3035,12 +3040,19 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleNavigateToCommit(e: CustomEvent<{ oid: string }>): void {
-    if (!this.graphCanvas?.selectCommit(e.detail.oid)) {
-      // Target commit isn't in the loaded window (or is hidden by a branch
-      // filter) — say so instead of silently doing nothing
+  /**
+   * Select a commit in the graph, telling the user when it isn't loaded
+   * (below the paginated window or hidden by a branch filter) instead of
+   * silently doing nothing. ALL reveal-in-graph flows must go through this.
+   */
+  private revealCommitInGraph(oid: string): void {
+    if (!this.graphCanvas?.selectCommit(oid)) {
       showToast('Commit is not loaded in the graph yet — scroll further back to load it', 'info', 4000);
     }
+  }
+
+  private handleNavigateToCommit(e: CustomEvent<{ oid: string }>): void {
+    this.revealCommitInGraph(e.detail.oid);
   }
 
   private handleShowFileHistory(e: CustomEvent<{ filePath: string }>): void {
@@ -3056,7 +3068,7 @@ export class AppShell extends LitElement {
   private handleFileHistoryCommitSelected(e: CustomEvent<{ commit: Commit }>): void {
     // Select the commit in the graph and navigate to it
     this.selectedCommit = e.detail.commit;
-    this.graphCanvas?.selectCommit(e.detail.commit.oid);
+    this.revealCommitInGraph(e.detail.commit.oid);
   }
 
   private handleFileHistoryViewDiff(e: CustomEvent<{ commitOid: string; filePath: string }>): void {
@@ -3170,6 +3182,7 @@ export class AppShell extends LitElement {
                     @ref-context-menu=${this.handleRefContextMenu}
                     @checkout-branch=${this.handleCheckoutBranchFromGraph}
                     @copy-sha=${this.handleCopySha}
+                    @graph-notice=${this.handleGraphNotice}
                   ></lv-graph-canvas>
                 </div>
 
@@ -3528,7 +3541,7 @@ export class AppShell extends LitElement {
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showReflog = false; }}
           @undo-complete=${() => { this.showReflog = false; this.handleRefresh(); }}
-          @show-commit=${(e: CustomEvent<{ oid: string }>) => { this.showReflog = false; this.graphCanvas?.selectCommit(e.detail.oid); }}
+          @show-commit=${(e: CustomEvent<{ oid: string }>) => { this.showReflog = false; this.revealCommitInGraph(e.detail.oid); }}
         ></lv-reflog-dialog>
       ` : ''}
 

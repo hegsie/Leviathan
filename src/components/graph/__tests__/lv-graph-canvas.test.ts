@@ -1026,6 +1026,24 @@ describe('lv-graph-canvas', () => {
       expect(selected?.oid).to.equal(commit3.oid);
     });
 
+    it('dispatches graph-notice when the HEAD toolbar button misses', async () => {
+      setupDefaultMocks({ refs: {} });
+      const el = await renderCanvas();
+
+      let noticeMessage: string | null = null;
+      el.addEventListener('graph-notice', (e: Event) => {
+        noticeMessage = (e as CustomEvent<{ message: string }>).detail.message;
+      });
+
+      const headBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('HEAD'));
+      headBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+
+      expect(noticeMessage).to.contain('HEAD commit is not loaded');
+    });
+
     it('getTagTips returns tag refs sorted by name', async () => {
       setupDefaultMocks({
         refs: {
@@ -1365,6 +1383,42 @@ describe('lv-graph-canvas', () => {
 
       // A failed fetch must NOT permanently mark the history as exhausted
       expect(internals.hasMoreCommits).to.be.true;
+    });
+
+    it('a superseded load-more does not clear a newer load\'s in-progress flag', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      // Stall the next page fetch so it can be superseded mid-flight
+      let resolveStalled: ((v: unknown) => void) | null = null;
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        const typedArgs = args as { skip?: number } | undefined;
+        if (command === 'get_commit_history' && typedArgs?.skip && typedArgs.skip > 0) {
+          return new Promise((r) => {
+            resolveStalled = r;
+          });
+        }
+        return previousMock(command, args);
+      };
+
+      const internals = el as unknown as {
+        loadMoreCommits(): Promise<void>;
+        isLoadingMore: boolean;
+        loadVersion: number;
+      };
+      const stalledLoad = internals.loadMoreCommits();
+      expect(internals.isLoadingMore).to.be.true;
+
+      // A full reload takes ownership mid-flight (bumps the version) and a
+      // NEWER load-more is then in progress
+      internals.loadVersion++;
+      internals.isLoadingMore = true;
+
+      // The stale fetch resolving must not clear the newer load's flag
+      resolveStalled!([]);
+      await stalledLoad;
+      expect(internals.isLoadingMore).to.be.true;
     });
 
     it('loads more pages when scrolled past the loaded rows', async () => {

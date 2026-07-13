@@ -1049,6 +1049,9 @@ export class LvGraphCanvas extends LitElement {
     const currentVersion = this.loadVersion;
     const repoPath = this.repositoryPath;
     this.inFlightLoadPath = repoPath;
+    // This full reload supersedes any in-flight load-more; its (now stale)
+    // finally block deliberately won't touch the flag, so reset it here
+    this.isLoadingMore = false;
 
     // A background revalidation keeps showing the (cached) graph instead of
     // flashing the loading state — and its failure must not paint an error
@@ -1303,7 +1306,15 @@ export class LvGraphCanvas extends LitElement {
         this.processLayout();
       }
     } finally {
-      this.isLoadingMore = false;
+      // Only the load that still owns the current version clears the flag.
+      // A superseded fetch (repo switch or full reload happened mid-flight)
+      // must not clear a NEWER load's in-progress state — that would let a
+      // second overlapping load-more start and double-count
+      // totalLoadedCommits. willUpdate/loadCommits reset the flag when they
+      // take ownership.
+      if (this.loadVersion === currentVersion) {
+        this.isLoadingMore = false;
+      }
     }
 
     // The scrollbar spans the FULL history, so the user may have scrolled
@@ -2374,6 +2385,20 @@ export class LvGraphCanvas extends LitElement {
     return true;
   }
 
+  private handleJumpToHeadClick = (): void => {
+    if (!this.jumpToHead()) {
+      // The component can't toast itself — app-shell listens for
+      // graph-notice (same wiring as copy-sha) and shows the toast
+      this.dispatchEvent(
+        new CustomEvent('graph-notice', {
+          detail: { message: 'HEAD commit is not loaded in the graph', type: 'info' },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    }
+  };
+
   /**
    * Select and scroll to the commit HEAD points at.
    * Returns false when HEAD's commit is not in the loaded graph.
@@ -3177,7 +3202,7 @@ export class LvGraphCanvas extends LitElement {
             <button
               class="toolbar-btn"
               title="Jump to HEAD"
-              @click=${() => this.jumpToHead()}
+              @click=${this.handleJumpToHeadClick}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="3"></circle>
