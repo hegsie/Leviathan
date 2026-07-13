@@ -738,3 +738,89 @@ test.describe('Graph Error Handling', () => {
     ).toHaveCount(0);
   });
 });
+
+test.describe('Branch Visibility Filtering', () => {
+  let graph: GraphPanelPage;
+
+  // Fork topology: commit1 (main, HEAD) and commit2 (feature) both branch
+  // off commit0, so hiding "feature" must remove exactly commit2.
+  const forkCommits = [
+    makeCommit(1, ['commit0']),
+    makeCommit(2, ['commit0']),
+    makeCommit(0, []),
+  ];
+
+  const forkRefs = {
+    commit1: [
+      { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+    ],
+    commit2: [
+      { name: 'refs/heads/feature', shorthand: 'feature', refType: 'localBranch', isHead: false },
+    ],
+  };
+
+  test.beforeEach(async ({ page }) => {
+    graph = new GraphPanelPage(page);
+    await setupOpenRepository(page, { commits: forkCommits });
+    await expect(graph.canvas).toBeVisible();
+    await waitForNodeCount(page, 3);
+
+    // Provide branch refs and reload so the graph picks them up
+    await injectCommandMock(page, { get_refs_by_commit: forkRefs });
+    const handle = await getGraphCanvasHandle(page);
+    await page.evaluate((el) => {
+      (el as HTMLElement & { refresh(): void }).refresh();
+    }, handle);
+    // Refs are loaded when the branch panel can list them
+    await page.locator('lv-graph-canvas .toolbar-btn', { hasText: 'Branches' }).click();
+    await expect(
+      page.locator('lv-graph-canvas .branch-item', { hasText: 'feature' })
+    ).toBeVisible();
+  });
+
+  test('hiding a branch removes its exclusive commits from the graph', async ({ page }) => {
+    const featureCheckbox = page
+      .locator('lv-graph-canvas .branch-item', { hasText: 'feature' })
+      .locator('input[type="checkbox"]');
+    await featureCheckbox.uncheck();
+
+    // commit2 is only reachable from "feature", so the graph drops to 2 nodes
+    await waitForNodeCount(page, 2);
+    const handle = await getGraphCanvasHandle(page);
+    const oids = await page.evaluate((el) => {
+      const canvas = el as HTMLElement & { sortedNodesByRow?: Array<{ oid: string }> };
+      return (canvas?.sortedNodesByRow ?? []).map((n) => n.oid);
+    }, handle);
+    expect(oids).not.toContain('commit2');
+    expect(oids).toContain('commit1');
+    expect(oids).toContain('commit0');
+  });
+
+  test('re-showing a hidden branch restores its commits', async ({ page }) => {
+    const featureCheckbox = page
+      .locator('lv-graph-canvas .branch-item', { hasText: 'feature' })
+      .locator('input[type="checkbox"]');
+
+    await featureCheckbox.uncheck();
+    await waitForNodeCount(page, 2);
+
+    await featureCheckbox.check();
+    await waitForNodeCount(page, 3);
+  });
+
+  test('hiding the HEAD branch keeps HEAD history visible', async ({ page }) => {
+    const mainCheckbox = page
+      .locator('lv-graph-canvas .branch-item', { hasText: 'main' })
+      .locator('input[type="checkbox"]');
+    await mainCheckbox.uncheck();
+
+    // main is HEAD — its commits must not disappear
+    const handle = await getGraphCanvasHandle(page);
+    const oids = await page.evaluate((el) => {
+      const canvas = el as HTMLElement & { sortedNodesByRow?: Array<{ oid: string }> };
+      return (canvas?.sortedNodesByRow ?? []).map((n) => n.oid);
+    }, handle);
+    expect(oids).toContain('commit1');
+    expect(oids).toContain('commit0');
+  });
+});

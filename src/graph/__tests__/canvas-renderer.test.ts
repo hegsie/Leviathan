@@ -1,10 +1,11 @@
 /**
  * Unit tests for canvas-renderer utility functions.
- * Focused on sortRefsForDisplay — ensures the most important refs
- * are shown first when the refs column has limited space.
+ * Covers sortRefsForDisplay (most important refs shown first when the refs
+ * column has limited space), renderer state getters used by graph export,
+ * and the avatar cache (LRU + failure retry + fetch opt-out).
  */
 import { expect } from '@open-wc/testing';
-import { sortRefsForDisplay } from '../canvas-renderer.ts';
+import { CanvasRenderer, sortRefsForDisplay } from '../canvas-renderer.ts';
 import type { RefInfo } from '../../types/git.types.ts';
 
 function makeRef(overrides: Partial<RefInfo>): RefInfo {
@@ -164,5 +165,103 @@ describe('sortRefsForDisplay', () => {
     expect(sorted[2].shorthand).to.equal('origin/main'); // remote duplicate (main exists locally)
     expect(sorted[3].shorthand).to.equal('origin/release/v2'); // remote duplicate (release/v2 exists locally)
     expect(sorted[4].shorthand).to.equal('v2.0'); // tag
+  });
+});
+
+// ── Renderer state (export support + avatar cache) ─────────────────────────
+type RendererInternals = {
+  avatarCache: Map<string, HTMLImageElement>;
+  failedAvatars: Map<string, number>;
+  avatarLoadingSet: Set<string>;
+  loadAvatar(email: string): void;
+  getCachedAvatar(email: string): HTMLImageElement | undefined;
+};
+
+function makeRenderer(config: Record<string, unknown> = {}): CanvasRenderer {
+  const canvas = document.createElement('canvas');
+  canvas.width = 100;
+  canvas.height = 100;
+  return new CanvasRenderer(canvas, config);
+}
+
+describe('CanvasRenderer state getters', () => {
+  it('returns commit stats set via setCommitStats (used by PNG export)', () => {
+    const renderer = makeRenderer();
+    const stats = new Map([
+      ['abc', { additions: 5, deletions: 2, filesChanged: 1 }],
+    ]);
+    renderer.setCommitStats(stats);
+    expect(renderer.getCommitStats().get('abc')).to.deep.equal({
+      additions: 5,
+      deletions: 2,
+      filesChanged: 1,
+    });
+    renderer.destroy();
+  });
+
+  it('returns commit signatures set via setCommitSignatures (used by PNG export)', () => {
+    const renderer = makeRenderer();
+    const sigs = new Map([['abc', { signed: true, valid: true }]]);
+    renderer.setCommitSignatures(sigs);
+    expect(renderer.getCommitSignatures().get('abc')).to.deep.equal({
+      signed: true,
+      valid: true,
+    });
+    renderer.destroy();
+  });
+});
+
+describe('CanvasRenderer avatar cache', () => {
+  it('does not start avatar loads when fetchAvatars is false', () => {
+    const renderer = makeRenderer({ fetchAvatars: false });
+    const internals = renderer as unknown as RendererInternals;
+
+    internals.loadAvatar('someone@example.com');
+    expect(internals.avatarLoadingSet.size).to.equal(0);
+    renderer.destroy();
+  });
+
+  it('does not retry a recently failed avatar load', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals;
+
+    internals.failedAvatars.set('someone@example.com', Date.now());
+    internals.loadAvatar('someone@example.com');
+    expect(internals.avatarLoadingSet.size).to.equal(0);
+    renderer.destroy();
+  });
+
+  it('retries a failed avatar load after the retry window has passed', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals;
+
+    // Failure recorded 10 minutes ago — outside the 5-minute retry window
+    internals.failedAvatars.set('someone@example.com', Date.now() - 10 * 60 * 1000);
+    internals.loadAvatar('someone@example.com');
+    expect(internals.avatarLoadingSet.has('someone@example.com')).to.be.true;
+    renderer.destroy();
+  });
+
+  it('refreshes LRU position when a cached avatar is read', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals;
+
+    internals.avatarCache.set('first@example.com', new Image());
+    internals.avatarCache.set('second@example.com', new Image());
+
+    // Reading the oldest entry moves it to the most-recent end
+    internals.getCachedAvatar('first@example.com');
+    const keys = [...internals.avatarCache.keys()];
+    expect(keys).to.deep.equal(['second@example.com', 'first@example.com']);
+    renderer.destroy();
+  });
+
+  it('returns undefined for uncached avatars without touching the cache', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals;
+
+    expect(internals.getCachedAvatar('missing@example.com')).to.be.undefined;
+    expect(internals.avatarCache.size).to.equal(0);
+    renderer.destroy();
   });
 });

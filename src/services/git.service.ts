@@ -80,7 +80,6 @@ import type {
   CloneFilterInfo,
   CleanupCandidate,
 } from "../types/git.types.ts";
-import type { CommitGraphData } from "../types/graph.types.ts";
 import type {
   OpenRepositoryCommand,
   CloneRepositoryCommand,
@@ -133,7 +132,6 @@ import type {
   GetDiffWithOptionsCommand,
   GetAvatarUrlCommand,
   GetAvatarUrlsCommand,
-  GetCommitGraphCommand,
   KeyboardShortcutConfig,
   GetKeyboardShortcutsCommand,
   SetKeyboardShortcutCommand,
@@ -6617,30 +6615,6 @@ export async function pruneRemoteTrackingBranches(
   return invokeCommand<PruneResult>("prune_remote_tracking_branches", {
     path: repoPath,
     remote,
-  });
-}
-
-/**
- * Commit graph visualization
- */
-
-/**
- * Get commit graph data for visualization
- *
- * Returns graph nodes with lane assignments, edges, and ref annotations
- * suitable for rendering a commit graph (GitKraken/SourceTree style).
- *
- * @param args Graph command options including path, maxCount, branch, and skip
- * @returns Commit graph data with nodes, total commits count, and max lane
- */
-export async function getCommitGraph(
-  args: GetCommitGraphCommand,
-): Promise<CommandResult<CommitGraphData>> {
-  return invokeCommand<CommitGraphData>("get_commit_graph", {
-    path: args.path,
-    maxCount: args.maxCount,
-    branch: args.branch,
-    skip: args.skip,
   });
 }
 

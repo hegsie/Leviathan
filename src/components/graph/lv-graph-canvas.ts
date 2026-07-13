@@ -1074,9 +1074,58 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
+  /**
+   * Commits to lay out after applying the branch-visibility filter.
+   *
+   * A commit stays visible when it is reachable (via parent links within the
+   * loaded window) from any visible branch tip, from HEAD, or from a tag.
+   * With no hidden branches this is all loaded commits.
+   */
+  private getVisibleCommits(): GraphCommit[] {
+    if (this.hiddenBranches.size === 0) {
+      return this.commits;
+    }
+
+    // Walk starts from HEAD, tags, and branches that are not hidden
+    const tips: string[] = [];
+    let hasBranchRefs = false;
+    for (const [oid, refs] of Object.entries(this.refsByCommit)) {
+      for (const ref of refs) {
+        const isBranch = ref.refType === 'localBranch' || ref.refType === 'remoteBranch';
+        if (isBranch) {
+          hasBranchRefs = true;
+        }
+        const isVisibleBranch = isBranch && !this.hiddenBranches.has(ref.shorthand);
+        if (isVisibleBranch || ref.isHead || ref.refType === 'tag') {
+          tips.push(oid);
+          break;
+        }
+      }
+    }
+    // Without any branch refs there is nothing meaningful to filter against
+    if (!hasBranchRefs) {
+      return this.commits;
+    }
+
+    const commitByOid = new Map(this.commits.map((c) => [c.oid, c]));
+    const visible = new Set<string>();
+    const stack = [...tips];
+    while (stack.length > 0) {
+      const oid = stack.pop()!;
+      if (visible.has(oid)) continue;
+      const commit = commitByOid.get(oid);
+      if (!commit) continue;
+      visible.add(oid);
+      for (const pid of commit.parentIds) {
+        stack.push(pid);
+      }
+    }
+    return this.commits.filter((c) => visible.has(c.oid));
+  }
+
   private processLayout(): void {
     // Compute layout (use simple algorithm for cleaner one-commit-per-row layout)
-    const result = computeGraphLayout(this.commits, { optimized: false });
+    const result = computeGraphLayout(this.getVisibleCommits(), { optimized: false });
     this.layout = result.layout;
 
     // Build sorted nodes array for keyboard navigation
@@ -2114,48 +2163,31 @@ export class LvGraphCanvas extends LitElement {
   }
 
   private applyBranchFilter(): void {
-    if (this.hiddenBranches.size === 0) {
-      // No filter — use all commits
-      this.processLayout();
-    } else {
-      // Build set of visible branch names
-      const visibleBranchOids = new Set<string>();
+    // processLayout() applies the branch-visibility filter via
+    // getVisibleCommits(), rebuilds the indices, and schedules a render
+    this.processLayout();
 
-      // Find all commit OIDs that belong to visible branches
-      for (const [oid, refs] of Object.entries(this.refsByCommit)) {
-        const hasVisibleBranch = refs.some(
-          (ref) =>
-            (ref.refType === 'localBranch' || ref.refType === 'remoteBranch') &&
-            !this.hiddenBranches.has(ref.shorthand)
-        );
-        if (hasVisibleBranch) {
-          visibleBranchOids.add(oid);
+    // A commit hidden by the filter must not stay selected
+    if (this.layout) {
+      let selectionChanged = false;
+      for (const oid of [...this.selectedNodes]) {
+        if (!this.layout.nodes.has(oid)) {
+          this.selectedNodes.delete(oid);
+          selectionChanged = true;
         }
       }
-
-      // Also keep commits that have no branch refs (ancestors)
-      // and commits that have tags (tags should always be visible)
-      for (const [oid, refs] of Object.entries(this.refsByCommit)) {
-        const hasBranchRef = refs.some(
-          (ref) => ref.refType === 'localBranch' || ref.refType === 'remoteBranch'
-        );
-        if (!hasBranchRef) {
-          visibleBranchOids.add(oid);
-        }
+      if (this.selectedNode && !this.layout.nodes.has(this.selectedNode.oid)) {
+        this.selectedNode = null;
+        this.lastClickedNode = null;
+        selectionChanged = true;
       }
-
-      // Include commits with no refs at all (most commits)
-      for (const commit of this.commits) {
-        if (!this.refsByCommit[commit.oid]) {
-          visibleBranchOids.add(commit.oid);
-        }
+      if (selectionChanged) {
+        this.dispatchSelectionEvent();
+        this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
+        this.renderer?.markDirty();
+        this.scheduleRender();
       }
-
-      this.processLayout();
     }
-
-    this.renderer?.markDirty();
-    this.scheduleRender();
   }
 
   // Export methods
@@ -2177,7 +2209,9 @@ export class LvGraphCanvas extends LitElement {
     offscreen.width = width * dpr;
     offscreen.height = maxHeight * dpr;
 
-    // Create temporary renderer on offscreen canvas
+    // Create temporary renderer on offscreen canvas. Avatar fetching is
+    // disabled: the export renders synchronously once, so kicking off
+    // network loads would never paint into it.
     const tempRenderer = new CanvasRenderer(
       offscreen,
       {
@@ -2187,16 +2221,17 @@ export class LvGraphCanvas extends LitElement {
         lineWidth: 2,
         showLabels: true,
         showFps: false,
+        fetchAvatars: false,
         refsColumnWidth: this.refsColumnWidth,
         statsColumnWidth: this.statsColumnWidth,
       },
       getThemeFromCSS()
     );
 
-    // Copy state to temp renderer
+    // Copy state to temp renderer so the export matches what is on screen
     if (this.renderer) {
-      const stats = new Map<string, { additions: number; deletions: number; filesChanged: number }>();
-      tempRenderer.setCommitStats(stats);
+      tempRenderer.setCommitStats(this.renderer.getCommitStats());
+      tempRenderer.setCommitSignatures(this.renderer.getCommitSignatures());
       tempRenderer.setHighlightedCommits(this.matchedCommitOids);
       tempRenderer.setMultiSelection(this.selectedNodes, null);
     }

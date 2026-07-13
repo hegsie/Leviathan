@@ -31,6 +31,12 @@ export interface RenderConfig {
   showFps: boolean;
   /** Show avatars inside nodes */
   showAvatars: boolean;
+  /**
+   * Fetch author avatars from Gravatar. When false no network requests are
+   * made for avatars and colored initials are drawn instead (privacy/offline
+   * opt-out).
+   */
+  fetchAvatars: boolean;
   /** Show icons in ref labels */
   showRefIcons: boolean;
   /** Width of the refs column in pixels (default 200) */
@@ -92,6 +98,7 @@ const DEFAULT_CONFIG: RenderConfig = {
   showLabels: false,
   showFps: false,
   showAvatars: false,
+  fetchAvatars: true,
   showRefIcons: true,
   refsColumnWidth: 200,
   statsColumnWidth: 80,
@@ -283,9 +290,12 @@ export class CanvasRenderer {
   private isDirty = true;
   private pendingFrame: number = 0;
 
-  // Avatar cache
+  // Avatar cache (LRU: reads re-insert entries so hot avatars stay cached)
   private static readonly MAX_AVATAR_CACHE_SIZE = 500;
-  private avatarCache: Map<string, HTMLImageElement | null> = new Map();
+  // Failed loads are retried after this long instead of being cached forever
+  private static readonly AVATAR_RETRY_MS = 5 * 60 * 1000;
+  private avatarCache: Map<string, HTMLImageElement> = new Map();
+  private failedAvatars: Map<string, number> = new Map();
   private avatarLoadingSet: Set<string> = new Set();
   private pendingAvatarImages: Set<HTMLImageElement> = new Set();
 
@@ -294,9 +304,6 @@ export class CanvasRenderer {
 
   // Commit signatures (oid -> {signed, valid})
   private commitSignatures: Map<string, { signed: boolean; valid: boolean }> = new Map();
-
-  // CI status (oid -> status: 'success' | 'failure' | 'pending' | 'error')
-  private ciStatuses: Map<string, string> = new Map();
 
   // Highlighted commits for search result dimming
   private highlightedOids: Set<string> = new Set();
@@ -412,6 +419,20 @@ export class CanvasRenderer {
   }
 
   /**
+   * Get current commit stats (e.g. for copying state to an export renderer)
+   */
+  getCommitStats(): Map<string, { additions: number; deletions: number; filesChanged: number }> {
+    return this.commitStats;
+  }
+
+  /**
+   * Get current commit signatures (e.g. for copying state to an export renderer)
+   */
+  getCommitSignatures(): Map<string, { signed: boolean; valid: boolean }> {
+    return this.commitSignatures;
+  }
+
+  /**
    * Set highlighted commits for search result display
    * When set, non-highlighted commits will be dimmed
    */
@@ -429,10 +450,20 @@ export class CanvasRenderer {
   }
 
   /**
-   * Load avatar image for an email
+   * Load avatar image for an email.
+   * No-op when avatar fetching is disabled, a load is in flight, the avatar
+   * is already cached, or a recent load failed (failures retry after a TTL
+   * so a transient network error doesn't blank an author for the session).
    */
   private loadAvatar(email: string): void {
+    if (!this.config.fetchAvatars) {
+      return;
+    }
     if (this.avatarCache.has(email) || this.avatarLoadingSet.has(email)) {
+      return;
+    }
+    const failedAt = this.failedAvatars.get(email);
+    if (failedAt !== undefined && Date.now() - failedAt < CanvasRenderer.AVATAR_RETRY_MS) {
       return;
     }
 
@@ -443,9 +474,10 @@ export class CanvasRenderer {
 
     img.onload = () => {
       this.pendingAvatarImages.delete(img);
+      this.failedAvatars.delete(email);
       this.avatarCache.set(email, img);
       this.avatarLoadingSet.delete(email);
-      // Evict oldest entries when cache exceeds limit
+      // Evict least-recently-used entry when cache exceeds limit
       if (this.avatarCache.size > CanvasRenderer.MAX_AVATAR_CACHE_SIZE) {
         const firstKey = this.avatarCache.keys().next().value;
         if (firstKey) this.avatarCache.delete(firstKey);
@@ -455,16 +487,25 @@ export class CanvasRenderer {
 
     img.onerror = () => {
       this.pendingAvatarImages.delete(img);
-      this.avatarCache.set(email, null);
+      this.failedAvatars.set(email, Date.now());
       this.avatarLoadingSet.delete(email);
-      // Evict oldest entries when cache exceeds limit
-      if (this.avatarCache.size > CanvasRenderer.MAX_AVATAR_CACHE_SIZE) {
-        const firstKey = this.avatarCache.keys().next().value;
-        if (firstKey) this.avatarCache.delete(firstKey);
-      }
     };
 
     img.src = this.getGravatarUrl(email, 64);
+  }
+
+  /**
+   * Get a cached avatar and refresh its LRU position
+   */
+  private getCachedAvatar(email: string): HTMLImageElement | undefined {
+    const img = this.avatarCache.get(email);
+    if (img) {
+      // Map iteration order is insertion order; re-inserting keeps
+      // frequently-drawn avatars away from the eviction end
+      this.avatarCache.delete(email);
+      this.avatarCache.set(email, img);
+    }
+    return img;
   }
 
   /**
@@ -813,7 +854,7 @@ export class CanvasRenderer {
       // Try to draw avatar if enabled and email available
       let avatarDrawn = false;
       if (config.showAvatars && authorEmail) {
-        const avatar = this.avatarCache.get(authorEmail);
+        const avatar = this.getCachedAvatar(authorEmail);
         if (avatar) {
           // Draw circular avatar
           ctx.save();
@@ -925,6 +966,30 @@ export class CanvasRenderer {
   }
 
   /**
+   * Draw the colored initials circle used when no avatar image is available
+   */
+  private drawInitialsAvatar(
+    centerX: number,
+    centerY: number,
+    radius: number,
+    size: number,
+    author: string
+  ): void {
+    const { ctx } = this;
+    const userColor = this.getUserColor(author);
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius - 1, 0, Math.PI * 2);
+    ctx.fillStyle = userColor;
+    ctx.fill();
+    const initials = this.getInitials(author);
+    ctx.fillStyle = this.getContrastingIconColor(userColor);
+    ctx.font = `bold ${Math.floor(size * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(initials, centerX, centerY + 1);
+  }
+
+  /**
    * Get initials from author name
    */
   private getInitials(name: string): string {
@@ -1015,51 +1080,24 @@ export class CanvasRenderer {
         oid: node.oid,
       });
 
-      if (authorEmail) {
-        const avatar = this.avatarCache.get(authorEmail);
-        const avatarLoaded = this.avatarCache.has(authorEmail);
-
-        if (avatar instanceof Image) {
-          // Draw actual Gravatar image
-          ctx.save();
-          ctx.beginPath();
-          ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
-          ctx.clip();
-          ctx.drawImage(avatar, avatarCenterX - avatarRadius + 1, y - avatarRadius + 1, avatarSize - 2, avatarSize - 2);
-          ctx.restore();
-        } else {
-          // No Gravatar: either failed (null) or still loading (undefined)
-          if (!avatarLoaded) {
-            // Not yet attempted, start loading
-            this.loadAvatar(authorEmail);
-          }
-          // Draw colored initials circle
-          const userColor = this.getUserColor(node.commit.author);
-          ctx.beginPath();
-          ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
-          ctx.fillStyle = userColor;
-          ctx.fill();
-          // Draw initials with contrasting text
-          const initials = this.getInitials(node.commit.author);
-          ctx.fillStyle = this.getContrastingIconColor(userColor);
-          ctx.font = `bold ${Math.floor(avatarSize * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(initials, avatarCenterX, y + 1);
-        }
-      } else {
-        // No email - draw initials circle
-        const userColor = this.getUserColor(node.commit.author);
+      const avatar = authorEmail && config.fetchAvatars
+        ? this.getCachedAvatar(authorEmail)
+        : undefined;
+      if (avatar) {
+        // Draw actual Gravatar image
+        ctx.save();
         ctx.beginPath();
         ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
-        ctx.fillStyle = userColor;
-        ctx.fill();
-        const initials = this.getInitials(node.commit.author);
-        ctx.fillStyle = this.getContrastingIconColor(userColor);
-        ctx.font = `bold ${Math.floor(avatarSize * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(initials, avatarCenterX, y + 1);
+        ctx.clip();
+        ctx.drawImage(avatar, avatarCenterX - avatarRadius + 1, y - avatarRadius + 1, avatarSize - 2, avatarSize - 2);
+        ctx.restore();
+      } else {
+        if (authorEmail) {
+          // Kick off a load; no-ops when fetching is disabled, already in
+          // flight, or a recent attempt failed
+          this.loadAvatar(authorEmail);
+        }
+        this.drawInitialsAvatar(avatarCenterX, y, avatarRadius, avatarSize, node.commit.author);
       }
 
       // Draw signature badge if commit is signed
@@ -1885,9 +1923,9 @@ export class CanvasRenderer {
     this.pendingAvatarImages.clear();
     this.avatarCache.clear();
     this.avatarLoadingSet.clear();
+    this.failedAvatars.clear();
     this.commitStats.clear();
     this.commitSignatures.clear();
-    this.ciStatuses.clear();
     this.highlightedOids.clear();
   }
 }

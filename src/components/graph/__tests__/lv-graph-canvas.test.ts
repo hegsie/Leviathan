@@ -400,6 +400,134 @@ describe('lv-graph-canvas', () => {
     });
   });
 
+  // ── Branch visibility filtering ──────────────────────────────────────
+  describe('branch visibility filtering', () => {
+    // Topology: main (HEAD) -> mainCommit -> baseCommit
+    //           feature     -> featureCommit -> baseCommit
+    const baseCommit = makeCommit({
+      oid: '1111111111111111111111111111111111111111',
+      shortId: '1111111',
+      summary: 'Base commit',
+      timestamp: 1700000000,
+      parentIds: [],
+    });
+    const mainCommit = makeCommit({
+      oid: '2222222222222222222222222222222222222222',
+      shortId: '2222222',
+      summary: 'Main commit',
+      timestamp: 1700002000,
+      parentIds: [baseCommit.oid],
+    });
+    const featureCommit = makeCommit({
+      oid: '3333333333333333333333333333333333333333',
+      shortId: '3333333',
+      summary: 'Feature commit',
+      timestamp: 1700001000,
+      parentIds: [baseCommit.oid],
+    });
+
+    const branchCommits: Commit[] = [mainCommit, featureCommit, baseCommit];
+    const branchRefs: RefsByCommit = {
+      [mainCommit.oid]: [
+        { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+      ],
+      [featureCommit.oid]: [
+        { name: 'refs/heads/feature', shorthand: 'feature', refType: 'localBranch', isHead: false },
+      ],
+    };
+
+    function getNodeOids(el: LvGraphCanvas): string[] {
+      const nodes = (el as unknown as { sortedNodesByRow: Array<{ oid: string }> })
+        .sortedNodesByRow;
+      return nodes.map((n) => n.oid);
+    }
+
+    it('hiding a branch removes its exclusive commits from the graph', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      expect(getNodeOids(el)).to.have.length(3);
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      const oids = getNodeOids(el);
+      expect(oids).to.have.length(2);
+      expect(oids).to.not.include(featureCommit.oid);
+      // Shared ancestor stays visible: it is reachable from main
+      expect(oids).to.include(baseCommit.oid);
+      expect(oids).to.include(mainCommit.oid);
+    });
+
+    it('re-showing a hidden branch restores its commits', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+      expect(getNodeOids(el)).to.have.length(2);
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+      expect(getNodeOids(el)).to.have.length(3);
+      expect(getNodeOids(el)).to.include(featureCommit.oid);
+    });
+
+    it('keeps HEAD history visible even when its branch is hidden', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('main');
+      await el.updateComplete;
+
+      // main is HEAD, so its commits stay visible
+      const oids = getNodeOids(el);
+      expect(oids).to.include(mainCommit.oid);
+      expect(oids).to.include(baseCommit.oid);
+    });
+
+    it('keeps tagged commits visible when their branch is hidden', async () => {
+      const taggedRefs: RefsByCommit = {
+        ...branchRefs,
+        [featureCommit.oid]: [
+          ...branchRefs[featureCommit.oid],
+          { name: 'refs/tags/v1.0', shorthand: 'v1.0', refType: 'tag', isHead: false },
+        ],
+      };
+      setupDefaultMocks({ commits: branchCommits, refs: taggedRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      expect(getNodeOids(el)).to.include(featureCommit.oid);
+    });
+
+    it('clears the selection when the selected commit becomes hidden', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      expect(el.selectCommit(featureCommit.oid)).to.be.true;
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      const selected = (el as unknown as { selectedNode: { oid: string } | null }).selectedNode;
+      expect(selected).to.be.null;
+    });
+
+    it('keeps the selection when the selected commit stays visible', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      expect(el.selectCommit(mainCommit.oid)).to.be.true;
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      const selected = (el as unknown as { selectedNode: { oid: string } | null }).selectedNode;
+      expect(selected?.oid).to.equal(mainCommit.oid);
+    });
+  });
+
   // ── Export UI ────────────────────────────────────────────────────────
   describe('export UI', () => {
     it('does not show the export menu by default', async () => {

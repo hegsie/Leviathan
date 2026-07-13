@@ -365,8 +365,6 @@ pub fn run() {
             commands::diff::get_file_blame,
             commands::diff::get_image_versions,
             commands::refs::get_refs_by_commit,
-            // Commit graph visualization
-            commands::graph::get_commit_graph,
             commands::describe::describe,
             commands::shortlog::shortlog,
             commands::watcher::start_watching,
