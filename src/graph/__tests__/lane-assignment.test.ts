@@ -4,7 +4,12 @@
  * semantics, and lane reuse.
  */
 import { expect } from '@open-wc/testing';
-import { assignLanes, validateLayout, type GraphCommit } from '../lane-assignment.ts';
+import {
+  assignLanes,
+  appendLanes,
+  validateLayout,
+  type GraphCommit,
+} from '../lane-assignment.ts';
 
 function makeCommit(
   oid: string,
@@ -263,5 +268,181 @@ describe('assignLanes', () => {
       expect(layout.nodes.get(oid)!.lane).to.equal(0, `expected ${oid} in lane 0`);
       expect(layout.nodes.get(oid)!.colorIndex).to.equal(0, `expected ${oid} color 0`);
     }
+  });
+});
+
+describe('appendLanes', () => {
+  it('does not disturb rows, lanes, or colors of already-laid-out commits', () => {
+    const page1 = [
+      makeCommit('m3', ['m2'], 9000),
+      makeCommit('side1', ['m1'], 8500),
+      makeCommit('m2', ['m1'], 8000),
+      makeCommit('m1', ['m0'], 7000), // m0 is beyond the window
+    ];
+    const layout = assignLanes(page1, { headOid: 'm3' });
+
+    const before = new Map(
+      [...layout.nodes.values()].map((n) => [
+        n.oid,
+        { row: n.row, lane: n.lane, colorIndex: n.colorIndex },
+      ])
+    );
+
+    appendLanes(layout, [makeCommit('m0', [], 1000)]);
+
+    for (const [oid, snapshot] of before) {
+      const node = layout.nodes.get(oid)!;
+      expect(node.row).to.equal(snapshot.row, `row of ${oid}`);
+      expect(node.lane).to.equal(snapshot.lane, `lane of ${oid}`);
+      expect(node.colorIndex).to.equal(snapshot.colorIndex, `color of ${oid}`);
+    }
+  });
+
+  it('creates edges from appended parents to already-visible children', () => {
+    const page1 = [
+      makeCommit('c2', ['c1'], 3000),
+      makeCommit('c1', ['c0'], 2000),
+    ];
+    const layout = assignLanes(page1, { headOid: 'c2' });
+    expect(layout.edges).to.have.length(1);
+
+    appendLanes(layout, [makeCommit('c0', [], 1000)]);
+
+    const boundaryEdge = layout.edges.find(
+      (e) => e.fromOid === 'c0' && e.toOid === 'c1'
+    );
+    expect(boundaryEdge).to.not.be.undefined;
+    expect(boundaryEdge!.fromRow).to.equal(2);
+    expect(boundaryEdge!.toRow).to.equal(1);
+  });
+
+  it('clears the history-continues flag once the missing parent arrives', () => {
+    const layout = assignLanes(
+      [makeCommit('c1', ['c0'], 2000)],
+      { headOid: 'c1' }
+    );
+    expect(layout.nodes.get('c1')!.hasMissingParents).to.be.true;
+
+    appendLanes(layout, [makeCommit('c0', [], 1000)]);
+
+    expect(layout.nodes.get('c1')!.hasMissingParents).to.be.false;
+    expect(layout.nodes.get('c0')!.hasMissingParents).to.be.false;
+    expect(layout.nodes.get('c1')!.parentLanes).to.deep.equal([0]);
+  });
+
+  it('continues the mainline into the appended page (lane 0, color 0)', () => {
+    const page1 = [
+      makeCommit('m2', ['m1'], 9000),
+      makeCommit('side', ['m1'], 8500),
+      makeCommit('m1', ['m0'], 8000),
+    ];
+    const layout = assignLanes(page1, { headOid: 'm2' });
+
+    appendLanes(layout, [
+      makeCommit('m0', ['root'], 2000),
+      makeCommit('root', [], 1000),
+    ]);
+
+    expect(layout.nodes.get('m0')!.lane).to.equal(0);
+    expect(layout.nodes.get('m0')!.colorIndex).to.equal(0);
+    expect(layout.nodes.get('root')!.lane).to.equal(0);
+    expect(layout.nodes.get('root')!.colorIndex).to.equal(0);
+  });
+
+  it('continues a side branch line with its original color', () => {
+    const page1 = [
+      makeCommit('m2', ['m1'], 9000),
+      makeCommit('side2', ['side1'], 8500), // side1 beyond the window
+      makeCommit('m1', ['m0'], 8000),
+    ];
+    const layout = assignLanes(page1, { headOid: 'm2' });
+    const sideColor = layout.nodes.get('side2')!.colorIndex;
+    const sideLane = layout.nodes.get('side2')!.lane;
+
+    appendLanes(layout, [
+      makeCommit('m0', [], 2000),
+      makeCommit('side1', ['m0'], 1500),
+    ]);
+
+    expect(layout.nodes.get('side1')!.colorIndex).to.equal(sideColor);
+    expect(layout.nodes.get('side1')!.lane).to.equal(sideLane);
+  });
+
+  it('appends rows below the existing layout and updates totals', () => {
+    const layout = assignLanes(
+      [makeCommit('c1', ['c0'], 2000)],
+      { headOid: 'c1' }
+    );
+    expect(layout.totalRows).to.equal(1);
+
+    appendLanes(layout, [makeCommit('c0', [], 1000)]);
+
+    expect(layout.totalRows).to.equal(2);
+    expect(layout.nodes.get('c0')!.row).to.equal(1);
+  });
+
+  it('skips commits that are already laid out', () => {
+    const layout = assignLanes(
+      [makeCommit('c1', ['c0'], 2000), makeCommit('c0', [], 1000)],
+      { headOid: 'c1' }
+    );
+
+    appendLanes(layout, [makeCommit('c0', [], 1000)]);
+
+    expect(layout.nodes.size).to.equal(2);
+    expect(layout.totalRows).to.equal(2);
+  });
+
+  it('produces a valid combined layout across several pages', () => {
+    // Linear history split into three pages
+    const all: GraphCommit[] = [];
+    for (let i = 0; i < 12; i++) {
+      all.push(
+        makeCommit(`c${i}`, i < 11 ? [`c${i + 1}`] : [], (12 - i) * 1000)
+      );
+    }
+    const layout = assignLanes(all.slice(0, 4), { headOid: 'c0' });
+    appendLanes(layout, all.slice(4, 8));
+    appendLanes(layout, all.slice(8));
+
+    expect(layout.nodes.size).to.equal(12);
+    expect(validateLayout(layout, all)).to.deep.equal([]);
+    // Whole chain is the mainline
+    for (const node of layout.nodes.values()) {
+      expect(node.lane).to.equal(0);
+      expect(node.colorIndex).to.equal(0);
+    }
+  });
+
+  it('matches assignLanes totals when appending a branchy page', () => {
+    const all = [
+      makeCommit('h', ['g', 'f'], 9000),
+      makeCommit('g', ['e'], 8000),
+      makeCommit('f', ['d'], 7000),
+      makeCommit('e', ['d', 'c'], 6000),
+      makeCommit('d', ['b'], 5000),
+      makeCommit('c', ['b'], 4000),
+      makeCommit('b', ['a'], 2000),
+      makeCommit('a', [], 1000),
+    ];
+    const layout = assignLanes(all.slice(0, 4), { headOid: 'h' });
+    appendLanes(layout, all.slice(4));
+
+    expect(layout.nodes.size).to.equal(8);
+    expect(validateLayout(layout, all)).to.deep.equal([]);
+    // Mainline chain stays in lane 0 across the page boundary
+    for (const oid of ['h', 'g', 'e', 'd', 'b', 'a']) {
+      expect(layout.nodes.get(oid)!.lane).to.equal(0, `lane of ${oid}`);
+    }
+  });
+
+  it('throws on a layout without append state', () => {
+    const layout = {
+      nodes: new Map(),
+      edges: [],
+      maxLane: 0,
+      totalRows: 0,
+    };
+    expect(() => appendLanes(layout, [makeCommit('x', [], 1)])).to.throw();
   });
 });

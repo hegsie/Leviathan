@@ -125,6 +125,7 @@ function setupDefaultMocks(opts: {
   refs?: RefsByCommit;
   hasMore?: boolean;
   moreCommits?: Commit[];
+  total?: number;
 } = {}): void {
   const commits = opts.commits ?? defaultCommits;
   const refs = opts.refs ?? defaultRefs;
@@ -141,6 +142,8 @@ function setupDefaultMocks(opts: {
         }
         return commits;
       }
+      case 'get_commit_total':
+        return opts.total ?? commits.length + moreCommits.length;
       case 'get_refs_by_commit':
         return refs;
       case 'detect_github_repo':
@@ -836,6 +839,153 @@ describe('lv-graph-canvas', () => {
   });
 
   // ── Per-repo graph cache ─────────────────────────────────────────────
+  describe('zoom', () => {
+    beforeEach(() => {
+      try {
+        localStorage.removeItem('leviathan-graph-zoom');
+      } catch {
+        // Ignore
+      }
+    });
+
+    it('scales the row metrics and persists the zoom level', async () => {
+      const el = await renderCanvas();
+      const internals = el as unknown as { ROW_HEIGHT: number; LANE_WIDTH: number };
+      const baseRowHeight = internals.ROW_HEIGHT;
+
+      el.setZoom(1.5);
+      expect(el.getZoom()).to.equal(1.5);
+      expect(internals.ROW_HEIGHT).to.equal(Math.round(baseRowHeight * 1.5));
+      expect(localStorage.getItem('leviathan-graph-zoom')).to.equal('1.5');
+    });
+
+    it('clamps zoom to the allowed range', async () => {
+      const el = await renderCanvas();
+
+      el.setZoom(10);
+      expect(el.getZoom()).to.equal(2);
+
+      el.setZoom(0.01);
+      expect(el.getZoom()).to.equal(0.6);
+    });
+
+    it('zooms on Ctrl+wheel instead of scrolling', async () => {
+      const el = await renderCanvas();
+      const canvas = el.shadowRoot!.querySelector('canvas')!;
+
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, cancelable: true })
+      );
+      expect(el.getZoom()).to.be.greaterThan(1);
+
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', { deltaY: 100, ctrlKey: true, cancelable: true })
+      );
+      expect(el.getZoom()).to.be.closeTo(1, 0.001);
+    });
+
+    it('restores the persisted zoom level on connect', async () => {
+      localStorage.setItem('leviathan-graph-zoom', '1.3');
+      const el = await renderCanvas();
+      expect(el.getZoom()).to.equal(1.3);
+    });
+  });
+
+  describe('incremental layout append', () => {
+    it('keeps rows and colors of loaded commits stable when older commits load', async () => {
+      // First page: A -> B -> C, C's parent D arrives in the next page
+      const commitA = makeCommit({
+        oid: 'aaaa000000000000000000000000000000000000',
+        summary: 'A',
+        timestamp: 4000,
+        parentIds: ['bbbb000000000000000000000000000000000000'],
+      });
+      const commitB = makeCommit({
+        oid: 'bbbb000000000000000000000000000000000000',
+        summary: 'B',
+        timestamp: 3000,
+        parentIds: ['cccc000000000000000000000000000000000000'],
+      });
+      const commitC = makeCommit({
+        oid: 'cccc000000000000000000000000000000000000',
+        summary: 'C',
+        timestamp: 2000,
+        parentIds: ['dddd000000000000000000000000000000000000'],
+      });
+      const commitD = makeCommit({
+        oid: 'dddd000000000000000000000000000000000000',
+        summary: 'D',
+        timestamp: 1000,
+        parentIds: [],
+      });
+
+      setupDefaultMocks({
+        commits: [commitA, commitB, commitC],
+        refs: {
+          [commitA.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+        moreCommits: [commitD],
+        total: 4,
+      });
+
+      const el = await renderCanvas();
+      const internals = el as unknown as {
+        sortedNodesByRow: Array<{ oid: string; row: number; lane: number; colorIndex: number }>;
+        loadMoreCommits(): Promise<void>;
+        hasMoreCommits: boolean;
+      };
+      expect(internals.sortedNodesByRow).to.have.length(3);
+      expect(internals.hasMoreCommits).to.be.true;
+
+      const before = internals.sortedNodesByRow.map((n) => ({ ...n }));
+
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+
+      expect(internals.sortedNodesByRow).to.have.length(4);
+      // Existing rows/lanes/colors are untouched by the append
+      for (let i = 0; i < before.length; i++) {
+        const after = internals.sortedNodesByRow[i];
+        expect(after.oid).to.equal(before[i].oid);
+        expect(after.row).to.equal(before[i].row);
+        expect(after.lane).to.equal(before[i].lane);
+        expect(after.colorIndex).to.equal(before[i].colorIndex);
+      }
+      // The appended commit sits below, continuing the mainline
+      const appended = internals.sortedNodesByRow[3];
+      expect(appended.oid).to.equal(commitD.oid);
+      expect(appended.lane).to.equal(0);
+    });
+  });
+
+  describe('commit total', () => {
+    it('marks pagination complete when all commits are loaded', async () => {
+      setupDefaultMocks({ total: 3 });
+      const el = await renderCanvas();
+
+      const hasMore = (el as unknown as { hasMoreCommits: boolean }).hasMoreCommits;
+      expect(hasMore).to.be.false;
+    });
+
+    it('keeps pagination open when the backend reports more commits', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      const hasMore = (el as unknown as { hasMoreCommits: boolean }).hasMoreCommits;
+      expect(hasMore).to.be.true;
+    });
+
+    it('announces loaded-of-total in the canvas aria-label', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      const canvas = el.shadowRoot!.querySelector('canvas')!;
+      expect(canvas.getAttribute('aria-label')).to.contain('3 of 500');
+    });
+  });
+
   describe('visible-range stats fetching', () => {
     it('fetches stats only for the visible rows, not every loaded commit', async () => {
       // 500 commits loaded; only the visible range (plus overscan) should

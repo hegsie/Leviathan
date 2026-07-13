@@ -67,6 +67,22 @@ export interface GraphLayout {
   edges: LayoutEdge[];
   maxLane: number;
   totalRows: number;
+  /**
+   * Lane-engine state at the end of the layout, enabling appendLanes() to
+   * extend it with older pages without recomputing existing rows.
+   */
+  appendState?: LayoutAppendState;
+}
+
+export interface LayoutAppendState {
+  /** Lane occupancy at the end of the laid-out rows (null = free) */
+  lanes: (string | null)[];
+  /** Next unused branch color index */
+  nextColorIndex: number;
+  /** Number of lanes reserved for the mainline (0 or 1) */
+  reservedLanes: number;
+  /** First-parent OID continuing the mainline beyond the laid-out set */
+  mainlineContinuation?: string;
 }
 
 export interface AssignLanesOptions {
@@ -179,19 +195,24 @@ function topologicalOrder(commits: GraphCommit[]): GraphCommit[] {
 }
 
 /**
- * Compute the first-parent chain of a commit within the loaded set
+ * Compute the first-parent chain of a commit within the given set.
+ * `continuation` is the first-parent OID where the chain leaves the set
+ * (undefined when the chain ends at a root).
  */
 function firstParentChain(
-  headOid: string | undefined,
+  startOid: string | undefined,
   commitMap: Map<string, GraphCommit>
-): Set<string> {
+): { chain: Set<string>; continuation?: string } {
   const chain = new Set<string>();
-  let current = headOid;
+  let current = startOid;
   while (current !== undefined && commitMap.has(current) && !chain.has(current)) {
     chain.add(current);
     current = commitMap.get(current)!.parentIds[0];
   }
-  return chain;
+  return {
+    chain,
+    continuation: current !== undefined && !chain.has(current) ? current : undefined,
+  };
 }
 
 /**
@@ -204,41 +225,123 @@ function firstParentChain(
  *   parent of; commits starting a new branch line get the leftmost free
  *   lane (never lane 0 while a mainline exists) and a fresh color.
  * - A lane is released for reuse when its line ends.
+ *
+ * The returned layout carries `appendState`, which lets `appendLanes()`
+ * extend it with older pages without disturbing already-assigned rows,
+ * lanes, or colors.
  */
 export function assignLanes(
   commits: GraphCommit[],
   options: AssignLanesOptions = {}
 ): GraphLayout {
-  if (commits.length === 0) {
-    return { nodes: new Map(), edges: [], maxLane: 0, totalRows: 0 };
+  const layout: GraphLayout = { nodes: new Map(), edges: [], maxLane: 0, totalRows: 0 };
+
+  const commitMap = new Map<string, GraphCommit>(commits.map((c) => [c.oid, c]));
+  const { chain, continuation } = firstParentChain(options.headOid, commitMap);
+  const state: LayoutAppendState = {
+    lanes: [],
+    reservedLanes: chain.size > 0 ? 1 : 0,
+    // Color 0 belongs to the mainline
+    nextColorIndex: chain.size > 0 ? 1 : 0,
+    mainlineContinuation: continuation,
+  };
+
+  layoutInto(layout, commits, chain, state);
+  return layout;
+}
+
+/**
+ * Append a page of OLDER commits to an existing layout without recomputing
+ * it: rows, lanes and colors of already-laid-out commits stay exactly as
+ * they are, so "load more" doesn't make the visible graph jump. Edges from
+ * new commits to already-visible children are created, and boundary nodes
+ * whose parents just arrived lose their "history continues" stub.
+ *
+ * Falls back are the caller's job: a changed filter or a refresh needs a
+ * full `assignLanes()` recompute.
+ */
+export function appendLanes(layout: GraphLayout, newCommits: GraphCommit[]): GraphLayout {
+  const state = layout.appendState;
+  if (!state) {
+    throw new Error('appendLanes requires a layout produced by assignLanes');
   }
 
-  // Build lookup maps
-  const commitMap = new Map<string, GraphCommit>();
-  const childrenMap = new Map<string, string[]>();
+  const fresh = newCommits.filter((c) => !layout.nodes.has(c.oid));
+  if (fresh.length === 0) {
+    return layout;
+  }
 
+  // Continue the mainline chain into the new page
+  const freshMap = new Map<string, GraphCommit>(fresh.map((c) => [c.oid, c]));
+  const { chain, continuation } = firstParentChain(state.mainlineContinuation, freshMap);
+  state.mainlineContinuation = continuation;
+
+  // Re-reserve lanes of boundary lines that continue below the appended
+  // rows, so new branch lines don't get placed on top of them
+  for (const node of layout.nodes.values()) {
+    if (!node.hasMissingParents) continue;
+    const firstParent = node.commit.parentIds[0];
+    if (
+      firstParent !== undefined &&
+      !layout.nodes.has(firstParent) &&
+      node.lane >= state.reservedLanes
+    ) {
+      while (state.lanes.length <= node.lane) {
+        state.lanes.push(null);
+      }
+      state.lanes[node.lane] = node.oid;
+    }
+  }
+
+  layoutInto(layout, fresh, chain, state);
+  return layout;
+}
+
+/**
+ * Core layout pass shared by assignLanes (empty layout) and appendLanes
+ * (existing layout). Lays out `commits` below the current rows, threading
+ * lane occupancy and color allocation through `state`.
+ */
+function layoutInto(
+  layout: GraphLayout,
+  commits: GraphCommit[],
+  mainline: Set<string>,
+  state: LayoutAppendState
+): void {
+  layout.appendState = state;
+  if (commits.length === 0) {
+    return;
+  }
+
+  const { nodes, edges } = layout;
+  const { lanes, reservedLanes } = state;
+  const freshOids = new Set(commits.map((c) => c.oid));
+
+  // Children within this batch...
+  const childrenMap = new Map<string, string[]>();
   for (const commit of commits) {
-    commitMap.set(commit.oid, commit);
     for (const parentId of commit.parentIds) {
       const children = childrenMap.get(parentId) || [];
       children.push(commit.oid);
       childrenMap.set(parentId, children);
     }
   }
+  // ...plus already-laid-out boundary nodes whose parents arrive in this batch
+  const boundaryNodes: LayoutNode[] = [];
+  for (const node of nodes.values()) {
+    if (!node.hasMissingParents) continue;
+    boundaryNodes.push(node);
+    for (const pid of node.commit.parentIds) {
+      if (freshOids.has(pid)) {
+        const children = childrenMap.get(pid) || [];
+        children.push(node.oid);
+        childrenMap.set(pid, children);
+      }
+    }
+  }
 
-  const sortedCommits = topologicalOrder(commits);
-  const commitOidSet = new Set(commits.map((c) => c.oid));
-
-  // Mainline: HEAD's first-parent chain is pinned to lane 0 / color 0
-  const mainline = firstParentChain(options.headOid, commitMap);
-  const reservedLanes = mainline.size > 0 ? 1 : 0;
-
-  // Lane management - null means lane is free
-  const lanes: (string | null)[] = [];
-  const nodes = new Map<string, LayoutNode>();
-  const edges: LayoutEdge[] = [];
-  const oidToLane = new Map<string, number>();
-  let nextColorIndex = reservedLanes; // color 0 belongs to the mainline
+  // A commit counts as "in the window" when it is in this batch or already laid out
+  const inWindow = (oid: string): boolean => freshOids.has(oid) || nodes.has(oid);
 
   function getFreeLane(): number {
     // Lane 0 stays reserved for the mainline while one exists
@@ -264,9 +367,14 @@ export function assignLanes(
     }
   }
 
-  // Process commits from newest (row 0) to oldest
-  for (let row = 0; row < sortedCommits.length; row++) {
-    const commit = sortedCommits[row];
+  const sortedCommits = topologicalOrder(commits);
+  const startRow = layout.totalRows;
+
+  // Process commits from newest to oldest, rows continuing below the
+  // existing layout
+  for (let i = 0; i < sortedCommits.length; i++) {
+    const commit = sortedCommits[i];
+    const row = startRow + i;
     const children = childrenMap.get(commit.oid) || [];
 
     let lane: number | undefined;
@@ -280,10 +388,9 @@ export function assignLanes(
       // Inherit lane and color from a child we are the first parent of —
       // that child's branch line continues through this commit
       for (const childOid of children) {
-        const childCommit = commitMap.get(childOid);
         const childNode = nodes.get(childOid);
 
-        if (childCommit && childNode && childCommit.parentIds[0] === commit.oid) {
+        if (childNode && childNode.commit.parentIds[0] === commit.oid) {
           // Never inherit the reserved mainline lane for non-mainline commits
           if (childNode.lane === 0 && reservedLanes > 0) {
             continue;
@@ -300,16 +407,15 @@ export function assignLanes(
       lane = getFreeLane();
     }
     if (colorIndex === undefined) {
-      colorIndex = nextColorIndex++;
+      colorIndex = state.nextColorIndex++;
     }
 
     occupyLane(lane, commit.oid);
-    oidToLane.set(commit.oid, lane);
 
-    // Create layout node (children are always processed before parents in
-    // topological order, so childLanes is complete here)
+    // Create layout node (children — in this batch or already laid out —
+    // are always placed before their parents, so childLanes is complete)
     const childLanes = children
-      .map((c) => oidToLane.get(c))
+      .map((c) => nodes.get(c)?.lane)
       .filter((l): l is number => l !== undefined);
 
     const node: LayoutNode = {
@@ -326,10 +432,10 @@ export function assignLanes(
 
     // Create edges to children and check for lane releases
     for (const childOid of children) {
-      const childLane = oidToLane.get(childOid);
       const childNode = nodes.get(childOid);
 
-      if (childLane !== undefined && childNode) {
+      if (childNode && childNode.oid !== commit.oid) {
+        const childLane = childNode.lane;
         const parentIndex = childNode.commit.parentIds.indexOf(commit.oid);
         const isMergeEdge = parentIndex > 0;
         edges.push({
@@ -347,9 +453,8 @@ export function assignLanes(
 
         // Release child's lane if we're not using it and all its parents are done
         if (lane !== childLane) {
-          const childCommit = commitMap.get(childOid)!;
-          const allParentsProcessed = childCommit.parentIds.every(
-            (pid) => !commitOidSet.has(pid) || nodes.has(pid) || pid === commit.oid
+          const allParentsProcessed = childNode.commit.parentIds.every(
+            (pid) => !inWindow(pid) || nodes.has(pid) || pid === commit.oid
           );
           if (allParentsProcessed) {
             releaseLane(childLane);
@@ -358,35 +463,38 @@ export function assignLanes(
       }
     }
 
-    // Release this lane if commit has no parents in the set
-    const hasParentsInSet = commit.parentIds.some((pid) => commitOidSet.has(pid));
-    if (!hasParentsInSet) {
+    // Release this lane if commit has no parents in the window
+    const hasParentsInWindow = commit.parentIds.some((pid) => inWindow(pid));
+    if (!hasParentsInWindow) {
       releaseLane(lane);
     }
   }
 
-  // Second pass: fill in parent lanes and flag parents outside the set
-  for (const node of nodes.values()) {
+  // Second pass: parent lanes and missing-parent flags for the new nodes,
+  // plus a refresh of boundary nodes whose parents just arrived
+  const refreshNode = (node: LayoutNode): void => {
     node.parentLanes = node.commit.parentIds
-      .map((pid) => oidToLane.get(pid))
+      .map((pid) => nodes.get(pid)?.lane)
       .filter((l): l is number => l !== undefined);
     node.hasMissingParents = node.commit.parentIds.some((pid) => !nodes.has(pid));
+  };
+  for (const commit of sortedCommits) {
+    refreshNode(nodes.get(commit.oid)!);
+  }
+  for (const node of boundaryNodes) {
+    refreshNode(node);
   }
 
-  // Calculate max lane (find highest used lane)
-  let maxLane = 0;
-  for (const node of nodes.values()) {
-    if (node.lane > maxLane) {
-      maxLane = node.lane;
+  // Extend max lane and total rows
+  let maxLane = layout.maxLane;
+  for (const commit of sortedCommits) {
+    const lane = nodes.get(commit.oid)!.lane;
+    if (lane > maxLane) {
+      maxLane = lane;
     }
   }
-
-  return {
-    nodes,
-    edges,
-    maxLane,
-    totalRows: sortedCommits.length,
-  };
+  layout.maxLane = maxLane;
+  layout.totalRows = startRow + sortedCommits.length;
 }
 
 /**

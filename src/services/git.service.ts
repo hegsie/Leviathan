@@ -354,6 +354,16 @@ export async function getCommitHistory(
   return invokeCommand<Commit[]>("get_commit_history", args);
 }
 
+/**
+ * Total number of commits reachable from any ref (size of the all-branches
+ * graph walk). Cheap when the backend walk cache is warm.
+ */
+export async function getCommitTotal(
+  repoPath: string,
+): Promise<CommandResult<number>> {
+  return invokeCommand<number>("get_commit_total", { path: repoPath });
+}
+
 export async function getCommit(
   repoPath: string,
   oid: string,

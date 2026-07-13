@@ -9,7 +9,7 @@ import {
   type GraphLayout,
   type LayoutNode,
 } from '../../graph/graph-layout.service.ts';
-import { type GraphCommit } from '../../graph/lane-assignment.ts';
+import { appendLanes, type GraphCommit } from '../../graph/lane-assignment.ts';
 import { SpatialIndex, type HitTestResult } from '../../graph/spatial-index.ts';
 import {
   VirtualScrollManager,
@@ -20,6 +20,7 @@ import {
 import { CanvasRenderer, getThemeFromCSS } from '../../graph/canvas-renderer.ts';
 import {
   getCommitHistory,
+  getCommitTotal,
   getRefsByCommit,
   getCommitsStats,
   getCommitsSignatures,
@@ -493,6 +494,8 @@ export class LvGraphCanvas extends LitElement {
   // Infinite scroll pagination
   @state() private isLoadingMore = false;
   @state() private hasMoreCommits = true;
+  // True total commit count across all refs (null until fetched)
+  @state() private commitTotal: number | null = null;
   private totalLoadedCommits = 0;
 
   // Column resize state
@@ -543,19 +546,115 @@ export class LvGraphCanvas extends LitElement {
   private statsFetchedOids: Set<string> = new Set();
   private signaturesFetchedOids: Set<string> = new Set();
 
-  // Config - compact size
-  private readonly ROW_HEIGHT = 22;
-  private readonly LANE_WIDTH = 16;
+  // Config - base metrics at zoom 1.0 (compact size)
+  private static readonly BASE_ROW_HEIGHT = 22;
+  private static readonly BASE_LANE_WIDTH = 16;
+  private static readonly BASE_NODE_RADIUS = 6;
+  private static readonly MIN_ZOOM = 0.6;
+  private static readonly MAX_ZOOM = 2;
+  private readonly ZOOM_STORAGE_KEY = 'leviathan-graph-zoom';
+  /** Density factor applied to row height / lane width / node radius */
+  private zoomLevel = 1;
   private readonly PADDING = 20;
-  private readonly NODE_RADIUS = 6;
   private readonly HEADER_HEIGHT = 28; // Must match canvas-renderer.ts
   // Rows beyond the viewport whose stats/signatures are prefetched
   private readonly DATA_FETCH_OVERSCAN_ROWS = 100;
+
+  private get ROW_HEIGHT(): number {
+    return Math.round(LvGraphCanvas.BASE_ROW_HEIGHT * this.zoomLevel);
+  }
+  private get LANE_WIDTH(): number {
+    return Math.round(LvGraphCanvas.BASE_LANE_WIDTH * this.zoomLevel);
+  }
+  private get NODE_RADIUS(): number {
+    return Math.max(3, Math.round(LvGraphCanvas.BASE_NODE_RADIUS * this.zoomLevel));
+  }
 
   connectedCallback(): void {
     super.connectedCallback();
     this.loadColumnWidths();
     this.loadHiddenBranches();
+    this.loadZoomLevel();
+  }
+
+  private loadZoomLevel(): void {
+    try {
+      const saved = localStorage.getItem(this.ZOOM_STORAGE_KEY);
+      if (saved) {
+        const zoom = parseFloat(saved);
+        if (Number.isFinite(zoom)) {
+          this.zoomLevel = Math.min(
+            LvGraphCanvas.MAX_ZOOM,
+            Math.max(LvGraphCanvas.MIN_ZOOM, zoom)
+          );
+        }
+      }
+    } catch {
+      // Ignore storage errors, keep default zoom
+    }
+  }
+
+  private saveZoomLevel(): void {
+    try {
+      localStorage.setItem(this.ZOOM_STORAGE_KEY, String(this.zoomLevel));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  /** Current zoom/density factor */
+  public getZoom(): number {
+    return this.zoomLevel;
+  }
+
+  /**
+   * Set the zoom/density factor (clamped). Scales row height, lane width
+   * and node radius, keeps the viewport anchored, and persists the value.
+   */
+  public setZoom(zoom: number): void {
+    const clamped = Math.min(
+      LvGraphCanvas.MAX_ZOOM,
+      Math.max(LvGraphCanvas.MIN_ZOOM, zoom)
+    );
+    if (Math.abs(clamped - this.zoomLevel) < 0.001) return;
+
+    const previousScroll = this.scrollState?.getScroll();
+    const previousRowHeight = this.ROW_HEIGHT;
+
+    this.zoomLevel = clamped;
+    this.saveZoomLevel();
+
+    // Reconfigure every subsystem that bakes the metrics in
+    this.virtualScroll?.setConfig({
+      rowHeight: this.ROW_HEIGHT,
+      laneWidth: this.LANE_WIDTH,
+    });
+    this.renderer?.setConfig({
+      rowHeight: this.ROW_HEIGHT,
+      laneWidth: this.LANE_WIDTH,
+      nodeRadius: this.NODE_RADIUS,
+      minNodeRadius: Math.max(3, Math.round(5 * this.zoomLevel)),
+      maxNodeRadius: Math.max(4, Math.round(10 * this.zoomLevel)),
+    });
+    this.buildSpatialIndex();
+    this.updateScrollContentSize();
+
+    // Keep the viewport anchored on the same rows across the zoom change
+    if (previousScroll && this.scrollState && this.virtualScroll) {
+      const ratio = this.ROW_HEIGHT / previousRowHeight;
+      const size = this.virtualScroll.getContentSize();
+      const viewport = this.getViewport();
+      const maxScrollY = Math.max(0, size.height - viewport.height);
+      const maxScrollX = Math.max(0, size.width - viewport.width);
+      this.scrollState.setScroll(
+        Math.min(previousScroll.scrollTop * ratio, maxScrollY),
+        Math.min(previousScroll.scrollLeft, maxScrollX)
+      );
+      this.syncScrollbarPosition();
+    }
+
+    this.renderer?.markDirty();
+    this.scheduleRender();
   }
 
   async firstUpdated(): Promise<void> {
@@ -594,6 +693,7 @@ export class LvGraphCanvas extends LitElement {
 
       // A reload queued for the PREVIOUS repo must not leak into this one
       this.reloadQueued = false;
+      this.commitTotal = null;
       // Clear any stats spinner owned by the previous repo — the new repo's
       // fetch (if any) will set it again; a repo with no stats to fetch must
       // not inherit the old spinner
@@ -929,6 +1029,16 @@ export class LvGraphCanvas extends LitElement {
       this.commits = commitsResult.data.map(commitToGraphCommit);
       this.totalLoadedCommits = commitsResult.data.length;
       this.hasMoreCommits = commitsResult.data.length >= this.commitCount;
+
+      // Fetch the true total in the background (cheap: served from the
+      // backend walk cache) so pagination and the a11y label are exact
+      getCommitTotal(repoPath).then((totalResult) => {
+        if (this.loadVersion !== currentVersion) return;
+        if (totalResult.success && typeof totalResult.data === 'number') {
+          this.commitTotal = totalResult.data;
+          this.hasMoreCommits = this.totalLoadedCommits < totalResult.data;
+        }
+      });
       // Cache this page so switching back to the tab renders instantly
       cacheGraphPage(repoPath, {
         commits: commitsResult.data,
@@ -994,10 +1104,22 @@ export class LvGraphCanvas extends LitElement {
       for (const commit of result.data) {
         this.realCommits.set(commit.oid, commit);
       }
-      this.commits = [...this.commits, ...result.data.map(commitToGraphCommit)];
+      const newGraphCommits = result.data.map(commitToGraphCommit);
+      this.commits = [...this.commits, ...newGraphCommits];
       this.totalLoadedCommits += result.data.length;
-      this.hasMoreCommits = result.data.length >= batchSize;
-      this.processLayout();
+      this.hasMoreCommits = this.commitTotal !== null
+        ? this.totalLoadedCommits < this.commitTotal
+        : result.data.length >= batchSize;
+
+      // Incremental append keeps rows/lanes/colors of already-visible
+      // commits stable. A branch filter or active search changes which
+      // commits are laid out, so those paths take the full recompute.
+      if (this.layout?.appendState && this.hiddenBranches.size === 0 && !this.hasActiveSearch()) {
+        this.layout = appendLanes(this.layout, newGraphCommits);
+        this.applyLayout();
+      } else {
+        this.processLayout();
+      }
     } finally {
       this.isLoadingMore = false;
     }
@@ -1171,6 +1293,15 @@ export class LvGraphCanvas extends LitElement {
   private processLayout(): void {
     const result = computeGraphLayout(this.getVisibleCommits(), { headOid: this.getHeadOid() });
     this.layout = result.layout;
+    this.applyLayout();
+  }
+
+  /**
+   * Push the current layout into the render/scroll/hit-test subsystems.
+   * Shared by full recomputes (processLayout) and incremental appends.
+   */
+  private applyLayout(): void {
+    if (!this.layout) return;
 
     // Build sorted nodes array for keyboard navigation
     this.sortedNodesByRow = [...this.layout.nodes.values()].sort((a, b) => a.row - b.row);
@@ -1354,6 +1485,7 @@ export class LvGraphCanvas extends LitElement {
       rowHeight: this.ROW_HEIGHT,
       laneWidth: this.LANE_WIDTH,
       maxLane: this.layout.maxLane,
+      nodeRadius: this.NODE_RADIUS + 6,
     });
 
     this.spatialIndex.build([...this.layout.nodes.values()], this.layout.edges);
@@ -1392,6 +1524,13 @@ export class LvGraphCanvas extends LitElement {
 
   private handleWheel = (e: WheelEvent): void => {
     e.preventDefault();
+
+    // Ctrl/Cmd + wheel zooms the graph density instead of scrolling
+    if (e.ctrlKey || e.metaKey) {
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      this.setZoom(this.zoomLevel * factor);
+      return;
+    }
 
     if (!this.scrollState || !this.virtualScroll) {
       return;
@@ -2520,7 +2659,9 @@ export class LvGraphCanvas extends LitElement {
             tabindex="0"
             role="img"
             aria-label="${this.totalLoadedCommits > 0
-              ? `Git commit history showing ${this.totalLoadedCommits} commits`
+              ? `Git commit history showing ${this.totalLoadedCommits}${
+                  this.commitTotal !== null ? ` of ${this.commitTotal}` : ''
+                } commits`
               : 'Loading commit graph...'}"
           ></canvas>
 
@@ -2571,7 +2712,11 @@ export class LvGraphCanvas extends LitElement {
             ? html`
                 <div class="loading-indicator">
                   <div class="spinner"></div>
-                  <span>Loading more commits...</span>
+                  <span>
+                    Loading more commits...${this.commitTotal !== null
+                      ? ` (${this.totalLoadedCommits} of ${this.commitTotal})`
+                      : ''}
+                  </span>
                 </div>
               `
             : ''}
