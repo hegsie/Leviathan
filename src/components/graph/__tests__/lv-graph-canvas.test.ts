@@ -527,6 +527,29 @@ describe('lv-graph-canvas', () => {
       expect(hidden.size).to.equal(0);
     });
 
+    it('clears pull-request badges when switching repositories', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      // Simulate PRs loaded for the current repo (keyed by OID — a fork and
+      // its upstream share OIDs, so stale entries would render clickable
+      // badges for the wrong repository)
+      const internals = el as unknown as {
+        pullRequestsByCommit: Record<string, unknown[]>;
+        githubRepo: { owner: string; repo: string } | null;
+      };
+      internals.pullRequestsByCommit = {
+        [mainCommit.oid]: [{ number: 1, state: 'open', draft: false, url: 'https://x' }],
+      };
+      internals.githubRepo = { owner: 'acme', repo: 'repo-a' };
+
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+
+      expect(Object.keys(internals.pullRequestsByCommit)).to.have.length(0);
+      expect(internals.githubRepo).to.be.null;
+    });
+
     it('clears search highlighting when switching repositories', async () => {
       setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
       const el = await renderCanvas();

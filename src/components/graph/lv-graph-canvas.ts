@@ -855,6 +855,14 @@ export class LvGraphCanvas extends LitElement {
       this.mirrorNodes = [];
       this.lastMirrorKey = '';
 
+      // PRs are keyed by OID; on a fork/upstream switch the shared OIDs
+      // would show (clickable!) badges for the WRONG repository's pull
+      // requests on the cached render until the background GitHub fetch
+      // resolves
+      this.pullRequestsByCommit = {};
+      this.githubRepo = null;
+      this.virtualScroll?.setPullRequests(this.pullRequestsByCommit);
+
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
 
