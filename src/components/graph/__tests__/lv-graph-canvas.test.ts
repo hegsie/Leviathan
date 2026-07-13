@@ -839,6 +839,55 @@ describe('lv-graph-canvas', () => {
   });
 
   // ── Per-repo graph cache ─────────────────────────────────────────────
+  describe('screen-reader support', () => {
+    it('mirrors the visible commits into a hidden listbox', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      const listbox = el.shadowRoot!.querySelector('[role="listbox"]');
+      expect(listbox).to.not.be.null;
+
+      const options = listbox!.querySelectorAll('[role="option"]');
+      expect(options.length).to.equal(3);
+      expect(options[0].textContent).to.contain('Third commit');
+      expect(options[0].getAttribute('aria-posinset')).to.equal('1');
+      expect(options[0].getAttribute('aria-setsize')).to.equal('3');
+    });
+
+    it('marks the selected commit in the mirror and announces it', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      el.selectCommit(commit2.oid);
+      await el.updateComplete;
+
+      const selectedOptions = Array.from(
+        el.shadowRoot!.querySelectorAll('[role="option"]')
+      ).filter((o) => o.getAttribute('aria-selected') === 'true');
+      expect(selectedOptions).to.have.length(1);
+      expect(selectedOptions[0].textContent).to.contain('Second commit');
+
+      const status = el.shadowRoot!.querySelector('[role="status"]');
+      expect(status?.textContent).to.contain('Second commit');
+      expect(status?.textContent).to.contain('Test Author');
+    });
+
+    it('clears the announcement when the selection is cleared', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      el.selectCommit(commit2.oid);
+      await el.updateComplete;
+
+      const canvas = el.shadowRoot!.querySelector('canvas')!;
+      canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await el.updateComplete;
+
+      const status = el.shadowRoot!.querySelector('[role="status"]');
+      expect(status?.textContent?.trim()).to.equal('');
+    });
+  });
+
   describe('jump to HEAD and tag tips', () => {
     it('jumpToHead selects the commit HEAD points at', async () => {
       setupDefaultMocks();

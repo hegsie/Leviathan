@@ -444,6 +444,19 @@ export class LvGraphCanvas extends LitElement {
         background: var(--color-bg-hover);
       }
 
+      /* Visually hidden but exposed to assistive technology */
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
       .resize-handle {
         position: absolute;
         top: 0;
@@ -497,6 +510,13 @@ export class LvGraphCanvas extends LitElement {
   // True total commit count across all refs (null until fetched)
   @state() private commitTotal: number | null = null;
   private totalLoadedCommits = 0;
+
+  // Screen-reader mirror of the visible rows + selection announcements.
+  // The canvas itself has no DOM semantics, so a hidden listbox mirrors the
+  // virtual scroll window and a live region announces selection changes.
+  @state() private mirrorNodes: LayoutNode[] = [];
+  @state() private srAnnouncement = '';
+  private lastMirrorKey = '';
 
   // Column resize state
   @state() private refsColumnWidth = 200;
@@ -2235,6 +2255,15 @@ export class LvGraphCanvas extends LitElement {
         composed: true,
       })
     );
+
+    // Announce the selection to assistive technology
+    if (this.selectedNode && commit) {
+      const position = this.selectedNode.row + 1;
+      const total = this.layout?.totalRows ?? this.sortedNodesByRow.length;
+      this.srAnnouncement = `Commit ${position} of ${total}: ${commit.summary} by ${commit.author.name}`;
+    } else {
+      this.srAnnouncement = '';
+    }
   }
 
   private scheduleRender(): void {
@@ -2601,6 +2630,13 @@ export class LvGraphCanvas extends LitElement {
     this.lastRenderData = renderData;
     this.visibleNodes = renderData.nodes.length;
 
+    // Refresh the screen-reader mirror only when the visible window changed
+    const mirrorKey = `${renderData.range.startRow}-${renderData.range.endRow}-${this.layout.totalRows}`;
+    if (mirrorKey !== this.lastMirrorKey) {
+      this.lastMirrorKey = mirrorKey;
+      this.mirrorNodes = [...renderData.nodes].sort((a, b) => a.row - b.row);
+    }
+
     this.renderer.render(renderData);
 
     const stats = this.renderer.getPerformanceStats();
@@ -2793,6 +2829,26 @@ export class LvGraphCanvas extends LitElement {
 
           ${this.showBranchPanel ? this.renderBranchPanel() : ''}
           ${this.showExportMenu ? this.renderExportMenu() : ''}
+
+          <div class="sr-only" role="listbox" aria-label="Commits">
+            ${this.mirrorNodes.map((node) => {
+              const commit = this.realCommits.get(node.oid);
+              return html`
+                <div
+                  role="option"
+                  aria-selected=${this.selectedNodes.has(node.oid) ? 'true' : 'false'}
+                  aria-setsize=${this.layout?.totalRows ?? this.mirrorNodes.length}
+                  aria-posinset=${node.row + 1}
+                >
+                  ${commit?.summary ?? node.commit.message} by
+                  ${commit?.author.name ?? node.commit.author}
+                </div>
+              `;
+            })}
+          </div>
+          <div class="sr-only" role="status" aria-live="polite">
+            ${this.srAnnouncement}
+          </div>
         </div>
       </div>
     `;

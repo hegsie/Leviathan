@@ -313,6 +313,66 @@ describe('CanvasRenderer text truncation cache', () => {
   });
 });
 
+describe('CanvasRenderer merge edge dashing', () => {
+  it('draws merge edges dashed and first-parent edges solid', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as { ctx: CanvasRenderingContext2D };
+
+    const dashCalls: number[][] = [];
+    const originalSetLineDash = internals.ctx.setLineDash.bind(internals.ctx);
+    internals.ctx.setLineDash = (segments: number[]) => {
+      dashCalls.push([...segments]);
+      originalSetLineDash(segments);
+    };
+
+    const commit = {
+      oid: 'child',
+      parentIds: ['p1', 'p2'],
+      timestamp: 1,
+      message: 'msg',
+      author: 'a',
+    };
+    const makeNode = (oid: string, row: number) => ({
+      oid,
+      row,
+      lane: 0,
+      commit: { ...commit, oid },
+      childLanes: [],
+      parentLanes: [],
+      colorIndex: 0,
+      hasMissingParents: false,
+    });
+
+    renderer.render({
+      nodes: [makeNode('child', 0), makeNode('p1', 1), makeNode('p2', 2)],
+      edges: [
+        {
+          fromOid: 'p1', toOid: 'child', fromRow: 1, toRow: 0,
+          fromLane: 0, toLane: 0, isMerge: false, colorIndex: 0,
+        },
+        {
+          fromOid: 'p2', toOid: 'child', fromRow: 2, toRow: 0,
+          fromLane: 1, toLane: 0, isMerge: true, colorIndex: 1,
+        },
+      ],
+      range: { startRow: 0, endRow: 2, startLane: 0, endLane: 1 },
+      offsetX: 20,
+      offsetY: 20,
+      refsByCommit: {},
+      authorEmails: {},
+      maxLane: 1,
+    });
+
+    // Solid for the first-parent edge, dashed for the merge edge, plus the
+    // trailing reset to solid
+    expect(dashCalls).to.deep.include([]);
+    expect(dashCalls.some((d) => d.length === 2)).to.be.true;
+    // Last call restores solid strokes
+    expect(dashCalls[dashCalls.length - 1]).to.deep.equal([]);
+    renderer.destroy();
+  });
+});
+
 describe('CanvasRenderer avatar cache', () => {
   it('does not start avatar loads when fetchAvatars is false', () => {
     const renderer = makeRenderer({ fetchAvatars: false });

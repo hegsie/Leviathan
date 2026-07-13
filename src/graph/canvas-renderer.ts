@@ -862,6 +862,9 @@ export class CanvasRenderer {
       const toY = offsetY + edge.toRow * config.rowHeight + this.HEADER_HEIGHT;
 
       ctx.strokeStyle = this.getBranchColor(edge.colorIndex);
+      // Merge edges are dashed — a non-color cue distinguishing the merged
+      // branch's edge for color-blind users
+      ctx.setLineDash(edge.isMerge ? [5, 4] : []);
       ctx.beginPath();
 
       if (edge.fromLane === edge.toLane) {
@@ -916,6 +919,9 @@ export class CanvasRenderer {
 
       ctx.stroke();
     }
+
+    // Restore solid strokes for everything drawn after the edges
+    ctx.setLineDash([]);
   }
 
   /**
