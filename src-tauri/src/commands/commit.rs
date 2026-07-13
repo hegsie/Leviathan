@@ -16,6 +16,8 @@ use crate::models::Commit;
 struct WalkCache {
     fingerprint: u64,
     oids: Vec<git2::Oid>,
+    /// Recency marker for LRU eviction — refreshed on every hit
+    last_used: std::time::Instant,
 }
 
 const WALK_CACHE_MAX_ENTRIES: usize = 8;
@@ -73,16 +75,30 @@ fn cached_walk_page(
         let oids: Vec<git2::Oid> = revwalk.flatten().collect();
 
         if cache.len() >= WALK_CACHE_MAX_ENTRIES && !cache.contains_key(path) {
-            if let Some(oldest) = cache.keys().next().cloned() {
-                cache.remove(&oldest);
+            // Evict the least-recently-used entry (HashMap iteration order
+            // is arbitrary, so recency is tracked explicitly)
+            if let Some(lru_key) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            {
+                cache.remove(&lru_key);
             }
         }
-        cache.insert(path.to_string(), WalkCache { fingerprint, oids });
+        cache.insert(
+            path.to_string(),
+            WalkCache {
+                fingerprint,
+                oids,
+                last_used: std::time::Instant::now(),
+            },
+        );
     }
 
     let entry = cache
-        .get(path)
+        .get_mut(path)
         .expect("walk cache entry inserted above must exist");
+    entry.last_used = std::time::Instant::now();
     let total = entry.oids.len();
     let page = entry.oids.iter().skip(skip).take(limit).copied().collect();
     Ok((page, total))

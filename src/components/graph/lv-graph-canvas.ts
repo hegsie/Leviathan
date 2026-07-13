@@ -33,6 +33,7 @@ import type { Commit, RefsByCommit, RefInfo } from '../../types/git.types.ts';
 import type { GraphPullRequest } from '../../graph/virtual-scroll.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
 import { embeddingIndexService } from '../../services/embedding-index.service.ts';
+import { settingsStore } from '../../stores/settings.store.ts';
 
 /**
  * Per-repository cache of the last loaded commit page. Switching back to an
@@ -448,6 +449,10 @@ export class LvGraphCanvas extends LitElement {
         position: absolute;
         top: 28px; /* Below the column headers */
         bottom: 0;
+        /* The shared canvas rule sets left: 0; without this override the
+           box is over-constrained and right is ignored, parking the
+           minimap on the LEFT over the graph */
+        left: auto;
         right: 12px; /* Left of the scrollbar */
         width: 56px;
         background: var(--color-bg-secondary);
@@ -581,6 +586,7 @@ export class LvGraphCanvas extends LitElement {
   private scrollState: ScrollStateManager | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private themeObserver: MutationObserver | null = null;
+  private settingsUnsubscribe: (() => void) | null = null;
   private mediaQuery: MediaQueryList | null = null;
   private animationFrame = 0;
   private lastRenderData: RenderData | null = null;
@@ -603,6 +609,9 @@ export class LvGraphCanvas extends LitElement {
   private readonly ZOOM_STORAGE_KEY = 'leviathan-graph-zoom';
   /** Density factor applied to row height / lane width / node radius */
   private zoomLevel = 1;
+  // Wheel-zoom ticks accumulate here and apply once per animation frame
+  private pendingZoomTarget: number | null = null;
+  private zoomFrame = 0;
   private readonly PADDING = 20;
   private readonly HEADER_HEIGHT = 28; // Must match canvas-renderer.ts
   // Rows beyond the viewport whose stats/signatures are prefetched
@@ -737,6 +746,7 @@ export class LvGraphCanvas extends LitElement {
 
     const previousScroll = this.scrollState?.getScroll();
     const previousRowHeight = this.ROW_HEIGHT;
+    const previousLaneWidth = this.LANE_WIDTH;
 
     this.zoomLevel = clamped;
     this.saveZoomLevel();
@@ -756,16 +766,18 @@ export class LvGraphCanvas extends LitElement {
     this.buildSpatialIndex();
     this.updateScrollContentSize();
 
-    // Keep the viewport anchored on the same rows across the zoom change
+    // Keep the viewport anchored on the same rows AND lanes across the
+    // zoom change (both axes scale with the zoom factor)
     if (previousScroll && this.scrollState && this.virtualScroll) {
-      const ratio = this.ROW_HEIGHT / previousRowHeight;
+      const ratioY = this.ROW_HEIGHT / previousRowHeight;
+      const ratioX = this.LANE_WIDTH / previousLaneWidth;
       const size = this.virtualScroll.getContentSize();
       const viewport = this.getViewport();
       const maxScrollY = Math.max(0, size.height - viewport.height);
       const maxScrollX = Math.max(0, size.width - viewport.width);
       this.scrollState.setScroll(
-        Math.min(previousScroll.scrollTop * ratio, maxScrollY),
-        Math.min(previousScroll.scrollLeft, maxScrollX)
+        Math.min(previousScroll.scrollTop * ratioY, maxScrollY),
+        Math.min(previousScroll.scrollLeft * ratioX, maxScrollX)
       );
       this.syncScrollbarPosition();
     }
@@ -792,9 +804,14 @@ export class LvGraphCanvas extends LitElement {
       // Clear existing state when switching repositories
       this.layout = null;
       this.selectedNode = null;
+      this.selectedNodes.clear();
+      this.lastClickedNode = null;
       this.hoveredNode = null;
       this.realCommits.clear();
       this.refsByCommit = {};
+      // A catch-up load in flight for the previous repo must not block the
+      // new repo's pagination (its own version guard discards its results)
+      this.isLoadingMore = false;
 
       // Stats/signatures are keyed by commit OID, which is repo-specific —
       // drop the previous repo's data so memory stays bounded
@@ -874,9 +891,19 @@ export class LvGraphCanvas extends LitElement {
         statsColumnWidth: this.statsColumnWidth,
         showAuthorColumn: this.showAuthorColumn,
         showDateColumn: this.showDateColumn,
+        // The "Show Avatars" app setting controls whether author avatars
+        // are fetched from Gravatar (off = colored initials only)
+        fetchAvatars: settingsStore.getState().showAvatars,
       },
       getThemeFromCSS()
     );
+
+    // Keep avatar fetching in sync with the settings toggle
+    this.settingsUnsubscribe = settingsStore.subscribe((state) => {
+      this.renderer?.setConfig({ fetchAvatars: state.showAvatars });
+      this.renderer?.markDirty();
+      this.scheduleRender();
+    });
 
     // Listen for theme changes via data-theme attribute
     this.themeObserver = new MutationObserver(() => {
@@ -951,6 +978,10 @@ export class LvGraphCanvas extends LitElement {
     if (this.animationFrame) {
       cancelAnimationFrame(this.animationFrame);
     }
+    if (this.zoomFrame) {
+      cancelAnimationFrame(this.zoomFrame);
+      this.zoomFrame = 0;
+    }
     if (this.statsDebounceTimer) {
       clearTimeout(this.statsDebounceTimer);
     }
@@ -967,6 +998,8 @@ export class LvGraphCanvas extends LitElement {
     this.scrollState?.destroy();
     this.resizeObserver?.disconnect();
     this.themeObserver?.disconnect();
+    this.settingsUnsubscribe?.();
+    this.settingsUnsubscribe = null;
     this.mediaQuery?.removeEventListener('change', this.handleThemeChange);
   }
 
@@ -1160,8 +1193,12 @@ export class LvGraphCanvas extends LitElement {
         if (totalResult.success && typeof totalResult.data === 'number') {
           this.commitTotal = totalResult.data;
           this.hasMoreCommits = this.totalLoadedCommits < totalResult.data;
-          // Grow the scrollbar to span the full history
+          // Grow the scrollbar to span the full history, and re-spread the
+          // minimap dots over the new total so they aren't stretched over
+          // the whole strip
           this.updateVirtualTotalRows();
+          this.rebuildMinimapDots();
+          this.renderMinimap();
         }
       });
       // Cache this page so switching back to the tab renders instantly
@@ -1206,11 +1243,23 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
+  /** True when the viewport extends past the bottom of the loaded rows */
+  private isViewportBeyondLoaded(): boolean {
+    const scrollTop = this.scrollState?.getScroll().scrollTop ?? 0;
+    const viewportHeight = this.containerEl?.clientHeight ?? 0;
+    const loadedBottom = this.PADDING + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
+    return scrollTop + viewportHeight > loadedBottom;
+  }
+
   private async loadMoreCommits(): Promise<void> {
     if (this.isLoadingMore || !this.hasMoreCommits || !this.repositoryPath) return;
     this.isLoadingMore = true;
-    const batchSize = 500;
+    // Larger batches while catching up to a distant scrollbar/minimap
+    // position: each batch pays a layout/index rebuild over ALL loaded
+    // commits, so fewer, bigger batches keep deep drags responsive
+    const batchSize = this.isViewportBeyondLoaded() ? 2000 : 500;
     const currentVersion = this.loadVersion;
+    let failed = false;
 
     try {
       const result = await getCommitHistory({
@@ -1221,7 +1270,15 @@ export class LvGraphCanvas extends LitElement {
       });
 
       if (this.loadVersion !== currentVersion) return;
-      if (!result.success || !result.data?.length) {
+      if (!result.success) {
+        // Transient failure: keep hasMoreCommits so a later scroll retries,
+        // but stop the catch-up chain to avoid a hot retry loop
+        failed = true;
+        log.warn('loadMoreCommits: fetch failed:', result.error?.message);
+        return;
+      }
+      if (!result.data?.length) {
+        // Genuinely no more commits
         this.hasMoreCommits = false;
         return;
       }
@@ -1251,8 +1308,13 @@ export class LvGraphCanvas extends LitElement {
 
     // The scrollbar spans the FULL history, so the user may have scrolled
     // far past the loaded rows — keep loading pages until the viewport is
-    // caught up (each call loads one batch, then re-checks)
-    this.checkLoadMore();
+    // caught up (each call loads one batch, then re-checks). Only when
+    // unfiltered: with a branch filter or search active the scrollbar does
+    // NOT span the full history, and chaining here would silently pull the
+    // whole repository just because the filtered graph is short.
+    if (!failed && this.hiddenBranches.size === 0 && !this.hasActiveSearch()) {
+      this.checkLoadMore();
+    }
   }
 
   private checkLoadMore(): void {
@@ -1800,10 +1862,27 @@ export class LvGraphCanvas extends LitElement {
   private handleWheel = (e: WheelEvent): void => {
     e.preventDefault();
 
-    // Ctrl/Cmd + wheel zooms the graph density instead of scrolling
+    // Ctrl/Cmd + wheel zooms the graph density instead of scrolling.
+    // Wheel ticks arrive far faster than zoom application is cheap (each
+    // zoom rebuilds the spatial index), so ticks accumulate into a target
+    // applied once per animation frame.
     if (e.ctrlKey || e.metaKey) {
       const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-      this.setZoom(this.zoomLevel * factor);
+      const base = this.pendingZoomTarget ?? this.zoomLevel;
+      this.pendingZoomTarget = Math.min(
+        LvGraphCanvas.MAX_ZOOM,
+        Math.max(LvGraphCanvas.MIN_ZOOM, base * factor)
+      );
+      if (!this.zoomFrame) {
+        this.zoomFrame = requestAnimationFrame(() => {
+          this.zoomFrame = 0;
+          if (this.pendingZoomTarget !== null) {
+            const target = this.pendingZoomTarget;
+            this.pendingZoomTarget = null;
+            this.setZoom(target);
+          }
+        });
+      }
       return;
     }
 
@@ -2561,6 +2640,9 @@ export class LvGraphCanvas extends LitElement {
   }
 
   private loadHiddenBranches(): void {
+    // Always reset first: a repo with no saved entry must NOT inherit the
+    // previous repo's hidden branches
+    this.hiddenBranches = new Set();
     try {
       const saved = localStorage.getItem(this.getBranchStorageKey());
       if (saved) {
@@ -2669,8 +2751,12 @@ export class LvGraphCanvas extends LitElement {
 
     const contentSize = this.virtualScroll.getContentSize();
 
+    // Size the export to the LOADED rows, not the virtual full-history
+    // height — only loaded commits can be drawn, and sizing to the virtual
+    // total would produce a mostly-blank image on large repos
+    const loadedHeight = this.layout.totalRows * this.ROW_HEIGHT + this.PADDING * 2;
     // Limit export size for very large graphs
-    const maxHeight = Math.min(contentSize.height + this.HEADER_HEIGHT + 40, 50000);
+    const maxHeight = Math.min(loadedHeight + this.HEADER_HEIGHT + 40, 50000);
     const width = Math.max(contentSize.width, this.containerEl?.clientWidth ?? 800);
 
     // Create offscreen canvas
@@ -2741,7 +2827,9 @@ export class LvGraphCanvas extends LitElement {
 
     const contentSize = this.virtualScroll.getContentSize();
     const width = Math.max(contentSize.width, this.containerEl?.clientWidth ?? 800);
-    const height = contentSize.height + this.HEADER_HEIGHT + 40;
+    // Loaded rows only — see exportAsImage
+    const loadedHeight = this.layout.totalRows * this.ROW_HEIGHT + this.PADDING * 2;
+    const height = loadedHeight + this.HEADER_HEIGHT + 40;
     const theme = getThemeFromCSS();
 
     const svgParts: string[] = [];

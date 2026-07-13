@@ -37,10 +37,13 @@ export interface LayoutNode {
    */
   colorIndex: number;
   /**
-   * True when the commit has parents that are NOT in the laid-out set
+   * True when the commit's FIRST parent is not in the laid-out set
    * (outside the loaded pagination window or hidden by a branch filter).
    * The renderer draws a fading "history continues" stub below such nodes
-   * so the history doesn't look like it dead-ends.
+   * so the commit's own line doesn't look like it dead-ends. A merge whose
+   * first-parent chain is loaded but whose merged branch is missing does
+   * NOT get the stub — its own lane genuinely continues via the loaded
+   * first-parent edge.
    */
   hasMissingParents: boolean;
 }
@@ -238,11 +241,16 @@ export function assignLanes(
 
   const commitMap = new Map<string, GraphCommit>(commits.map((c) => [c.oid, c]));
   const { chain, continuation } = firstParentChain(options.headOid, commitMap);
+  // Reserve lane 0 / color 0 whenever a HEAD exists — even when its chain
+  // is not in THIS page (e.g. detached HEAD on an older commit): the
+  // mainline may arrive via appendLanes later and must not collide with an
+  // unrelated branch that grabbed lane 0 / color 0 in the first page.
+  const hasMainline = options.headOid !== undefined;
   const state: LayoutAppendState = {
     lanes: [],
-    reservedLanes: chain.size > 0 ? 1 : 0,
+    reservedLanes: hasMainline ? 1 : 0,
     // Color 0 belongs to the mainline
-    nextColorIndex: chain.size > 0 ? 1 : 0,
+    nextColorIndex: hasMainline ? 1 : 0,
     mainlineContinuation: continuation,
   };
 
@@ -279,7 +287,6 @@ export function appendLanes(layout: GraphLayout, newCommits: GraphCommit[]): Gra
   // Re-reserve lanes of boundary lines that continue below the appended
   // rows, so new branch lines don't get placed on top of them
   for (const node of layout.nodes.values()) {
-    if (!node.hasMissingParents) continue;
     const firstParent = node.commit.parentIds[0];
     if (
       firstParent !== undefined &&
@@ -326,10 +333,13 @@ function layoutInto(
       childrenMap.set(parentId, children);
     }
   }
-  // ...plus already-laid-out boundary nodes whose parents arrive in this batch
+  // ...plus already-laid-out boundary nodes whose parents arrive in this
+  // batch. Checked against the nodes map directly (NOT hasMissingParents,
+  // which only covers the first parent): a merge whose second parent
+  // arrives in this batch still needs its merge edge created.
   const boundaryNodes: LayoutNode[] = [];
   for (const node of nodes.values()) {
-    if (!node.hasMissingParents) continue;
+    if (!node.commit.parentIds.some((pid) => !nodes.has(pid))) continue;
     boundaryNodes.push(node);
     for (const pid of node.commit.parentIds) {
       if (freshOids.has(pid)) {
@@ -476,7 +486,10 @@ function layoutInto(
     node.parentLanes = node.commit.parentIds
       .map((pid) => nodes.get(pid)?.lane)
       .filter((l): l is number => l !== undefined);
-    node.hasMissingParents = node.commit.parentIds.some((pid) => !nodes.has(pid));
+    // First parent only: the stub marks the commit's OWN line continuing
+    // beyond the window, not a missing merged branch
+    const firstParent = node.commit.parentIds[0];
+    node.hasMissingParents = firstParent !== undefined && !nodes.has(firstParent);
   };
   for (const commit of sortedCommits) {
     refreshNode(nodes.get(commit.oid)!);

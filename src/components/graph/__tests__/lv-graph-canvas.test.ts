@@ -509,6 +509,42 @@ describe('lv-graph-canvas', () => {
       expect(getNodeOids(el)).to.include(featureCommit.oid);
     });
 
+    it('does not leak hidden branches into a repo with no saved filter', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+      expect(getNodeOids(el)).to.have.length(2);
+
+      // Switch to a repository that has never had branches hidden — the
+      // previous repo's filter must NOT apply
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+
+      const hidden = (el as unknown as { hiddenBranches: Set<string> }).hiddenBranches;
+      expect(hidden.size).to.equal(0);
+    });
+
+    it('clears multi-selection state when switching repositories', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.selectCommit(mainCommit.oid);
+      const internals = el as unknown as {
+        selectedNodes: Set<string>;
+        lastClickedNode: unknown;
+      };
+      expect(internals.selectedNodes.size).to.equal(1);
+
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+
+      expect(internals.selectedNodes.size).to.equal(0);
+      expect(internals.lastClickedNode).to.be.null;
+    });
+
     it('clears the selection when the selected commit becomes hidden', async () => {
       setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
       const el = await renderCanvas();
@@ -1040,19 +1076,37 @@ describe('lv-graph-canvas', () => {
       expect(el.getZoom()).to.equal(0.6);
     });
 
-    it('zooms on Ctrl+wheel instead of scrolling', async () => {
+    it('zooms on Ctrl+wheel instead of scrolling (applied once per frame)', async () => {
       const el = await renderCanvas();
       const canvas = el.shadowRoot!.querySelector('canvas')!;
+      const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
 
       canvas.dispatchEvent(
         new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, cancelable: true })
       );
+      await nextFrame();
       expect(el.getZoom()).to.be.greaterThan(1);
 
       canvas.dispatchEvent(
         new WheelEvent('wheel', { deltaY: 100, ctrlKey: true, cancelable: true })
       );
+      await nextFrame();
       expect(el.getZoom()).to.be.closeTo(1, 0.001);
+    });
+
+    it('accumulates rapid wheel ticks into a single zoom application', async () => {
+      const el = await renderCanvas();
+      const canvas = el.shadowRoot!.querySelector('canvas')!;
+      const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+
+      // Three ticks in the same frame compound into one target (1.1^3)
+      for (let i = 0; i < 3; i++) {
+        canvas.dispatchEvent(
+          new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, cancelable: true })
+        );
+      }
+      await nextFrame();
+      expect(el.getZoom()).to.be.closeTo(1.331, 0.005);
     });
 
     it('restores the persisted zoom level on connect', async () => {
@@ -1221,6 +1275,32 @@ describe('lv-graph-canvas', () => {
       expect(content.style.height).to.equal(
         `${internals.sortedNodesByRow.length * 22 + 40}px`
       );
+    });
+
+    it('keeps pagination available after a transient load-more failure', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      // Make the next page fetch fail
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_commit_history') {
+          const typedArgs = args as { skip?: number } | undefined;
+          if (typedArgs?.skip && typedArgs.skip > 0) {
+            throw { code: 'GIT_ERROR', message: 'network blip' };
+          }
+        }
+        return previousMock(command, args);
+      };
+
+      const internals = el as unknown as {
+        loadMoreCommits(): Promise<void>;
+        hasMoreCommits: boolean;
+      };
+      await internals.loadMoreCommits();
+
+      // A failed fetch must NOT permanently mark the history as exhausted
+      expect(internals.hasMoreCommits).to.be.true;
     });
 
     it('loads more pages when scrolled past the loaded rows', async () => {

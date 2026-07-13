@@ -2349,7 +2349,11 @@ export class AppShell extends LitElement {
         label: 'Graph: Jump to HEAD',
         category: 'navigation',
         icon: 'commit',
-        action: this.requiresRepository(() => this.graphCanvas?.jumpToHead()),
+        action: this.requiresRepository(() => {
+          if (!this.graphCanvas?.jumpToHead()) {
+            showToast('HEAD commit is not loaded in the graph', 'info', 4000);
+          }
+        }),
       },
       {
         id: 'toggle-output-panel',
@@ -3032,7 +3036,11 @@ export class AppShell extends LitElement {
   }
 
   private handleNavigateToCommit(e: CustomEvent<{ oid: string }>): void {
-    this.graphCanvas?.selectCommit(e.detail.oid);
+    if (!this.graphCanvas?.selectCommit(e.detail.oid)) {
+      // Target commit isn't in the loaded window (or is hidden by a branch
+      // filter) — say so instead of silently doing nothing
+      showToast('Commit is not loaded in the graph yet — scroll further back to load it', 'info', 4000);
+    }
   }
 
   private handleShowFileHistory(e: CustomEvent<{ filePath: string }>): void {

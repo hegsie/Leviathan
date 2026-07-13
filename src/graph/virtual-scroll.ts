@@ -81,6 +81,15 @@ const DEFAULT_CONFIG: VirtualScrollConfig = {
 };
 
 /**
+ * Browsers cap element heights around ~33.5M px; past that the scrollable
+ * range silently clamps and deep rows become unreachable. Content height is
+ * capped below the browser limit — repos big enough to hit this (~1.3M+
+ * commits at default zoom) degrade to a shorter scrollbar instead of a
+ * broken one.
+ */
+const MAX_CONTENT_HEIGHT_PX = 30_000_000;
+
+/**
  * Virtual scroll manager for graph rendering
  */
 export class VirtualScrollManager {
@@ -190,8 +199,10 @@ export class VirtualScrollManager {
 
     const width =
       (this.layout.maxLane + 1) * this.config.laneWidth + this.config.padding * 2;
-    const height =
-      this.effectiveTotalRows() * this.config.rowHeight + this.config.padding * 2;
+    const height = Math.min(
+      this.effectiveTotalRows() * this.config.rowHeight + this.config.padding * 2,
+      MAX_CONTENT_HEIGHT_PX
+    );
 
     return { width, height };
   }

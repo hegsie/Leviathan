@@ -238,6 +238,41 @@ describe('assignLanes', () => {
     expect(layout.nodes.get('c2')!.hasMissingParents).to.be.false;
   });
 
+  it('does not flag a merge whose first-parent chain is loaded but merged branch is missing', () => {
+    const commits = [
+      makeCommit('merge', ['main1', 'unloaded-side'], 3000),
+      makeCommit('main1', [], 1000),
+    ];
+    const layout = assignLanes(commits, { headOid: 'merge' });
+
+    // The merge's OWN line continues via the loaded first parent — no
+    // dead-end stub over the real mainline edge
+    expect(layout.nodes.get('merge')!.hasMissingParents).to.be.false;
+  });
+
+  it('reserves lane 0 / color 0 for the mainline even when HEAD is not in the first page', () => {
+    // Detached HEAD on an older commit: page 1 holds only newer branch
+    // commits; the mainline arrives in page 2
+    const page1 = [
+      makeCommit('branch2', ['branch1'], 9000),
+      makeCommit('branch1', ['old-base'], 8000),
+    ];
+    const layout = assignLanes(page1, { headOid: 'head-commit' });
+
+    // The unrelated branch must NOT take the mainline's lane 0 / color 0
+    expect(layout.nodes.get('branch2')!.lane).to.be.greaterThan(0);
+    expect(layout.nodes.get('branch2')!.colorIndex).to.be.greaterThan(0);
+
+    appendLanes(layout, [
+      makeCommit('head-commit', ['old-base'], 3000),
+      makeCommit('old-base', [], 1000),
+    ]);
+
+    expect(layout.nodes.get('head-commit')!.lane).to.equal(0);
+    expect(layout.nodes.get('head-commit')!.colorIndex).to.equal(0);
+    expect(layout.nodes.get('old-base')!.lane).to.equal(0);
+  });
+
   it('does not flag true root commits as having missing parents', () => {
     const commits = [
       makeCommit('c2', ['c1'], 2000),
@@ -328,6 +363,25 @@ describe('appendLanes', () => {
     expect(layout.nodes.get('c1')!.hasMissingParents).to.be.false;
     expect(layout.nodes.get('c0')!.hasMissingParents).to.be.false;
     expect(layout.nodes.get('c1')!.parentLanes).to.deep.equal([0]);
+  });
+
+  it('creates a merge edge when the missing SECOND parent arrives in a later page', () => {
+    // merge's first parent is loaded, second parent pages in later — the
+    // merge edge across the page boundary must still be created
+    const page1 = [
+      makeCommit('merge', ['main1', 'side1'], 3000),
+      makeCommit('main1', [], 1000),
+    ];
+    const layout = assignLanes(page1, { headOid: 'merge' });
+    expect(layout.nodes.get('merge')!.hasMissingParents).to.be.false;
+
+    appendLanes(layout, [makeCommit('side1', [], 500)]);
+
+    const mergeEdge = layout.edges.find(
+      (e) => e.fromOid === 'side1' && e.toOid === 'merge'
+    );
+    expect(mergeEdge).to.not.be.undefined;
+    expect(mergeEdge!.isMerge).to.be.true;
   });
 
   it('continues the mainline into the appended page (lane 0, color 0)', () => {
