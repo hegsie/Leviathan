@@ -211,6 +211,53 @@ describe('CanvasRenderer state getters', () => {
   });
 });
 
+describe('CanvasRenderer text truncation cache', () => {
+  type TruncationInternals = {
+    ctx: CanvasRenderingContext2D;
+    truncationCache: Map<string, string>;
+    truncateToWidth(text: string, maxWidth: number): string;
+  };
+
+  it('truncates long text with an ellipsis and caches the result', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as TruncationInternals;
+    internals.ctx.font = '13px sans-serif';
+
+    const longText = 'A very long commit message that cannot possibly fit';
+    const truncated = internals.truncateToWidth(longText, 60);
+    expect(truncated.endsWith('…')).to.be.true;
+    expect(truncated.length).to.be.lessThan(longText.length);
+    expect(internals.truncationCache.size).to.equal(1);
+
+    // Second call is served from the cache
+    expect(internals.truncateToWidth(longText, 60)).to.equal(truncated);
+    expect(internals.truncationCache.size).to.equal(1);
+    renderer.destroy();
+  });
+
+  it('returns short text unchanged', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as TruncationInternals;
+    internals.ctx.font = '13px sans-serif';
+
+    expect(internals.truncateToWidth('short', 500)).to.equal('short');
+    renderer.destroy();
+  });
+
+  it('keys the cache on width so resizes re-truncate', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as TruncationInternals;
+    internals.ctx.font = '13px sans-serif';
+
+    const text = 'A very long commit message that cannot possibly fit';
+    const narrow = internals.truncateToWidth(text, 60);
+    const wide = internals.truncateToWidth(text, 200);
+    expect(wide.length).to.be.greaterThan(narrow.length);
+    expect(internals.truncationCache.size).to.equal(2);
+    renderer.destroy();
+  });
+});
+
 describe('CanvasRenderer avatar cache', () => {
   it('does not start avatar loads when fetchAvatars is false', () => {
     const renderer = makeRenderer({ fetchAvatars: false });

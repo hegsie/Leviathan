@@ -1,11 +1,10 @@
 /**
- * Optimized Canvas Renderer for Git Graph
+ * Canvas Renderer for Git Graph
  *
- * Features:
- * - Double buffering for smooth rendering
- * - Dirty region tracking
- * - Layer separation (edges, nodes, labels)
- * - FPS monitoring
+ * Renders the virtualized viewport (edges, nodes, ref labels, column
+ * headers) in a single full repaint per dirty frame. Includes FPS
+ * monitoring, HiDPI scaling, a Gravatar cache, and a text-truncation cache
+ * to keep per-frame measureText cost down.
  */
 
 import type { RenderData, GraphPullRequest } from './virtual-scroll.ts';
@@ -307,6 +306,12 @@ export class CanvasRenderer {
   // Highlighted commits for search result dimming
   private highlightedOids: Set<string> = new Set();
 
+  // Truncated-text cache keyed by font, width and text. Char-by-char
+  // truncation calls measureText per character, which is a per-frame hot
+  // spot without this.
+  private static readonly MAX_TRUNCATION_CACHE = 4000;
+  private truncationCache: Map<string, string> = new Map();
+
   // Header height for offsetting content
   private readonly HEADER_HEIGHT = 28;
 
@@ -505,6 +510,31 @@ export class CanvasRenderer {
       this.avatarCache.set(email, img);
     }
     return img;
+  }
+
+  /**
+   * Truncate text with an ellipsis to fit maxWidth using the CURRENT
+   * ctx.font, caching results so repeated frames skip the measure loop
+   */
+  private truncateToWidth(text: string, maxWidth: number): string {
+    const key = `${this.ctx.font}|${Math.round(maxWidth)}|${text}`;
+    const cached = this.truncationCache.get(key);
+    if (cached !== undefined) return cached;
+
+    let result = text;
+    if (this.ctx.measureText(text).width > maxWidth) {
+      let truncated = text;
+      while (truncated.length > 0 && this.ctx.measureText(truncated + '…').width > maxWidth) {
+        truncated = truncated.slice(0, -1);
+      }
+      result = truncated + '…';
+    }
+
+    if (this.truncationCache.size >= CanvasRenderer.MAX_TRUNCATION_CACHE) {
+      this.truncationCache.clear();
+    }
+    this.truncationCache.set(key, result);
+    return result;
   }
 
   /**
@@ -1114,14 +1144,8 @@ export class CanvasRenderer {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
 
-      // Truncate message to fit available space
-      let displayMessage = message;
-      if (ctx.measureText(displayMessage).width > availableMessageWidth) {
-        while (ctx.measureText(displayMessage + '…').width > availableMessageWidth && displayMessage.length > 0) {
-          displayMessage = displayMessage.slice(0, -1);
-        }
-        displayMessage += '…';
-      }
+      // Truncate message to fit available space (cached)
+      const displayMessage = this.truncateToWidth(message, availableMessageWidth);
       ctx.fillText(displayMessage, messageColumnX, y);
 
       // Render refs in refs column - show as many as fit
@@ -1226,18 +1250,10 @@ export class CanvasRenderer {
             const ref = item as RefInfo;
             const { bgColor, textColor } = this.getRefColors(ref);
 
-            // Truncate label if needed
-            let displayLabel = labelText;
+            // Truncate label if needed (cached)
             const maxTextWidth = maxPillWidth - smallLabelPadding * 2 - iconWidth;
-            let actualTextWidth = ctx.measureText(displayLabel).width;
-
-            if (actualTextWidth > maxTextWidth) {
-              while (ctx.measureText(displayLabel + '…').width > maxTextWidth && displayLabel.length > 0) {
-                displayLabel = displayLabel.slice(0, -1);
-              }
-              displayLabel += '…';
-              actualTextWidth = ctx.measureText(displayLabel).width;
-            }
+            const displayLabel = this.truncateToWidth(labelText, maxTextWidth);
+            const actualTextWidth = ctx.measureText(displayLabel).width;
 
             const actualPillWidth = actualTextWidth + smallLabelPadding * 2 + iconWidth;
 
@@ -1926,6 +1942,7 @@ export class CanvasRenderer {
     this.commitStats.clear();
     this.commitSignatures.clear();
     this.highlightedOids.clear();
+    this.truncationCache.clear();
   }
 }
 

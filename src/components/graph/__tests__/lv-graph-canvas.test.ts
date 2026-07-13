@@ -836,6 +836,48 @@ describe('lv-graph-canvas', () => {
   });
 
   // ── Per-repo graph cache ─────────────────────────────────────────────
+  describe('visible-range stats fetching', () => {
+    it('fetches stats only for the visible rows, not every loaded commit', async () => {
+      // 500 commits loaded; only the visible range (plus overscan) should
+      // have its stats requested
+      const manyCommits = makeMoreCommits(500, 0);
+      setupDefaultMocks({ commits: manyCommits, refs: {} });
+
+      await renderCanvas();
+      // Stats fetch is debounced (300ms) — wait for it to fire
+      await new Promise((r) => setTimeout(r, 600));
+
+      const statsCalls = findCommands('get_commits_stats');
+      const requestedOids = new Set<string>();
+      for (const call of statsCalls) {
+        const args = call.args as { commitOids?: string[] } | undefined;
+        for (const oid of args?.commitOids ?? []) {
+          requestedOids.add(oid);
+        }
+      }
+
+      expect(requestedOids.size).to.be.greaterThan(0);
+      expect(requestedOids.size).to.be.lessThan(500);
+    });
+
+    it('does not refetch stats for already-fetched commits', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      await new Promise((r) => setTimeout(r, 600));
+
+      const callsBefore = findCommands('get_commits_stats').length;
+      expect(callsBefore).to.be.greaterThan(0);
+
+      // Trigger another visible-data fetch for the same rows
+      (el as unknown as { scheduleVisibleDataFetch(): void }).scheduleVisibleDataFetch();
+      await new Promise((r) => setTimeout(r, 600));
+
+      // All visible commits were already fetched — no new backend calls
+      const callsAfter = findCommands('get_commits_stats').length;
+      expect(callsAfter).to.equal(callsBefore);
+    });
+  });
+
   describe('per-repo graph cache', () => {
     beforeEach(() => {
       clearGraphCacheForTests();

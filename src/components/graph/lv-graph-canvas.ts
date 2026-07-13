@@ -533,12 +533,22 @@ export class LvGraphCanvas extends LitElement {
   private lastRenderData: RenderData | null = null;
   private sortedNodesByRow: LayoutNode[] = [];
 
+  // Stats/signatures accumulated per commit OID. Fetched lazily for the
+  // visible row range only (a commit's stats never change for a given OID,
+  // so entries stay valid across reloads of the same repo).
+  private commitStatsMap: Map<string, { additions: number; deletions: number; filesChanged: number }> = new Map();
+  private commitSignaturesMap: Map<string, { signed: boolean; valid: boolean }> = new Map();
+  private statsFetchedOids: Set<string> = new Set();
+  private signaturesFetchedOids: Set<string> = new Set();
+
   // Config - compact size
   private readonly ROW_HEIGHT = 22;
   private readonly LANE_WIDTH = 16;
   private readonly PADDING = 20;
   private readonly NODE_RADIUS = 6;
   private readonly HEADER_HEIGHT = 28; // Must match canvas-renderer.ts
+  // Rows beyond the viewport whose stats/signatures are prefetched
+  private readonly DATA_FETCH_OVERSCAN_ROWS = 100;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -567,6 +577,15 @@ export class LvGraphCanvas extends LitElement {
       this.hoveredNode = null;
       this.realCommits.clear();
       this.refsByCommit = {};
+
+      // Stats/signatures are keyed by commit OID, which is repo-specific —
+      // drop the previous repo's data so memory stays bounded
+      this.commitStatsMap.clear();
+      this.commitSignaturesMap.clear();
+      this.statsFetchedOids.clear();
+      this.signaturesFetchedOids.clear();
+      this.renderer?.setCommitStats(this.commitStatsMap);
+      this.renderer?.setCommitSignatures(this.commitSignaturesMap);
 
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
@@ -1158,8 +1177,8 @@ export class LvGraphCanvas extends LitElement {
     // Update scroll content size
     this.updateScrollContentSize();
 
-    // Rebuild spatial index
-    this.rebuildSpatialIndex();
+    // Build spatial index (once per layout — scroll-independent)
+    this.buildSpatialIndex();
 
     // Set highlighted commits for search results
     this.renderer?.setHighlightedCommits(this.matchedCommitOids);
@@ -1168,143 +1187,130 @@ export class LvGraphCanvas extends LitElement {
     this.renderer?.markDirty();
     this.scheduleRender();
 
-    // Fetch real commit stats and signatures asynchronously (don't block initial render)
-    // Use debouncing for stats to handle rapid repo changes during startup
-    this.scheduleStatsFetch();
-    this.fetchCommitSignatures();
+    // Fetch stats and signatures for the visible rows asynchronously
+    // (don't block initial render). Debounced to let rapid changes settle.
+    this.scheduleVisibleDataFetch();
   }
 
   /**
-   * Schedule stats fetch with debouncing to avoid race conditions during rapid repo changes
+   * Schedule a stats/signatures fetch for the visible rows, debounced so
+   * rapid repo switches and fast scrolling settle before hitting the backend
    */
-  private scheduleStatsFetch(): void {
+  private scheduleVisibleDataFetch(): void {
     const repoPath = this.repositoryPath;
-    log.debug(`scheduleStatsFetch: scheduling for ${repoPath}, version=${this.loadVersion}`);
 
-    // Cancel any pending stats fetch
     if (this.statsDebounceTimer) {
       clearTimeout(this.statsDebounceTimer);
-      log.debug(`scheduleStatsFetch: cancelled previous pending fetch`);
     }
 
-    // Wait a short time before fetching to let rapid changes settle
-    // Use 300ms to handle startup where multiple repos are loaded quickly
     this.statsDebounceTimer = setTimeout(() => {
       this.statsDebounceTimer = null;
       // Check if repo is still the same before fetching
       if (this.repositoryPath === repoPath) {
-        log.debug(`scheduleStatsFetch: timer fired, fetching for ${repoPath}`);
-        this.fetchCommitStats();
-      } else {
-        log.debug(`scheduleStatsFetch: timer fired but repo changed from ${repoPath} to ${this.repositoryPath}, skipping`);
+        this.fetchVisibleCommitData();
       }
     }, 300);
   }
 
-  private async fetchCommitStats(): Promise<void> {
-    if (!this.repositoryPath || this.realCommits.size === 0) return;
+  /**
+   * OIDs of the commits in the visible row range plus overscan
+   */
+  private getVisibleDataOids(): string[] {
+    if (!this.virtualScroll || this.sortedNodesByRow.length === 0) return [];
+    const range = this.virtualScroll.getVisibleRange(this.getViewport());
+    const start = Math.max(0, range.startRow - this.DATA_FETCH_OVERSCAN_ROWS);
+    const end = Math.min(
+      this.sortedNodesByRow.length,
+      range.endRow + this.DATA_FETCH_OVERSCAN_ROWS + 1
+    );
+    return this.sortedNodesByRow.slice(start, end).map((n) => n.oid);
+  }
 
-    // Capture state at start to avoid race conditions when repository changes
+  /**
+   * Fetch commit stats and signatures for the VISIBLE rows only (plus
+   * overscan), instead of every loaded commit. Results accumulate per OID —
+   * a commit's stats never change for a given OID — so scrolling back over
+   * fetched rows costs nothing.
+   */
+  private async fetchVisibleCommitData(): Promise<void> {
+    if (!this.repositoryPath) return;
     const repoPath = this.repositoryPath;
-    const commitOids = [...this.realCommits.keys()];
-    const version = this.loadVersion;
-    const startTime = Date.now();
-    const MIN_LOADING_DISPLAY_MS = 400; // Minimum time to show loading indicator
+    const visibleOids = this.getVisibleDataOids();
 
-    log.debug(`fetchCommitStats: starting for ${commitOids.length} commits, version=${version}`);
-    this.isLoadingStats = true;
+    const statsOids = visibleOids.filter((oid) => !this.statsFetchedOids.has(oid));
+    const signatureOids = visibleOids.filter((oid) => !this.signaturesFetchedOids.has(oid));
+    if (statsOids.length === 0 && signatureOids.length === 0) return;
+
+    // Mark as requested up-front so overlapping scroll events don't refetch
+    for (const oid of statsOids) this.statsFetchedOids.add(oid);
+    for (const oid of signatureOids) this.signaturesFetchedOids.add(oid);
+
+    // Only the very first fetch for a repo shows the spinner — subsequent
+    // scroll-driven fetches are incremental and shouldn't flash UI
+    const isInitialFetch = this.commitStatsMap.size === 0 && statsOids.length > 0;
+    const startTime = Date.now();
+    const MIN_LOADING_DISPLAY_MS = 400;
+    if (isInitialFetch) {
+      this.isLoadingStats = true;
+    }
 
     try {
-      // Fetch in batches to avoid overwhelming the backend
-      const batchSize = 100;
-      const allStats = new Map<string, { additions: number; deletions: number; filesChanged: number }>();
+      const statsBatchSize = 100;
+      for (let i = 0; i < statsOids.length; i += statsBatchSize) {
+        // Abort if we switched to a different repository
+        if (this.repositoryPath !== repoPath) return;
 
-      for (let i = 0; i < commitOids.length; i += batchSize) {
-        // Abort if we switched to a different repository (not just version change)
-        if (this.repositoryPath !== repoPath) {
-          log.debug(`fetchCommitStats: aborting at batch ${i / batchSize}, repo changed from ${repoPath} to ${this.repositoryPath}`);
-          return;
-        }
-
-        const batch = commitOids.slice(i, i + batchSize);
+        const batch = statsOids.slice(i, i + statsBatchSize);
         const result = await getCommitsStats(repoPath, batch);
-
         if (result.success && result.data) {
-          log.debug(`fetchCommitStats: batch ${i / batchSize} returned ${result.data.length}/${batch.length} stats`);
           for (const stat of result.data) {
-            allStats.set(stat.oid, {
+            this.commitStatsMap.set(stat.oid, {
               additions: stat.additions,
               deletions: stat.deletions,
               filesChanged: stat.filesChanged,
             });
           }
         } else {
-          log.warn(`fetchCommitStats: batch ${i / batchSize} failed: ${result.error}`);
+          log.warn(`fetchVisibleCommitData: stats batch failed: ${result.error}`);
+          // Allow a retry on the next fetch for this range
+          for (const oid of batch) this.statsFetchedOids.delete(oid);
         }
       }
 
-      // Only update if we're still on the same repository (use path check, not version)
-      // This allows stats to be applied even if a refresh happened during fetching
-      if (this.repositoryPath === repoPath && allStats.size > 0) {
-        log.debug(`fetchCommitStats: complete, got stats for ${allStats.size}/${commitOids.length} commits`);
-        this.renderer?.setCommitStats(allStats);
+      const signatureBatchSize = 50;
+      for (let i = 0; i < signatureOids.length; i += signatureBatchSize) {
+        if (this.repositoryPath !== repoPath) return;
+
+        const batch = signatureOids.slice(i, i + signatureBatchSize);
+        const result = await getCommitsSignatures(repoPath, batch);
+        if (result.success && result.data) {
+          for (const [oid, sig] of result.data) {
+            this.commitSignaturesMap.set(oid, { signed: sig.signed, valid: sig.valid });
+          }
+        } else {
+          for (const oid of batch) this.signaturesFetchedOids.delete(oid);
+        }
+      }
+
+      if (this.repositoryPath === repoPath) {
+        this.renderer?.setCommitStats(this.commitStatsMap);
+        this.renderer?.setCommitSignatures(this.commitSignaturesMap);
         this.renderer?.markDirty();
         this.scheduleRender();
-      } else if (this.repositoryPath !== repoPath) {
-        log.debug(`fetchCommitStats: discarding stats for ${repoPath}, now on ${this.repositoryPath}`);
       }
     } finally {
-      // Enforce the minimum-visible delay only while still on the same repo.
-      if (this.repositoryPath === repoPath) {
-        const elapsed = Date.now() - startTime;
-        if (elapsed < MIN_LOADING_DISPLAY_MS) {
-          await new Promise(resolve => setTimeout(resolve, MIN_LOADING_DISPLAY_MS - elapsed));
+      if (isInitialFetch) {
+        // Enforce the minimum-visible delay only while still on the same repo
+        if (this.repositoryPath === repoPath) {
+          const elapsed = Date.now() - startTime;
+          if (elapsed < MIN_LOADING_DISPLAY_MS) {
+            await new Promise(resolve => setTimeout(resolve, MIN_LOADING_DISPLAY_MS - elapsed));
+          }
+          this.isLoadingStats = false;
         }
+        // A repo switch mid-fetch resets the flag in willUpdate, so the
+        // spinner never sticks for the new repo
       }
-      // Clear the stats spinner only for the CURRENT load. A superseded
-      // fetch (the user switched repos while it ran) must not clear a newer
-      // repo's spinner; the repo switch itself resets the flag (willUpdate)
-      // and the new repo's own fetch manages it from there — so switching
-      // away mid-fetch never leaves the spinner stuck on.
-      if (this.loadVersion === version) {
-        this.isLoadingStats = false;
-      }
-    }
-  }
-
-  private async fetchCommitSignatures(): Promise<void> {
-    if (!this.repositoryPath || this.realCommits.size === 0) return;
-
-    // Capture state at start to avoid race conditions when repository changes
-    const repoPath = this.repositoryPath;
-    const commitOids = [...this.realCommits.keys()];
-    const version = this.loadVersion;
-
-    // Fetch in batches to avoid overwhelming the backend
-    const batchSize = 50;
-    const allSignatures = new Map<string, { signed: boolean; valid: boolean }>();
-
-    for (let i = 0; i < commitOids.length; i += batchSize) {
-      // Abort if a newer load has started
-      if (this.loadVersion !== version) {
-        return;
-      }
-
-      const batch = commitOids.slice(i, i + batchSize);
-      const result = await getCommitsSignatures(repoPath, batch);
-
-      if (result.success && result.data) {
-        for (const [oid, sig] of result.data) {
-          allSignatures.set(oid, { signed: sig.signed, valid: sig.valid });
-        }
-      }
-    }
-
-    // Only update if no newer load has started
-    if (this.loadVersion === version && allSignatures.size > 0) {
-      this.renderer?.setCommitSignatures(allSignatures);
-      this.renderer?.markDirty();
-      this.scheduleRender();
     }
   }
 
@@ -1319,7 +1325,13 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
-  private rebuildSpatialIndex(): void {
+  /**
+   * Build the spatial index for the whole layout. The index lives in graph
+   * coordinates (scroll-independent), so it is built ONCE per layout instead
+   * of being rebuilt on every scroll event — hitTest() translates the query
+   * point by the current scroll offset.
+   */
+  private buildSpatialIndex(): void {
     if (!this.layout || !this.spatialIndex) return;
 
     // Configure spatial index with current maxLane for mirrored coordinates
@@ -1331,22 +1343,7 @@ export class LvGraphCanvas extends LitElement {
       maxLane: this.layout.maxLane,
     });
 
-    const viewport = this.getViewport();
-    const range = this.virtualScroll?.getVisibleRange(viewport);
-
-    if (range) {
-      // Build index only for visible area (+ buffer)
-      const visibleNodes = [...this.layout.nodes.values()].filter(
-        (n) => n.row >= range.startRow && n.row <= range.endRow
-      );
-      const visibleEdges = this.layout.edges.filter((e) => {
-        const minRow = Math.min(e.fromRow, e.toRow);
-        const maxRow = Math.max(e.fromRow, e.toRow);
-        return maxRow >= range.startRow && minRow <= range.endRow;
-      });
-
-      this.spatialIndex.build(visibleNodes, visibleEdges);
-    }
+    this.spatialIndex.build([...this.layout.nodes.values()], this.layout.edges);
   }
 
   private getViewport(): Viewport {
@@ -1371,12 +1368,13 @@ export class LvGraphCanvas extends LitElement {
   }
 
   private onScroll(_scrollTop: number, _scrollLeft: number): void {
-    // Rebuild spatial index for new viewport
-    this.rebuildSpatialIndex();
+    // The spatial index lives in graph coordinates and needs no rebuild here
     // Mark renderer dirty so it actually redraws
     this.renderer?.markDirty();
     this.scheduleRender();
     this.checkLoadMore();
+    // Newly revealed rows may need their stats/signatures fetched
+    this.scheduleVisibleDataFetch();
   }
 
   private handleWheel = (e: WheelEvent): void => {
@@ -1854,8 +1852,6 @@ export class LvGraphCanvas extends LitElement {
     // Dispatch selection event after scroll is set
     this.dispatchSelectionEvent();
 
-    // Force rebuild spatial index for new viewport and render
-    this.rebuildSpatialIndex();
     this.renderer?.markDirty();
     this.scheduleRender();
 
@@ -2005,11 +2001,10 @@ export class LvGraphCanvas extends LitElement {
     if (adjustedY >= 0 && this.layout) {
       const row = Math.round(adjustedY / this.ROW_HEIGHT);
 
-      // Find the node at this row
-      for (const node of this.layout.nodes.values()) {
-        if (node.row === row) {
-          return { type: 'node', node, distance: 0 };
-        }
+      // One commit per row, rows are contiguous — O(1) lookup
+      const node = this.sortedNodesByRow[row];
+      if (node && node.row === row) {
+        return { type: 'node', node, distance: 0 };
       }
     }
 

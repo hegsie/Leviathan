@@ -87,7 +87,9 @@ export class VirtualScrollManager {
   private config: VirtualScrollConfig;
   private layout: GraphLayout | null = null;
   private nodesByRow: Map<number, LayoutNode[]> = new Map();
-  private edgesByRowRange: Map<string, LayoutEdge[]> = new Map();
+  // Edges sorted by their min row so visibility queries can early-exit —
+  // numeric fields instead of parsed string keys
+  private edgeIndex: Array<{ minRow: number; maxRow: number; edge: LayoutEdge }> = [];
   private refsByCommit: RefsByCommit = {};
   private authorEmails: Record<string, string> = {};
   private pullRequestsByCommit: Record<string, GraphPullRequest[]> = {};
@@ -137,7 +139,7 @@ export class VirtualScrollManager {
    */
   private buildIndices(): void {
     this.nodesByRow.clear();
-    this.edgesByRowRange.clear();
+    this.edgeIndex = [];
 
     if (!this.layout) return;
 
@@ -151,20 +153,15 @@ export class VirtualScrollManager {
       rowNodes.push(node);
     }
 
-    // Index edges by row range (for quick filtering)
-    // Group edges by their row span to optimize lookups
+    // Index edges by row span, sorted by min row for early-exit queries
     for (const edge of this.layout.edges) {
-      const minRow = Math.min(edge.fromRow, edge.toRow);
-      const maxRow = Math.max(edge.fromRow, edge.toRow);
-      const key = `${minRow}-${maxRow}`;
-
-      let rangeEdges = this.edgesByRowRange.get(key);
-      if (!rangeEdges) {
-        rangeEdges = [];
-        this.edgesByRowRange.set(key, rangeEdges);
-      }
-      rangeEdges.push(edge);
+      this.edgeIndex.push({
+        minRow: Math.min(edge.fromRow, edge.toRow),
+        maxRow: Math.max(edge.fromRow, edge.toRow),
+        edge,
+      });
     }
+    this.edgeIndex.sort((a, b) => a.minRow - b.minRow);
   }
 
   /**
@@ -264,29 +261,17 @@ export class VirtualScrollManager {
     if (!this.layout) return [];
 
     const edges: LayoutEdge[] = [];
-    const seen = new Set<LayoutEdge>();
 
+    // Entries are sorted by minRow, so everything after the first entry
+    // starting below the viewport can be skipped
+    for (const entry of this.edgeIndex) {
+      if (entry.minRow > range.endRow) break;
+      if (entry.maxRow < range.startRow) continue;
 
-    // Check all edge row ranges that might intersect our viewport
-    for (const [key, rangeEdges] of this.edgesByRowRange) {
-      const [minRowStr, maxRowStr] = key.split('-');
-      const minRow = parseInt(minRowStr, 10);
-      const maxRow = parseInt(maxRowStr, 10);
-
-      // Check if this range intersects viewport
-      if (maxRow >= range.startRow && minRow <= range.endRow) {
-        for (const edge of rangeEdges) {
-          if (seen.has(edge)) continue;
-
-          // Check lane intersection
-          const minLane = Math.min(edge.fromLane, edge.toLane);
-          const maxLane = Math.max(edge.fromLane, edge.toLane);
-
-          if (maxLane >= range.startLane && minLane <= range.endLane) {
-            edges.push(edge);
-            seen.add(edge);
-          }
-        }
+      const minLane = Math.min(entry.edge.fromLane, entry.edge.toLane);
+      const maxLane = Math.max(entry.edge.fromLane, entry.edge.toLane);
+      if (maxLane >= range.startLane && minLane <= range.endLane) {
+        edges.push(entry.edge);
       }
     }
 
@@ -365,17 +350,16 @@ export class VirtualScrollManager {
 }
 
 /**
- * Scroll state manager with momentum scrolling support
+ * Scroll state manager.
+ *
+ * Wheel deltas are applied directly with no synthetic momentum: trackpads
+ * already deliver their own inertia through wheel events, so animating an
+ * extra glide on top made scrolling drift after the user stopped (and its
+ * per-frame friction decayed twice as fast on 120 Hz displays).
  */
 export class ScrollStateManager {
   private scrollTop = 0;
   private scrollLeft = 0;
-  private velocityY = 0;
-  private velocityX = 0;
-  private isAnimating = false;
-  private animationFrame: number = 0;
-  private friction = 0.95;
-  private minVelocity = 0.5;
 
   private onChange?: (scrollTop: number, scrollLeft: number) => void;
 
@@ -394,67 +378,15 @@ export class ScrollStateManager {
   }
 
   /**
-   * Handle wheel event with momentum
+   * Apply a wheel delta, clamped to the scrollable area
    */
   handleWheel(deltaX: number, deltaY: number, maxScrollX: number, maxScrollY: number): void {
-    // Cancel any ongoing momentum animation
-    this.stopMomentum();
-
-    // Apply scroll
     this.scrollTop = Math.max(0, Math.min(this.scrollTop + deltaY, maxScrollY));
     this.scrollLeft = Math.max(0, Math.min(this.scrollLeft + deltaX, maxScrollX));
-
-    // Set velocity for momentum
-    this.velocityY = deltaY * 0.5;
-    this.velocityX = deltaX * 0.5;
-
     this.onChange?.(this.scrollTop, this.scrollLeft);
-
-    // Start momentum animation
-    this.startMomentum(maxScrollX, maxScrollY);
-  }
-
-  private startMomentum(maxScrollX: number, maxScrollY: number): void {
-    if (this.isAnimating) return;
-
-    const animate = () => {
-      // Apply friction
-      this.velocityX *= this.friction;
-      this.velocityY *= this.friction;
-
-      // Check if we should stop
-      if (
-        Math.abs(this.velocityX) < this.minVelocity &&
-        Math.abs(this.velocityY) < this.minVelocity
-      ) {
-        this.stopMomentum();
-        return;
-      }
-
-      // Apply velocity
-      this.scrollTop = Math.max(0, Math.min(this.scrollTop + this.velocityY, maxScrollY));
-      this.scrollLeft = Math.max(0, Math.min(this.scrollLeft + this.velocityX, maxScrollX));
-
-      this.onChange?.(this.scrollTop, this.scrollLeft);
-
-      this.animationFrame = requestAnimationFrame(animate);
-    };
-
-    this.isAnimating = true;
-    this.animationFrame = requestAnimationFrame(animate);
-  }
-
-  stopMomentum(): void {
-    if (this.animationFrame) {
-      cancelAnimationFrame(this.animationFrame);
-      this.animationFrame = 0;
-    }
-    this.isAnimating = false;
-    this.velocityX = 0;
-    this.velocityY = 0;
   }
 
   destroy(): void {
-    this.stopMomentum();
+    // Nothing to clean up — kept for API compatibility with callers
   }
 }
