@@ -219,7 +219,7 @@ describe('lv-graph-canvas', () => {
       expect(toolbar).to.not.be.null;
 
       const buttons = toolbar!.querySelectorAll('.toolbar-btn');
-      expect(buttons.length).to.equal(2);
+      expect(buttons.length).to.equal(3); // HEAD, Branches, Export
 
       const buttonTexts = Array.from(buttons).map((b) => b.textContent?.trim());
       expect(buttonTexts).to.include('Branches');
@@ -839,6 +839,60 @@ describe('lv-graph-canvas', () => {
   });
 
   // ── Per-repo graph cache ─────────────────────────────────────────────
+  describe('jump to HEAD and tag tips', () => {
+    it('jumpToHead selects the commit HEAD points at', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      // defaultRefs marks commit3 (main) as HEAD
+      expect(el.jumpToHead()).to.be.true;
+      const selected = (el as unknown as { selectedNode: { oid: string } | null }).selectedNode;
+      expect(selected?.oid).to.equal(commit3.oid);
+    });
+
+    it('jumpToHead returns false when no HEAD ref is loaded', async () => {
+      setupDefaultMocks({ refs: {} });
+      const el = await renderCanvas();
+
+      expect(el.jumpToHead()).to.be.false;
+    });
+
+    it('renders a HEAD toolbar button that selects the HEAD commit', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      const headBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('HEAD'));
+      expect(headBtn).to.not.be.undefined;
+
+      headBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+
+      const selected = (el as unknown as { selectedNode: { oid: string } | null }).selectedNode;
+      expect(selected?.oid).to.equal(commit3.oid);
+    });
+
+    it('getTagTips returns tag refs sorted by name', async () => {
+      setupDefaultMocks({
+        refs: {
+          [commit1.oid]: [
+            { name: 'refs/tags/v2.0', shorthand: 'v2.0', refType: 'tag', isHead: false },
+          ],
+          [commit2.oid]: [
+            { name: 'refs/tags/v1.0', shorthand: 'v1.0', refType: 'tag', isHead: false },
+          ],
+        },
+      });
+      const el = await renderCanvas();
+
+      expect(el.getTagTips()).to.deep.equal([
+        { name: 'v1.0', oid: commit2.oid },
+        { name: 'v2.0', oid: commit1.oid },
+      ]);
+    });
+  });
+
   describe('zoom', () => {
     beforeEach(() => {
       try {

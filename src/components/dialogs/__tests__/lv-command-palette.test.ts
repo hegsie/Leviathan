@@ -543,3 +543,85 @@ describe('lv-command-palette', () => {
     });
   });
 });
+
+describe('lv-command-palette reveal-in-graph commands', () => {
+  async function makePalette(): Promise<LvCommandPalette> {
+    const el = await fixture<LvCommandPalette>(html`
+      <lv-command-palette
+        .branches=${[makeBranch('main'), makeBranch('feature/x')]}
+        .tags=${[{ name: 'v1.0.0', oid: 'tagoid123' }]}
+        open
+      ></lv-command-palette>
+    `);
+    await el.updateComplete;
+    return el;
+  }
+
+  async function search(el: LvCommandPalette, query: string): Promise<void> {
+    const input = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+    input.value = query;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await el.updateComplete;
+  }
+
+  function labels(el: LvCommandPalette): string[] {
+    return Array.from(el.shadowRoot!.querySelectorAll('.command .command-label, .command')).map(
+      (n) => n.textContent?.trim() ?? ''
+    );
+  }
+
+  it('offers "Reveal <branch> in graph" entries when searching', async () => {
+    const el = await makePalette();
+    await search(el, 'reveal main');
+
+    expect(labels(el).join('\n')).to.contain('Reveal main in graph');
+  });
+
+  it('offers "Reveal tag <tag> in graph" entries when searching', async () => {
+    const el = await makePalette();
+    await search(el, 'reveal tag v1');
+
+    expect(labels(el).join('\n')).to.contain('Reveal tag v1.0.0 in graph');
+  });
+
+  it('dispatches navigate-to-commit with the branch tip OID', async () => {
+    const el = await makePalette();
+    await search(el, 'reveal main');
+
+    let navigatedOid: string | null = null;
+    el.addEventListener('navigate-to-commit', (e: Event) => {
+      navigatedOid = (e as CustomEvent<{ oid: string }>).detail.oid;
+    });
+
+    const input = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
+
+    expect(navigatedOid).to.equal('abc123');
+  });
+
+  it('dispatches navigate-to-commit with the tag OID', async () => {
+    const el = await makePalette();
+    await search(el, 'reveal tag v1.0.0');
+
+    let navigatedOid: string | null = null;
+    el.addEventListener('navigate-to-commit', (e: Event) => {
+      navigatedOid = (e as CustomEvent<{ oid: string }>).detail.oid;
+    });
+
+    const input = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
+
+    expect(navigatedOid).to.equal('tagoid123');
+  });
+
+  it('hides reveal entries from the default (empty-query) view', async () => {
+    const el = await makePalette();
+    await search(el, '');
+
+    const text = labels(el).join('\n');
+    expect(text).to.contain('Switch to main');
+    expect(text).to.not.contain('Reveal main in graph');
+  });
+});

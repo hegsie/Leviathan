@@ -2011,6 +2011,33 @@ export class LvGraphCanvas extends LitElement {
   }
 
   /**
+   * Select and scroll to the commit HEAD points at.
+   * Returns false when HEAD's commit is not in the loaded graph.
+   */
+  public jumpToHead(): boolean {
+    const headOid = this.getHeadOid();
+    if (!headOid) {
+      return false;
+    }
+    return this.selectCommit(headOid);
+  }
+
+  /**
+   * Tag tips from the loaded refs (for command-palette navigation)
+   */
+  public getTagTips(): Array<{ name: string; oid: string }> {
+    const tips: Array<{ name: string; oid: string }> = [];
+    for (const [oid, refs] of Object.entries(this.refsByCommit)) {
+      for (const ref of refs) {
+        if (ref.refType === 'tag') {
+          tips.push({ name: ref.shorthand, oid });
+        }
+      }
+    }
+    return tips.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /**
    * Navigate to the previous commit (up in the list)
    */
   public navigatePrevious(): void {
@@ -2722,6 +2749,21 @@ export class LvGraphCanvas extends LitElement {
             : ''}
 
           <div class="graph-toolbar">
+            <button
+              class="toolbar-btn"
+              title="Jump to HEAD"
+              @click=${() => this.jumpToHead()}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"></circle>
+                <circle cx="12" cy="12" r="9"></circle>
+                <line x1="12" y1="1" x2="12" y2="5"></line>
+                <line x1="12" y1="19" x2="12" y2="23"></line>
+                <line x1="1" y1="12" x2="5" y2="12"></line>
+                <line x1="19" y1="12" x2="23" y2="12"></line>
+              </svg>
+              HEAD
+            </button>
             <button
               class="toolbar-btn ${this.showBranchPanel ? 'active' : ''}"
               title="Toggle branch visibility"

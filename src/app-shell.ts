@@ -2345,6 +2345,13 @@ export class AppShell extends LitElement {
         action: () => this.handleRefresh(),
       },
       {
+        id: 'graph-jump-head',
+        label: 'Graph: Jump to HEAD',
+        category: 'navigation',
+        icon: 'commit',
+        action: this.requiresRepository(() => this.graphCanvas?.jumpToHead()),
+      },
+      {
         id: 'toggle-output-panel',
         label: 'Toggle Output Panel',
         category: 'action',
@@ -3500,6 +3507,7 @@ export class AppShell extends LitElement {
         .branches=${this.branches}
         .files=${this.trackedFiles}
         .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
+        .tags=${this.graphCanvas?.getTagTips() ?? []}
         @close=${() => { this.showCommandPalette = false; }}
         @checkout-branch=${this.handleCheckoutBranch}
         @open-file=${this.handleOpenFileFromPalette}

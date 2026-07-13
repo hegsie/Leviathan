@@ -201,6 +201,8 @@ export class LvCommandPalette extends LitElement {
   @property({ type: Array }) branches: Branch[] = [];
   @property({ type: Array }) files: string[] = [];
   @property({ type: Array }) commits: Commit[] = [];
+  /** Tag tips for graph navigation ("Reveal tag X in graph") */
+  @property({ type: Array }) tags: Array<{ name: string; oid: string }> = [];
 
   @state() private searchQuery = '';
   @state() private selectedIndex = 0;
@@ -224,7 +226,13 @@ export class LvCommandPalette extends LitElement {
         this.searchInput?.focus();
       });
     }
-    if (changedProps.has('commands') || changedProps.has('branches') || changedProps.has('files') || changedProps.has('commits')) {
+    if (
+      changedProps.has('commands') ||
+      changedProps.has('branches') ||
+      changedProps.has('files') ||
+      changedProps.has('commits') ||
+      changedProps.has('tags')
+    ) {
       this.updateFilteredCommands();
     }
   }
@@ -252,6 +260,37 @@ export class LvCommandPalette extends LitElement {
       action: () => {
         this.dispatchEvent(new CustomEvent('checkout-branch', {
           detail: { branch: branch.name },
+          bubbles: true,
+          composed: true,
+        }));
+      },
+    }));
+
+    // Graph navigation: reveal a branch/tag tip in the commit graph
+    const revealBranchCommands: PaletteCommand[] = this.branches
+      .filter(branch => branch.targetOid)
+      .map(branch => ({
+        id: `reveal-branch:${branch.name}`,
+        label: `Reveal ${branch.name} in graph`,
+        category: 'navigation' as const,
+        icon: 'branch',
+        action: () => {
+          this.dispatchEvent(new CustomEvent('navigate-to-commit', {
+            detail: { oid: branch.targetOid },
+            bubbles: true,
+            composed: true,
+          }));
+        },
+      }));
+
+    const revealTagCommands: PaletteCommand[] = this.tags.map(tag => ({
+      id: `reveal-tag:${tag.name}`,
+      label: `Reveal tag ${tag.name} in graph`,
+      category: 'navigation' as const,
+      icon: 'commit',
+      action: () => {
+        this.dispatchEvent(new CustomEvent('navigate-to-commit', {
+          detail: { oid: tag.oid },
           bubbles: true,
           composed: true,
         }));
@@ -286,7 +325,14 @@ export class LvCommandPalette extends LitElement {
       },
     }));
 
-    return [...this.commands, ...branchCommands, ...fileCommands, ...commitCommands];
+    return [
+      ...this.commands,
+      ...branchCommands,
+      ...revealBranchCommands,
+      ...revealTagCommands,
+      ...fileCommands,
+      ...commitCommands,
+    ];
   }
 
   private updateFilteredCommands(): void {
@@ -295,8 +341,12 @@ export class LvCommandPalette extends LitElement {
     const includeFileCommit = query.length >= 2;
 
     if (!query) {
-      // Show recent commands first, then action/branch/navigation commands only
-      const baseCommands = allCommands.filter(c => c.category !== 'file' && c.category !== 'commit');
+      // Show recent commands first, then action/branch/navigation commands
+      // only. Reveal-in-graph entries stay searchable but would double every
+      // branch in the default view, so they are excluded here too.
+      const baseCommands = allCommands.filter(
+        c => c.category !== 'file' && c.category !== 'commit' && !c.id.startsWith('reveal-')
+      );
       const recent = this.recentCommands
         .map(id => baseCommands.find(c => c.id === id))
         .filter((c): c is PaletteCommand => c !== undefined)
