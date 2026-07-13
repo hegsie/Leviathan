@@ -293,6 +293,7 @@ pub fn run() {
             commands::branch_rules::set_branch_rule,
             commands::branch_rules::delete_branch_rule,
             commands::commit::get_commit_history,
+            commands::commit::get_commit_total,
             commands::commit::get_commit,
             commands::commit::create_commit,
             commands::commit::amend_commit,
@@ -365,8 +366,6 @@ pub fn run() {
             commands::diff::get_file_blame,
             commands::diff::get_image_versions,
             commands::refs::get_refs_by_commit,
-            // Commit graph visualization
-            commands::graph::get_commit_graph,
             commands::describe::describe,
             commands::shortlog::shortlog,
             commands::watcher::start_watching,

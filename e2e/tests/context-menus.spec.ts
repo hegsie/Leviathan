@@ -22,7 +22,7 @@ async function rightClickOnCommitRow(page: import('@playwright/test').Page, rowI
 
   // Wait for the inner <canvas> element to have non-zero dimensions.
   // Playwright locators auto-pierce shadow DOM, so use the inner canvas locator.
-  const innerCanvas = graphCanvas.locator('canvas');
+  const innerCanvas = graphCanvas.locator('canvas[role="img"]');
   await expect(innerCanvas).toBeAttached();
 
   // Wait for commits to be loaded in the graph before clicking.

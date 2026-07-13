@@ -600,16 +600,6 @@ export interface GetAvatarUrlsCommand {
 }
 
 /**
- * Graph commands
- */
-export interface GetCommitGraphCommand {
-  path: string;
-  maxCount?: number;
-  branch?: string;
-  skip?: number;
-}
-
-/**
  * Keyboard shortcut types
  */
 export interface KeyboardShortcutConfig {

@@ -33,7 +33,6 @@ pub mod github;
 pub mod gitignore;
 pub mod gitlab;
 pub mod gpg;
-pub mod graph;
 pub mod hooks;
 pub mod issue_templates;
 pub mod jira;

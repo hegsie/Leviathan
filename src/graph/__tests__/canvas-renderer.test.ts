@@ -1,10 +1,11 @@
 /**
  * Unit tests for canvas-renderer utility functions.
- * Focused on sortRefsForDisplay — ensures the most important refs
- * are shown first when the refs column has limited space.
+ * Covers sortRefsForDisplay (most important refs shown first when the refs
+ * column has limited space), renderer state getters used by graph export,
+ * and the avatar cache (LRU + failure retry + fetch opt-out).
  */
 import { expect } from '@open-wc/testing';
-import { sortRefsForDisplay } from '../canvas-renderer.ts';
+import { CanvasRenderer, sortRefsForDisplay } from '../canvas-renderer.ts';
 import type { RefInfo } from '../../types/git.types.ts';
 
 function makeRef(overrides: Partial<RefInfo>): RefInfo {
@@ -164,5 +165,368 @@ describe('sortRefsForDisplay', () => {
     expect(sorted[2].shorthand).to.equal('origin/main'); // remote duplicate (main exists locally)
     expect(sorted[3].shorthand).to.equal('origin/release/v2'); // remote duplicate (release/v2 exists locally)
     expect(sorted[4].shorthand).to.equal('v2.0'); // tag
+  });
+});
+
+// ── Renderer state (export support + avatar cache) ─────────────────────────
+type RendererInternals = {
+  avatarCache: Map<string, HTMLImageElement>;
+  failedAvatars: Map<string, number>;
+  avatarLoadingSet: Set<string>;
+  loadAvatar(email: string): void;
+  getCachedAvatar(email: string): HTMLImageElement | undefined;
+};
+
+function makeRenderer(config: Record<string, unknown> = {}): CanvasRenderer {
+  const canvas = document.createElement('canvas');
+  canvas.width = 100;
+  canvas.height = 100;
+  return new CanvasRenderer(canvas, config);
+}
+
+describe('CanvasRenderer state getters', () => {
+  it('returns commit stats set via setCommitStats (used by PNG export)', () => {
+    const renderer = makeRenderer();
+    const stats = new Map([
+      ['abc', { additions: 5, deletions: 2, filesChanged: 1 }],
+    ]);
+    renderer.setCommitStats(stats);
+    expect(renderer.getCommitStats().get('abc')).to.deep.equal({
+      additions: 5,
+      deletions: 2,
+      filesChanged: 1,
+    });
+    renderer.destroy();
+  });
+
+  it('returns commit signatures set via setCommitSignatures (used by PNG export)', () => {
+    const renderer = makeRenderer();
+    const sigs = new Map([['abc', { signed: true, valid: true }]]);
+    renderer.setCommitSignatures(sigs);
+    expect(renderer.getCommitSignatures().get('abc')).to.deep.equal({
+      signed: true,
+      valid: true,
+    });
+    renderer.destroy();
+  });
+});
+
+describe('CanvasRenderer contrast color', () => {
+  type ContrastInternals = {
+    getContrastingIconColor(bgColor: string): string;
+  };
+
+  it('returns a dark color for light hsl() backgrounds', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as ContrastInternals;
+
+    // Very light background — must NOT return white
+    const color = internals.getContrastingIconColor('hsl(210, 100%, 90%)');
+    expect(color).to.not.equal('#ffffff');
+    renderer.destroy();
+  });
+
+  it('returns white for dark hsl() backgrounds', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as ContrastInternals;
+
+    expect(internals.getContrastingIconColor('hsl(210, 35%, 20%)')).to.equal('#ffffff');
+    renderer.destroy();
+  });
+
+  it('still handles hex backgrounds', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as ContrastInternals;
+
+    expect(internals.getContrastingIconColor('#101010')).to.equal('#ffffff');
+    expect(internals.getContrastingIconColor('#f0f0f0')).to.not.equal('#ffffff');
+    renderer.destroy();
+  });
+});
+
+describe('CanvasRenderer theme', () => {
+  it('exposes theme-derived row/stats/badge colors with dark fallbacks', async () => {
+    const { getThemeFromCSS } = await import('../canvas-renderer.ts');
+    const theme = getThemeFromCSS();
+
+    expect(theme.rowColors.selectedBg).to.be.a('string').and.to.not.equal('');
+    expect(theme.rowColors.hoveredBg).to.be.a('string').and.to.not.equal('');
+    expect(theme.statsColors.additions).to.be.a('string').and.to.not.equal('');
+    expect(theme.statsColors.deletions).to.be.a('string').and.to.not.equal('');
+    expect(theme.badgeColors.verified).to.be.a('string').and.to.not.equal('');
+    expect(theme.prColors.merged).to.be.a('string').and.to.not.equal('');
+  });
+
+  it('uses 16 distinct branch colors (no duplicated palette entries)', async () => {
+    const { getThemeFromCSS } = await import('../canvas-renderer.ts');
+    const theme = getThemeFromCSS();
+
+    expect(theme.laneColors).to.have.length(16);
+    expect(new Set(theme.laneColors).size).to.equal(16);
+  });
+});
+
+describe('CanvasRenderer text truncation cache', () => {
+  type TruncationInternals = {
+    ctx: CanvasRenderingContext2D;
+    truncationCache: Map<string, string>;
+    truncateToWidth(text: string, maxWidth: number): string;
+  };
+
+  it('truncates long text with an ellipsis and caches the result', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as TruncationInternals;
+    internals.ctx.font = '13px sans-serif';
+
+    const longText = 'A very long commit message that cannot possibly fit';
+    const truncated = internals.truncateToWidth(longText, 60);
+    expect(truncated.endsWith('…')).to.be.true;
+    expect(truncated.length).to.be.lessThan(longText.length);
+    expect(internals.truncationCache.size).to.equal(1);
+
+    // Second call is served from the cache
+    expect(internals.truncateToWidth(longText, 60)).to.equal(truncated);
+    expect(internals.truncationCache.size).to.equal(1);
+    renderer.destroy();
+  });
+
+  it('returns short text unchanged', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as TruncationInternals;
+    internals.ctx.font = '13px sans-serif';
+
+    expect(internals.truncateToWidth('short', 500)).to.equal('short');
+    renderer.destroy();
+  });
+
+  it('keys the cache on width so resizes re-truncate', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as TruncationInternals;
+    internals.ctx.font = '13px sans-serif';
+
+    const text = 'A very long commit message that cannot possibly fit';
+    const narrow = internals.truncateToWidth(text, 60);
+    const wide = internals.truncateToWidth(text, 200);
+    expect(wide.length).to.be.greaterThan(narrow.length);
+    expect(internals.truncationCache.size).to.equal(2);
+    renderer.destroy();
+  });
+});
+
+describe('CanvasRenderer optional columns', () => {
+  type ColumnInternals = {
+    getRightColumnLayout(): {
+      timeColumnX: number;
+      statsColumnX: number;
+      dateColumnX: number | null;
+      authorColumnX: number | null;
+      messageRightEdge: number;
+    };
+    formatAbsoluteDate(timestamp: number): string;
+  };
+
+  it('reserves no space for author/date when disabled', () => {
+    const renderer = makeRenderer();
+    const layout = (renderer as unknown as ColumnInternals).getRightColumnLayout();
+
+    expect(layout.authorColumnX).to.be.null;
+    expect(layout.dateColumnX).to.be.null;
+    expect(layout.messageRightEdge).to.equal(layout.statsColumnX - 8);
+    renderer.destroy();
+  });
+
+  it('places author and date columns left of the stats column when enabled', () => {
+    const renderer = makeRenderer({ showAuthorColumn: true, showDateColumn: true });
+    const layout = (renderer as unknown as ColumnInternals).getRightColumnLayout();
+
+    expect(layout.dateColumnX).to.be.a('number');
+    expect(layout.authorColumnX).to.be.a('number');
+    expect(layout.dateColumnX!).to.be.lessThan(layout.statsColumnX);
+    expect(layout.authorColumnX!).to.be.lessThan(layout.dateColumnX!);
+    // Message space shrinks to end before the author column
+    expect(layout.messageRightEdge).to.equal(layout.authorColumnX! - 8);
+    renderer.destroy();
+  });
+
+  it('drops optional columns instead of squeezing the message on narrow canvases', () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 900;
+    canvas.height = 100;
+    const renderer = new CanvasRenderer(canvas, {
+      showAuthorColumn: true,
+      showDateColumn: true,
+    });
+    const internals = renderer as unknown as ColumnInternals & {
+      getRightColumnLayout(messageColumnX?: number): {
+        statsColumnX: number;
+        dateColumnX: number | null;
+        authorColumnX: number | null;
+        messageRightEdge: number;
+      };
+    };
+
+    // Plenty of room: both columns reserved
+    const roomy = internals.getRightColumnLayout(100);
+    expect(roomy.dateColumnX).to.be.a('number');
+    expect(roomy.authorColumnX).to.be.a('number');
+
+    // Message starts late: the author column yields first
+    const tight = internals.getRightColumnLayout(450);
+    expect(tight.dateColumnX).to.be.a('number');
+    expect(tight.authorColumnX).to.be.null;
+
+    // Tighter still: both optional columns yield, message keeps its width
+    const cramped = internals.getRightColumnLayout(620);
+    expect(cramped.dateColumnX).to.be.null;
+    expect(cramped.authorColumnX).to.be.null;
+    expect(cramped.messageRightEdge - 620).to.be.at.least(0);
+    renderer.destroy();
+  });
+
+  it('formats and caches absolute dates', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as ColumnInternals;
+
+    const first = internals.formatAbsoluteDate(1700000000);
+    expect(first).to.be.a('string').and.to.not.equal('');
+    expect(internals.formatAbsoluteDate(1700000000)).to.equal(first);
+    renderer.destroy();
+  });
+});
+
+describe('CanvasRenderer merge edge dashing', () => {
+  it('draws merge edges dashed and first-parent edges solid', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as { ctx: CanvasRenderingContext2D };
+
+    const dashCalls: number[][] = [];
+    const originalSetLineDash = internals.ctx.setLineDash.bind(internals.ctx);
+    internals.ctx.setLineDash = (segments: number[]) => {
+      dashCalls.push([...segments]);
+      originalSetLineDash(segments);
+    };
+
+    const commit = {
+      oid: 'child',
+      parentIds: ['p1', 'p2'],
+      timestamp: 1,
+      message: 'msg',
+      author: 'a',
+    };
+    const makeNode = (oid: string, row: number) => ({
+      oid,
+      row,
+      lane: 0,
+      commit: { ...commit, oid },
+      childLanes: [],
+      parentLanes: [],
+      colorIndex: 0,
+      hasMissingParents: false,
+    });
+
+    renderer.render({
+      nodes: [makeNode('child', 0), makeNode('p1', 1), makeNode('p2', 2)],
+      edges: [
+        {
+          fromOid: 'p1', toOid: 'child', fromRow: 1, toRow: 0,
+          fromLane: 0, toLane: 0, isMerge: false, colorIndex: 0,
+        },
+        {
+          fromOid: 'p2', toOid: 'child', fromRow: 2, toRow: 0,
+          fromLane: 1, toLane: 0, isMerge: true, colorIndex: 1,
+        },
+      ],
+      range: { startRow: 0, endRow: 2, startLane: 0, endLane: 1 },
+      offsetX: 20,
+      offsetY: 20,
+      refsByCommit: {},
+      authorEmails: {},
+      maxLane: 1,
+    });
+
+    // Solid for the first-parent edge, dashed for the merge edge, plus the
+    // trailing reset to solid
+    expect(dashCalls).to.deep.include([]);
+    expect(dashCalls.some((d) => d.length === 2)).to.be.true;
+    // Last call restores solid strokes
+    expect(dashCalls[dashCalls.length - 1]).to.deep.equal([]);
+    renderer.destroy();
+  });
+});
+
+describe('CanvasRenderer avatar cache', () => {
+  it('does not start avatar loads when fetchAvatars is false', () => {
+    const renderer = makeRenderer({ fetchAvatars: false });
+    const internals = renderer as unknown as RendererInternals;
+
+    internals.loadAvatar('someone@example.com');
+    expect(internals.avatarLoadingSet.size).to.equal(0);
+    renderer.destroy();
+  });
+
+  it('does not retry a recently failed avatar load', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals;
+
+    internals.failedAvatars.set('someone@example.com', Date.now());
+    internals.loadAvatar('someone@example.com');
+    expect(internals.avatarLoadingSet.size).to.equal(0);
+    renderer.destroy();
+  });
+
+  it('retries a failed avatar load after the retry window has passed', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals;
+
+    // Failure recorded 10 minutes ago — outside the 5-minute retry window
+    internals.failedAvatars.set('someone@example.com', Date.now() - 10 * 60 * 1000);
+    internals.loadAvatar('someone@example.com');
+    expect(internals.avatarLoadingSet.has('someone@example.com')).to.be.true;
+    renderer.destroy();
+  });
+
+  it('refreshes LRU position when a cached avatar is read', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals;
+
+    internals.avatarCache.set('first@example.com', new Image());
+    internals.avatarCache.set('second@example.com', new Image());
+
+    // Reading the oldest entry moves it to the most-recent end
+    internals.getCachedAvatar('first@example.com');
+    const keys = [...internals.avatarCache.keys()];
+    expect(keys).to.deep.equal(['second@example.com', 'first@example.com']);
+    renderer.destroy();
+  });
+
+  it('bounds the failed-avatar map when loads keep failing', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals & {
+      pendingAvatarImages: Set<HTMLImageElement>;
+    };
+
+    // Simulate a long offline session with many distinct failed authors
+    for (let i = 0; i < 500; i++) {
+      internals.failedAvatars.set(`author${i}@example.com`, Date.now());
+    }
+
+    // The next failure must evict rather than grow unbounded
+    internals.loadAvatar('one-more@example.com');
+    const img = [...internals.pendingAvatarImages][0];
+    expect(img).to.not.be.undefined;
+    img.onerror?.(new Event('error'));
+
+    expect(internals.failedAvatars.size).to.be.at.most(500);
+    expect(internals.failedAvatars.has('one-more@example.com')).to.be.true;
+    renderer.destroy();
+  });
+
+  it('returns undefined for uncached avatars without touching the cache', () => {
+    const renderer = makeRenderer();
+    const internals = renderer as unknown as RendererInternals;
+
+    expect(internals.getCachedAvatar('missing@example.com')).to.be.undefined;
+    expect(internals.avatarCache.size).to.equal(0);
+    renderer.destroy();
   });
 });

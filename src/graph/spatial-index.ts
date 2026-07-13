@@ -59,12 +59,17 @@ export class SpatialIndex {
     rowHeight: number;
     laneWidth: number;
     maxLane?: number;
+    /** Hit radius for nodes — pass when zooming changes the drawn radius */
+    nodeRadius?: number;
   }): void {
     this.offsetX = params.offsetX;
     this.offsetY = params.offsetY;
     this.rowHeight = params.rowHeight;
     this.laneWidth = params.laneWidth;
     this.maxLane = params.maxLane ?? 0;
+    if (params.nodeRadius !== undefined) {
+      this.nodeRadius = params.nodeRadius;
+    }
   }
 
   /**

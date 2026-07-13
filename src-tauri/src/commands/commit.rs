@@ -1,10 +1,125 @@
 //! Commit command handlers
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
 use crate::models::Commit;
+
+/// Cached full revwalk (OIDs only) per repository for the all-branches graph
+/// walk. Paging a raw revwalk with `skip` is O(skip) per request and re-walks
+/// from the roots on every page; caching the walked order makes each page
+/// O(page size). Entries are fingerprinted by every ref tip plus HEAD, so any
+/// commit, fetch, branch move, or tag change invalidates them.
+struct WalkCache {
+    fingerprint: u64,
+    oids: Vec<git2::Oid>,
+    /// Recency marker for LRU eviction — refreshed on every hit
+    last_used: std::time::Instant,
+}
+
+const WALK_CACHE_MAX_ENTRIES: usize = 8;
+
+fn walk_cache() -> &'static Mutex<HashMap<String, WalkCache>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, WalkCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// One consistent snapshot of the repository's ref state: the fingerprint
+/// and the walk tips come from the SAME enumeration, so a ref changing
+/// between "compute fingerprint" and "seed the walk" can't produce a cache
+/// entry whose fingerprint matches a different ref state than its walk.
+fn refs_snapshot(repo: &git2::Repository) -> (u64, Vec<git2::Oid>) {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut tips: Vec<git2::Oid> = Vec::new();
+
+    // HEAD is a pseudo-ref that references() does NOT enumerate. It must be
+    // a walk tip too: commits created on a detached HEAD are reachable from
+    // nothing else and would otherwise vanish from the graph and the total.
+    if let Ok(head) = repo.head() {
+        head.name().unwrap_or("").hash(&mut hasher);
+        if let Some(oid) = head.target() {
+            oid.as_bytes().hash(&mut hasher);
+            tips.push(oid);
+        }
+    }
+
+    if let Ok(refs) = repo.references() {
+        for reference in refs.flatten() {
+            reference.name().unwrap_or("").hash(&mut hasher);
+            if let Some(oid) = reference.target() {
+                oid.as_bytes().hash(&mut hasher);
+                tips.push(oid);
+            }
+        }
+    }
+    (hasher.finish(), tips)
+}
+
+/// Get one page of the all-branches walk plus the true total commit count,
+/// (re)building the cached walk when the repo's refs changed
+fn cached_walk_page(
+    repo: &git2::Repository,
+    path: &str,
+    skip: usize,
+    limit: usize,
+) -> Result<(Vec<git2::Oid>, usize)> {
+    let (fingerprint, tips) = refs_snapshot(repo);
+
+    // Fast path: serve a warm entry under a short lock
+    {
+        let mut cache = walk_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache.get_mut(path) {
+            if entry.fingerprint == fingerprint {
+                entry.last_used = std::time::Instant::now();
+                let total = entry.oids.len();
+                let page = entry.oids.iter().skip(skip).take(limit).copied().collect();
+                return Ok((page, total));
+            }
+        }
+    }
+
+    // Cold or stale: walk WITHOUT holding the lock — a multi-second walk on
+    // a large repository must not block history/total calls for every OTHER
+    // open repository whose entry is warm. A concurrent duplicate walk of
+    // the same repo is possible and acceptable (last writer wins with an
+    // identical result).
+    let mut revwalk = repo.revwalk()?;
+    revwalk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
+    // Seed from the SAME snapshot the fingerprint was computed from
+    for tip in &tips {
+        let _ = revwalk.push(*tip);
+    }
+    let oids: Vec<git2::Oid> = revwalk.flatten().collect();
+    let total = oids.len();
+    let page = oids.iter().skip(skip).take(limit).copied().collect();
+
+    let mut cache = walk_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= WALK_CACHE_MAX_ENTRIES && !cache.contains_key(path) {
+        // Evict the least-recently-used entry (HashMap iteration order is
+        // arbitrary, so recency is tracked explicitly)
+        if let Some(lru_key) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&lru_key);
+        }
+    }
+    cache.insert(
+        path.to_string(),
+        WalkCache {
+            fingerprint,
+            oids,
+            last_used: std::time::Instant::now(),
+        },
+    );
+
+    Ok((page, total))
+}
 
 /// Parse an ISO 8601 date string into a git2::Time
 ///
@@ -143,17 +258,24 @@ pub async fn get_commit_history(
 ) -> Result<Vec<Commit>> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
+    let skip_count = skip.unwrap_or(0);
+    let limit_count = limit.unwrap_or(100);
+
+    if all_branches.unwrap_or(false) {
+        // All-branches graph walk: served from the cached walk so deep
+        // pagination doesn't re-walk from the roots on every page
+        let (page, _total) = cached_walk_page(&repo, &path, skip_count, limit_count)?;
+        let commits: Vec<Commit> = page
+            .into_iter()
+            .filter_map(|oid| repo.find_commit(oid).ok().map(|c| Commit::from_git2(&c)))
+            .collect();
+        return Ok(commits);
+    }
+
     let mut revwalk = repo.revwalk()?;
     revwalk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
 
-    if all_branches.unwrap_or(false) {
-        // Push all branch heads for complete graph
-        for reference in repo.references()?.flatten() {
-            if let Some(oid) = reference.target() {
-                let _ = revwalk.push(oid);
-            }
-        }
-    } else if let Some(ref oid_str) = start_oid {
+    if let Some(ref oid_str) = start_oid {
         let start = git2::Oid::from_str(oid_str)?;
         revwalk.push(start)?;
     } else {
@@ -163,9 +285,6 @@ pub async fn get_commit_history(
             .ok_or(LeviathanError::RepositoryNotOpen)?;
         revwalk.push(start)?;
     }
-
-    let skip_count = skip.unwrap_or(0);
-    let limit_count = limit.unwrap_or(100);
 
     let commits: Vec<Commit> = revwalk
         .skip(skip_count)
@@ -178,6 +297,16 @@ pub async fn get_commit_history(
         .collect();
 
     Ok(commits)
+}
+
+/// Get the total number of commits reachable from any ref (the size of the
+/// all-branches graph walk). Served from the same cached walk as
+/// `get_commit_history`, so it is O(1) when the cache is warm.
+#[command]
+pub async fn get_commit_total(path: String) -> Result<usize> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let (_page, total) = cached_walk_page(&repo, &path, 0, 0)?;
+    Ok(total)
 }
 
 /// Get a single commit by OID
@@ -1356,6 +1485,111 @@ pub async fn get_file_history(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    #[tokio::test]
+    async fn test_commit_history_all_branches_pagination_and_total() {
+        let repo = TestRepo::with_initial_commit();
+        for i in 0..9 {
+            repo.create_commit(
+                &format!("Commit {}", i),
+                &[("file.txt", &format!("v{}", i))],
+            );
+        }
+
+        // Full walk: 10 commits (initial + 9)
+        let all = get_commit_history(repo.path_str(), None, Some(100), None, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 10);
+
+        // Paged walk (served from the cache) must slice the same order
+        let page1 = get_commit_history(repo.path_str(), None, Some(4), Some(0), Some(true))
+            .await
+            .unwrap();
+        let page2 = get_commit_history(repo.path_str(), None, Some(4), Some(4), Some(true))
+            .await
+            .unwrap();
+        let page3 = get_commit_history(repo.path_str(), None, Some(4), Some(8), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(page1.len(), 4);
+        assert_eq!(page2.len(), 4);
+        assert_eq!(page3.len(), 2);
+
+        let paged_oids: Vec<String> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .map(|c| c.oid.clone())
+            .collect();
+        let all_oids: Vec<String> = all.iter().map(|c| c.oid.clone()).collect();
+        assert_eq!(paged_oids, all_oids);
+
+        let total = get_commit_total(repo.path_str()).await.unwrap();
+        assert_eq!(total, 10);
+    }
+
+    #[tokio::test]
+    async fn test_commit_history_cache_invalidates_on_new_commit() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Second", &[("a.txt", "a")]);
+
+        // Warm the cache
+        let before = get_commit_history(repo.path_str(), None, Some(100), None, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 2);
+        assert_eq!(get_commit_total(repo.path_str()).await.unwrap(), 2);
+
+        // A new commit moves the branch tip — the fingerprint changes and
+        // the stale cached walk must not be served
+        repo.create_commit("Third", &[("b.txt", "b")]);
+        let after = get_commit_history(repo.path_str(), None, Some(100), None, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(after.len(), 3);
+        assert_eq!(after[0].summary, "Third");
+        assert_eq!(get_commit_total(repo.path_str()).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_commit_history_includes_detached_head_commits() {
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid();
+        repo.create_commit("On branch", &[("a.txt", "a")]);
+
+        // Detach HEAD at the older commit and commit while detached — the
+        // new commit is reachable ONLY from HEAD, not from any ref
+        repo.repo().set_head_detached(base).unwrap();
+        let detached = repo.create_commit("Detached work", &[("d.txt", "d")]);
+
+        let commits = get_commit_history(repo.path_str(), None, Some(100), None, Some(true))
+            .await
+            .unwrap();
+        assert!(
+            commits.iter().any(|c| c.oid == detached.to_string()),
+            "detached-HEAD commit must appear in the all-branches walk"
+        );
+        assert_eq!(get_commit_total(repo.path_str()).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_commit_history_all_branches_includes_side_branches() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        repo.create_commit("Side commit", &[("side.txt", "side")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main commit", &[("main.txt", "main")]);
+
+        let commits = get_commit_history(repo.path_str(), None, Some(100), None, Some(true))
+            .await
+            .unwrap();
+        let summaries: Vec<&str> = commits.iter().map(|c| c.summary.as_str()).collect();
+        assert!(summaries.contains(&"Side commit"));
+        assert!(summaries.contains(&"Main commit"));
+    }
 
     #[tokio::test]
     async fn test_create_commit_mid_merge_includes_merge_head() {

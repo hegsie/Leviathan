@@ -1,11 +1,10 @@
 /**
- * Optimized Canvas Renderer for Git Graph
+ * Canvas Renderer for Git Graph
  *
- * Features:
- * - Double buffering for smooth rendering
- * - Dirty region tracking
- * - Layer separation (edges, nodes, labels)
- * - FPS monitoring
+ * Renders the virtualized viewport (edges, nodes, ref labels, column
+ * headers) in a single full repaint per dirty frame. Includes FPS
+ * monitoring, HiDPI scaling, a Gravatar cache, and a text-truncation cache
+ * to keep per-frame measureText cost down.
  */
 
 import type { RenderData, GraphPullRequest } from './virtual-scroll.ts';
@@ -31,12 +30,22 @@ export interface RenderConfig {
   showFps: boolean;
   /** Show avatars inside nodes */
   showAvatars: boolean;
+  /**
+   * Fetch author avatars from Gravatar. When false no network requests are
+   * made for avatars and colored initials are drawn instead (privacy/offline
+   * opt-out).
+   */
+  fetchAvatars: boolean;
   /** Show icons in ref labels */
   showRefIcons: boolean;
   /** Width of the refs column in pixels (default 200) */
   refsColumnWidth: number;
   /** Width of the stats column in pixels (default 80) */
   statsColumnWidth: number;
+  /** Show the author-name column */
+  showAuthorColumn: boolean;
+  /** Show the absolute-date column */
+  showDateColumn: boolean;
 }
 
 export interface RenderTheme {
@@ -80,6 +89,22 @@ export interface RenderTheme {
     draft: string;
     draftText: string;
   };
+  /** Row highlight colors for selection/hover (theme-aware washes) */
+  rowColors: {
+    selectedBg: string;
+    hoveredBg: string;
+  };
+  /** Stats column colors */
+  statsColors: {
+    additions: string;
+    deletions: string;
+  };
+  /** Signature badge colors */
+  badgeColors: {
+    verified: string;
+    unverified: string;
+    icon: string;
+  };
 }
 
 const DEFAULT_CONFIG: RenderConfig = {
@@ -92,9 +117,12 @@ const DEFAULT_CONFIG: RenderConfig = {
   showLabels: false,
   showFps: false,
   showAvatars: false,
+  fetchAvatars: true,
   showRefIcons: true,
   refsColumnWidth: 200,
   statsColumnWidth: 80,
+  showAuthorColumn: false,
+  showDateColumn: false,
 };
 
 /**
@@ -121,15 +149,14 @@ export function getThemeFromCSS(): RenderTheme {
       getCSSVar('--color-branch-6', '#4dd0e1'),
       getCSSVar('--color-branch-7', '#ff8a65'),
       getCSSVar('--color-branch-8', '#aed581'),
-      // Extended colors - derived from base colors
-      getCSSVar('--color-branch-1', '#4fc3f7'),
-      getCSSVar('--color-branch-2', '#81c784'),
-      getCSSVar('--color-branch-3', '#ef5350'),
-      getCSSVar('--color-branch-4', '#ffb74d'),
-      getCSSVar('--color-branch-5', '#ce93d8'),
-      getCSSVar('--color-branch-6', '#4dd0e1'),
-      getCSSVar('--color-branch-7', '#ff8a65'),
-      getCSSVar('--color-branch-8', '#aed581'),
+      getCSSVar('--color-branch-9', '#f48fb1'),
+      getCSSVar('--color-branch-10', '#80cbc4'),
+      getCSSVar('--color-branch-11', '#9fa8da'),
+      getCSSVar('--color-branch-12', '#bcaaa4'),
+      getCSSVar('--color-branch-13', '#dce775'),
+      getCSSVar('--color-branch-14', '#90a4ae'),
+      getCSSVar('--color-branch-15', '#ffd54f'),
+      getCSSVar('--color-branch-16', '#b39ddb'),
     ],
     textColor: getCSSVar('--graph-text-color', '#c8c8c8'),
     selectedColor: getCSSVar('--graph-selected-color', '#ffffff'),
@@ -156,10 +183,23 @@ export function getThemeFromCSS(): RenderTheme {
       openText: getCSSVar('--color-success', '#4caf50'),
       closed: getCSSVar('--color-error-bg', '#3d1a1a'),
       closedText: getCSSVar('--color-error', '#ef5350'),
-      merged: '#2d1f4e',
-      mergedText: '#a371f7',
+      merged: getCSSVar('--pr-merged-bg', '#2d1f4e'),
+      mergedText: getCSSVar('--pr-merged-text', '#a371f7'),
       draft: getCSSVar('--color-bg-hover', '#2d2d2d'),
       draftText: getCSSVar('--color-text-muted', '#888888'),
+    },
+    rowColors: {
+      selectedBg: getCSSVar('--graph-row-selected-bg', 'rgba(255, 255, 255, 0.15)'),
+      hoveredBg: getCSSVar('--graph-row-hovered-bg', 'rgba(255, 255, 255, 0.05)'),
+    },
+    statsColors: {
+      additions: getCSSVar('--graph-stat-additions', '#3fb950'),
+      deletions: getCSSVar('--graph-stat-deletions', '#f85149'),
+    },
+    badgeColors: {
+      verified: getCSSVar('--badge-verified-bg', '#238636'),
+      unverified: getCSSVar('--badge-unverified-bg', '#8b949e'),
+      icon: getCSSVar('--badge-icon-color', '#ffffff'),
     },
   };
 }
@@ -170,8 +210,8 @@ const DEFAULT_THEME: RenderTheme = {
   laneColors: [
     '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
     '#ce93d8', '#4dd0e1', '#ff8a65', '#aed581',
-    '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
-    '#ce93d8', '#4dd0e1', '#ff8a65', '#aed581',
+    '#f48fb1', '#80cbc4', '#9fa8da', '#bcaaa4',
+    '#dce775', '#90a4ae', '#ffd54f', '#b39ddb',
   ],
   textColor: '#c8c8c8',
   selectedColor: '#ffffff',
@@ -200,6 +240,19 @@ const DEFAULT_THEME: RenderTheme = {
     mergedText: '#a371f7',
     draft: '#2d2d2d',
     draftText: '#888888',
+  },
+  rowColors: {
+    selectedBg: 'rgba(255, 255, 255, 0.15)',
+    hoveredBg: 'rgba(255, 255, 255, 0.05)',
+  },
+  statsColors: {
+    additions: '#3fb950',
+    deletions: '#f85149',
+  },
+  badgeColors: {
+    verified: '#238636',
+    unverified: '#8b949e',
+    icon: '#ffffff',
   },
 };
 
@@ -271,6 +324,9 @@ export class CanvasRenderer {
   private config: RenderConfig;
   private theme: RenderTheme;
   private dpr: number;
+  private dprMediaQuery: MediaQueryList | null = null;
+  private lastCssWidth = 0;
+  private lastCssHeight = 0;
 
   private perfMonitor = new PerformanceMonitor();
 
@@ -283,9 +339,12 @@ export class CanvasRenderer {
   private isDirty = true;
   private pendingFrame: number = 0;
 
-  // Avatar cache
+  // Avatar cache (LRU: reads re-insert entries so hot avatars stay cached)
   private static readonly MAX_AVATAR_CACHE_SIZE = 500;
-  private avatarCache: Map<string, HTMLImageElement | null> = new Map();
+  // Failed loads are retried after this long instead of being cached forever
+  private static readonly AVATAR_RETRY_MS = 5 * 60 * 1000;
+  private avatarCache: Map<string, HTMLImageElement> = new Map();
+  private failedAvatars: Map<string, number> = new Map();
   private avatarLoadingSet: Set<string> = new Set();
   private pendingAvatarImages: Set<HTMLImageElement> = new Set();
 
@@ -295,14 +354,24 @@ export class CanvasRenderer {
   // Commit signatures (oid -> {signed, valid})
   private commitSignatures: Map<string, { signed: boolean; valid: boolean }> = new Map();
 
-  // CI status (oid -> status: 'success' | 'failure' | 'pending' | 'error')
-  private ciStatuses: Map<string, string> = new Map();
-
   // Highlighted commits for search result dimming
   private highlightedOids: Set<string> = new Set();
 
+  // Truncated-text cache keyed by font, width and text. Char-by-char
+  // truncation calls measureText per character, which is a per-frame hot
+  // spot without this.
+  private static readonly MAX_TRUNCATION_CACHE = 4000;
+  private truncationCache: Map<string, string> = new Map();
+
   // Header height for offsetting content
   private readonly HEADER_HEIGHT = 28;
+
+  // Optional right-aligned column widths
+  private static readonly AUTHOR_COLUMN_WIDTH = 110;
+  private static readonly DATE_COLUMN_WIDTH = 85;
+
+  // Formatted absolute dates cached per timestamp
+  private absoluteDateCache: Map<number, string> = new Map();
 
   // Avatar hitboxes for tooltip detection
   private avatarHitboxes: Array<{
@@ -352,7 +421,29 @@ export class CanvasRenderer {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.theme = { ...DEFAULT_THEME, ...theme };
     this.dpr = window.devicePixelRatio || 1;
+    this.watchDprChanges();
   }
+
+  /**
+   * Track devicePixelRatio changes (window dragged to a monitor with a
+   * different pixel density, OS zoom) so the canvas doesn't go blurry.
+   * The media query only matches the CURRENT ratio, so it is re-armed
+   * after every change.
+   */
+  private watchDprChanges(): void {
+    if (typeof window.matchMedia !== 'function') return;
+    this.dprMediaQuery?.removeEventListener('change', this.handleDprChange);
+    this.dprMediaQuery = window.matchMedia(`(resolution: ${this.dpr}dppx)`);
+    this.dprMediaQuery.addEventListener('change', this.handleDprChange);
+  }
+
+  private handleDprChange = (): void => {
+    this.dpr = window.devicePixelRatio || 1;
+    if (this.lastCssWidth > 0 && this.lastCssHeight > 0) {
+      this.resize(this.lastCssWidth, this.lastCssHeight);
+    }
+    this.watchDprChanges();
+  };
 
   /**
    * Update configuration
@@ -412,6 +503,20 @@ export class CanvasRenderer {
   }
 
   /**
+   * Get current commit stats (e.g. for copying state to an export renderer)
+   */
+  getCommitStats(): Map<string, { additions: number; deletions: number; filesChanged: number }> {
+    return this.commitStats;
+  }
+
+  /**
+   * Get current commit signatures (e.g. for copying state to an export renderer)
+   */
+  getCommitSignatures(): Map<string, { signed: boolean; valid: boolean }> {
+    return this.commitSignatures;
+  }
+
+  /**
    * Set highlighted commits for search result display
    * When set, non-highlighted commits will be dimmed
    */
@@ -429,10 +534,20 @@ export class CanvasRenderer {
   }
 
   /**
-   * Load avatar image for an email
+   * Load avatar image for an email.
+   * No-op when avatar fetching is disabled, a load is in flight, the avatar
+   * is already cached, or a recent load failed (failures retry after a TTL
+   * so a transient network error doesn't blank an author for the session).
    */
   private loadAvatar(email: string): void {
+    if (!this.config.fetchAvatars) {
+      return;
+    }
     if (this.avatarCache.has(email) || this.avatarLoadingSet.has(email)) {
+      return;
+    }
+    const failedAt = this.failedAvatars.get(email);
+    if (failedAt !== undefined && Date.now() - failedAt < CanvasRenderer.AVATAR_RETRY_MS) {
       return;
     }
 
@@ -443,9 +558,10 @@ export class CanvasRenderer {
 
     img.onload = () => {
       this.pendingAvatarImages.delete(img);
+      this.failedAvatars.delete(email);
       this.avatarCache.set(email, img);
       this.avatarLoadingSet.delete(email);
-      // Evict oldest entries when cache exceeds limit
+      // Evict least-recently-used entry when cache exceeds limit
       if (this.avatarCache.size > CanvasRenderer.MAX_AVATAR_CACHE_SIZE) {
         const firstKey = this.avatarCache.keys().next().value;
         if (firstKey) this.avatarCache.delete(firstKey);
@@ -455,16 +571,57 @@ export class CanvasRenderer {
 
     img.onerror = () => {
       this.pendingAvatarImages.delete(img);
-      this.avatarCache.set(email, null);
+      this.failedAvatars.set(email, Date.now());
       this.avatarLoadingSet.delete(email);
-      // Evict oldest entries when cache exceeds limit
-      if (this.avatarCache.size > CanvasRenderer.MAX_AVATAR_CACHE_SIZE) {
-        const firstKey = this.avatarCache.keys().next().value;
-        if (firstKey) this.avatarCache.delete(firstKey);
+      // Bound the failure map like the success cache — offline sessions
+      // with many distinct authors must not grow it for the renderer's
+      // lifetime
+      if (this.failedAvatars.size > CanvasRenderer.MAX_AVATAR_CACHE_SIZE) {
+        const firstKey = this.failedAvatars.keys().next().value;
+        if (firstKey) this.failedAvatars.delete(firstKey);
       }
     };
 
     img.src = this.getGravatarUrl(email, 64);
+  }
+
+  /**
+   * Get a cached avatar and refresh its LRU position
+   */
+  private getCachedAvatar(email: string): HTMLImageElement | undefined {
+    const img = this.avatarCache.get(email);
+    if (img) {
+      // Map iteration order is insertion order; re-inserting keeps
+      // frequently-drawn avatars away from the eviction end
+      this.avatarCache.delete(email);
+      this.avatarCache.set(email, img);
+    }
+    return img;
+  }
+
+  /**
+   * Truncate text with an ellipsis to fit maxWidth using the CURRENT
+   * ctx.font, caching results so repeated frames skip the measure loop
+   */
+  private truncateToWidth(text: string, maxWidth: number): string {
+    const key = `${this.ctx.font}|${Math.round(maxWidth)}|${text}`;
+    const cached = this.truncationCache.get(key);
+    if (cached !== undefined) return cached;
+
+    let result = text;
+    if (this.ctx.measureText(text).width > maxWidth) {
+      let truncated = text;
+      while (truncated.length > 0 && this.ctx.measureText(truncated + '…').width > maxWidth) {
+        truncated = truncated.slice(0, -1);
+      }
+      result = truncated + '…';
+    }
+
+    if (this.truncationCache.size >= CanvasRenderer.MAX_TRUNCATION_CACHE) {
+      this.truncationCache.clear();
+    }
+    this.truncationCache.set(key, result);
+    return result;
   }
 
   /**
@@ -516,6 +673,86 @@ export class CanvasRenderer {
     }
   }
 
+  /** Minimum usable commit-message width before optional columns yield */
+  private static readonly MIN_MESSAGE_WIDTH = 160;
+
+  /**
+   * X positions of the right-aligned columns (time, stats, and the optional
+   * date/author columns), plus the right edge available to the message
+   * column. Shared by headers, row rendering, and resize-handle placement.
+   *
+   * When `messageColumnX` is provided, an optional column is only reserved
+   * if the message column keeps a usable width — on narrow windows the
+   * author/date columns yield rather than squeezing the message to nothing.
+   */
+  private getRightColumnLayout(messageColumnX?: number): {
+    timeColumnX: number;
+    timeColumnWidth: number;
+    statsColumnX: number;
+    dateColumnX: number | null;
+    authorColumnX: number | null;
+    messageRightEdge: number;
+  } {
+    const canvasWidth = this.canvas.width / this.dpr;
+    const rightPadding = 16;
+    const timeColumnWidth = 40;
+    const statsColumnWidth = this.config.statsColumnWidth;
+
+    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
+    const statsColumnX = timeColumnX - statsColumnWidth - 8;
+
+    const fitsMessage = (edge: number): boolean =>
+      messageColumnX === undefined ||
+      edge - 8 - messageColumnX >= CanvasRenderer.MIN_MESSAGE_WIDTH;
+
+    let cursor = statsColumnX;
+    let dateColumnX: number | null = null;
+    if (this.config.showDateColumn) {
+      const candidate = cursor - CanvasRenderer.DATE_COLUMN_WIDTH - 8;
+      if (fitsMessage(candidate)) {
+        dateColumnX = candidate;
+        cursor = candidate;
+      }
+    }
+    let authorColumnX: number | null = null;
+    if (this.config.showAuthorColumn) {
+      const candidate = cursor - CanvasRenderer.AUTHOR_COLUMN_WIDTH - 8;
+      if (fitsMessage(candidate)) {
+        authorColumnX = candidate;
+        cursor = candidate;
+      }
+    }
+
+    return {
+      timeColumnX,
+      timeColumnWidth,
+      statsColumnX,
+      dateColumnX,
+      authorColumnX,
+      messageRightEdge: cursor - 8,
+    };
+  }
+
+  /**
+   * Format a timestamp as an absolute date (e.g. "12 Jan 25"), cached per
+   * timestamp
+   */
+  private formatAbsoluteDate(timestamp: number): string {
+    const cached = this.absoluteDateCache.get(timestamp);
+    if (cached !== undefined) return cached;
+
+    const formatted = new Date(timestamp * 1000).toLocaleDateString(undefined, {
+      day: '2-digit',
+      month: 'short',
+      year: '2-digit',
+    });
+    if (this.absoluteDateCache.size >= 5000) {
+      this.absoluteDateCache.clear();
+    }
+    this.absoluteDateCache.set(timestamp, formatted);
+    return formatted;
+  }
+
   /**
    * Format commit stats as "+N -M" string, or special cases for no changes
    */
@@ -538,17 +775,17 @@ export class CanvasRenderer {
    * Draw a verified signature badge (checkmark icon)
    */
   private drawVerifiedBadge(x: number, y: number, isValid: boolean): void {
-    const { ctx } = this;
+    const { ctx, theme } = this;
     const size = 12;
 
-    // Badge background
-    ctx.fillStyle = isValid ? '#238636' : '#8b949e'; // Green for verified, gray for unverified
+    // Badge background: green for verified, gray for unverified
+    ctx.fillStyle = isValid ? theme.badgeColors.verified : theme.badgeColors.unverified;
     ctx.beginPath();
     ctx.arc(x, y, size / 2 + 1, 0, Math.PI * 2);
     ctx.fill();
 
     // Checkmark icon
-    ctx.strokeStyle = '#ffffff';
+    ctx.strokeStyle = theme.badgeColors.icon;
     ctx.lineWidth = 1.5;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -570,6 +807,8 @@ export class CanvasRenderer {
    * Resize canvas
    */
   resize(width: number, height: number): void {
+    this.lastCssWidth = width;
+    this.lastCssHeight = height;
     // Setting canvas dimensions resets the context state, including transforms
     this.canvas.width = width * this.dpr;
     this.canvas.height = height * this.dpr;
@@ -650,19 +889,21 @@ export class CanvasRenderer {
 
     const headerY = this.HEADER_HEIGHT / 2;
     const canvasWidth = this.canvas.width / this.dpr;
-    const rightPadding = 16;
 
     // Calculate column positions
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
     const avatarColumnX = graphEndX + 20;
     const avatarSize = 22;
     const messageColumnX = avatarColumnX + avatarSize + 12;
+    // Rows start the message AFTER the refs column — the optional-column
+    // drop decision must use the same origin as renderRefLabels or headers
+    // and cells could disagree about which columns exist
+    const rowMessageColumnX = avatarColumnX + avatarSize + 8 + config.refsColumnWidth + 12;
 
     // Right-aligned columns (use config values)
-    const timeColumnWidth = 40;
+    const { timeColumnX, timeColumnWidth, statsColumnX, dateColumnX, authorColumnX } =
+      this.getRightColumnLayout(rowMessageColumnX);
     const statsColumnWidth = config.statsColumnWidth;
-    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
-    const statsColumnX = timeColumnX - statsColumnWidth - 8;
 
     // Draw header background
     ctx.fillStyle = theme.background;
@@ -681,6 +922,14 @@ export class CanvasRenderer {
     // Commit message header
     ctx.textAlign = 'left';
     ctx.fillText('COMMIT', messageColumnX, headerY);
+
+    // Optional author/date headers
+    if (authorColumnX !== null) {
+      ctx.fillText('AUTHOR', authorColumnX, headerY);
+    }
+    if (dateColumnX !== null) {
+      ctx.fillText('DATE', dateColumnX, headerY);
+    }
 
     // Stats header - center aligned in its column
     ctx.textAlign = 'center';
@@ -722,7 +971,10 @@ export class CanvasRenderer {
       const toX = graphEndX - (edge.toLane + 1) * config.laneWidth + config.laneWidth / 2;
       const toY = offsetY + edge.toRow * config.rowHeight + this.HEADER_HEIGHT;
 
-      ctx.strokeStyle = this.getLaneColor(edge.fromLane);
+      ctx.strokeStyle = this.getBranchColor(edge.colorIndex);
+      // Merge edges are dashed — a non-color cue distinguishing the merged
+      // branch's edge for color-blind users
+      ctx.setLineDash(edge.isMerge ? [5, 4] : []);
       ctx.beginPath();
 
       if (edge.fromLane === edge.toLane) {
@@ -777,6 +1029,9 @@ export class CanvasRenderer {
 
       ctx.stroke();
     }
+
+    // Restore solid strokes for everything drawn after the edges
+    ctx.setLineDash([]);
   }
 
   /**
@@ -795,7 +1050,7 @@ export class CanvasRenderer {
     for (const node of nodes) {
       const x = graphEndX - (node.lane + 1) * config.laneWidth + config.laneWidth / 2;
       const y = offsetY + node.row * config.rowHeight + this.HEADER_HEIGHT;
-      const color = this.getLaneColor(node.lane);
+      const color = this.getBranchColor(node.colorIndex);
       const radius = this.getNodeRadius(node.oid);
 
       const isSelected = this.selectedOids.has(node.oid);
@@ -807,13 +1062,28 @@ export class CanvasRenderer {
         ctx.globalAlpha = 0.25;
       }
 
+      // History continues below (parents not loaded / filtered out):
+      // draw a short fading stub instead of dead-ending the line
+      if (node.hasMissingParents) {
+        const stubLength = config.rowHeight * 0.8;
+        const gradient = ctx.createLinearGradient(x, y, x, y + radius + stubLength);
+        gradient.addColorStop(0, color);
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.strokeStyle = gradient;
+        ctx.lineWidth = config.lineWidth;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, y + radius + stubLength);
+        ctx.stroke();
+      }
+
       // Get author email for avatar
       const authorEmail = authorEmails?.[node.oid];
 
       // Try to draw avatar if enabled and email available
       let avatarDrawn = false;
       if (config.showAvatars && authorEmail) {
-        const avatar = this.avatarCache.get(authorEmail);
+        const avatar = this.getCachedAvatar(authorEmail);
         if (avatar) {
           // Draw circular avatar
           ctx.save();
@@ -878,7 +1148,7 @@ export class CanvasRenderer {
       // Draw initials if no avatar and node is large enough
       if (!avatarDrawn && radius >= 12 && authorEmail) {
         const initials = this.getInitials(node.commit.author);
-        ctx.fillStyle = isSelected ? color : '#ffffff';
+        ctx.fillStyle = isSelected ? color : this.getContrastingIconColor(color);
         ctx.font = `bold ${Math.floor(radius * 0.8)}px -apple-system, BlinkMacSystemFont, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -925,6 +1195,30 @@ export class CanvasRenderer {
   }
 
   /**
+   * Draw the colored initials circle used when no avatar image is available
+   */
+  private drawInitialsAvatar(
+    centerX: number,
+    centerY: number,
+    radius: number,
+    size: number,
+    author: string
+  ): void {
+    const { ctx } = this;
+    const userColor = this.getUserColor(author);
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius - 1, 0, Math.PI * 2);
+    ctx.fillStyle = userColor;
+    ctx.fill();
+    const initials = this.getInitials(author);
+    ctx.fillStyle = this.getContrastingIconColor(userColor);
+    ctx.font = `bold ${Math.floor(size * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(initials, centerX, centerY + 1);
+  }
+
+  /**
    * Get initials from author name
    */
   private getInitials(name: string): string {
@@ -951,7 +1245,6 @@ export class CanvasRenderer {
 
     // Get canvas width for responsive layout
     const canvasWidth = this.canvas.width / this.dpr;
-    const rightPadding = 16;
 
     // Calculate column positions (left to right)
     const graphEndX = offsetX + (maxLane + 1) * config.laneWidth;
@@ -962,13 +1255,18 @@ export class CanvasRenderer {
     const messageColumnX = refsColumnX + refsColumnWidth + 12;
 
     // Right-aligned columns (use config values)
-    const timeColumnWidth = 40;
+    const {
+      timeColumnX,
+      timeColumnWidth,
+      statsColumnX,
+      dateColumnX,
+      authorColumnX,
+      messageRightEdge,
+    } = this.getRightColumnLayout(messageColumnX);
     const statsColumnWidth = config.statsColumnWidth;
-    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
-    const statsColumnX = timeColumnX - statsColumnWidth - 8;
 
-    // Message column fills space up to stats column
-    const availableMessageWidth = statsColumnX - messageColumnX - 8;
+    // Message column fills space up to the first right-aligned column
+    const availableMessageWidth = messageRightEdge - messageColumnX;
 
     // Check if search highlighting is active
     const hasHighlighting = this.highlightedOids.size > 0;
@@ -976,7 +1274,7 @@ export class CanvasRenderer {
     for (const node of nodes) {
       const y = offsetY + node.row * config.rowHeight + this.HEADER_HEIGHT;
       const refs = refsByCommit?.[node.oid] ?? [];
-      const laneColor = this.getLaneColor(node.lane);
+      const laneColor = this.getBranchColor(node.colorIndex);
 
       const isSelected = this.selectedOids.has(node.oid);
       const isHovered = node.oid === this.hoveredOid;
@@ -990,7 +1288,7 @@ export class CanvasRenderer {
       // Draw subtle row highlighting for selected/hovered rows
       if (isSelected || isHovered) {
         const rowTop = y - config.rowHeight / 2;
-        ctx.fillStyle = isSelected ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.05)';
+        ctx.fillStyle = isSelected ? theme.rowColors.selectedBg : theme.rowColors.hoveredBg;
         ctx.fillRect(0, rowTop, canvasWidth, config.rowHeight);
 
         // Draw left border stripe matching lane color
@@ -1015,51 +1313,24 @@ export class CanvasRenderer {
         oid: node.oid,
       });
 
-      if (authorEmail) {
-        const avatar = this.avatarCache.get(authorEmail);
-        const avatarLoaded = this.avatarCache.has(authorEmail);
-
-        if (avatar instanceof Image) {
-          // Draw actual Gravatar image
-          ctx.save();
-          ctx.beginPath();
-          ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
-          ctx.clip();
-          ctx.drawImage(avatar, avatarCenterX - avatarRadius + 1, y - avatarRadius + 1, avatarSize - 2, avatarSize - 2);
-          ctx.restore();
-        } else {
-          // No Gravatar: either failed (null) or still loading (undefined)
-          if (!avatarLoaded) {
-            // Not yet attempted, start loading
-            this.loadAvatar(authorEmail);
-          }
-          // Draw colored initials circle
-          const userColor = this.getUserColor(node.commit.author);
-          ctx.beginPath();
-          ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
-          ctx.fillStyle = userColor;
-          ctx.fill();
-          // Draw initials with contrasting text
-          const initials = this.getInitials(node.commit.author);
-          ctx.fillStyle = this.getContrastingIconColor(userColor);
-          ctx.font = `bold ${Math.floor(avatarSize * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(initials, avatarCenterX, y + 1);
-        }
-      } else {
-        // No email - draw initials circle
-        const userColor = this.getUserColor(node.commit.author);
+      const avatar = authorEmail && config.fetchAvatars
+        ? this.getCachedAvatar(authorEmail)
+        : undefined;
+      if (avatar) {
+        // Draw actual Gravatar image
+        ctx.save();
         ctx.beginPath();
         ctx.arc(avatarCenterX, y, avatarRadius - 1, 0, Math.PI * 2);
-        ctx.fillStyle = userColor;
-        ctx.fill();
-        const initials = this.getInitials(node.commit.author);
-        ctx.fillStyle = this.getContrastingIconColor(userColor);
-        ctx.font = `bold ${Math.floor(avatarSize * 0.45)}px -apple-system, BlinkMacSystemFont, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(initials, avatarCenterX, y + 1);
+        ctx.clip();
+        ctx.drawImage(avatar, avatarCenterX - avatarRadius + 1, y - avatarRadius + 1, avatarSize - 2, avatarSize - 2);
+        ctx.restore();
+      } else {
+        if (authorEmail) {
+          // Kick off a load; no-ops when fetching is disabled, already in
+          // flight, or a recent attempt failed
+          this.loadAvatar(authorEmail);
+        }
+        this.drawInitialsAvatar(avatarCenterX, y, avatarRadius, avatarSize, node.commit.author);
       }
 
       // Draw signature badge if commit is signed
@@ -1077,14 +1348,8 @@ export class CanvasRenderer {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
 
-      // Truncate message to fit available space
-      let displayMessage = message;
-      if (ctx.measureText(displayMessage).width > availableMessageWidth) {
-        while (ctx.measureText(displayMessage + '…').width > availableMessageWidth && displayMessage.length > 0) {
-          displayMessage = displayMessage.slice(0, -1);
-        }
-        displayMessage += '…';
-      }
+      // Truncate message to fit available space (cached)
+      const displayMessage = this.truncateToWidth(message, availableMessageWidth);
       ctx.fillText(displayMessage, messageColumnX, y);
 
       // Render refs in refs column - show as many as fit
@@ -1189,18 +1454,10 @@ export class CanvasRenderer {
             const ref = item as RefInfo;
             const { bgColor, textColor } = this.getRefColors(ref);
 
-            // Truncate label if needed
-            let displayLabel = labelText;
+            // Truncate label if needed (cached)
             const maxTextWidth = maxPillWidth - smallLabelPadding * 2 - iconWidth;
-            let actualTextWidth = ctx.measureText(displayLabel).width;
-
-            if (actualTextWidth > maxTextWidth) {
-              while (ctx.measureText(displayLabel + '…').width > maxTextWidth && displayLabel.length > 0) {
-                displayLabel = displayLabel.slice(0, -1);
-              }
-              displayLabel += '…';
-              actualTextWidth = ctx.measureText(displayLabel).width;
-            }
+            const displayLabel = this.truncateToWidth(labelText, maxTextWidth);
+            const actualTextWidth = ctx.measureText(displayLabel).width;
 
             const actualPillWidth = actualTextWidth + smallLabelPadding * 2 + iconWidth;
 
@@ -1291,6 +1548,32 @@ export class CanvasRenderer {
         }
       }
 
+      // Render optional author column
+      if (authorColumnX !== null) {
+        ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.fillStyle = theme.textColor;
+        ctx.globalAlpha = 0.75;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        const authorName = this.truncateToWidth(
+          node.commit.author,
+          CanvasRenderer.AUTHOR_COLUMN_WIDTH
+        );
+        ctx.fillText(authorName, authorColumnX, y);
+        ctx.globalAlpha = 1.0;
+      }
+
+      // Render optional absolute-date column
+      if (dateColumnX !== null) {
+        ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.fillStyle = theme.textColor;
+        ctx.globalAlpha = 0.75;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(this.formatAbsoluteDate(node.commit.timestamp), dateColumnX, y);
+        ctx.globalAlpha = 1.0;
+      }
+
       // Render stats column (right-aligned)
       const statsText = this.formatStats(node.oid);
       if (statsText) {
@@ -1312,12 +1595,12 @@ export class CanvasRenderer {
             const delText = `-${stats.deletions}`;
 
             // Draw deletions first (further right)
-            ctx.fillStyle = '#f85149'; // Red for deletions
+            ctx.fillStyle = theme.statsColors.deletions;
             const delWidth = ctx.measureText(delText).width;
             ctx.fillText(delText, statsColumnX + statsColumnWidth, y);
 
             // Draw additions
-            ctx.fillStyle = '#3fb950'; // Green for additions
+            ctx.fillStyle = theme.statsColors.additions;
             ctx.fillText(addText + ' ', statsColumnX + statsColumnWidth - delWidth - 4, y);
           }
         }
@@ -1477,6 +1760,30 @@ export class CanvasRenderer {
   }
 
   /**
+   * Convert HSL components to RGB (0-255 per channel)
+   */
+  private hslToRgb(h: number, s: number, l: number): { r: number; g: number; b: number } {
+    const sat = s / 100;
+    const light = l / 100;
+    const c = (1 - Math.abs(2 * light - 1)) * sat;
+    const hp = ((h % 360) + 360) % 360 / 60;
+    const x = c * (1 - Math.abs((hp % 2) - 1));
+    let r1 = 0, g1 = 0, b1 = 0;
+    if (hp < 1) [r1, g1, b1] = [c, x, 0];
+    else if (hp < 2) [r1, g1, b1] = [x, c, 0];
+    else if (hp < 3) [r1, g1, b1] = [0, c, x];
+    else if (hp < 4) [r1, g1, b1] = [0, x, c];
+    else if (hp < 5) [r1, g1, b1] = [x, 0, c];
+    else [r1, g1, b1] = [c, 0, x];
+    const m = light - c / 2;
+    return {
+      r: Math.round((r1 + m) * 255),
+      g: Math.round((g1 + m) * 255),
+      b: Math.round((b1 + m) * 255),
+    };
+  }
+
+  /**
    * Get a contrasting icon color based on the background
    */
   private getContrastingIconColor(bgColor: string): string {
@@ -1496,6 +1803,19 @@ export class CanvasRenderer {
         r = parseInt(match[1], 10);
         g = parseInt(match[2], 10);
         b = parseInt(match[3], 10);
+      }
+    }
+    // Parse hsl/hsla color — getUserColor produces hsl(), which previously
+    // fell through as black and made this function always return white
+    else if (bgColor.startsWith('hsl')) {
+      const match = bgColor.match(/hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%/);
+      if (match) {
+        const rgb = this.hslToRgb(
+          parseFloat(match[1]),
+          parseFloat(match[2]),
+          parseFloat(match[3])
+        );
+        ({ r, g, b } = rgb);
       }
     }
 
@@ -1718,10 +2038,10 @@ export class CanvasRenderer {
   }
 
   /**
-   * Get color for a lane
+   * Get color for a branch line by its stable color index
    */
-  private getLaneColor(lane: number): string {
-    return this.theme.laneColors[lane % this.theme.laneColors.length];
+  private getBranchColor(colorIndex: number): string {
+    return this.theme.laneColors[colorIndex % this.theme.laneColors.length];
   }
 
   /**
@@ -1847,13 +2167,7 @@ export class CanvasRenderer {
     const refsColumnX = avatarColumnX + avatarSize + 8;
     const refsColumnWidth = config.refsColumnWidth;
 
-    // Right-aligned columns
-    const canvasWidth = this.canvas.width / this.dpr;
-    const rightPadding = 16;
-    const timeColumnWidth = 40;
-    const statsColumnWidth = config.statsColumnWidth;
-    const timeColumnX = canvasWidth - rightPadding - timeColumnWidth;
-    const statsColumnX = timeColumnX - statsColumnWidth - 8;
+    const { statsColumnX } = this.getRightColumnLayout();
 
     return {
       refsEnd: refsColumnX + refsColumnWidth,
@@ -1876,6 +2190,8 @@ export class CanvasRenderer {
    */
   destroy(): void {
     this.cancelRender();
+    this.dprMediaQuery?.removeEventListener('change', this.handleDprChange);
+    this.dprMediaQuery = null;
     // Abort pending avatar loads to release closure references
     for (const img of this.pendingAvatarImages) {
       img.onload = null;
@@ -1885,10 +2201,12 @@ export class CanvasRenderer {
     this.pendingAvatarImages.clear();
     this.avatarCache.clear();
     this.avatarLoadingSet.clear();
+    this.failedAvatars.clear();
     this.commitStats.clear();
     this.commitSignatures.clear();
-    this.ciStatuses.clear();
     this.highlightedOids.clear();
+    this.truncationCache.clear();
+    this.absoluteDateCache.clear();
   }
 }
 

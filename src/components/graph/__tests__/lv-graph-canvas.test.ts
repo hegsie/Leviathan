@@ -125,6 +125,7 @@ function setupDefaultMocks(opts: {
   refs?: RefsByCommit;
   hasMore?: boolean;
   moreCommits?: Commit[];
+  total?: number;
 } = {}): void {
   const commits = opts.commits ?? defaultCommits;
   const refs = opts.refs ?? defaultRefs;
@@ -141,6 +142,8 @@ function setupDefaultMocks(opts: {
         }
         return commits;
       }
+      case 'get_commit_total':
+        return opts.total ?? commits.length + moreCommits.length;
       case 'get_refs_by_commit':
         return refs;
       case 'detect_github_repo':
@@ -181,9 +184,12 @@ describe('lv-graph-canvas', () => {
   beforeEach(() => {
     clearHistory();
     setupDefaultMocks();
-    // Clear localStorage for branch visibility tests
+    // Clear persisted graph settings so tests don't leak into each other
     try {
       localStorage.removeItem(`leviathan-hidden-branches-${REPO_PATH}`);
+      localStorage.removeItem('leviathan-graph-zoom');
+      localStorage.removeItem('leviathan-graph-optional-columns');
+      localStorage.removeItem('leviathan-graph-minimap');
     } catch {
       // Ignore
     }
@@ -216,7 +222,7 @@ describe('lv-graph-canvas', () => {
       expect(toolbar).to.not.be.null;
 
       const buttons = toolbar!.querySelectorAll('.toolbar-btn');
-      expect(buttons.length).to.equal(2);
+      expect(buttons.length).to.equal(5); // HEAD, Map, Columns, Branches, Export
 
       const buttonTexts = Array.from(buttons).map((b) => b.textContent?.trim());
       expect(buttonTexts).to.include('Branches');
@@ -397,6 +403,241 @@ describe('lv-graph-canvas', () => {
       branchBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await el.updateComplete;
       expect(el.shadowRoot!.querySelector('.branch-panel')).to.be.null;
+    });
+  });
+
+  // ── Branch visibility filtering ──────────────────────────────────────
+  describe('branch visibility filtering', () => {
+    // Topology: main (HEAD) -> mainCommit -> baseCommit
+    //           feature     -> featureCommit -> baseCommit
+    const baseCommit = makeCommit({
+      oid: '1111111111111111111111111111111111111111',
+      shortId: '1111111',
+      summary: 'Base commit',
+      timestamp: 1700000000,
+      parentIds: [],
+    });
+    const mainCommit = makeCommit({
+      oid: '2222222222222222222222222222222222222222',
+      shortId: '2222222',
+      summary: 'Main commit',
+      timestamp: 1700002000,
+      parentIds: [baseCommit.oid],
+    });
+    const featureCommit = makeCommit({
+      oid: '3333333333333333333333333333333333333333',
+      shortId: '3333333',
+      summary: 'Feature commit',
+      timestamp: 1700001000,
+      parentIds: [baseCommit.oid],
+    });
+
+    const branchCommits: Commit[] = [mainCommit, featureCommit, baseCommit];
+    const branchRefs: RefsByCommit = {
+      [mainCommit.oid]: [
+        { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+      ],
+      [featureCommit.oid]: [
+        { name: 'refs/heads/feature', shorthand: 'feature', refType: 'localBranch', isHead: false },
+      ],
+    };
+
+    function getNodeOids(el: LvGraphCanvas): string[] {
+      const nodes = (el as unknown as { sortedNodesByRow: Array<{ oid: string }> })
+        .sortedNodesByRow;
+      return nodes.map((n) => n.oid);
+    }
+
+    it('hiding a branch removes its exclusive commits from the graph', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      expect(getNodeOids(el)).to.have.length(3);
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      const oids = getNodeOids(el);
+      expect(oids).to.have.length(2);
+      expect(oids).to.not.include(featureCommit.oid);
+      // Shared ancestor stays visible: it is reachable from main
+      expect(oids).to.include(baseCommit.oid);
+      expect(oids).to.include(mainCommit.oid);
+    });
+
+    it('re-showing a hidden branch restores its commits', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+      expect(getNodeOids(el)).to.have.length(2);
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+      expect(getNodeOids(el)).to.have.length(3);
+      expect(getNodeOids(el)).to.include(featureCommit.oid);
+    });
+
+    it('keeps HEAD history visible even when its branch is hidden', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('main');
+      await el.updateComplete;
+
+      // main is HEAD, so its commits stay visible
+      const oids = getNodeOids(el);
+      expect(oids).to.include(mainCommit.oid);
+      expect(oids).to.include(baseCommit.oid);
+    });
+
+    it('keeps tagged commits visible when their branch is hidden', async () => {
+      const taggedRefs: RefsByCommit = {
+        ...branchRefs,
+        [featureCommit.oid]: [
+          ...branchRefs[featureCommit.oid],
+          { name: 'refs/tags/v1.0', shorthand: 'v1.0', refType: 'tag', isHead: false },
+        ],
+      };
+      setupDefaultMocks({ commits: branchCommits, refs: taggedRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      expect(getNodeOids(el)).to.include(featureCommit.oid);
+    });
+
+    it('does not leak hidden branches into a repo with no saved filter', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+      expect(getNodeOids(el)).to.have.length(2);
+
+      // Switch to a repository that has never had branches hidden — the
+      // previous repo's filter must NOT apply
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+
+      const hidden = (el as unknown as { hiddenBranches: Set<string> }).hiddenBranches;
+      expect(hidden.size).to.equal(0);
+    });
+
+    it('closes toolbar dropdowns when switching repositories', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      const branchBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('Branches'));
+      branchBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.branch-panel')).to.not.be.null;
+
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.branch-panel')).to.be.null;
+    });
+
+    it('clears pull-request badges when switching repositories', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      // Simulate PRs loaded for the current repo (keyed by OID — a fork and
+      // its upstream share OIDs, so stale entries would render clickable
+      // badges for the wrong repository)
+      const internals = el as unknown as {
+        pullRequestsByCommit: Record<string, unknown[]>;
+        githubRepo: { owner: string; repo: string } | null;
+      };
+      internals.pullRequestsByCommit = {
+        [mainCommit.oid]: [{ number: 1, state: 'open', draft: false, url: 'https://x' }],
+      };
+      internals.githubRepo = { owner: 'acme', repo: 'repo-a' };
+
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+
+      expect(Object.keys(internals.pullRequestsByCommit)).to.have.length(0);
+      expect(internals.githubRepo).to.be.null;
+    });
+
+    it('clears search highlighting when switching repositories', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      // Simulate an active search in the current repo
+      const internals = el as unknown as { matchedCommitOids: Set<string> };
+      internals.matchedCommitOids.add(mainCommit.oid);
+
+      // Switching repos must clear the matches synchronously — a stale
+      // non-empty set dims the entire cached graph of the next repo
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+
+      expect(internals.matchedCommitOids.size).to.equal(0);
+    });
+
+    it('clears multi-selection state when switching repositories', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.selectCommit(mainCommit.oid);
+      const internals = el as unknown as {
+        selectedNodes: Set<string>;
+        lastClickedNode: unknown;
+      };
+      expect(internals.selectedNodes.size).to.equal(1);
+
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+
+      expect(internals.selectedNodes.size).to.equal(0);
+      expect(internals.lastClickedNode).to.be.null;
+    });
+
+    it('clears the selection when the selected commit becomes hidden', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      expect(el.selectCommit(featureCommit.oid)).to.be.true;
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      const selected = (el as unknown as { selectedNode: { oid: string } | null }).selectedNode;
+      expect(selected).to.be.null;
+    });
+
+    it('reports filtered-out commits as loaded but not selectable', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      // The commit is fetched but hidden by the filter: selectCommit misses
+      // while hasLoadedCommit still reports it — callers use this to give
+      // accurate guidance (unhide the branch vs. load more history)
+      expect(el.selectCommit(featureCommit.oid)).to.be.false;
+      expect(el.hasLoadedCommit(featureCommit.oid)).to.be.true;
+      expect(el.hasLoadedCommit('0000000000000000000000000000000000000000')).to.be.false;
+    });
+
+    it('keeps the selection when the selected commit stays visible', async () => {
+      setupDefaultMocks({ commits: branchCommits, refs: branchRefs });
+      const el = await renderCanvas();
+
+      expect(el.selectCommit(mainCommit.oid)).to.be.true;
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      const selected = (el as unknown as { selectedNode: { oid: string } | null }).selectedNode;
+      expect(selected?.oid).to.equal(mainCommit.oid);
     });
   });
 
@@ -708,6 +949,730 @@ describe('lv-graph-canvas', () => {
   });
 
   // ── Per-repo graph cache ─────────────────────────────────────────────
+  describe('optional columns', () => {
+    beforeEach(() => {
+      try {
+        localStorage.removeItem('leviathan-graph-optional-columns');
+      } catch {
+        // Ignore
+      }
+    });
+
+    it('opens the Columns menu with author/date checkboxes', async () => {
+      const el = await renderCanvas();
+
+      const columnsBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('Columns'));
+      expect(columnsBtn).to.not.be.undefined;
+
+      columnsBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+
+      const menu = el.shadowRoot!.querySelector('.columns-menu') as HTMLElement;
+      expect(menu).to.not.be.null;
+      // The menu anchors to its own trigger button (measured at open time),
+      // not the hardcoded offset shared with the export menu
+      expect(menu.style.right).to.match(/px$/);
+      const checkboxes = menu!.querySelectorAll('input[type="checkbox"]');
+      expect(checkboxes.length).to.equal(2);
+      // Off by default
+      for (const cb of checkboxes) {
+        expect((cb as HTMLInputElement).checked).to.be.false;
+      }
+    });
+
+    it('toggling a column updates the renderer config and persists', async () => {
+      const el = await renderCanvas();
+
+      el.toggleOptionalColumn('author');
+      await el.updateComplete;
+
+      const renderer = (el as unknown as {
+        renderer: { getColumnWidths(): unknown } & { config?: unknown };
+      }).renderer;
+      const config = (renderer as unknown as {
+        config: { showAuthorColumn: boolean; showDateColumn: boolean };
+      }).config;
+      expect(config.showAuthorColumn).to.be.true;
+      expect(config.showDateColumn).to.be.false;
+
+      const saved = JSON.parse(localStorage.getItem('leviathan-graph-optional-columns')!);
+      expect(saved).to.deep.equal({ author: true, date: false });
+    });
+
+    it('restores persisted column visibility on connect', async () => {
+      localStorage.setItem(
+        'leviathan-graph-optional-columns',
+        JSON.stringify({ author: true, date: true })
+      );
+      const el = await renderCanvas();
+
+      const internals = el as unknown as {
+        showAuthorColumn: boolean;
+        showDateColumn: boolean;
+      };
+      expect(internals.showAuthorColumn).to.be.true;
+      expect(internals.showDateColumn).to.be.true;
+    });
+  });
+
+  describe('screen-reader support', () => {
+    it('mirrors the visible commits into a hidden listbox', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      const listbox = el.shadowRoot!.querySelector('[role="listbox"]');
+      expect(listbox).to.not.be.null;
+
+      const options = listbox!.querySelectorAll('[role="option"]');
+      expect(options.length).to.equal(3);
+      expect(options[0].textContent).to.contain('Third commit');
+      expect(options[0].getAttribute('aria-posinset')).to.equal('1');
+      expect(options[0].getAttribute('aria-setsize')).to.equal('3');
+    });
+
+    it('marks the selected commit in the mirror and announces it', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      el.selectCommit(commit2.oid);
+      await el.updateComplete;
+
+      const selectedOptions = Array.from(
+        el.shadowRoot!.querySelectorAll('[role="option"]')
+      ).filter((o) => o.getAttribute('aria-selected') === 'true');
+      expect(selectedOptions).to.have.length(1);
+      expect(selectedOptions[0].textContent).to.contain('Second commit');
+
+      const status = el.shadowRoot!.querySelector('[role="status"]');
+      expect(status?.textContent).to.contain('Second commit');
+      expect(status?.textContent).to.contain('Test Author');
+    });
+
+    it('clears the announcement when the selection is cleared', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      el.selectCommit(commit2.oid);
+      await el.updateComplete;
+
+      const canvas = el.shadowRoot!.querySelector('canvas')!;
+      canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await el.updateComplete;
+
+      const status = el.shadowRoot!.querySelector('[role="status"]');
+      expect(status?.textContent?.trim()).to.equal('');
+    });
+  });
+
+  describe('jump to HEAD and tag tips', () => {
+    it('jumpToHead selects the commit HEAD points at', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      // defaultRefs marks commit3 (main) as HEAD
+      expect(el.jumpToHead()).to.be.true;
+      const selected = (el as unknown as { selectedNode: { oid: string } | null }).selectedNode;
+      expect(selected?.oid).to.equal(commit3.oid);
+    });
+
+    it('jumpToHead returns false when no HEAD ref is loaded', async () => {
+      setupDefaultMocks({ refs: {} });
+      const el = await renderCanvas();
+
+      expect(el.jumpToHead()).to.be.false;
+    });
+
+    it('renders a HEAD toolbar button that selects the HEAD commit', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      const headBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('HEAD'));
+      expect(headBtn).to.not.be.undefined;
+
+      headBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+
+      const selected = (el as unknown as { selectedNode: { oid: string } | null }).selectedNode;
+      expect(selected?.oid).to.equal(commit3.oid);
+    });
+
+    it('dispatches graph-notice when the HEAD toolbar button misses', async () => {
+      setupDefaultMocks({ refs: {} });
+      const el = await renderCanvas();
+
+      let noticeMessage: string | null = null;
+      el.addEventListener('graph-notice', (e: Event) => {
+        noticeMessage = (e as CustomEvent<{ message: string }>).detail.message;
+      });
+
+      const headBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('HEAD'));
+      headBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+
+      expect(noticeMessage).to.contain('HEAD commit is not loaded');
+    });
+
+    it('getTagTips returns tag refs sorted by name', async () => {
+      setupDefaultMocks({
+        refs: {
+          [commit1.oid]: [
+            { name: 'refs/tags/v2.0', shorthand: 'v2.0', refType: 'tag', isHead: false },
+          ],
+          [commit2.oid]: [
+            { name: 'refs/tags/v1.0', shorthand: 'v1.0', refType: 'tag', isHead: false },
+          ],
+        },
+      });
+      const el = await renderCanvas();
+
+      expect(el.getTagTips()).to.deep.equal([
+        { name: 'v1.0', oid: commit2.oid },
+        { name: 'v2.0', oid: commit1.oid },
+      ]);
+    });
+  });
+
+  describe('zoom', () => {
+    beforeEach(() => {
+      try {
+        localStorage.removeItem('leviathan-graph-zoom');
+      } catch {
+        // Ignore
+      }
+    });
+
+    it('scales the row metrics and persists the zoom level', async () => {
+      const el = await renderCanvas();
+      const internals = el as unknown as { ROW_HEIGHT: number; LANE_WIDTH: number };
+      const baseRowHeight = internals.ROW_HEIGHT;
+
+      el.setZoom(1.5);
+      expect(el.getZoom()).to.equal(1.5);
+      expect(internals.ROW_HEIGHT).to.equal(Math.round(baseRowHeight * 1.5));
+      expect(localStorage.getItem('leviathan-graph-zoom')).to.equal('1.5');
+    });
+
+    it('clamps zoom to the allowed range', async () => {
+      const el = await renderCanvas();
+
+      el.setZoom(10);
+      expect(el.getZoom()).to.equal(2);
+
+      el.setZoom(0.01);
+      expect(el.getZoom()).to.equal(0.6);
+    });
+
+    it('zooms on Ctrl+wheel instead of scrolling (applied once per frame)', async () => {
+      const el = await renderCanvas();
+      const canvas = el.shadowRoot!.querySelector('canvas')!;
+      const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, cancelable: true })
+      );
+      await nextFrame();
+      expect(el.getZoom()).to.be.greaterThan(1);
+
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', { deltaY: 100, ctrlKey: true, cancelable: true })
+      );
+      await nextFrame();
+      expect(el.getZoom()).to.be.closeTo(1, 0.001);
+    });
+
+    it('accumulates rapid wheel ticks into a single zoom application', async () => {
+      const el = await renderCanvas();
+      const canvas = el.shadowRoot!.querySelector('canvas')!;
+      const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+
+      // Three ticks in the same frame compound into one target (1.1^3)
+      for (let i = 0; i < 3; i++) {
+        canvas.dispatchEvent(
+          new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, cancelable: true })
+        );
+      }
+      await nextFrame();
+      expect(el.getZoom()).to.be.closeTo(1.331, 0.005);
+    });
+
+    it('restores the persisted zoom level on connect', async () => {
+      localStorage.setItem('leviathan-graph-zoom', '1.3');
+      const el = await renderCanvas();
+      expect(el.getZoom()).to.equal(1.3);
+    });
+  });
+
+  describe('incremental layout append', () => {
+    it('keeps rows and colors of loaded commits stable when older commits load', async () => {
+      // First page: A -> B -> C, C's parent D arrives in the next page
+      const commitA = makeCommit({
+        oid: 'aaaa000000000000000000000000000000000000',
+        summary: 'A',
+        timestamp: 4000,
+        parentIds: ['bbbb000000000000000000000000000000000000'],
+      });
+      const commitB = makeCommit({
+        oid: 'bbbb000000000000000000000000000000000000',
+        summary: 'B',
+        timestamp: 3000,
+        parentIds: ['cccc000000000000000000000000000000000000'],
+      });
+      const commitC = makeCommit({
+        oid: 'cccc000000000000000000000000000000000000',
+        summary: 'C',
+        timestamp: 2000,
+        parentIds: ['dddd000000000000000000000000000000000000'],
+      });
+      const commitD = makeCommit({
+        oid: 'dddd000000000000000000000000000000000000',
+        summary: 'D',
+        timestamp: 1000,
+        parentIds: [],
+      });
+
+      setupDefaultMocks({
+        commits: [commitA, commitB, commitC],
+        refs: {
+          [commitA.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+        moreCommits: [commitD],
+        total: 4,
+      });
+
+      const el = await renderCanvas();
+      const internals = el as unknown as {
+        sortedNodesByRow: Array<{ oid: string; row: number; lane: number; colorIndex: number }>;
+        loadMoreCommits(): Promise<void>;
+        hasMoreCommits: boolean;
+      };
+      expect(internals.sortedNodesByRow).to.have.length(3);
+      expect(internals.hasMoreCommits).to.be.true;
+
+      const before = internals.sortedNodesByRow.map((n) => ({ ...n }));
+
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+
+      expect(internals.sortedNodesByRow).to.have.length(4);
+      // Existing rows/lanes/colors are untouched by the append
+      for (let i = 0; i < before.length; i++) {
+        const after = internals.sortedNodesByRow[i];
+        expect(after.oid).to.equal(before[i].oid);
+        expect(after.row).to.equal(before[i].row);
+        expect(after.lane).to.equal(before[i].lane);
+        expect(after.colorIndex).to.equal(before[i].colorIndex);
+      }
+      // The appended commit sits below, continuing the mainline
+      const appended = internals.sortedNodesByRow[3];
+      expect(appended.oid).to.equal(commitD.oid);
+      expect(appended.lane).to.equal(0);
+    });
+  });
+
+  describe('pull request loading race', () => {
+    it('discards PRs fetched for a previously active repository', async () => {
+      let resolvePrs: ((v: unknown) => void) | null = null;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_commit_history':
+            return defaultCommits;
+          case 'get_refs_by_commit':
+            return defaultRefs;
+          case 'detect_github_repo':
+            return { owner: 'acme', repo: 'repo-a' };
+          case 'check_github_connection':
+            return { connected: true };
+          case 'list_pull_requests':
+            // Stall the PR fetch so a repo switch can happen mid-flight
+            return new Promise((r) => {
+              resolvePrs = r;
+            });
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderCanvas();
+      expect(resolvePrs).to.not.be.null;
+
+      // Switch to a non-GitHub repository while repo A's PR fetch is stalled
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_commit_history':
+            return defaultCommits;
+          case 'get_refs_by_commit':
+            return defaultRefs;
+          case 'detect_github_repo':
+            return null;
+          default:
+            return null;
+        }
+      };
+      el.repositoryPath = '/test/other-repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Now repo A's stalled fetch resolves with a PR whose head ref matches
+      // a branch name ("main") that also exists in repo B
+      resolvePrs!([
+        {
+          number: 7,
+          state: 'open',
+          draft: false,
+          headSha: 'nonexistent-sha',
+          headRef: 'main',
+          htmlUrl: 'https://example.com/pr/7',
+        },
+      ]);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const prs = (el as unknown as {
+        pullRequestsByCommit: Record<string, unknown[]>;
+      }).pullRequestsByCommit;
+      expect(Object.keys(prs)).to.have.length(0);
+    });
+  });
+
+  describe('minimap', () => {
+    it('shows the minimap by default and toggles it via the toolbar', async () => {
+      const el = await renderCanvas();
+
+      expect(el.shadowRoot!.querySelector('.minimap-canvas')).to.not.be.null;
+
+      const mapBtn = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-btn')
+      ).find((b) => b.textContent?.trim().includes('Map'));
+      expect(mapBtn).to.not.be.undefined;
+
+      mapBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+      expect(el.shadowRoot!.querySelector('.minimap-canvas')).to.be.null;
+      expect(localStorage.getItem('leviathan-graph-minimap')).to.equal('false');
+
+      mapBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 20));
+      expect(el.shadowRoot!.querySelector('.minimap-canvas')).to.not.be.null;
+      expect(localStorage.getItem('leviathan-graph-minimap')).to.equal('true');
+    });
+
+    it('restores the persisted minimap preference on connect', async () => {
+      localStorage.setItem('leviathan-graph-minimap', 'false');
+      const el = await renderCanvas();
+
+      expect(el.shadowRoot!.querySelector('.minimap-canvas')).to.be.null;
+    });
+
+    it('maps minimap clicks to proportional scroll positions', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      // Give the component real layout height so the minimap has a size
+      el.style.height = '228px';
+      await new Promise((r) => setTimeout(r, 30));
+      (el as unknown as { resizeMinimap(): void }).resizeMinimap();
+
+      const internals = el as unknown as {
+        minimapYToScrollTop(y: number): number;
+        getMinimapCssSize(): { width: number; height: number };
+        virtualScroll: { getContentSize(): { height: number } };
+        containerEl: HTMLElement;
+      };
+      const cssHeight = internals.getMinimapCssSize().height;
+      expect(cssHeight).to.be.greaterThan(0);
+
+      const contentHeight = internals.virtualScroll.getContentSize().height;
+      expect(contentHeight).to.equal(500 * 22 + 40);
+      const viewportHeight = internals.containerEl.clientHeight;
+
+      // Clicking the middle centers the viewport around the midpoint
+      const scrollTop = internals.minimapYToScrollTop(cssHeight / 2);
+      expect(scrollTop).to.be.closeTo(contentHeight / 2 - viewportHeight / 2, 2);
+
+      // Top and bottom clamp within the scrollable range
+      expect(internals.minimapYToScrollTop(0)).to.equal(0);
+      expect(internals.minimapYToScrollTop(cssHeight)).to.be.at.most(contentHeight);
+    });
+
+    it('scales the minimap backing store by devicePixelRatio', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+
+      el.style.height = '228px';
+      await new Promise((r) => setTimeout(r, 30));
+      (el as unknown as { resizeMinimap(): void }).resizeMinimap();
+
+      const internals = el as unknown as {
+        getMinimapCssSize(): { width: number; height: number };
+      };
+      const cssSize = internals.getMinimapCssSize();
+      const minimap = el.shadowRoot!.querySelector('.minimap-canvas') as HTMLCanvasElement;
+      const dpr = window.devicePixelRatio || 1;
+      expect(minimap.width).to.equal(Math.round(cssSize.width * dpr));
+      expect(minimap.height).to.equal(Math.round(cssSize.height * dpr));
+    });
+  });
+
+  describe('full-history scrollbar', () => {
+    it('sizes the scroll area to the full history, not just the loaded rows', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      const content = el.shadowRoot!.querySelector('.scroll-content') as HTMLDivElement;
+      // 500 virtual rows at 22px + 2x20px padding
+      expect(content.style.height).to.equal(`${500 * 22 + 40}px`);
+    });
+
+    it('keeps the loaded height once everything is loaded', async () => {
+      setupDefaultMocks({ total: 3 });
+      const el = await renderCanvas();
+
+      const content = el.shadowRoot!.querySelector('.scroll-content') as HTMLDivElement;
+      expect(content.style.height).to.equal(`${3 * 22 + 40}px`);
+    });
+
+    it('uses the filtered row count while a branch filter is active', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      // Hiding a branch makes the backend total meaningless for row math
+      el.toggleBranch('feature');
+      await el.updateComplete;
+
+      const content = el.shadowRoot!.querySelector('.scroll-content') as HTMLDivElement;
+      const internals = el as unknown as { sortedNodesByRow: unknown[] };
+      expect(content.style.height).to.equal(
+        `${internals.sortedNodesByRow.length * 22 + 40}px`
+      );
+    });
+
+    it('keeps pagination available after a transient load-more failure', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      // Make the next page fetch fail
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_commit_history') {
+          const typedArgs = args as { skip?: number } | undefined;
+          if (typedArgs?.skip && typedArgs.skip > 0) {
+            throw { code: 'GIT_ERROR', message: 'network blip' };
+          }
+        }
+        return previousMock(command, args);
+      };
+
+      const internals = el as unknown as {
+        loadMoreCommits(): Promise<void>;
+        hasMoreCommits: boolean;
+      };
+      await internals.loadMoreCommits();
+
+      // A failed fetch must NOT permanently mark the history as exhausted
+      expect(internals.hasMoreCommits).to.be.true;
+    });
+
+    it('a superseded load-more does not clear a newer load\'s in-progress flag', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      // Stall the next page fetch so it can be superseded mid-flight
+      let resolveStalled: ((v: unknown) => void) | null = null;
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        const typedArgs = args as { skip?: number } | undefined;
+        if (command === 'get_commit_history' && typedArgs?.skip && typedArgs.skip > 0) {
+          return new Promise((r) => {
+            resolveStalled = r;
+          });
+        }
+        return previousMock(command, args);
+      };
+
+      const internals = el as unknown as {
+        loadMoreCommits(): Promise<void>;
+        isLoadingMore: boolean;
+        loadVersion: number;
+      };
+      const stalledLoad = internals.loadMoreCommits();
+      expect(internals.isLoadingMore).to.be.true;
+
+      // A full reload takes ownership mid-flight (bumps the version) and a
+      // NEWER load-more is then in progress
+      internals.loadVersion++;
+      internals.isLoadingMore = true;
+
+      // The stale fetch resolving must not clear the newer load's flag
+      resolveStalled!([]);
+      await stalledLoad;
+      expect(internals.isLoadingMore).to.be.true;
+    });
+
+    it('loads more pages when scrolled past the loaded rows', async () => {
+      setupDefaultMocks({ total: 500, moreCommits: makeMoreCommits(3, 100) });
+      const el = await renderCanvas();
+      clearHistory();
+
+      // Scroll deep into the unloaded region — the catch-up loader kicks in
+      const internals = el as unknown as {
+        scrollState: { setScroll(top: number, left: number): void };
+      };
+      internals.scrollState.setScroll(400 * 22, 0);
+      await new Promise((r) => setTimeout(r, 100));
+
+      const catchUpLoads = findCommands('get_commit_history').filter(
+        (c) => ((c.args as { skip?: number } | undefined)?.skip ?? 0) > 0
+      );
+      expect(catchUpLoads.length).to.be.greaterThan(0);
+    });
+  });
+
+  describe('commit total', () => {
+    it('marks pagination complete when all commits are loaded', async () => {
+      setupDefaultMocks({ total: 3 });
+      const el = await renderCanvas();
+
+      const hasMore = (el as unknown as { hasMoreCommits: boolean }).hasMoreCommits;
+      expect(hasMore).to.be.false;
+    });
+
+    it('keeps pagination open when the backend reports more commits', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      const hasMore = (el as unknown as { hasMoreCommits: boolean }).hasMoreCommits;
+      expect(hasMore).to.be.true;
+    });
+
+    it('announces loaded-of-total in the canvas aria-label', async () => {
+      setupDefaultMocks({ total: 500 });
+      const el = await renderCanvas();
+
+      const canvas = el.shadowRoot!.querySelector('canvas')!;
+      expect(canvas.getAttribute('aria-label')).to.contain('3 of 500');
+    });
+  });
+
+  describe('visible-range stats fetching', () => {
+    it('fetches stats only for the visible rows, not every loaded commit', async () => {
+      // 500 commits loaded; only the visible range (plus overscan) should
+      // have its stats requested
+      const manyCommits = makeMoreCommits(500, 0);
+      setupDefaultMocks({ commits: manyCommits, refs: {} });
+
+      await renderCanvas();
+      // Stats fetch is debounced (300ms) — wait for it to fire
+      await new Promise((r) => setTimeout(r, 600));
+
+      const statsCalls = findCommands('get_commits_stats');
+      const requestedOids = new Set<string>();
+      for (const call of statsCalls) {
+        const args = call.args as { commitOids?: string[] } | undefined;
+        for (const oid of args?.commitOids ?? []) {
+          requestedOids.add(oid);
+        }
+      }
+
+      expect(requestedOids.size).to.be.greaterThan(0);
+      expect(requestedOids.size).to.be.lessThan(500);
+    });
+
+    it('PNG export fills in stats for rows the user never scrolled past', async () => {
+      // 300 loaded commits; the viewport-lazy fetch only covers the first
+      // ~viewport+overscan rows
+      const manyCommits = makeMoreCommits(300, 0);
+      setupDefaultMocks({ commits: manyCommits, refs: {}, total: 300 });
+
+      const el = await renderCanvas();
+      await new Promise((r) => setTimeout(r, 600));
+
+      const internals = el as unknown as {
+        statsFetchedOids: Set<string>;
+        exportAsImage(): Promise<void>;
+      };
+      expect(internals.statsFetchedOids.size).to.be.lessThan(300);
+
+      // The export renders EVERY loaded row, so it must fetch the rest first
+      await internals.exportAsImage();
+      expect(internals.statsFetchedOids.size).to.equal(300);
+    });
+
+    it('PNG export waits for an in-flight stats fetch instead of skipping claimed OIDs', async () => {
+      const manyCommits = makeMoreCommits(150, 0);
+
+      // Stall every stats fetch until released
+      let releaseStats: (() => void) | null = null;
+      const stallGate = new Promise<void>((r) => {
+        releaseStats = () => r();
+      });
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_commit_history':
+            return manyCommits;
+          case 'get_commit_total':
+            return 150;
+          case 'get_refs_by_commit':
+            return {};
+          case 'detect_github_repo':
+            return null;
+          case 'get_commits_stats': {
+            await stallGate;
+            const oids = (args as { commitOids: string[] }).commitOids;
+            return oids.map((oid) => ({ oid, additions: 1, deletions: 1, filesChanged: 1 }));
+          }
+          case 'get_commits_signatures':
+            return [];
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderCanvas();
+      // Let the debounced visible fetch start (it claims OIDs, then stalls)
+      await new Promise((r) => setTimeout(r, 400));
+
+      const internals = el as unknown as {
+        exportAsImage(): Promise<void>;
+        commitStatsMap: Map<string, unknown>;
+      };
+      const exportDone = internals.exportAsImage();
+
+      // Release the stalled fetches; the export must wait for the data
+      releaseStats!();
+      await exportDone;
+
+      // Every loaded commit has stats after the export — none skipped
+      // because another fetch had merely CLAIMED them
+      expect(internals.commitStatsMap.size).to.equal(150);
+    });
+
+    it('does not refetch stats for already-fetched commits', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      await new Promise((r) => setTimeout(r, 600));
+
+      const callsBefore = findCommands('get_commits_stats').length;
+      expect(callsBefore).to.be.greaterThan(0);
+
+      // Trigger another visible-data fetch for the same rows
+      (el as unknown as { scheduleVisibleDataFetch(): void }).scheduleVisibleDataFetch();
+      await new Promise((r) => setTimeout(r, 600));
+
+      // All visible commits were already fetched — no new backend calls
+      const callsAfter = findCommands('get_commits_stats').length;
+      expect(callsAfter).to.equal(callsBefore);
+    });
+  });
+
   describe('per-repo graph cache', () => {
     beforeEach(() => {
       clearGraphCacheForTests();

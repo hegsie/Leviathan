@@ -941,7 +941,7 @@ export class AppShell extends LitElement {
   private handleShowCommitEvent = (e: Event): void => {
     const customEvent = e as CustomEvent<{ oid: string }>;
     if (customEvent.detail?.oid) {
-      this.graphCanvas?.selectCommit(customEvent.detail.oid);
+      this.revealCommitInGraph(customEvent.detail.oid);
     }
   };
 
@@ -2012,7 +2012,7 @@ export class AppShell extends LitElement {
   }
 
   private handleSelectCommit(e: CustomEvent<{ oid: string }>): void {
-    this.graphCanvas?.selectCommit(e.detail.oid);
+    this.revealCommitInGraph(e.detail.oid);
   }
 
   private async handleCheckoutBranchFromGraph(e: CustomEvent<{ branchName: string }>): Promise<void> {
@@ -2033,6 +2033,11 @@ export class AppShell extends LitElement {
   private handleCopySha(e: CustomEvent<{ sha: string }>): void {
     // Show brief feedback that SHA was copied
     showToast(`Copied SHA ${e.detail.sha} to clipboard`, 'success');
+  }
+
+  private handleGraphNotice(e: CustomEvent<{ message: string; type?: 'info' | 'success' | 'error' }>): void {
+    // User-facing notices from the graph canvas (it has no toast of its own)
+    showToast(e.detail.message, e.detail.type ?? 'info', 4000);
   }
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry; isPartiallyStaged?: boolean }>): void {
@@ -2070,14 +2075,14 @@ export class AppShell extends LitElement {
   private handleTagSelected(e: CustomEvent<{ tag: Tag }>): void {
     const tag = e.detail.tag;
     if (tag.targetOid) {
-      this.graphCanvas?.selectCommit(tag.targetOid);
+      this.revealCommitInGraph(tag.targetOid);
     }
   }
 
   private handleBranchSelected(e: CustomEvent<{ branch: Branch }>): void {
     const branch = e.detail.branch;
     if (branch.targetOid) {
-      this.graphCanvas?.selectCommit(branch.targetOid);
+      this.revealCommitInGraph(branch.targetOid);
     }
   }
 
@@ -2248,7 +2253,7 @@ export class AppShell extends LitElement {
 
   private handleBlameCommitClick(e: CustomEvent<{ oid: string }>): void {
     this.showBlame = false;
-    this.graphCanvas?.selectCommit(e.detail.oid);
+    this.revealCommitInGraph(e.detail.oid);
   }
 
   private handleCloseBlame(): void {
@@ -2343,6 +2348,25 @@ export class AppShell extends LitElement {
         icon: 'refresh',
         shortcut: `${mod}R`,
         action: () => this.handleRefresh(),
+      },
+      {
+        id: 'graph-jump-head',
+        label: 'Graph: Jump to HEAD',
+        category: 'navigation',
+        icon: 'commit',
+        action: this.requiresRepository(() => {
+          if (this.graphCanvas?.jumpToHead()) {
+            return;
+          }
+          // Route the miss through the shared reveal helper so the toast
+          // distinguishes loaded-but-filtered from not-loaded
+          const headOid = this.graphCanvas?.getHeadOid();
+          if (headOid !== undefined) {
+            this.revealCommitInGraph(headOid);
+          } else {
+            showToast('HEAD commit is not loaded in the graph', 'info', 4000);
+          }
+        }),
       },
       {
         id: 'toggle-output-panel',
@@ -3024,8 +3048,26 @@ export class AppShell extends LitElement {
     }
   }
 
+  /**
+   * Select a commit in the graph, telling the user when it isn't loaded
+   * (below the paginated window or hidden by a branch filter) instead of
+   * silently doing nothing. ALL reveal-in-graph flows must go through this.
+   */
+  private revealCommitInGraph(oid: string): void {
+    if (this.graphCanvas?.selectCommit(oid)) {
+      return;
+    }
+    // Two distinct miss cases need different guidance: a commit hidden by
+    // the branch-visibility filter will NEVER appear through scrolling
+    if (this.graphCanvas?.hasLoadedCommit(oid)) {
+      showToast('Commit is hidden by the branch visibility filter — show its branch to reveal it', 'info', 4000);
+    } else {
+      showToast('Commit is not loaded in the graph yet — scroll further back to load it', 'info', 4000);
+    }
+  }
+
   private handleNavigateToCommit(e: CustomEvent<{ oid: string }>): void {
-    this.graphCanvas?.selectCommit(e.detail.oid);
+    this.revealCommitInGraph(e.detail.oid);
   }
 
   private handleShowFileHistory(e: CustomEvent<{ filePath: string }>): void {
@@ -3041,7 +3083,7 @@ export class AppShell extends LitElement {
   private handleFileHistoryCommitSelected(e: CustomEvent<{ commit: Commit }>): void {
     // Select the commit in the graph and navigate to it
     this.selectedCommit = e.detail.commit;
-    this.graphCanvas?.selectCommit(e.detail.commit.oid);
+    this.revealCommitInGraph(e.detail.commit.oid);
   }
 
   private handleFileHistoryViewDiff(e: CustomEvent<{ commitOid: string; filePath: string }>): void {
@@ -3155,6 +3197,7 @@ export class AppShell extends LitElement {
                     @ref-context-menu=${this.handleRefContextMenu}
                     @checkout-branch=${this.handleCheckoutBranchFromGraph}
                     @copy-sha=${this.handleCopySha}
+                    @graph-notice=${this.handleGraphNotice}
                   ></lv-graph-canvas>
                 </div>
 
@@ -3500,6 +3543,7 @@ export class AppShell extends LitElement {
         .branches=${this.branches}
         .files=${this.trackedFiles}
         .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
+        .tags=${this.graphCanvas?.getTagTips() ?? []}
         @close=${() => { this.showCommandPalette = false; }}
         @checkout-branch=${this.handleCheckoutBranch}
         @open-file=${this.handleOpenFileFromPalette}
@@ -3512,7 +3556,7 @@ export class AppShell extends LitElement {
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showReflog = false; }}
           @undo-complete=${() => { this.showReflog = false; this.handleRefresh(); }}
-          @show-commit=${(e: CustomEvent<{ oid: string }>) => { this.showReflog = false; this.graphCanvas?.selectCommit(e.detail.oid); }}
+          @show-commit=${(e: CustomEvent<{ oid: string }>) => { this.showReflog = false; this.revealCommitInGraph(e.detail.oid); }}
         ></lv-reflog-dialog>
       ` : ''}
 

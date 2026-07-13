@@ -24,7 +24,15 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        // Allow pointing at a preinstalled Chromium (e.g. in CI/sandbox
+        // images where the bundled download is skipped) — mirrors the same
+        // escape hatch in web-test-runner.config.mjs.
+        ...(process.env.PW_CHROMIUM_PATH
+          ? { launchOptions: { executablePath: process.env.PW_CHROMIUM_PATH } }
+          : {}),
+      },
     },
   ],
 

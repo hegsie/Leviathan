@@ -9,7 +9,7 @@ import {
   type GraphLayout,
   type LayoutNode,
 } from '../../graph/graph-layout.service.ts';
-import { type GraphCommit } from '../../graph/lane-assignment.ts';
+import { appendLanes, type GraphCommit } from '../../graph/lane-assignment.ts';
 import { SpatialIndex, type HitTestResult } from '../../graph/spatial-index.ts';
 import {
   VirtualScrollManager,
@@ -20,6 +20,7 @@ import {
 import { CanvasRenderer, getThemeFromCSS } from '../../graph/canvas-renderer.ts';
 import {
   getCommitHistory,
+  getCommitTotal,
   getRefsByCommit,
   getCommitsStats,
   getCommitsSignatures,
@@ -32,6 +33,7 @@ import type { Commit, RefsByCommit, RefInfo } from '../../types/git.types.ts';
 import type { GraphPullRequest } from '../../graph/virtual-scroll.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
 import { embeddingIndexService } from '../../services/embedding-index.service.ts';
+import { settingsStore } from '../../stores/settings.store.ts';
 
 /**
  * Per-repository cache of the last loaded commit page. Switching back to an
@@ -443,6 +445,36 @@ export class LvGraphCanvas extends LitElement {
         background: var(--color-bg-hover);
       }
 
+      .minimap-canvas {
+        position: absolute;
+        top: 28px; /* Below the column headers */
+        bottom: 0;
+        /* The shared canvas rule sets left: 0; without this override the
+           box is over-constrained and right is ignored, parking the
+           minimap on the LEFT over the graph */
+        left: auto;
+        right: 12px; /* Left of the scrollbar */
+        width: 56px;
+        background: var(--color-bg-secondary);
+        border-left: 1px solid var(--color-border);
+        opacity: 0.92;
+        z-index: 4;
+        cursor: pointer;
+      }
+
+      /* Visually hidden but exposed to assistive technology */
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
       .resize-handle {
         position: absolute;
         top: 0;
@@ -490,10 +522,48 @@ export class LvGraphCanvas extends LitElement {
   // Export
   @state() private showExportMenu = false;
 
+  // Dropdown menus anchor to the toolbar button that opened them. Measured
+  // at open time (not hardcoded) so adding/reordering toolbar buttons can't
+  // silently detach a menu from its trigger.
+  @state() private exportMenuRight: number | null = null;
+  @state() private columnsMenuRight: number | null = null;
+
+  /** Distance from the container's right edge to the trigger's right edge */
+  private menuRightOffset(e: MouseEvent): number {
+    const button = e.currentTarget as HTMLElement | null;
+    if (!button || !this.containerEl) return 0;
+    const containerRect = this.containerEl.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    return Math.max(0, containerRect.right - buttonRect.right);
+  }
+
+  // Optional columns (author name, absolute date)
+  @state() private showColumnsMenu = false;
+  @state() private showAuthorColumn = false;
+  @state() private showDateColumn = false;
+  private readonly OPTIONAL_COLUMNS_KEY = 'leviathan-graph-optional-columns';
+
+  // Minimap
+  @state() private showMinimap = true;
+  private readonly MINIMAP_KEY = 'leviathan-graph-minimap';
+  private readonly MINIMAP_WIDTH = 56;
+  /** Offscreen layer with one dot per commit, rebuilt on layout changes */
+  private minimapDots: HTMLCanvasElement | null = null;
+  private minimapDragging = false;
+
   // Infinite scroll pagination
   @state() private isLoadingMore = false;
   @state() private hasMoreCommits = true;
+  // True total commit count across all refs (null until fetched)
+  @state() private commitTotal: number | null = null;
   private totalLoadedCommits = 0;
+
+  // Screen-reader mirror of the visible rows + selection announcements.
+  // The canvas itself has no DOM semantics, so a hidden listbox mirrors the
+  // virtual scroll window and a live region announces selection changes.
+  @state() private mirrorNodes: LayoutNode[] = [];
+  @state() private srAnnouncement = '';
+  private lastMirrorKey = '';
 
   // Column resize state
   @state() private refsColumnWidth = 200;
@@ -505,8 +575,9 @@ export class LvGraphCanvas extends LitElement {
   private readonly BRANCH_VISIBILITY_KEY = 'leviathan-hidden-branches';
 
   @query('.canvas-container') private containerEl!: HTMLDivElement;
-  @query('canvas') private canvasEl!: HTMLCanvasElement;
+  @query('canvas[role="img"]') private canvasEl!: HTMLCanvasElement;
   @query('.scroll-container') private scrollEl!: HTMLDivElement;
+  @query('.minimap-canvas') private minimapEl?: HTMLCanvasElement;
 
   private commits: GraphCommit[] = [];
   private realCommits: Map<string, Commit> = new Map();
@@ -514,6 +585,8 @@ export class LvGraphCanvas extends LitElement {
   private refsByCommit: RefsByCommit = {};
   private loadVersion = 0; // Incremented on each load to cancel stale requests
   private statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Periodic repaint so relative timestamps ("2m", "5h") don't go stale
+  private relativeTimeTimer: ReturnType<typeof setInterval> | null = null;
   private lastLoadedRepoPath: string | null = null; // Track the last repo that completed loading
   private inFlightLoadPath: string | null = null; // Repo whose loadCommits is currently in flight
   // A refresh arrived while a load was in flight; that load's snapshot may
@@ -528,22 +601,208 @@ export class LvGraphCanvas extends LitElement {
   private scrollState: ScrollStateManager | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private themeObserver: MutationObserver | null = null;
+  private settingsUnsubscribe: (() => void) | null = null;
   private mediaQuery: MediaQueryList | null = null;
   private animationFrame = 0;
   private lastRenderData: RenderData | null = null;
   private sortedNodesByRow: LayoutNode[] = [];
 
-  // Config - compact size
-  private readonly ROW_HEIGHT = 22;
-  private readonly LANE_WIDTH = 16;
+  // Stats/signatures accumulated per commit OID. Fetched lazily for the
+  // visible row range only (a commit's stats never change for a given OID,
+  // so entries stay valid across reloads of the same repo).
+  private commitStatsMap: Map<string, { additions: number; deletions: number; filesChanged: number }> = new Map();
+  private commitSignaturesMap: Map<string, { signed: boolean; valid: boolean }> = new Map();
+  private statsFetchedOids: Set<string> = new Set();
+  private signaturesFetchedOids: Set<string> = new Set();
+
+  // Config - base metrics at zoom 1.0 (compact size)
+  private static readonly BASE_ROW_HEIGHT = 22;
+  private static readonly BASE_LANE_WIDTH = 16;
+  private static readonly BASE_NODE_RADIUS = 6;
+  private static readonly MIN_ZOOM = 0.6;
+  private static readonly MAX_ZOOM = 2;
+  private readonly ZOOM_STORAGE_KEY = 'leviathan-graph-zoom';
+  /** Density factor applied to row height / lane width / node radius */
+  private zoomLevel = 1;
+  // Wheel-zoom ticks accumulate here and apply once per animation frame
+  private pendingZoomTarget: number | null = null;
+  private zoomFrame = 0;
   private readonly PADDING = 20;
-  private readonly NODE_RADIUS = 6;
   private readonly HEADER_HEIGHT = 28; // Must match canvas-renderer.ts
+  // Rows beyond the viewport whose stats/signatures are prefetched
+  private readonly DATA_FETCH_OVERSCAN_ROWS = 100;
+
+  private get ROW_HEIGHT(): number {
+    return Math.round(LvGraphCanvas.BASE_ROW_HEIGHT * this.zoomLevel);
+  }
+  private get LANE_WIDTH(): number {
+    return Math.round(LvGraphCanvas.BASE_LANE_WIDTH * this.zoomLevel);
+  }
+  private get NODE_RADIUS(): number {
+    return Math.max(3, Math.round(LvGraphCanvas.BASE_NODE_RADIUS * this.zoomLevel));
+  }
 
   connectedCallback(): void {
     super.connectedCallback();
     this.loadColumnWidths();
     this.loadHiddenBranches();
+    this.loadZoomLevel();
+    this.loadOptionalColumns();
+    this.loadMinimapPreference();
+  }
+
+  private loadMinimapPreference(): void {
+    try {
+      const saved = localStorage.getItem(this.MINIMAP_KEY);
+      if (saved !== null) {
+        this.showMinimap = saved === 'true';
+      }
+    } catch {
+      // Ignore storage errors, keep default
+    }
+  }
+
+  /** Toggle the minimap overview strip */
+  public async toggleMinimap(): Promise<void> {
+    this.showMinimap = !this.showMinimap;
+    try {
+      localStorage.setItem(this.MINIMAP_KEY, String(this.showMinimap));
+    } catch {
+      // Ignore storage errors
+    }
+    await this.updateComplete;
+    if (this.showMinimap) {
+      this.resizeMinimap();
+      this.rebuildMinimapDots();
+      this.renderMinimap();
+    }
+  }
+
+  private loadOptionalColumns(): void {
+    try {
+      const saved = localStorage.getItem(this.OPTIONAL_COLUMNS_KEY);
+      if (saved) {
+        const { author, date } = JSON.parse(saved);
+        this.showAuthorColumn = author === true;
+        this.showDateColumn = date === true;
+      }
+    } catch {
+      // Ignore parse errors, keep defaults
+    }
+  }
+
+  private saveOptionalColumns(): void {
+    try {
+      localStorage.setItem(
+        this.OPTIONAL_COLUMNS_KEY,
+        JSON.stringify({ author: this.showAuthorColumn, date: this.showDateColumn })
+      );
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  /** Toggle the optional author/date columns */
+  public toggleOptionalColumn(column: 'author' | 'date'): void {
+    if (column === 'author') {
+      this.showAuthorColumn = !this.showAuthorColumn;
+    } else {
+      this.showDateColumn = !this.showDateColumn;
+    }
+    this.saveOptionalColumns();
+    this.renderer?.setConfig({
+      showAuthorColumn: this.showAuthorColumn,
+      showDateColumn: this.showDateColumn,
+    });
+    this.renderer?.markDirty();
+    this.scheduleRender();
+  }
+
+  private loadZoomLevel(): void {
+    try {
+      const saved = localStorage.getItem(this.ZOOM_STORAGE_KEY);
+      if (saved) {
+        const zoom = parseFloat(saved);
+        if (Number.isFinite(zoom)) {
+          this.zoomLevel = Math.min(
+            LvGraphCanvas.MAX_ZOOM,
+            Math.max(LvGraphCanvas.MIN_ZOOM, zoom)
+          );
+        }
+      }
+    } catch {
+      // Ignore storage errors, keep default zoom
+    }
+  }
+
+  private saveZoomLevel(): void {
+    try {
+      localStorage.setItem(this.ZOOM_STORAGE_KEY, String(this.zoomLevel));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  /** Current zoom/density factor */
+  public getZoom(): number {
+    return this.zoomLevel;
+  }
+
+  /**
+   * Set the zoom/density factor (clamped). Scales row height, lane width
+   * and node radius, keeps the viewport anchored, and persists the value.
+   */
+  public setZoom(zoom: number): void {
+    const clamped = Math.min(
+      LvGraphCanvas.MAX_ZOOM,
+      Math.max(LvGraphCanvas.MIN_ZOOM, zoom)
+    );
+    if (Math.abs(clamped - this.zoomLevel) < 0.001) return;
+
+    const previousScroll = this.scrollState?.getScroll();
+    const previousRowHeight = this.ROW_HEIGHT;
+    const previousLaneWidth = this.LANE_WIDTH;
+
+    this.zoomLevel = clamped;
+    this.saveZoomLevel();
+
+    // Reconfigure every subsystem that bakes the metrics in
+    this.virtualScroll?.setConfig({
+      rowHeight: this.ROW_HEIGHT,
+      laneWidth: this.LANE_WIDTH,
+    });
+    this.renderer?.setConfig({
+      rowHeight: this.ROW_HEIGHT,
+      laneWidth: this.LANE_WIDTH,
+      nodeRadius: this.NODE_RADIUS,
+      minNodeRadius: Math.max(3, Math.round(5 * this.zoomLevel)),
+      maxNodeRadius: Math.max(4, Math.round(10 * this.zoomLevel)),
+    });
+    this.buildSpatialIndex();
+    this.updateScrollContentSize();
+
+    // Keep the viewport anchored on the same rows AND lanes across the
+    // zoom change (both axes scale with the zoom factor)
+    if (previousScroll && this.scrollState && this.virtualScroll) {
+      const ratioY = this.ROW_HEIGHT / previousRowHeight;
+      const ratioX = this.LANE_WIDTH / previousLaneWidth;
+      const size = this.virtualScroll.getContentSize();
+      const viewport = this.getViewport();
+      const maxScrollY = Math.max(0, size.height - viewport.height);
+      const maxScrollX = Math.max(0, size.width - viewport.width);
+      this.scrollState.setScroll(
+        Math.min(previousScroll.scrollTop * ratioY, maxScrollY),
+        Math.min(previousScroll.scrollLeft * ratioX, maxScrollX)
+      );
+      this.syncScrollbarPosition();
+    }
+
+    this.renderer?.markDirty();
+    this.scheduleRender();
+    // zoomLevel is not a reactive property, but the DOM resize handles are
+    // positioned from renderer config inside render() — re-render so their
+    // hit targets track the new column boundaries
+    this.requestUpdate();
   }
 
   async firstUpdated(): Promise<void> {
@@ -564,15 +823,58 @@ export class LvGraphCanvas extends LitElement {
       // Clear existing state when switching repositories
       this.layout = null;
       this.selectedNode = null;
+      this.selectedNodes.clear();
+      this.lastClickedNode = null;
       this.hoveredNode = null;
       this.realCommits.clear();
       this.refsByCommit = {};
+      // A catch-up load in flight for the previous repo must not block the
+      // new repo's pagination (its own version guard discards its results)
+      this.isLoadingMore = false;
+
+      // Stats/signatures are keyed by commit OID, which is repo-specific —
+      // drop the previous repo's data so memory stays bounded
+      this.commitStatsMap.clear();
+      this.commitSignaturesMap.clear();
+      this.statsFetchedOids.clear();
+      this.signaturesFetchedOids.clear();
+      this.renderer?.setCommitStats(this.commitStatsMap);
+      this.renderer?.setCommitSignatures(this.commitSignaturesMap);
+
+      // The previous repo's search matches must not dim the new repo's
+      // cached graph (a stale non-empty set dims EVERY node because none of
+      // the new repo's OIDs are in it). loadCommits clears this too, but
+      // only after its IPC round-trip — the cached render is synchronous.
+      this.matchedCommitOids.clear();
+      this.renderer?.setHighlightedCommits(this.matchedCommitOids);
+
+      // Keyboard navigation and the SR mirror must not act on the previous
+      // repo's rows during the load gap (an arrow key would select a node
+      // whose commit no longer exists in realCommits)
+      this.sortedNodesByRow = [];
+      this.mirrorNodes = [];
+      this.lastMirrorKey = '';
+
+      // PRs are keyed by OID; on a fork/upstream switch the shared OIDs
+      // would show (clickable!) badges for the WRONG repository's pull
+      // requests on the cached render until the background GitHub fetch
+      // resolves
+      this.pullRequestsByCommit = {};
+      this.githubRepo = null;
+      this.virtualScroll?.setPullRequests(this.pullRequestsByCommit);
+
+      // Toolbar dropdowns belong to the previous repo's context — don't
+      // leave them floating open over the new repo's graph
+      this.showBranchPanel = false;
+      this.showExportMenu = false;
+      this.showColumnsMenu = false;
 
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
 
       // A reload queued for the PREVIOUS repo must not leak into this one
       this.reloadQueued = false;
+      this.commitTotal = null;
       // Clear any stats spinner owned by the previous repo — the new repo's
       // fetch (if any) will set it again; a repo with no stats to fetch must
       // not inherit the old spinner
@@ -634,13 +936,27 @@ export class LvGraphCanvas extends LitElement {
         showFps: false, // We show our own FPS
         refsColumnWidth: this.refsColumnWidth,
         statsColumnWidth: this.statsColumnWidth,
+        showAuthorColumn: this.showAuthorColumn,
+        showDateColumn: this.showDateColumn,
+        // The "Show Avatars" app setting controls whether author avatars
+        // are fetched from Gravatar (off = colored initials only)
+        fetchAvatars: settingsStore.getState().showAvatars,
       },
       getThemeFromCSS()
     );
 
+    // Keep avatar fetching in sync with the settings toggle
+    this.settingsUnsubscribe = settingsStore.subscribe((state) => {
+      this.renderer?.setConfig({ fetchAvatars: state.showAvatars });
+      this.renderer?.markDirty();
+      this.scheduleRender();
+    });
+
     // Listen for theme changes via data-theme attribute
     this.themeObserver = new MutationObserver(() => {
       this.renderer?.setTheme(getThemeFromCSS());
+      this.rebuildMinimapDots();
+      this.scheduleRender();
     });
     this.themeObserver.observe(document.documentElement, {
       attributes: true,
@@ -661,6 +977,13 @@ export class LvGraphCanvas extends LitElement {
       this.onResize();
     });
     this.resizeObserver.observe(this.containerEl);
+
+    // The TIME column renders relative timestamps against "now" — repaint
+    // periodically so they don't freeze at their initial values
+    this.relativeTimeTimer = setInterval(() => {
+      this.renderer?.markDirty();
+      this.scheduleRender();
+    }, 30_000);
 
     // Initial resize
     this.onResize();
@@ -702,16 +1025,28 @@ export class LvGraphCanvas extends LitElement {
     if (this.animationFrame) {
       cancelAnimationFrame(this.animationFrame);
     }
+    if (this.zoomFrame) {
+      cancelAnimationFrame(this.zoomFrame);
+      this.zoomFrame = 0;
+    }
     if (this.statsDebounceTimer) {
       clearTimeout(this.statsDebounceTimer);
+    }
+    if (this.relativeTimeTimer) {
+      clearInterval(this.relativeTimeTimer);
+      this.relativeTimeTimer = null;
     }
     // Clean up resize listeners if still attached
     document.removeEventListener('mousemove', this.handleResizeMove);
     document.removeEventListener('mouseup', this.handleResizeEnd);
+    document.removeEventListener('mousemove', this.handleMinimapPointerMove);
+    document.removeEventListener('mouseup', this.handleMinimapPointerUp);
     this.renderer?.destroy();
     this.scrollState?.destroy();
     this.resizeObserver?.disconnect();
     this.themeObserver?.disconnect();
+    this.settingsUnsubscribe?.();
+    this.settingsUnsubscribe = null;
     this.mediaQuery?.removeEventListener('change', this.handleThemeChange);
   }
 
@@ -761,6 +1096,9 @@ export class LvGraphCanvas extends LitElement {
     const currentVersion = this.loadVersion;
     const repoPath = this.repositoryPath;
     this.inFlightLoadPath = repoPath;
+    // This full reload supersedes any in-flight load-more; its (now stale)
+    // finally block deliberately won't touch the flag, so reset it here
+    this.isLoadingMore = false;
 
     // A background revalidation keeps showing the (cached) graph instead of
     // flashing the loading state — and its failure must not paint an error
@@ -897,6 +1235,22 @@ export class LvGraphCanvas extends LitElement {
       this.commits = commitsResult.data.map(commitToGraphCommit);
       this.totalLoadedCommits = commitsResult.data.length;
       this.hasMoreCommits = commitsResult.data.length >= this.commitCount;
+
+      // Fetch the true total in the background (cheap: served from the
+      // backend walk cache) so pagination and the a11y label are exact
+      getCommitTotal(repoPath).then((totalResult) => {
+        if (this.loadVersion !== currentVersion) return;
+        if (totalResult.success && typeof totalResult.data === 'number') {
+          this.commitTotal = totalResult.data;
+          this.hasMoreCommits = this.totalLoadedCommits < totalResult.data;
+          // Grow the scrollbar to span the full history, and re-spread the
+          // minimap dots over the new total so they aren't stretched over
+          // the whole strip
+          this.updateVirtualTotalRows();
+          this.rebuildMinimapDots();
+          this.renderMinimap();
+        }
+      });
       // Cache this page so switching back to the tab renders instantly
       cacheGraphPage(repoPath, {
         commits: commitsResult.data,
@@ -939,11 +1293,23 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
+  /** True when the viewport extends past the bottom of the loaded rows */
+  private isViewportBeyondLoaded(): boolean {
+    const scrollTop = this.scrollState?.getScroll().scrollTop ?? 0;
+    const viewportHeight = this.containerEl?.clientHeight ?? 0;
+    const loadedBottom = this.PADDING + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
+    return scrollTop + viewportHeight > loadedBottom;
+  }
+
   private async loadMoreCommits(): Promise<void> {
     if (this.isLoadingMore || !this.hasMoreCommits || !this.repositoryPath) return;
     this.isLoadingMore = true;
-    const batchSize = 500;
+    // Larger batches while catching up to a distant scrollbar/minimap
+    // position: each batch pays a layout/index rebuild over ALL loaded
+    // commits, so fewer, bigger batches keep deep drags responsive
+    const batchSize = this.isViewportBeyondLoaded() ? 2000 : 500;
     const currentVersion = this.loadVersion;
+    let failed = false;
 
     try {
       const result = await getCommitHistory({
@@ -954,7 +1320,15 @@ export class LvGraphCanvas extends LitElement {
       });
 
       if (this.loadVersion !== currentVersion) return;
-      if (!result.success || !result.data?.length) {
+      if (!result.success) {
+        // Transient failure: keep hasMoreCommits so a later scroll retries,
+        // but stop the catch-up chain to avoid a hot retry loop
+        failed = true;
+        log.warn('loadMoreCommits: fetch failed:', result.error?.message);
+        return;
+      }
+      if (!result.data?.length) {
+        // Genuinely no more commits
         this.hasMoreCommits = false;
         return;
       }
@@ -962,21 +1336,53 @@ export class LvGraphCanvas extends LitElement {
       for (const commit of result.data) {
         this.realCommits.set(commit.oid, commit);
       }
-      this.commits = [...this.commits, ...result.data.map(commitToGraphCommit)];
+      const newGraphCommits = result.data.map(commitToGraphCommit);
+      this.commits = [...this.commits, ...newGraphCommits];
       this.totalLoadedCommits += result.data.length;
-      this.hasMoreCommits = result.data.length >= batchSize;
-      this.processLayout();
+      this.hasMoreCommits = this.commitTotal !== null
+        ? this.totalLoadedCommits < this.commitTotal
+        : result.data.length >= batchSize;
+
+      // Incremental append keeps rows/lanes/colors of already-visible
+      // commits stable. A branch filter or active search changes which
+      // commits are laid out, so those paths take the full recompute.
+      if (this.layout?.appendState && this.hiddenBranches.size === 0 && !this.hasActiveSearch()) {
+        this.layout = appendLanes(this.layout, newGraphCommits);
+        this.applyLayout();
+      } else {
+        this.processLayout();
+      }
     } finally {
-      this.isLoadingMore = false;
+      // Only the load that still owns the current version clears the flag.
+      // A superseded fetch (repo switch or full reload happened mid-flight)
+      // must not clear a NEWER load's in-progress state — that would let a
+      // second overlapping load-more start and double-count
+      // totalLoadedCommits. willUpdate/loadCommits reset the flag when they
+      // take ownership.
+      if (this.loadVersion === currentVersion) {
+        this.isLoadingMore = false;
+      }
+    }
+
+    // The scrollbar spans the FULL history, so the user may have scrolled
+    // far past the loaded rows — keep loading pages until the viewport is
+    // caught up (each call loads one batch, then re-checks). Only when
+    // unfiltered: with a branch filter or search active the scrollbar does
+    // NOT span the full history, and chaining here would silently pull the
+    // whole repository just because the filtered graph is short.
+    if (!failed && this.hiddenBranches.size === 0 && !this.hasActiveSearch()) {
+      this.checkLoadMore();
     }
   }
 
   private checkLoadMore(): void {
     if (!this.virtualScroll || !this.hasMoreCommits || this.isLoadingMore) return;
-    const contentSize = this.virtualScroll.getContentSize();
     const scrollTop = this.scrollState?.getScroll().scrollTop ?? 0;
     const viewportHeight = this.containerEl?.clientHeight ?? 0;
-    if (contentSize.height - (scrollTop + viewportHeight) < 500) {
+    // Distance from the bottom of the viewport to the end of the LOADED
+    // rows (the content height itself now spans the full history)
+    const loadedBottom = this.PADDING + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
+    if (loadedBottom - (scrollTop + viewportHeight) < 500) {
       this.loadMoreCommits();
     }
   }
@@ -986,7 +1392,12 @@ export class LvGraphCanvas extends LitElement {
    * Maps PRs to their head commit SHA for display
    */
   private async loadPullRequests(): Promise<void> {
-    if (!this.githubRepo) {
+    // Capture the repo identity at the start: a repo switch while the
+    // fetches are in flight must not attach this repo's PRs to the new
+    // repo's commits (the branch-name fallback below would happily match
+    // a same-named branch like "main" in an unrelated repository)
+    const requestedRepo = this.githubRepo;
+    if (!requestedRepo) {
       return;
     }
 
@@ -999,9 +1410,14 @@ export class LvGraphCanvas extends LitElement {
 
       // Fetch open PRs (and recently closed for context)
       const [openPrs, closedPrs] = await Promise.all([
-        listPullRequests(this.githubRepo.owner, this.githubRepo.repo, 'open', 50),
-        listPullRequests(this.githubRepo.owner, this.githubRepo.repo, 'closed', 20),
+        listPullRequests(requestedRepo.owner, requestedRepo.repo, 'open', 50),
+        listPullRequests(requestedRepo.owner, requestedRepo.repo, 'closed', 20),
       ]);
+
+      // Abort if the repository changed while the fetches were in flight
+      if (this.githubRepo !== requestedRepo) {
+        return;
+      }
 
       const prsByCommit: Record<string, GraphPullRequest[]> = {};
 
@@ -1074,10 +1490,81 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
+  /**
+   * Commits to lay out after applying the branch-visibility filter.
+   *
+   * A commit stays visible when it is reachable (via parent links within the
+   * loaded window) from any visible branch tip, from HEAD, or from a tag.
+   * With no hidden branches this is all loaded commits.
+   */
+  private getVisibleCommits(): GraphCommit[] {
+    if (this.hiddenBranches.size === 0) {
+      return this.commits;
+    }
+
+    // Walk starts from HEAD, tags, and branches that are not hidden
+    const tips: string[] = [];
+    let hasBranchRefs = false;
+    for (const [oid, refs] of Object.entries(this.refsByCommit)) {
+      for (const ref of refs) {
+        const isBranch = ref.refType === 'localBranch' || ref.refType === 'remoteBranch';
+        if (isBranch) {
+          hasBranchRefs = true;
+        }
+        const isVisibleBranch = isBranch && !this.hiddenBranches.has(ref.shorthand);
+        if (isVisibleBranch || ref.isHead || ref.refType === 'tag') {
+          tips.push(oid);
+          break;
+        }
+      }
+    }
+    // Without any branch refs there is nothing meaningful to filter against
+    if (!hasBranchRefs) {
+      return this.commits;
+    }
+
+    const commitByOid = new Map(this.commits.map((c) => [c.oid, c]));
+    const visible = new Set<string>();
+    const stack = [...tips];
+    while (stack.length > 0) {
+      const oid = stack.pop()!;
+      if (visible.has(oid)) continue;
+      const commit = commitByOid.get(oid);
+      if (!commit) continue;
+      visible.add(oid);
+      for (const pid of commit.parentIds) {
+        stack.push(pid);
+      }
+    }
+    return this.commits.filter((c) => visible.has(c.oid));
+  }
+
+  /**
+   * OID of the commit HEAD points at, from the loaded refs.
+   * The layout pins its first-parent chain to lane 0. Public so callers of
+   * jumpToHead() can give accurate feedback on a miss.
+   */
+  public getHeadOid(): string | undefined {
+    for (const [oid, refs] of Object.entries(this.refsByCommit)) {
+      if (refs.some((ref) => ref.isHead)) {
+        return oid;
+      }
+    }
+    return undefined;
+  }
+
   private processLayout(): void {
-    // Compute layout (use simple algorithm for cleaner one-commit-per-row layout)
-    const result = computeGraphLayout(this.commits, { optimized: false });
+    const result = computeGraphLayout(this.getVisibleCommits(), { headOid: this.getHeadOid() });
     this.layout = result.layout;
+    this.applyLayout();
+  }
+
+  /**
+   * Push the current layout into the render/scroll/hit-test subsystems.
+   * Shared by full recomputes (processLayout) and incremental appends.
+   */
+  private applyLayout(): void {
+    if (!this.layout) return;
 
     // Build sorted nodes array for keyboard navigation
     this.sortedNodesByRow = [...this.layout.nodes.values()].sort((a, b) => a.row - b.row);
@@ -1094,11 +1581,15 @@ export class LvGraphCanvas extends LitElement {
     this.virtualScroll?.setAuthorEmails(authorEmails);
     this.virtualScroll?.setPullRequests(this.pullRequestsByCommit);
 
-    // Update scroll content size
-    this.updateScrollContentSize();
+    // Update scroll content size (spans the full history when unfiltered)
+    this.updateVirtualTotalRows();
 
-    // Rebuild spatial index
-    this.rebuildSpatialIndex();
+    // Build spatial index (once per layout — scroll-independent)
+    this.buildSpatialIndex();
+
+    // Refresh the minimap dots for the new layout
+    this.resizeMinimap();
+    this.rebuildMinimapDots();
 
     // Set highlighted commits for search results
     this.renderer?.setHighlightedCommits(this.matchedCommitOids);
@@ -1107,144 +1598,314 @@ export class LvGraphCanvas extends LitElement {
     this.renderer?.markDirty();
     this.scheduleRender();
 
-    // Fetch real commit stats and signatures asynchronously (don't block initial render)
-    // Use debouncing for stats to handle rapid repo changes during startup
-    this.scheduleStatsFetch();
-    this.fetchCommitSignatures();
+    // Fetch stats and signatures for the visible rows asynchronously
+    // (don't block initial render). Debounced to let rapid changes settle.
+    this.scheduleVisibleDataFetch();
   }
 
   /**
-   * Schedule stats fetch with debouncing to avoid race conditions during rapid repo changes
+   * Schedule a stats/signatures fetch for the visible rows, debounced so
+   * rapid repo switches and fast scrolling settle before hitting the backend
    */
-  private scheduleStatsFetch(): void {
+  private scheduleVisibleDataFetch(): void {
     const repoPath = this.repositoryPath;
-    log.debug(`scheduleStatsFetch: scheduling for ${repoPath}, version=${this.loadVersion}`);
 
-    // Cancel any pending stats fetch
     if (this.statsDebounceTimer) {
       clearTimeout(this.statsDebounceTimer);
-      log.debug(`scheduleStatsFetch: cancelled previous pending fetch`);
     }
 
-    // Wait a short time before fetching to let rapid changes settle
-    // Use 300ms to handle startup where multiple repos are loaded quickly
     this.statsDebounceTimer = setTimeout(() => {
       this.statsDebounceTimer = null;
       // Check if repo is still the same before fetching
       if (this.repositoryPath === repoPath) {
-        log.debug(`scheduleStatsFetch: timer fired, fetching for ${repoPath}`);
-        this.fetchCommitStats();
-      } else {
-        log.debug(`scheduleStatsFetch: timer fired but repo changed from ${repoPath} to ${this.repositoryPath}, skipping`);
+        this.queueDataFetch(() => this.fetchVisibleCommitData());
       }
     }, 300);
   }
 
-  private async fetchCommitStats(): Promise<void> {
-    if (!this.repositoryPath || this.realCommits.size === 0) return;
+  // All stats/signature fetches run through this queue. The fetched-OID
+  // marker sets are claimed synchronously at fetch START (to dedupe), so a
+  // consumer that needs the DATA (e.g. export) must not race a fetch that
+  // has claimed OIDs but hasn't resolved — serializing the jobs makes
+  // "claimed by a completed job" equivalent to "data present or unclaimed
+  // again after failure".
+  private dataFetchQueue: Promise<void> = Promise.resolve();
 
-    // Capture state at start to avoid race conditions when repository changes
-    const repoPath = this.repositoryPath;
-    const commitOids = [...this.realCommits.keys()];
-    const version = this.loadVersion;
-    const startTime = Date.now();
-    const MIN_LOADING_DISPLAY_MS = 400; // Minimum time to show loading indicator
+  private queueDataFetch(job: () => Promise<void>): Promise<void> {
+    const run = this.dataFetchQueue.then(job, job);
+    // Keep the chain alive even if a job rejects
+    this.dataFetchQueue = run.catch(() => undefined);
+    return run;
+  }
 
-    log.debug(`fetchCommitStats: starting for ${commitOids.length} commits, version=${version}`);
-    this.isLoadingStats = true;
+  /**
+   * Fetch stats and signatures for the given OIDs in batches, accumulating
+   * into the per-repo maps. Aborts silently on a repo switch; failed
+   * batches are unmarked so a later fetch retries them.
+   */
+  private async fetchCommitDataBatches(
+    repoPath: string,
+    statsOids: string[],
+    signatureOids: string[]
+  ): Promise<void> {
+    // Mark as requested up-front so overlapping fetches don't duplicate
+    for (const oid of statsOids) this.statsFetchedOids.add(oid);
+    for (const oid of signatureOids) this.signaturesFetchedOids.add(oid);
 
-    try {
-      // Fetch in batches to avoid overwhelming the backend
-      const batchSize = 100;
-      const allStats = new Map<string, { additions: number; deletions: number; filesChanged: number }>();
+    const statsBatchSize = 100;
+    for (let i = 0; i < statsOids.length; i += statsBatchSize) {
+      // Abort if we switched to a different repository
+      if (this.repositoryPath !== repoPath) return;
 
-      for (let i = 0; i < commitOids.length; i += batchSize) {
-        // Abort if we switched to a different repository (not just version change)
-        if (this.repositoryPath !== repoPath) {
-          log.debug(`fetchCommitStats: aborting at batch ${i / batchSize}, repo changed from ${repoPath} to ${this.repositoryPath}`);
-          return;
+      const batch = statsOids.slice(i, i + statsBatchSize);
+      const result = await getCommitsStats(repoPath, batch);
+      if (result.success && result.data) {
+        for (const stat of result.data) {
+          this.commitStatsMap.set(stat.oid, {
+            additions: stat.additions,
+            deletions: stat.deletions,
+            filesChanged: stat.filesChanged,
+          });
         }
+      } else {
+        log.warn(`fetchCommitDataBatches: stats batch failed: ${result.error}`);
+        // Allow a retry on the next fetch for this range
+        for (const oid of batch) this.statsFetchedOids.delete(oid);
+      }
+    }
 
-        const batch = commitOids.slice(i, i + batchSize);
-        const result = await getCommitsStats(repoPath, batch);
+    const signatureBatchSize = 50;
+    for (let i = 0; i < signatureOids.length; i += signatureBatchSize) {
+      if (this.repositoryPath !== repoPath) return;
 
-        if (result.success && result.data) {
-          log.debug(`fetchCommitStats: batch ${i / batchSize} returned ${result.data.length}/${batch.length} stats`);
-          for (const stat of result.data) {
-            allStats.set(stat.oid, {
-              additions: stat.additions,
-              deletions: stat.deletions,
-              filesChanged: stat.filesChanged,
-            });
-          }
-        } else {
-          log.warn(`fetchCommitStats: batch ${i / batchSize} failed: ${result.error}`);
+      const batch = signatureOids.slice(i, i + signatureBatchSize);
+      const result = await getCommitsSignatures(repoPath, batch);
+      if (result.success && result.data) {
+        for (const [oid, sig] of result.data) {
+          this.commitSignaturesMap.set(oid, { signed: sig.signed, valid: sig.valid });
         }
-      }
-
-      // Only update if we're still on the same repository (use path check, not version)
-      // This allows stats to be applied even if a refresh happened during fetching
-      if (this.repositoryPath === repoPath && allStats.size > 0) {
-        log.debug(`fetchCommitStats: complete, got stats for ${allStats.size}/${commitOids.length} commits`);
-        this.renderer?.setCommitStats(allStats);
-        this.renderer?.markDirty();
-        this.scheduleRender();
-      } else if (this.repositoryPath !== repoPath) {
-        log.debug(`fetchCommitStats: discarding stats for ${repoPath}, now on ${this.repositoryPath}`);
-      }
-    } finally {
-      // Enforce the minimum-visible delay only while still on the same repo.
-      if (this.repositoryPath === repoPath) {
-        const elapsed = Date.now() - startTime;
-        if (elapsed < MIN_LOADING_DISPLAY_MS) {
-          await new Promise(resolve => setTimeout(resolve, MIN_LOADING_DISPLAY_MS - elapsed));
-        }
-      }
-      // Clear the stats spinner only for the CURRENT load. A superseded
-      // fetch (the user switched repos while it ran) must not clear a newer
-      // repo's spinner; the repo switch itself resets the flag (willUpdate)
-      // and the new repo's own fetch manages it from there — so switching
-      // away mid-fetch never leaves the spinner stuck on.
-      if (this.loadVersion === version) {
-        this.isLoadingStats = false;
+      } else {
+        for (const oid of batch) this.signaturesFetchedOids.delete(oid);
       }
     }
   }
 
-  private async fetchCommitSignatures(): Promise<void> {
-    if (!this.repositoryPath || this.realCommits.size === 0) return;
+  /**
+   * OIDs of the commits in the visible row range plus overscan
+   */
+  private getVisibleDataOids(): string[] {
+    if (!this.virtualScroll || this.sortedNodesByRow.length === 0) return [];
+    const range = this.virtualScroll.getVisibleRange(this.getViewport());
+    const start = Math.max(0, range.startRow - this.DATA_FETCH_OVERSCAN_ROWS);
+    const end = Math.min(
+      this.sortedNodesByRow.length,
+      range.endRow + this.DATA_FETCH_OVERSCAN_ROWS + 1
+    );
+    return this.sortedNodesByRow.slice(start, end).map((n) => n.oid);
+  }
 
-    // Capture state at start to avoid race conditions when repository changes
+  /**
+   * Fetch commit stats and signatures for the VISIBLE rows only (plus
+   * overscan), instead of every loaded commit. Results accumulate per OID —
+   * a commit's stats never change for a given OID — so scrolling back over
+   * fetched rows costs nothing.
+   */
+  private async fetchVisibleCommitData(): Promise<void> {
+    if (!this.repositoryPath) return;
     const repoPath = this.repositoryPath;
-    const commitOids = [...this.realCommits.keys()];
-    const version = this.loadVersion;
+    const visibleOids = this.getVisibleDataOids();
 
-    // Fetch in batches to avoid overwhelming the backend
-    const batchSize = 50;
-    const allSignatures = new Map<string, { signed: boolean; valid: boolean }>();
+    const statsOids = visibleOids.filter((oid) => !this.statsFetchedOids.has(oid));
+    const signatureOids = visibleOids.filter((oid) => !this.signaturesFetchedOids.has(oid));
+    if (statsOids.length === 0 && signatureOids.length === 0) return;
 
-    for (let i = 0; i < commitOids.length; i += batchSize) {
-      // Abort if a newer load has started
-      if (this.loadVersion !== version) {
-        return;
+    // Only the very first fetch for a repo shows the spinner — subsequent
+    // scroll-driven fetches are incremental and shouldn't flash UI
+    const isInitialFetch = this.commitStatsMap.size === 0 && statsOids.length > 0;
+    const startTime = Date.now();
+    const MIN_LOADING_DISPLAY_MS = 400;
+    if (isInitialFetch) {
+      this.isLoadingStats = true;
+    }
+
+    try {
+      await this.fetchCommitDataBatches(repoPath, statsOids, signatureOids);
+
+      if (this.repositoryPath === repoPath) {
+        this.renderer?.setCommitStats(this.commitStatsMap);
+        this.renderer?.setCommitSignatures(this.commitSignaturesMap);
+        this.renderer?.markDirty();
+        this.scheduleRender();
       }
-
-      const batch = commitOids.slice(i, i + batchSize);
-      const result = await getCommitsSignatures(repoPath, batch);
-
-      if (result.success && result.data) {
-        for (const [oid, sig] of result.data) {
-          allSignatures.set(oid, { signed: sig.signed, valid: sig.valid });
+    } finally {
+      if (isInitialFetch) {
+        // Enforce the minimum-visible delay only while still on the same repo
+        if (this.repositoryPath === repoPath) {
+          const elapsed = Date.now() - startTime;
+          if (elapsed < MIN_LOADING_DISPLAY_MS) {
+            await new Promise(resolve => setTimeout(resolve, MIN_LOADING_DISPLAY_MS - elapsed));
+          }
+          // Re-check AFTER the delay: a repo switch during it means the
+          // spinner now belongs to the NEW repo's fetch and must stay on
+          if (this.repositoryPath === repoPath) {
+            this.isLoadingStats = false;
+          }
         }
+        // A repo switch mid-fetch resets the flag in willUpdate, so the
+        // spinner never sticks for the new repo
       }
     }
+  }
 
-    // Only update if no newer load has started
-    if (this.loadVersion === version && allSignatures.size > 0) {
-      this.renderer?.setCommitSignatures(allSignatures);
-      this.renderer?.markDirty();
-      this.scheduleRender();
+  /**
+   * Make the scrollable area span the TRUE history length (not just the
+   * loaded rows) so the scrollbar is honest about repo size. Only when the
+   * graph is unfiltered — a branch filter or search changes which commits
+   * are shown, so the backend total no longer matches the row count.
+   */
+  private updateVirtualTotalRows(): void {
+    const unfiltered = this.hiddenBranches.size === 0 && !this.hasActiveSearch();
+    this.virtualScroll?.setVirtualTotalRows(
+      unfiltered && this.hasMoreCommits ? this.commitTotal : null
+    );
+    this.updateScrollContentSize();
+  }
+
+  // ── Minimap ──────────────────────────────────────────────────────────
+
+  /** Rows the minimap spans (matches the scrollable area, incl. unloaded) */
+  private getMinimapTotalRows(): number {
+    const loaded = this.layout?.totalRows ?? 0;
+    const unfiltered = this.hiddenBranches.size === 0 && !this.hasActiveSearch();
+    const virtual = unfiltered && this.hasMoreCommits ? this.commitTotal ?? 0 : 0;
+    return Math.max(1, loaded, virtual);
+  }
+
+  /** CSS-pixel size of the minimap (backing store is DPR-scaled) */
+  private getMinimapCssSize(): { width: number; height: number } {
+    const height = this.containerEl
+      ? Math.max(0, this.containerEl.clientHeight - this.HEADER_HEIGHT)
+      : 0;
+    return { width: this.MINIMAP_WIDTH, height };
+  }
+
+  private resizeMinimap(): void {
+    if (!this.minimapEl || !this.containerEl) return;
+    // DPR-scaled backing store so the minimap is crisp on HiDPI displays
+    // (drawing code works in CSS pixels via a scaled transform)
+    const dpr = window.devicePixelRatio || 1;
+    const { width, height } = this.getMinimapCssSize();
+    this.minimapEl.width = Math.round(width * dpr);
+    this.minimapEl.height = Math.round(height * dpr);
+  }
+
+  /**
+   * Rebuild the offscreen dots layer: one branch-colored dot per commit,
+   * positioned by row (vertically, over the FULL history span) and lane
+   * (horizontally, mirrored like the graph). Rebuilt on layout changes;
+   * per-frame rendering just composites it under the viewport indicator.
+   */
+  private rebuildMinimapDots(): void {
+    if (!this.showMinimap || !this.minimapEl || !this.layout) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const { width, height } = this.getMinimapCssSize();
+    if (width === 0 || height === 0) return;
+
+    const dots = document.createElement('canvas');
+    dots.width = Math.round(width * dpr);
+    dots.height = Math.round(height * dpr);
+    const ctx = dots.getContext('2d');
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+
+    const theme = getThemeFromCSS();
+    const totalRows = this.getMinimapTotalRows();
+    const laneCount = this.layout.maxLane + 1;
+    const usableWidth = width - 10;
+
+    for (const node of this.layout.nodes.values()) {
+      const y = ((node.row + 0.5) / totalRows) * height;
+      // Mirrored like the graph: lane 0 on the right
+      const x = width - 5 - ((node.lane + 0.5) / laneCount) * usableWidth;
+      ctx.fillStyle = theme.laneColors[node.colorIndex % theme.laneColors.length];
+      ctx.fillRect(x - 1, y - 1, 2, 2);
     }
+
+    this.minimapDots = dots;
+  }
+
+  /** Composite the dots layer with the viewport indicator */
+  private renderMinimap(): void {
+    if (!this.showMinimap || !this.minimapEl || !this.virtualScroll) return;
+    const ctx = this.minimapEl.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const { width, height } = this.getMinimapCssSize();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    if (this.minimapDots) {
+      ctx.drawImage(this.minimapDots, 0, 0, width, height);
+    }
+
+    // Viewport indicator
+    const contentHeight = this.virtualScroll.getContentSize().height;
+    if (contentHeight <= 0) return;
+    const viewport = this.getViewport();
+    const indicatorY = (viewport.scrollTop / contentHeight) * height;
+    const indicatorH = Math.max(8, (viewport.height / contentHeight) * height);
+
+    const theme = getThemeFromCSS();
+    ctx.fillStyle = theme.textColor;
+    ctx.globalAlpha = 0.12;
+    ctx.fillRect(0, indicatorY, width, indicatorH);
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = theme.textColor;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, indicatorY + 0.5, width - 1, indicatorH - 1);
+    ctx.globalAlpha = 1.0;
+  }
+
+  /** Map a minimap Y coordinate (CSS px) to a scrollTop (viewport centered) */
+  private minimapYToScrollTop(y: number): number {
+    if (!this.minimapEl || !this.virtualScroll) return 0;
+    const height = this.getMinimapCssSize().height;
+    if (height <= 0) return 0;
+    const contentHeight = this.virtualScroll.getContentSize().height;
+    const viewport = this.getViewport();
+    const target = (y / height) * contentHeight - viewport.height / 2;
+    const maxScroll = Math.max(0, contentHeight - viewport.height);
+    return Math.max(0, Math.min(target, maxScroll));
+  }
+
+  private handleMinimapPointerDown = (e: MouseEvent): void => {
+    e.preventDefault();
+    this.minimapDragging = true;
+    this.scrollMinimapTo(e);
+    document.addEventListener('mousemove', this.handleMinimapPointerMove);
+    document.addEventListener('mouseup', this.handleMinimapPointerUp);
+  };
+
+  private handleMinimapPointerMove = (e: MouseEvent): void => {
+    if (!this.minimapDragging) return;
+    this.scrollMinimapTo(e);
+  };
+
+  private handleMinimapPointerUp = (): void => {
+    this.minimapDragging = false;
+    document.removeEventListener('mousemove', this.handleMinimapPointerMove);
+    document.removeEventListener('mouseup', this.handleMinimapPointerUp);
+  };
+
+  private scrollMinimapTo(e: MouseEvent): void {
+    if (!this.minimapEl || !this.scrollState) return;
+    const rect = this.minimapEl.getBoundingClientRect();
+    const scrollTop = this.minimapYToScrollTop(e.clientY - rect.top);
+    const scroll = this.scrollState.getScroll();
+    this.scrollState.setScroll(scrollTop, scroll.scrollLeft);
+    this.syncScrollbarPosition();
   }
 
   private updateScrollContentSize(): void {
@@ -1258,7 +1919,13 @@ export class LvGraphCanvas extends LitElement {
     }
   }
 
-  private rebuildSpatialIndex(): void {
+  /**
+   * Build the spatial index for the whole layout. The index lives in graph
+   * coordinates (scroll-independent), so it is built ONCE per layout instead
+   * of being rebuilt on every scroll event — hitTest() translates the query
+   * point by the current scroll offset.
+   */
+  private buildSpatialIndex(): void {
     if (!this.layout || !this.spatialIndex) return;
 
     // Configure spatial index with current maxLane for mirrored coordinates
@@ -1268,24 +1935,10 @@ export class LvGraphCanvas extends LitElement {
       rowHeight: this.ROW_HEIGHT,
       laneWidth: this.LANE_WIDTH,
       maxLane: this.layout.maxLane,
+      nodeRadius: this.NODE_RADIUS + 6,
     });
 
-    const viewport = this.getViewport();
-    const range = this.virtualScroll?.getVisibleRange(viewport);
-
-    if (range) {
-      // Build index only for visible area (+ buffer)
-      const visibleNodes = [...this.layout.nodes.values()].filter(
-        (n) => n.row >= range.startRow && n.row <= range.endRow
-      );
-      const visibleEdges = this.layout.edges.filter((e) => {
-        const minRow = Math.min(e.fromRow, e.toRow);
-        const maxRow = Math.max(e.fromRow, e.toRow);
-        return maxRow >= range.startRow && minRow <= range.endRow;
-      });
-
-      this.spatialIndex.build(visibleNodes, visibleEdges);
-    }
+    this.spatialIndex.build([...this.layout.nodes.values()], this.layout.edges);
   }
 
   private getViewport(): Viewport {
@@ -1306,20 +1959,47 @@ export class LvGraphCanvas extends LitElement {
     const height = this.containerEl.clientHeight;
 
     this.renderer.resize(width, height);
+    this.resizeMinimap();
+    this.rebuildMinimapDots();
     this.scheduleRender();
   }
 
   private onScroll(_scrollTop: number, _scrollLeft: number): void {
-    // Rebuild spatial index for new viewport
-    this.rebuildSpatialIndex();
+    // The spatial index lives in graph coordinates and needs no rebuild here
     // Mark renderer dirty so it actually redraws
     this.renderer?.markDirty();
     this.scheduleRender();
     this.checkLoadMore();
+    // Newly revealed rows may need their stats/signatures fetched
+    this.scheduleVisibleDataFetch();
   }
 
   private handleWheel = (e: WheelEvent): void => {
     e.preventDefault();
+
+    // Ctrl/Cmd + wheel zooms the graph density instead of scrolling.
+    // Wheel ticks arrive far faster than zoom application is cheap (each
+    // zoom rebuilds the spatial index), so ticks accumulate into a target
+    // applied once per animation frame.
+    if (e.ctrlKey || e.metaKey) {
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      const base = this.pendingZoomTarget ?? this.zoomLevel;
+      this.pendingZoomTarget = Math.min(
+        LvGraphCanvas.MAX_ZOOM,
+        Math.max(LvGraphCanvas.MIN_ZOOM, base * factor)
+      );
+      if (!this.zoomFrame) {
+        this.zoomFrame = requestAnimationFrame(() => {
+          this.zoomFrame = 0;
+          if (this.pendingZoomTarget !== null) {
+            const target = this.pendingZoomTarget;
+            this.pendingZoomTarget = null;
+            this.setZoom(target);
+          }
+        });
+      }
+      return;
+    }
 
     if (!this.scrollState || !this.virtualScroll) {
       return;
@@ -1764,6 +2444,16 @@ export class LvGraphCanvas extends LitElement {
   }
 
   /**
+   * Whether a commit is loaded (fetched from the backend), regardless of
+   * whether the branch-visibility filter currently shows it. Lets callers
+   * distinguish "not loaded yet — scroll/load more" from "loaded but
+   * hidden by a filter" when selectCommit() returns false.
+   */
+  public hasLoadedCommit(oid: string): boolean {
+    return this.realCommits.has(oid);
+  }
+
+  /**
    * Public method to select and scroll to a commit by OID
    * Used by other components (like commit details panel) to navigate the graph
    */
@@ -1793,12 +2483,59 @@ export class LvGraphCanvas extends LitElement {
     // Dispatch selection event after scroll is set
     this.dispatchSelectionEvent();
 
-    // Force rebuild spatial index for new viewport and render
-    this.rebuildSpatialIndex();
     this.renderer?.markDirty();
     this.scheduleRender();
 
     return true;
+  }
+
+  private handleJumpToHeadClick = (): void => {
+    if (this.jumpToHead()) {
+      return;
+    }
+    // Same loaded-but-filtered vs not-loaded distinction as the shared
+    // revealCommitInGraph path in app-shell (sibling reveal flows must give
+    // consistent guidance). The component can't toast itself — app-shell
+    // listens for graph-notice (same wiring as copy-sha).
+    const headOid = this.getHeadOid();
+    const message =
+      headOid !== undefined && this.hasLoadedCommit(headOid)
+        ? 'HEAD commit is hidden by the branch visibility filter — show its branch to reveal it'
+        : 'HEAD commit is not loaded in the graph';
+    this.dispatchEvent(
+      new CustomEvent('graph-notice', {
+        detail: { message, type: 'info' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  };
+
+  /**
+   * Select and scroll to the commit HEAD points at.
+   * Returns false when HEAD's commit is not in the loaded graph.
+   */
+  public jumpToHead(): boolean {
+    const headOid = this.getHeadOid();
+    if (!headOid) {
+      return false;
+    }
+    return this.selectCommit(headOid);
+  }
+
+  /**
+   * Tag tips from the loaded refs (for command-palette navigation)
+   */
+  public getTagTips(): Array<{ name: string; oid: string }> {
+    const tips: Array<{ name: string; oid: string }> = [];
+    for (const [oid, refs] of Object.entries(this.refsByCommit)) {
+      for (const ref of refs) {
+        if (ref.refType === 'tag') {
+          tips.push({ name: ref.shorthand, oid });
+        }
+      }
+    }
+    return tips.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /**
@@ -1944,11 +2681,10 @@ export class LvGraphCanvas extends LitElement {
     if (adjustedY >= 0 && this.layout) {
       const row = Math.round(adjustedY / this.ROW_HEIGHT);
 
-      // Find the node at this row
-      for (const node of this.layout.nodes.values()) {
-        if (node.row === row) {
-          return { type: 'node', node, distance: 0 };
-        }
+      // One commit per row, rows are contiguous — O(1) lookup
+      const node = this.sortedNodesByRow[row];
+      if (node && node.row === row) {
+        return { type: 'node', node, distance: 0 };
       }
     }
 
@@ -2000,6 +2736,15 @@ export class LvGraphCanvas extends LitElement {
         composed: true,
       })
     );
+
+    // Announce the selection to assistive technology
+    if (this.selectedNode && commit) {
+      const position = this.selectedNode.row + 1;
+      const total = this.layout?.totalRows ?? this.sortedNodesByRow.length;
+      this.srAnnouncement = `Commit ${position} of ${total}: ${commit.summary} by ${commit.author.name}`;
+    } else {
+      this.srAnnouncement = '';
+    }
   }
 
   private scheduleRender(): void {
@@ -2042,6 +2787,9 @@ export class LvGraphCanvas extends LitElement {
   }
 
   private loadHiddenBranches(): void {
+    // Always reset first: a repo with no saved entry must NOT inherit the
+    // previous repo's hidden branches
+    this.hiddenBranches = new Set();
     try {
       const saved = localStorage.getItem(this.getBranchStorageKey());
       if (saved) {
@@ -2114,61 +2862,83 @@ export class LvGraphCanvas extends LitElement {
   }
 
   private applyBranchFilter(): void {
-    if (this.hiddenBranches.size === 0) {
-      // No filter — use all commits
-      this.processLayout();
-    } else {
-      // Build set of visible branch names
-      const visibleBranchOids = new Set<string>();
+    // processLayout() applies the branch-visibility filter via
+    // getVisibleCommits(), rebuilds the indices, and schedules a render
+    this.processLayout();
 
-      // Find all commit OIDs that belong to visible branches
-      for (const [oid, refs] of Object.entries(this.refsByCommit)) {
-        const hasVisibleBranch = refs.some(
-          (ref) =>
-            (ref.refType === 'localBranch' || ref.refType === 'remoteBranch') &&
-            !this.hiddenBranches.has(ref.shorthand)
-        );
-        if (hasVisibleBranch) {
-          visibleBranchOids.add(oid);
+    // A commit hidden by the filter must not stay selected
+    if (this.layout) {
+      let selectionChanged = false;
+      for (const oid of [...this.selectedNodes]) {
+        if (!this.layout.nodes.has(oid)) {
+          this.selectedNodes.delete(oid);
+          selectionChanged = true;
         }
       }
-
-      // Also keep commits that have no branch refs (ancestors)
-      // and commits that have tags (tags should always be visible)
-      for (const [oid, refs] of Object.entries(this.refsByCommit)) {
-        const hasBranchRef = refs.some(
-          (ref) => ref.refType === 'localBranch' || ref.refType === 'remoteBranch'
-        );
-        if (!hasBranchRef) {
-          visibleBranchOids.add(oid);
-        }
+      if (this.selectedNode && !this.layout.nodes.has(this.selectedNode.oid)) {
+        this.selectedNode = null;
+        this.lastClickedNode = null;
+        selectionChanged = true;
       }
-
-      // Include commits with no refs at all (most commits)
-      for (const commit of this.commits) {
-        if (!this.refsByCommit[commit.oid]) {
-          visibleBranchOids.add(commit.oid);
-        }
+      if (selectionChanged) {
+        this.dispatchSelectionEvent();
+        this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
+        this.renderer?.markDirty();
+        this.scheduleRender();
       }
-
-      this.processLayout();
     }
-
-    this.renderer?.markDirty();
-    this.scheduleRender();
   }
 
   // Export methods
   /**
    * Export graph as PNG image
    */
-  public exportAsImage(): void {
+  public async exportAsImage(): Promise<void> {
     if (!this.renderer || !this.virtualScroll || !this.layout) return;
+    const repoPath = this.repositoryPath;
+    // Close the menu immediately — the data fill below is async and leaving
+    // the item clickable would allow overlapping exports
+    this.showExportMenu = false;
+
+    // Viewport-lazy fetching may not have covered all loaded rows yet — the
+    // export renders EVERY loaded row, so fill in missing stats/signature
+    // data first or unscrolled rows would export with blank stats columns.
+    // Queued behind any in-flight fetch: the marker sets are claimed at
+    // fetch START, so checking them outside the queue could skip OIDs that
+    // are claimed but whose data hasn't arrived yet.
+    const allOids = [...this.layout.nodes.keys()];
+    this.isLoadingStats = true;
+    try {
+      await this.queueDataFetch(async () => {
+        const missingStats = allOids.filter((oid) => !this.statsFetchedOids.has(oid));
+        const missingSignatures = allOids.filter(
+          (oid) => !this.signaturesFetchedOids.has(oid)
+        );
+        if (missingStats.length === 0 && missingSignatures.length === 0) return;
+        await this.fetchCommitDataBatches(repoPath, missingStats, missingSignatures);
+      });
+      if (this.repositoryPath === repoPath) {
+        this.renderer.setCommitStats(this.commitStatsMap);
+        this.renderer.setCommitSignatures(this.commitSignaturesMap);
+      }
+    } finally {
+      if (this.repositoryPath === repoPath) {
+        this.isLoadingStats = false;
+      }
+    }
+    // The repository changed while fetching — abort the export
+    if (this.repositoryPath !== repoPath || !this.layout) {
+      return;
+    }
 
     const contentSize = this.virtualScroll.getContentSize();
 
+    // Size the export to the LOADED rows, not the virtual full-history
+    // height — only loaded commits can be drawn, and sizing to the virtual
+    // total would produce a mostly-blank image on large repos
+    const loadedHeight = this.layout.totalRows * this.ROW_HEIGHT + this.PADDING * 2;
     // Limit export size for very large graphs
-    const maxHeight = Math.min(contentSize.height + this.HEADER_HEIGHT + 40, 50000);
+    const maxHeight = Math.min(loadedHeight + this.HEADER_HEIGHT + 40, 50000);
     const width = Math.max(contentSize.width, this.containerEl?.clientWidth ?? 800);
 
     // Create offscreen canvas
@@ -2177,7 +2947,9 @@ export class LvGraphCanvas extends LitElement {
     offscreen.width = width * dpr;
     offscreen.height = maxHeight * dpr;
 
-    // Create temporary renderer on offscreen canvas
+    // Create temporary renderer on offscreen canvas. Avatar fetching is
+    // disabled: the export renders synchronously once, so kicking off
+    // network loads would never paint into it.
     const tempRenderer = new CanvasRenderer(
       offscreen,
       {
@@ -2187,16 +2959,19 @@ export class LvGraphCanvas extends LitElement {
         lineWidth: 2,
         showLabels: true,
         showFps: false,
+        fetchAvatars: false,
         refsColumnWidth: this.refsColumnWidth,
         statsColumnWidth: this.statsColumnWidth,
+        showAuthorColumn: this.showAuthorColumn,
+        showDateColumn: this.showDateColumn,
       },
       getThemeFromCSS()
     );
 
-    // Copy state to temp renderer
+    // Copy state to temp renderer so the export matches what is on screen
     if (this.renderer) {
-      const stats = new Map<string, { additions: number; deletions: number; filesChanged: number }>();
-      tempRenderer.setCommitStats(stats);
+      tempRenderer.setCommitStats(this.renderer.getCommitStats());
+      tempRenderer.setCommitSignatures(this.renderer.getCommitSignatures());
       tempRenderer.setHighlightedCommits(this.matchedCommitOids);
       tempRenderer.setMultiSelection(this.selectedNodes, null);
     }
@@ -2234,7 +3009,9 @@ export class LvGraphCanvas extends LitElement {
 
     const contentSize = this.virtualScroll.getContentSize();
     const width = Math.max(contentSize.width, this.containerEl?.clientWidth ?? 800);
-    const height = contentSize.height + this.HEADER_HEIGHT + 40;
+    // Loaded rows only — see exportAsImage
+    const loadedHeight = this.layout.totalRows * this.ROW_HEIGHT + this.PADDING * 2;
+    const height = loadedHeight + this.HEADER_HEIGHT + 40;
     const theme = getThemeFromCSS();
 
     const svgParts: string[] = [];
@@ -2251,7 +3028,7 @@ export class LvGraphCanvas extends LitElement {
       const fromY = offsetY + edge.fromRow * this.ROW_HEIGHT;
       const toX = offsetX + (maxLane - edge.toLane) * this.LANE_WIDTH;
       const toY = offsetY + edge.toRow * this.ROW_HEIGHT;
-      const color = theme.laneColors[edge.fromLane % theme.laneColors.length];
+      const color = theme.laneColors[edge.colorIndex % theme.laneColors.length];
 
       if (edge.fromLane === edge.toLane) {
         svgParts.push(`<line x1="${fromX}" y1="${fromY}" x2="${toX}" y2="${toY}" stroke="${color}" stroke-width="2" stroke-linecap="round"/>`);
@@ -2265,7 +3042,7 @@ export class LvGraphCanvas extends LitElement {
     for (const node of this.layout.nodes.values()) {
       const x = offsetX + (maxLane - node.lane) * this.LANE_WIDTH;
       const y = offsetY + node.row * this.ROW_HEIGHT;
-      const color = theme.laneColors[node.lane % theme.laneColors.length];
+      const color = theme.laneColors[node.colorIndex % theme.laneColors.length];
       const commit = this.realCommits.get(node.oid);
       const isMerge = commit && commit.parentIds.length > 1;
 
@@ -2379,6 +3156,14 @@ export class LvGraphCanvas extends LitElement {
 
     this.lastRenderData = renderData;
     this.visibleNodes = renderData.nodes.length;
+    this.renderMinimap();
+
+    // Refresh the screen-reader mirror only when the visible window changed
+    const mirrorKey = `${renderData.range.startRow}-${renderData.range.endRow}-${this.layout.totalRows}`;
+    if (mirrorKey !== this.lastMirrorKey) {
+      this.lastMirrorKey = mirrorKey;
+      this.mirrorNodes = [...renderData.nodes].sort((a, b) => a.row - b.row);
+    }
 
     this.renderer.render(renderData);
 
@@ -2441,13 +3226,42 @@ export class LvGraphCanvas extends LitElement {
 
   private renderExportMenu() {
     return html`
-      <div class="export-menu">
+      <div
+        class="export-menu"
+        style=${this.exportMenuRight !== null ? `right: ${this.exportMenuRight}px` : ''}
+      >
         <button class="export-menu-item" @click=${() => this.exportAsImage()}>
           Export as PNG
         </button>
         <button class="export-menu-item" @click=${() => this.exportAsSvg()}>
           Export as SVG
         </button>
+      </div>
+    `;
+  }
+
+  private renderColumnsMenu() {
+    return html`
+      <div
+        class="export-menu columns-menu"
+        style=${this.columnsMenuRight !== null ? `right: ${this.columnsMenuRight}px` : ''}
+      >
+        <label class="branch-item">
+          <input
+            type="checkbox"
+            .checked=${this.showAuthorColumn}
+            @change=${() => this.toggleOptionalColumn('author')}
+          />
+          <span class="branch-name">Author</span>
+        </label>
+        <label class="branch-item">
+          <input
+            type="checkbox"
+            .checked=${this.showDateColumn}
+            @change=${() => this.toggleOptionalColumn('date')}
+          />
+          <span class="branch-name">Date</span>
+        </label>
       </div>
     `;
   }
@@ -2465,9 +3279,21 @@ export class LvGraphCanvas extends LitElement {
             tabindex="0"
             role="img"
             aria-label="${this.totalLoadedCommits > 0
-              ? `Git commit history showing ${this.totalLoadedCommits} commits`
+              ? `Git commit history showing ${this.totalLoadedCommits}${
+                  this.commitTotal !== null ? ` of ${this.commitTotal}` : ''
+                } commits`
               : 'Loading commit graph...'}"
           ></canvas>
+
+          ${this.showMinimap
+            ? html`
+                <canvas
+                  class="minimap-canvas"
+                  aria-hidden="true"
+                  @mousedown=${this.handleMinimapPointerDown}
+                ></canvas>
+              `
+            : ''}
 
           ${handlePositions
             ? html`
@@ -2516,16 +3342,65 @@ export class LvGraphCanvas extends LitElement {
             ? html`
                 <div class="loading-indicator">
                   <div class="spinner"></div>
-                  <span>Loading more commits...</span>
+                  <span>
+                    Loading more commits...${this.commitTotal !== null
+                      ? ` (${this.totalLoadedCommits} of ${this.commitTotal})`
+                      : ''}
+                  </span>
                 </div>
               `
             : ''}
 
           <div class="graph-toolbar">
             <button
+              class="toolbar-btn"
+              title="Jump to HEAD"
+              @click=${this.handleJumpToHeadClick}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"></circle>
+                <circle cx="12" cy="12" r="9"></circle>
+                <line x1="12" y1="1" x2="12" y2="5"></line>
+                <line x1="12" y1="19" x2="12" y2="23"></line>
+                <line x1="1" y1="12" x2="5" y2="12"></line>
+                <line x1="19" y1="12" x2="23" y2="12"></line>
+              </svg>
+              HEAD
+            </button>
+            <button
+              class="toolbar-btn ${this.showMinimap ? 'active' : ''}"
+              title="Toggle minimap"
+              @click=${() => this.toggleMinimap()}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                <line x1="16" y1="3" x2="16" y2="21"></line>
+                <line x1="19" y1="7" x2="19" y2="9"></line>
+                <line x1="19" y1="13" x2="19" y2="16"></line>
+              </svg>
+              Map
+            </button>
+            <button
+              class="toolbar-btn ${this.showColumnsMenu ? 'active' : ''}"
+              title="Toggle optional columns"
+              @click=${(e: MouseEvent) => {
+                this.columnsMenuRight = this.menuRightOffset(e);
+                this.showColumnsMenu = !this.showColumnsMenu;
+                this.showBranchPanel = false;
+                this.showExportMenu = false;
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                <line x1="9" y1="3" x2="9" y2="21"></line>
+                <line x1="15" y1="3" x2="15" y2="21"></line>
+              </svg>
+              Columns
+            </button>
+            <button
               class="toolbar-btn ${this.showBranchPanel ? 'active' : ''}"
               title="Toggle branch visibility"
-              @click=${() => { this.showBranchPanel = !this.showBranchPanel; this.showExportMenu = false; }}
+              @click=${() => { this.showBranchPanel = !this.showBranchPanel; this.showExportMenu = false; this.showColumnsMenu = false; }}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="6" y1="3" x2="6" y2="15"></line>
@@ -2538,7 +3413,12 @@ export class LvGraphCanvas extends LitElement {
             <button
               class="toolbar-btn ${this.showExportMenu ? 'active' : ''}"
               title="Export graph"
-              @click=${() => { this.showExportMenu = !this.showExportMenu; this.showBranchPanel = false; }}
+              @click=${(e: MouseEvent) => {
+                this.exportMenuRight = this.menuRightOffset(e);
+                this.showExportMenu = !this.showExportMenu;
+                this.showBranchPanel = false;
+                this.showColumnsMenu = false;
+              }}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path>
@@ -2551,6 +3431,27 @@ export class LvGraphCanvas extends LitElement {
 
           ${this.showBranchPanel ? this.renderBranchPanel() : ''}
           ${this.showExportMenu ? this.renderExportMenu() : ''}
+          ${this.showColumnsMenu ? this.renderColumnsMenu() : ''}
+
+          <div class="sr-only" role="listbox" aria-label="Commits" aria-multiselectable="true">
+            ${this.mirrorNodes.map((node) => {
+              const commit = this.realCommits.get(node.oid);
+              return html`
+                <div
+                  role="option"
+                  aria-selected=${this.selectedNodes.has(node.oid) ? 'true' : 'false'}
+                  aria-setsize=${this.layout?.totalRows ?? this.mirrorNodes.length}
+                  aria-posinset=${node.row + 1}
+                >
+                  ${commit?.summary ?? node.commit.message} by
+                  ${commit?.author.name ?? node.commit.author}
+                </div>
+              `;
+            })}
+          </div>
+          <div class="sr-only" role="status" aria-live="polite">
+            ${this.srAnnouncement}
+          </div>
         </div>
       </div>
     `;

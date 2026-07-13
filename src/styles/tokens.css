@@ -78,6 +78,14 @@
   --color-branch-6: #00838f;
   --color-branch-7: #d84315;
   --color-branch-8: #558b2f;
+  --color-branch-9: #d01884;
+  --color-branch-10: #00796b;
+  --color-branch-11: #3f51b5;
+  --color-branch-12: #6d4c41;
+  --color-branch-13: #9e9d24;
+  --color-branch-14: #455a64;
+  --color-branch-15: #f9a825;
+  --color-branch-16: #5e35b1;
 
   /* Graph node/text colors */
   --graph-background: var(--color-bg-primary);
@@ -86,6 +94,23 @@
   --graph-selected-color: var(--color-text-primary);
   --graph-hover-color: var(--color-text-secondary);
   --graph-node-text: #ffffff;
+
+  /* Graph row highlight washes - dark-on-light for the light theme */
+  --graph-row-selected-bg: rgba(0, 0, 0, 0.08);
+  --graph-row-hovered-bg: rgba(0, 0, 0, 0.04);
+
+  /* Graph stats column (+/-) colors */
+  --graph-stat-additions: #188038;
+  --graph-stat-deletions: #c5221f;
+
+  /* Signature badge colors */
+  --badge-verified-bg: #1a7f37;
+  --badge-unverified-bg: #6e7781;
+  --badge-icon-color: #ffffff;
+
+  /* Merged pull-request label colors */
+  --pr-merged-bg: #ede9fe;
+  --pr-merged-text: #7c3aed;
 
   /* Ref label colors */
   --ref-local-bg: #c8e6c9;
@@ -203,6 +228,14 @@
     --color-branch-6: #5bb5b5;  /* Muted teal */
     --color-branch-7: #cc8866;  /* Muted peach */
     --color-branch-8: #8eb86e;  /* Muted sage */
+    --color-branch-9: #c980ac;  /* Muted pink */
+    --color-branch-10: #6bb2a4; /* Muted sea green */
+    --color-branch-11: #8a92cf; /* Muted indigo */
+    --color-branch-12: #b3927f; /* Muted brown */
+    --color-branch-13: #b0b16a; /* Muted olive */
+    --color-branch-14: #8fa3ae; /* Muted blue-grey */
+    --color-branch-15: #d4c05a; /* Muted yellow */
+    --color-branch-16: #9d86c9; /* Muted violet */
 
     /* Graph node/text colors */
     --graph-text-color: #c8c8c8;
@@ -210,6 +243,23 @@
     --graph-selected-color: #ffffff;
     --graph-hover-color: #e0e0e0;
     --graph-node-text: #1a1520;
+
+    /* Graph row highlight washes - light-on-dark for the dark theme */
+    --graph-row-selected-bg: rgba(255, 255, 255, 0.15);
+    --graph-row-hovered-bg: rgba(255, 255, 255, 0.05);
+
+    /* Graph stats column (+/-) colors */
+    --graph-stat-additions: #3fb950;
+    --graph-stat-deletions: #f85149;
+
+    /* Signature badge colors */
+    --badge-verified-bg: #238636;
+    --badge-unverified-bg: #8b949e;
+    --badge-icon-color: #ffffff;
+
+    /* Merged pull-request label colors */
+    --pr-merged-bg: #2d1f4e;
+    --pr-merged-text: #a371f7;
 
     /* Ref label colors - dark mode (semi-transparent backgrounds) */
     --ref-local-bg: rgba(115, 184, 117, 0.18);   /* Subtle green */
@@ -270,6 +320,14 @@
   --color-branch-6: #5bb5b5;  /* Muted teal */
   --color-branch-7: #cc8866;  /* Muted peach */
   --color-branch-8: #8eb86e;  /* Muted sage */
+  --color-branch-9: #c980ac;  /* Muted pink */
+  --color-branch-10: #6bb2a4; /* Muted sea green */
+  --color-branch-11: #8a92cf; /* Muted indigo */
+  --color-branch-12: #b3927f; /* Muted brown */
+  --color-branch-13: #b0b16a; /* Muted olive */
+  --color-branch-14: #8fa3ae; /* Muted blue-grey */
+  --color-branch-15: #d4c05a; /* Muted yellow */
+  --color-branch-16: #9d86c9; /* Muted violet */
 
   /* Graph node/text colors */
   --graph-text-color: #c8c8c8;
@@ -277,6 +335,23 @@
   --graph-selected-color: #ffffff;
   --graph-hover-color: #e0e0e0;
   --graph-node-text: #1a1520;
+
+  /* Graph row highlight washes - light-on-dark for the dark theme */
+  --graph-row-selected-bg: rgba(255, 255, 255, 0.15);
+  --graph-row-hovered-bg: rgba(255, 255, 255, 0.05);
+
+  /* Graph stats column (+/-) colors */
+  --graph-stat-additions: #3fb950;
+  --graph-stat-deletions: #f85149;
+
+  /* Signature badge colors */
+  --badge-verified-bg: #238636;
+  --badge-unverified-bg: #8b949e;
+  --badge-icon-color: #ffffff;
+
+  /* Merged pull-request label colors */
+  --pr-merged-bg: #2d1f4e;
+  --pr-merged-text: #a371f7;
 
   /* Ref label colors - dark mode (semi-transparent backgrounds) */
   --ref-local-bg: rgba(115, 184, 117, 0.18);   /* Subtle green */
