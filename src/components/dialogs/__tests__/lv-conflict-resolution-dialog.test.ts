@@ -190,10 +190,23 @@ describe('lv-conflict-resolution-dialog', () => {
       await el.updateComplete;
 
       const fileNames = el.shadowRoot!.querySelectorAll('.file-name');
-      const names = Array.from(fileNames).map(n => n.textContent!.trim());
-      expect(names).to.include('main.ts');
-      expect(names).to.include('utils.ts');
-      expect(names).to.include('app.ts');
+      const names = Array.from(fileNames).map(n => n.textContent!.replace(/\s+/g, ' ').trim());
+      expect(names.some(n => n.startsWith('main.ts'))).to.be.true;
+      expect(names.some(n => n.startsWith('utils.ts'))).to.be.true;
+      expect(names.some(n => n.startsWith('app.ts'))).to.be.true;
+    });
+
+    it('shows the directory hint for files in subdirectories', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const dirs = Array.from(el.shadowRoot!.querySelectorAll('.file-dir')).map(
+        n => n.textContent!.trim()
+      );
+      expect(dirs).to.include('src');
     });
 
     it('marks first file as selected by default', async () => {

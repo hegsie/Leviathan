@@ -267,8 +267,12 @@ export class LvCherryPickDialog extends LitElement {
         }));
         this.close();
       } else {
-        // Check if it's a conflict
-        if (result.error?.message?.includes('conflict')) {
+        // Check if it's a conflict — match the structured code like every
+        // other entry point, with the message match as a fallback.
+        if (
+          result.error?.code === 'CHERRY_PICK_CONFLICT' ||
+          result.error?.message?.toLowerCase().includes('conflict')
+        ) {
           this.dispatchEvent(new CustomEvent('cherry-pick-conflict', {
             detail: {
               sourceCommit: this.commit,

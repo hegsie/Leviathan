@@ -9,6 +9,14 @@
  * +------------------+------------------+------------------+
  * |                     OUTPUT (Editable)                  |
  * +-------------------------------------------------------+
+ *
+ * Conflict markers (<<<<<<< / ======= / >>>>>>>) are an internal, on-disk
+ * representation ONLY. They are parsed once into structured segments when the
+ * file loads and are never rendered anywhere in the UI. The output pane is a
+ * list of segments: resolved text (editable in place) and conflict blocks
+ * (ours/theirs side by side with Use Ours / Use Theirs / Use Both / Edit
+ * actions). The file is only written back once no conflict blocks remain, so
+ * markers can never round-trip into a "resolved" file.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -16,21 +24,55 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { showConfirm } from '../../services/dialog.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
-import { isWhitespaceOnlyChange, computeInlineWhitespaceDiff } from '../../utils/diff-utils.ts';
+import {
+  isWhitespaceOnlyChange,
+  computeInlineWhitespaceDiff,
+  alignThreeWay,
+  type ThreeWayRow,
+} from '../../utils/diff-utils.ts';
+
+export type MergeOperationType = 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash';
+
+type SegmentOrigin = 'ours' | 'theirs' | 'both' | 'base' | 'manual' | 'ai';
 
 interface OutputSegment {
+  id: number;
   type: 'resolved' | 'conflict';
+  /** Resolved output lines (empty while type === 'conflict'). */
   lines: string[];
+  /** Conflict side content — kept after resolution so the block can be reset. */
   oursLines: string[];
   theirsLines: string[];
   oursLabel: string;
   theirsLabel: string;
+  /** How a resolved segment was produced (colors the gutter). */
+  origin: SegmentOrigin | null;
+  /** True when a resolved segment came from a conflict block (enables Reset). */
+  fromConflict: boolean;
 }
+
+/** Per-operation pane labels: during a rebase the sides are semantically
+ * swapped (ours = the branch being rebased onto, theirs = your own commit). */
+const SIDE_LABELS: Record<MergeOperationType, { ours: string; theirs: string }> = {
+  merge: { ours: 'Ours (Current Branch)', theirs: 'Theirs (Incoming)' },
+  rebase: { ours: 'Ours (Rebasing Onto)', theirs: 'Theirs (Your Commit)' },
+  'cherry-pick': { ours: 'Ours (Current Branch)', theirs: 'Theirs (Picked Commit)' },
+  revert: { ours: 'Ours (Current Branch)', theirs: 'Theirs (Revert Changes)' },
+  stash: { ours: 'Ours (Working Tree)', theirs: 'Theirs (Stashed Changes)' },
+};
+
+const ORIGIN_LABELS: Record<SegmentOrigin, string> = {
+  ours: 'Ours',
+  theirs: 'Theirs',
+  both: 'Both',
+  base: 'Base',
+  manual: 'Edited',
+  ai: 'AI',
+};
 
 @customElement('lv-merge-editor')
 export class LvMergeEditor extends CodeRenderMixin(LitElement) {
@@ -80,8 +122,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         transition: all var(--transition-fast);
       }
 
-      .btn:hover {
+      .btn:hover:not(:disabled) {
         background: var(--color-bg-hover);
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
       }
 
       .btn-primary {
@@ -90,7 +137,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         border-color: var(--color-primary);
       }
 
-      .btn-primary:hover {
+      .btn-primary:hover:not(:disabled) {
         background: var(--color-primary-hover);
       }
 
@@ -100,7 +147,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         color: var(--color-success);
       }
 
-      .btn-ours:hover {
+      .btn-ours:hover:not(:disabled) {
         background: rgba(var(--color-success-rgb, 34, 197, 94), 0.25);
       }
 
@@ -110,7 +157,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         color: var(--color-info);
       }
 
-      .btn-theirs:hover {
+      .btn-theirs:hover:not(:disabled) {
         background: rgba(var(--color-info-rgb, 59, 130, 246), 0.25);
       }
 
@@ -120,7 +167,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         color: #a855f7;
       }
 
-      .btn-both:hover {
+      .btn-both:hover:not(:disabled) {
         background: rgba(168, 85, 247, 0.25);
       }
 
@@ -253,114 +300,149 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         word-break: break-all;
       }
 
-      .line-conflict {
+      .line-changed {
         background: rgba(var(--color-warning-rgb, 234, 179, 8), 0.2);
       }
 
-      .line-conflict .line-content {
-        background: rgba(var(--color-warning-rgb, 234, 179, 8), 0.2);
-      }
-
-      .line-conflict .line-number {
+      .line-changed .line-number {
         background: rgba(var(--color-warning-rgb, 234, 179, 8), 0.3);
       }
 
-      /* Resolved line origin highlighting in output */
-      .resolved-ours .line-content {
-        background: rgba(var(--color-success-rgb, 34, 197, 94), 0.1);
+      .line-removed-filler .line-content {
+        background: repeating-linear-gradient(
+          -45deg,
+          transparent,
+          transparent 4px,
+          rgba(var(--color-text-muted-rgb, 128, 128, 128), 0.12) 4px,
+          rgba(var(--color-text-muted-rgb, 128, 128, 128), 0.12) 8px
+        );
       }
 
-      .resolved-ours .line-number {
+      /* Resolved-segment origin highlighting in output */
+      .output-segment.resolved-ours .line-number {
         border-left: 3px solid var(--color-success);
       }
 
-      .resolved-theirs .line-content {
-        background: rgba(var(--color-info-rgb, 59, 130, 246), 0.1);
+      .output-segment.resolved-ours .line-content {
+        background: rgba(var(--color-success-rgb, 34, 197, 94), 0.1);
       }
 
-      .resolved-theirs .line-number {
+      .output-segment.resolved-theirs .line-number {
         border-left: 3px solid var(--color-info);
       }
 
-      .resolved-both .line-content {
-        background: rgba(168, 85, 247, 0.1);
+      .output-segment.resolved-theirs .line-content {
+        background: rgba(var(--color-info-rgb, 59, 130, 246), 0.1);
       }
 
-      .resolved-both .line-number {
+      .output-segment.resolved-both .line-number,
+      .output-segment.resolved-ai .line-number {
         border-left: 3px solid #a855f7;
       }
 
-      .panel-content textarea {
-        width: 100%;
-        height: 100%;
-        border: none;
-        background: var(--color-bg-primary);
-        color: var(--color-text-primary);
-        font-family: var(--font-family-mono);
-        font-size: var(--font-size-sm);
-        line-height: 1.5;
-        padding: var(--spacing-sm);
-        resize: none;
+      .output-segment.resolved-both .line-content,
+      .output-segment.resolved-ai .line-content {
+        background: rgba(168, 85, 247, 0.1);
       }
 
-      .panel-content textarea:focus {
-        outline: none;
+      .output-segment.resolved-manual .line-number {
+        border-left: 3px solid var(--color-warning);
       }
 
-      /* Editable code view with line gutter */
-      .editable-code-container {
+      .output-segment.resolved-manual .line-content {
+        background: rgba(var(--color-warning-rgb, 234, 179, 8), 0.08);
+      }
+
+      .output-segment {
+        position: relative;
+      }
+
+      .segment-actions {
+        position: absolute;
+        top: 2px;
+        right: var(--spacing-sm);
+        display: none;
+        gap: var(--spacing-xs);
+        align-items: center;
+        z-index: 1;
+      }
+
+      .output-segment:hover .segment-actions {
         display: flex;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
       }
 
-      .line-gutter {
-        flex-shrink: 0;
-        width: 50px;
-        background: var(--color-bg-tertiary);
-        border-right: 1px solid var(--color-border);
-        overflow: hidden;
-        user-select: none;
-      }
-
-      .gutter-line {
-        height: 1.5em;
-        padding: 0 var(--spacing-sm);
-        text-align: right;
-        font-family: var(--font-family-mono);
-        font-size: var(--font-size-sm);
-        line-height: 1.5;
+      .segment-origin-chip {
+        font-size: 10px;
+        font-weight: var(--font-weight-bold);
+        text-transform: uppercase;
+        padding: 1px 6px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--color-border);
         color: var(--color-text-muted);
+        background: var(--color-bg-secondary);
       }
 
-      .editable-textarea {
-        flex: 1;
-        font-family: var(--font-family-mono);
-        font-size: var(--font-size-sm);
-        line-height: 1.5;
-        padding: 0 var(--spacing-sm);
-        margin: 0;
+      .segment-btn {
+        padding: 1px 6px;
+        font-size: var(--font-size-xs);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        border: 1px solid var(--color-border);
+        background: var(--color-bg-secondary);
+        color: var(--color-text-primary);
+      }
+
+      .segment-btn:hover {
+        background: var(--color-bg-hover);
+      }
+
+      /* Inline segment editing */
+      .segment-editor {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-xs) var(--spacing-sm);
+        border: 1px solid var(--color-primary);
+        border-radius: var(--radius-sm);
+        margin: 2px 0;
+        background: var(--color-bg-primary);
+      }
+
+      .segment-editor textarea {
+        width: 100%;
         border: none;
         background: var(--color-bg-primary);
         color: var(--color-text-primary);
-        resize: none;
-        overflow: auto;
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-sm);
+        line-height: 1.5;
+        resize: vertical;
         white-space: pre;
         tab-size: 4;
       }
 
-      .editable-textarea:focus {
+      .segment-editor textarea:focus {
         outline: none;
       }
 
-      .editable-textarea::selection {
-        background: rgba(var(--color-primary-rgb, 59, 130, 246), 0.3);
+      .segment-editor-actions {
+        display: flex;
+        gap: var(--spacing-sm);
+        justify-content: flex-end;
       }
 
-      /* Line highlighting for conflict markers */
-      .line-conflict-marker {
-        background: rgba(var(--color-warning-rgb, 234, 179, 8), 0.3);
+      /* Side-by-side conflict block body */
+      .conflict-sides {
+        display: grid;
+        grid-template-columns: 1fr 1px 1fr;
+        align-items: stretch;
+      }
+
+      .conflict-side-empty {
+        padding: var(--spacing-xs) var(--spacing-sm);
+        color: var(--color-text-muted);
+        font-style: italic;
+        font-size: var(--font-size-xs);
       }
 
       .loading {
@@ -380,15 +462,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         font-style: italic;
       }
 
-      .resize-handle {
-        height: 4px;
-        background: var(--color-border);
-        cursor: row-resize;
-        transition: background var(--transition-fast);
-      }
-
-      .resize-handle:hover {
-        background: var(--color-primary);
+      .output-error {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-md);
+        height: 100%;
+        color: var(--color-text-muted);
       }
 
       .diff-indicator {
@@ -397,14 +478,6 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         height: 8px;
         border-radius: 50%;
         margin-left: var(--spacing-xs);
-      }
-
-      .diff-indicator.has-changes {
-        background: var(--color-warning);
-      }
-
-      .diff-indicator.no-changes {
-        background: var(--color-success);
       }
 
       .panel-stats {
@@ -416,10 +489,6 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       .conflict-pick-btn {
         padding: 2px 8px;
         font-size: var(--font-size-xs);
-      }
-
-      .output-mode-toggle {
-        margin-left: var(--spacing-sm);
       }
 
       .conflict-count {
@@ -438,11 +507,6 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         background: rgba(168, 85, 247, 0.25);
       }
 
-      .btn-ai:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-      }
-
       .ai-explanation {
         padding: var(--spacing-xs) var(--spacing-sm);
         background: rgba(168, 85, 247, 0.08);
@@ -456,68 +520,31 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   @property({ type: String }) repositoryPath = '';
   @property({ type: Object }) conflictFile: ConflictFile | null = null;
+  /** Which git operation produced the conflict — controls the side labels. */
+  @property({ type: String }) operationType: MergeOperationType = 'merge';
 
   @state() private baseContent = '';
   @state() private oursContent = '';
   @state() private theirsContent = '';
-  @state() private outputContent = '';
+  @state() private segments: OutputSegment[] = [];
   @state() private loading = false;
-  @state() private outputEditMode: 'visual' | 'raw' = 'visual';
+  @state() private loadFailed = false;
   @state() private launchingExternalTool = false;
   @state() private hasMergeTool = false;
   @state() private aiAvailable = false;
-  @state() private suggestingConflict: number | null = null;
+  @state() private suggestingSegment: number | null = null;
   @state() private suggestingAll = false;
-  @state() private conflictSuggestions: Map<number, { content: string; explanation: string }> = new Map();
+  @state() private editingSegmentId: number | null = null;
+  @state() private editDraft = '';
+  @state() private aiExplanations: Map<number, string> = new Map();
 
-  /**
-   * Maps output line index (within resolved segments) to resolution origin.
-   * Used to color-code resolved lines in the output visual.
-   */
-  private lineOrigins: Map<number, 'ours' | 'theirs' | 'both'> = new Map();
-
-  /**
-   * Compute line origins by comparing resolved output lines against base/ours/theirs.
-   * Lines not present in base but present in ours → 'ours', in theirs → 'theirs'.
-   */
-  private computeLineOrigins(): void {
-    const baseLines = this.baseContent.split('\n');
-    const oursLines = this.oursContent.split('\n');
-    const theirsLines = this.theirsContent.split('\n');
-
-    const baseSet = new Set(baseLines);
-    const oursNewLines = new Set(oursLines.filter(l => !baseSet.has(l)));
-    const theirsNewLines = new Set(theirsLines.filter(l => !baseSet.has(l)));
-
-    const newOrigins = new Map<number, 'ours' | 'theirs' | 'both'>();
-    const segments = this.parseOutputSegments();
-    let lineIdx = 0;
-
-    for (const segment of segments) {
-      if (segment.type === 'resolved') {
-        for (const line of segment.lines) {
-          if (!baseSet.has(line)) {
-            const inOurs = oursNewLines.has(line);
-            const inTheirs = theirsNewLines.has(line);
-
-            if (inOurs && !inTheirs) {
-              newOrigins.set(lineIdx, 'ours');
-            } else if (inTheirs && !inOurs) {
-              newOrigins.set(lineIdx, 'theirs');
-            } else if (inOurs && inTheirs) {
-              newOrigins.set(lineIdx, 'both');
-            }
-          }
-          lineIdx++;
-        }
-      } else {
-        // Skip conflict marker lines in the old output
-        lineIdx += 1 + segment.oursLines.length + 1 + segment.theirsLines.length + 1;
-      }
-    }
-
-    this.lineOrigins = newOrigins;
-  }
+  private nextSegmentId = 1;
+  private baseLines: string[] = [];
+  private oursLines: string[] = [];
+  private theirsLines: string[] = [];
+  private alignmentRows: ThreeWayRow[] = [];
+  /** Guards against scroll-sync feedback loops between the panes. */
+  private syncingScroll = false;
 
   private boundHandleAiSettingsChanged = async () => {
     this.aiAvailable = await aiService.isAiAvailable();
@@ -576,13 +603,18 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     if (!this.repositoryPath || !this.conflictFile) return;
 
     this.loading = true;
+    this.loadFailed = false;
+    // Per-file UI state must not leak between files.
+    this.editingSegmentId = null;
+    this.aiExplanations = new Map();
+    this.suggestingSegment = null;
 
     // Initialize Shiki highlighter and detect language
     await this.initCodeLanguage(this.conflictFile.path);
 
     try {
-      // Load all three versions and the working directory file in parallel
-      // The working directory file contains git's proper 3-way merge with conflict markers
+      // Load all three versions and the working directory file in parallel.
+      // The working directory file contains git's authoritative diff3 merge.
       const [ancestorResult, oursResult, theirsResult, workdirResult] = await Promise.all([
         this.conflictFile.ancestor?.oid
           ? gitService.getBlobContent(this.repositoryPath, this.conflictFile.ancestor.oid)
@@ -593,7 +625,6 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         this.conflictFile.theirs?.oid
           ? gitService.getBlobContent(this.repositoryPath, this.conflictFile.theirs.oid)
           : Promise.resolve({ success: true, data: '' }),
-        // Read the working directory file - git has already done a proper diff3 merge
         gitService.readFileContent(this.repositoryPath, this.conflictFile.path),
       ]);
 
@@ -601,90 +632,70 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       this.oursContent = oursResult.success ? (oursResult.data || '') : '';
       this.theirsContent = theirsResult.success ? (theirsResult.data || '') : '';
 
-      // Use git's merged output from the working directory (has proper conflict markers)
-      // Fall back to naive merge only if we can't read the working directory file
-      this.outputContent = workdirResult.success && workdirResult.data
-        ? workdirResult.data
-        : this.performAutoMerge();
-      // Compute which output lines came from which branch
-      this.computeLineOrigins();
+      this.baseLines = this.baseContent.split('\n');
+      this.oursLines = this.oursContent.split('\n');
+      this.theirsLines = this.theirsContent.split('\n');
+      this.alignmentRows = alignThreeWay(this.baseLines, this.oursLines, this.theirsLines);
+
+      // Only git's own merge output is trustworthy. If the working directory
+      // file can't be read, show an error state — never fabricate a merge.
+      // An empty string is valid content (empty merged file), so test the
+      // type, not truthiness.
+      if (workdirResult.success && typeof workdirResult.data === 'string') {
+        this.segments = this.parseSegments(workdirResult.data);
+      } else {
+        this.segments = [];
+        this.loadFailed = true;
+      }
     } catch (err) {
       console.error('Failed to load conflict contents:', err);
+      this.segments = [];
+      this.loadFailed = true;
     } finally {
       this.loading = false;
     }
   }
 
   /**
-   * Attempt automatic 3-way merge
-   * If there are conflicts, insert conflict markers
+   * Parse git's conflict-marker text into structured segments — the ONLY
+   * place markers are ever interpreted; they never reach the DOM.
+   * Handles diff3-style `|||||||` base sections (discarded) and tolerates an
+   * unterminated conflict at EOF (kept as a conflict block).
    */
-  private performAutoMerge(): string {
-    const baseLines = this.baseContent.split('\n');
-    const oursLines = this.oursContent.split('\n');
-    const theirsLines = this.theirsContent.split('\n');
-
-    // Simple line-by-line merge algorithm
-    const result: string[] = [];
-    const maxLen = Math.max(baseLines.length, oursLines.length, theirsLines.length);
-
-    let i = 0;
-    while (i < maxLen) {
-      const baseLine = baseLines[i] ?? '';
-      const oursLine = oursLines[i] ?? '';
-      const theirsLine = theirsLines[i] ?? '';
-
-      if (oursLine === theirsLine) {
-        // Both sides agree
-        result.push(oursLine);
-      } else if (oursLine === baseLine) {
-        // Only theirs changed
-        result.push(theirsLine);
-      } else if (theirsLine === baseLine) {
-        // Only ours changed
-        result.push(oursLine);
-      } else {
-        // Conflict - both sides changed differently
-        result.push('<<<<<<< OURS');
-        result.push(oursLine);
-        result.push('=======');
-        result.push(theirsLine);
-        result.push('>>>>>>> THEIRS');
-      }
-      i++;
-    }
-
-    return result.join('\n');
-  }
-
-  private parseOutputSegments(): OutputSegment[] {
-    const lines = this.outputContent.split('\n');
+  private parseSegments(text: string): OutputSegment[] {
+    const lines = text.split('\n');
     const segments: OutputSegment[] = [];
     let currentResolved: string[] = [];
     let inConflict = false;
-    // Which side of the conflict we're currently accumulating.
-    // 'base' is the diff3 common-ancestor section — it is discarded, never
-    // mixed into ours.
     let section: 'ours' | 'base' | 'theirs' = 'ours';
     let oursLines: string[] = [];
     let theirsLines: string[] = [];
     let oursLabel = '';
     let theirsLabel = '';
 
+    const flushResolved = (): void => {
+      if (currentResolved.length > 0) {
+        segments.push(this.makeResolvedSegment(currentResolved, null, false));
+        currentResolved = [];
+      }
+    };
+    const pushConflict = (): void => {
+      segments.push({
+        id: this.nextSegmentId++,
+        type: 'conflict',
+        lines: [],
+        oursLines: [...oursLines],
+        theirsLines: [...theirsLines],
+        oursLabel,
+        theirsLabel,
+        origin: null,
+        fromConflict: false,
+      });
+    };
+
     for (const line of lines) {
       if (!inConflict && line.startsWith('<<<<<<<')) {
-        // Flush any accumulated resolved lines
-        if (currentResolved.length > 0) {
-          segments.push({
-            type: 'resolved',
-            lines: currentResolved,
-            oursLines: [],
-            theirsLines: [],
-            oursLabel: '',
-            theirsLabel: '',
-          });
-          currentResolved = [];
-        }
+        flushResolved();
         inConflict = true;
         section = 'ours';
         oursLines = [];
@@ -694,18 +705,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       } else if (inConflict && line.startsWith('|||||||')) {
         // diff3 common-ancestor marker — begin discarding base lines
         section = 'base';
-      } else if (inConflict && line.startsWith('=======')) {
+      } else if (inConflict && section !== 'theirs' && line.startsWith('=======')) {
         section = 'theirs';
       } else if (inConflict && line.startsWith('>>>>>>>')) {
         theirsLabel = line.slice(7).trim() || 'THEIRS';
-        segments.push({
-          type: 'conflict',
-          lines: [],
-          oursLines: [...oursLines],
-          theirsLines: [...theirsLines],
-          oursLabel,
-          theirsLabel,
-        });
+        pushConflict();
         inConflict = false;
         section = 'ours';
         oursLines = [];
@@ -724,193 +728,229 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       }
     }
 
-    // Flush remaining resolved lines
-    if (currentResolved.length > 0) {
-      segments.push({
-        type: 'resolved',
-        lines: currentResolved,
-        oursLines: [],
-        theirsLines: [],
-        oursLabel: '',
-        theirsLabel: '',
-      });
+    if (inConflict) {
+      // Unterminated conflict (truncated file) — keep it as a conflict block
+      // rather than silently promoting marker content to resolved text.
+      theirsLabel = theirsLabel || 'THEIRS';
+      pushConflict();
+    } else {
+      flushResolved();
     }
 
     return segments;
   }
 
-  private handleOutputChange(e: Event): void {
-    const textarea = e.target as HTMLTextAreaElement;
-    this.outputContent = textarea.value;
+  private makeResolvedSegment(
+    lines: string[],
+    origin: SegmentOrigin | null,
+    fromConflict: boolean,
+    conflictData?: Pick<OutputSegment, 'oursLines' | 'theirsLines' | 'oursLabel' | 'theirsLabel'>,
+  ): OutputSegment {
+    return {
+      id: this.nextSegmentId++,
+      type: 'resolved',
+      lines,
+      oursLines: conflictData?.oursLines ?? [],
+      theirsLines: conflictData?.theirsLines ?? [],
+      oursLabel: conflictData?.oursLabel ?? '',
+      theirsLabel: conflictData?.theirsLabel ?? '',
+      origin,
+      fromConflict,
+    };
+  }
+
+  private get conflictCount(): number {
+    return this.segments.filter((s) => s.type === 'conflict').length;
+  }
+
+  /** Serialize the output. Only valid once every conflict block is resolved. */
+  private buildResolvedContent(): string {
+    return this.segments.flatMap((s) => s.lines).join('\n');
+  }
+
+  public getResolvedContent(): string {
+    return this.buildResolvedContent();
+  }
+
+  // ── Segment operations ────────────────────────────────────────────────
+
+  private updateSegment(id: number, update: Partial<OutputSegment>): void {
+    this.segments = this.segments.map((s) => (s.id === id ? { ...s, ...update } : s));
+  }
+
+  private resolveConflictSegment(id: number, choice: 'ours' | 'theirs' | 'both'): void {
+    const segment = this.segments.find((s) => s.id === id);
+    if (!segment || segment.type !== 'conflict') return;
+
+    const lines =
+      choice === 'ours'
+        ? [...segment.oursLines]
+        : choice === 'theirs'
+          ? [...segment.theirsLines]
+          : [...segment.oursLines, ...segment.theirsLines];
+    this.updateSegment(id, { type: 'resolved', lines, origin: choice, fromConflict: true });
+  }
+
+  /** Revert a resolved-from-conflict segment back to an open conflict block. */
+  private resetSegment(id: number): void {
+    const segment = this.segments.find((s) => s.id === id);
+    if (!segment || !segment.fromConflict) return;
+    if (this.editingSegmentId === id) this.editingSegmentId = null;
+    this.updateSegment(id, { type: 'conflict', lines: [], origin: null, fromConflict: false });
+  }
+
+  private startEditSegment(segment: OutputSegment): void {
+    this.editingSegmentId = segment.id;
+    // Editing an open conflict starts from both sides so the user trims what
+    // they don't want — never from marker text.
+    this.editDraft =
+      segment.type === 'conflict'
+        ? [...segment.oursLines, ...segment.theirsLines].join('\n')
+        : segment.lines.join('\n');
+  }
+
+  private applyEditSegment(): void {
+    const id = this.editingSegmentId;
+    if (id === null) return;
+    const segment = this.segments.find((s) => s.id === id);
+    if (!segment) {
+      this.editingSegmentId = null;
+      return;
+    }
+
+    this.updateSegment(id, {
+      type: 'resolved',
+      lines: this.editDraft.split('\n'),
+      origin: 'manual',
+      fromConflict: segment.type === 'conflict' ? true : segment.fromConflict,
+    });
+    this.editingSegmentId = null;
+    this.editDraft = '';
+  }
+
+  private cancelEditSegment(): void {
+    this.editingSegmentId = null;
+    this.editDraft = '';
+  }
+
+  private handleEditDraftInput(e: Event): void {
+    this.editDraft = (e.target as HTMLTextAreaElement).value;
+  }
+
+  // ── Whole-file operations ─────────────────────────────────────────────
+
+  private acceptWholeFile(origin: 'ours' | 'theirs' | 'base'): void {
+    const content =
+      origin === 'ours' ? this.oursContent : origin === 'theirs' ? this.theirsContent : this.baseContent;
+    this.editingSegmentId = null;
+    this.segments = [this.makeResolvedSegment(content.split('\n'), origin, false)];
   }
 
   private handleAcceptOurs(): void {
-    this.outputContent = this.oursContent;
-    this.computeLineOrigins();
+    this.acceptWholeFile('ours');
   }
 
   private handleAcceptTheirs(): void {
-    this.outputContent = this.theirsContent;
-    this.computeLineOrigins();
+    this.acceptWholeFile('theirs');
   }
 
   private handleAcceptBase(): void {
-    this.outputContent = this.baseContent;
-    this.computeLineOrigins();
+    this.acceptWholeFile('base');
   }
 
-  private handleAcceptOursPanel(): void {
-    this.outputContent = this.oursContent;
-    this.computeLineOrigins();
+  /** Re-read the on-disk merge, discarding all in-editor resolutions. */
+  private async handleReload(): Promise<void> {
+    await this.loadContents();
   }
 
-  private handleAcceptTheirsPanel(): void {
-    this.outputContent = this.theirsContent;
-    this.computeLineOrigins();
-  }
+  // ── AI resolution ─────────────────────────────────────────────────────
 
-  private async handleSuggestConflict(conflictIndex: number): Promise<void> {
-    if (!this.conflictFile || this.suggestingConflict !== null) return;
+  /** Resolve one conflict block via AI. Returns false when the call failed. */
+  private async handleSuggestSegment(id: number): Promise<boolean> {
+    if (!this.conflictFile || this.suggestingSegment !== null) return false;
+    const segment = this.segments.find((s) => s.id === id);
+    if (!segment || segment.type !== 'conflict') return false;
 
-    this.suggestingConflict = conflictIndex;
+    this.suggestingSegment = id;
     try {
-      const segments = this.parseOutputSegments();
-      let idx = 0;
-      let targetSegment: OutputSegment | null = null;
-
-      // Find the conflict segment by counting conflict indices
-      for (const segment of segments) {
-        if (segment.type === 'conflict') {
-          if (idx === conflictIndex) {
-            targetSegment = segment;
-            break;
-          }
-          idx++;
-        }
-      }
-
-      if (!targetSegment) return;
-
-      // Collect surrounding resolved context
+      // Surrounding resolved context helps the model match style.
       const resolvedBefore: string[] = [];
       const resolvedAfter: string[] = [];
-      let foundTarget = false;
-      let conflictCount = 0;
-
-      for (const segment of segments) {
-        if (segment.type === 'conflict') {
-          if (conflictCount === conflictIndex) {
-            foundTarget = true;
-          }
-          conflictCount++;
-        } else if (segment.type === 'resolved') {
-          if (!foundTarget) {
-            resolvedBefore.push(...segment.lines);
-          } else {
-            resolvedAfter.push(...segment.lines);
-          }
+      let seenTarget = false;
+      for (const s of this.segments) {
+        if (s.id === id) {
+          seenTarget = true;
+        } else if (s.type === 'resolved') {
+          (seenTarget ? resolvedAfter : resolvedBefore).push(...s.lines);
         }
       }
 
       const result = await aiService.suggestConflictResolution(
         this.conflictFile.path,
-        targetSegment.oursLines.join('\n'),
-        targetSegment.theirsLines.join('\n'),
+        segment.oursLines.join('\n'),
+        segment.theirsLines.join('\n'),
         this.baseContent || undefined,
         resolvedBefore.slice(-20).join('\n') || undefined,
         resolvedAfter.slice(0, 20).join('\n') || undefined,
       );
 
       if (result.success && result.data) {
-        // Apply the suggestion by resolving the conflict
-        this.applyAiSuggestion(conflictIndex, result.data.resolvedContent);
-
-        // Store the explanation
+        this.updateSegment(id, {
+          type: 'resolved',
+          lines: result.data.resolvedContent.split('\n'),
+          origin: 'ai',
+          fromConflict: true,
+        });
         if (result.data.explanation) {
-          this.conflictSuggestions = new Map(this.conflictSuggestions);
-          this.conflictSuggestions.set(conflictIndex, {
-            content: result.data.resolvedContent,
-            explanation: result.data.explanation,
-          });
+          this.aiExplanations = new Map(this.aiExplanations);
+          this.aiExplanations.set(id, result.data.explanation);
         }
-      } else {
-        showToast(result.error?.message ?? 'AI suggestion failed', 'error');
+        return true;
       }
+      showToast(result.error?.message ?? 'AI suggestion failed', 'error');
+      return false;
     } catch {
       showToast('Failed to get AI suggestion', 'error');
+      return false;
     } finally {
-      this.suggestingConflict = null;
+      this.suggestingSegment = null;
     }
-  }
-
-  private applyAiSuggestion(conflictIndex: number, resolvedContent: string): void {
-    const segments = this.parseOutputSegments();
-    const resultLines: string[] = [];
-    let conflictIdx = 0;
-
-    for (const segment of segments) {
-      if (segment.type === 'resolved') {
-        resultLines.push(...segment.lines);
-      } else {
-        if (conflictIdx === conflictIndex) {
-          resultLines.push(...resolvedContent.split('\n'));
-        } else {
-          resultLines.push(`<<<<<<< ${segment.oursLabel}`);
-          resultLines.push(...segment.oursLines);
-          resultLines.push('=======');
-          resultLines.push(...segment.theirsLines);
-          resultLines.push(`>>>>>>> ${segment.theirsLabel}`);
-        }
-        conflictIdx++;
-      }
-    }
-
-    this.outputContent = resultLines.join('\n');
-    this.computeLineOrigins();
   }
 
   private async handleAiResolveAll(): Promise<void> {
     if (this.suggestingAll) return;
 
-    const segments = this.parseOutputSegments();
-    const conflictCount = segments.filter(s => s.type === 'conflict').length;
-    if (conflictCount === 0) return;
+    const conflictIds = this.segments.filter((s) => s.type === 'conflict').map((s) => s.id);
+    if (conflictIds.length === 0) return;
 
     this.suggestingAll = true;
     try {
-      // Resolve conflicts sequentially (index shifts after each resolution)
-      for (let i = 0; i < conflictCount; i++) {
-        // Always resolve index 0 since previous ones get resolved
-        const currentSegments = this.parseOutputSegments();
-        const remainingConflicts = currentSegments.filter(s => s.type === 'conflict').length;
-        if (remainingConflicts === 0) break;
-
-        await this.handleSuggestConflict(0);
+      for (const id of conflictIds) {
+        // Stop on the first failure — retrying would just repeat the error.
+        if (!(await this.handleSuggestSegment(id))) break;
       }
     } finally {
       this.suggestingAll = false;
     }
   }
 
+  // ── Completion ────────────────────────────────────────────────────────
+
   private async handleMarkResolved(): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile) return;
 
-    // Check for remaining conflicts using segment parsing
-    const segments = this.parseOutputSegments();
-    const unresolvedCount = segments.filter(s => s.type === 'conflict').length;
-    if (unresolvedCount > 0) {
-      const proceed = await showConfirm(
-        'Unresolved Conflicts',
-        `There ${unresolvedCount === 1 ? 'is' : 'are'} ${unresolvedCount} unresolved conflict${unresolvedCount === 1 ? '' : 's'}. Are you sure you want to mark this as resolved?`,
-        'warning'
-      );
-      if (!proceed) return;
+    // The button is disabled while conflicts remain; this guard keeps the
+    // invariant even if invoked directly. A file with open conflict blocks
+    // must never be written out (it would re-serialize markers).
+    if (this.conflictCount > 0) {
+      showToast('Resolve all conflict blocks before marking the file resolved', 'warning');
+      return;
     }
 
     const result = await gitService.resolveConflict(
       this.repositoryPath,
       this.conflictFile.path,
-      this.outputContent
+      this.buildResolvedContent()
     );
 
     if (result.success) {
@@ -925,16 +965,8 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
   }
 
-  public getResolvedContent(): string {
-    return this.outputContent;
-  }
-
   private get isBinaryConflict(): boolean {
     return this.conflictFile?.isBinary === true;
-  }
-
-  private get isDeletedSideConflict(): boolean {
-    return !!this.conflictFile && (!this.conflictFile.ours || !this.conflictFile.theirs);
   }
 
   /**
@@ -963,26 +995,115 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
   }
 
-  private renderCodeView(content: string, diffAgainst?: string): ReturnType<typeof html> {
-    const lines = content.split('\n');
-    const compareLines = diffAgainst?.split('\n') ?? [];
+  // ── Scroll synchronization ────────────────────────────────────────────
+
+  /**
+   * The three source panes share identical row geometry (same aligned row
+   * count), so they mirror scrollTop exactly; the output pane has different
+   * content and is synced proportionally.
+   */
+  private handleSourceScroll(e: Event): void {
+    if (this.syncingScroll) return;
+    this.syncingScroll = true;
+
+    const source = e.target as HTMLElement;
+    for (const id of ['panel-ours', 'panel-base', 'panel-theirs']) {
+      const panel = this.shadowRoot?.getElementById(id);
+      if (panel && panel !== source) {
+        panel.scrollTop = source.scrollTop;
+        panel.scrollLeft = source.scrollLeft;
+      }
+    }
+
+    const output = this.shadowRoot?.getElementById('panel-output');
+    if (output) {
+      const sourceMax = source.scrollHeight - source.clientHeight;
+      const ratio = sourceMax > 0 ? source.scrollTop / sourceMax : 0;
+      output.scrollTop = ratio * (output.scrollHeight - output.clientHeight);
+    }
+
+    requestAnimationFrame(() => {
+      this.syncingScroll = false;
+    });
+  }
+
+  private handleOutputScroll(e: Event): void {
+    if (this.syncingScroll) return;
+    this.syncingScroll = true;
+
+    const output = e.target as HTMLElement;
+    const outputMax = output.scrollHeight - output.clientHeight;
+    const ratio = outputMax > 0 ? output.scrollTop / outputMax : 0;
+
+    for (const id of ['panel-ours', 'panel-base', 'panel-theirs']) {
+      const panel = this.shadowRoot?.getElementById(id);
+      if (panel) {
+        panel.scrollTop = ratio * (panel.scrollHeight - panel.clientHeight);
+      }
+    }
+
+    requestAnimationFrame(() => {
+      this.syncingScroll = false;
+    });
+  }
+
+  // ── Change statistics ─────────────────────────────────────────────────
+
+  private getChangeCount(side: 'ours' | 'theirs'): number {
+    let changes = 0;
+    for (const row of this.alignmentRows) {
+      const idx = row[side];
+      if (row.base === null) {
+        if (idx !== null) changes++; // added
+      } else if (idx === null) {
+        changes++; // removed
+      } else {
+        const sideLine = side === 'ours' ? this.oursLines[idx] : this.theirsLines[idx];
+        if (sideLine !== this.baseLines[row.base]) changes++; // modified
+      }
+    }
+    return changes;
+  }
+
+  private getLineCount(content: string): number {
+    return content ? content.split('\n').length : 0;
+  }
+
+  // ── Rendering ─────────────────────────────────────────────────────────
+
+  /** Render one source pane from the shared three-way alignment rows. */
+  private renderAlignedPane(side: 'ours' | 'base' | 'theirs'): ReturnType<typeof html> {
+    const sideLines =
+      side === 'ours' ? this.oursLines : side === 'theirs' ? this.theirsLines : this.baseLines;
 
     return html`
       <div class="code-view">
-        ${lines.map((line, index) => {
-          const compareLine = compareLines[index];
+        ${this.alignmentRows.map((row) => {
+          const idx = row[side];
+          if (idx === null) {
+            // Filler row keeps the panes vertically aligned. When base has a
+            // line here, this side deleted it — show a struck-out filler.
+            const removed = side !== 'base' && row.base !== null;
+            return html`
+              <div class="code-line ${removed ? 'line-removed-filler' : ''}">
+                <span class="line-number"></span>
+                <span class="line-content"></span>
+              </div>
+            `;
+          }
+
+          const line = sideLines[idx];
           let lineClass = '';
           let wsSegments: ReturnType<typeof computeInlineWhitespaceDiff> | null = null;
-
-          if (diffAgainst !== undefined) {
-            if (compareLine === undefined) {
+          if (side !== 'base') {
+            if (row.base === null) {
               lineClass = 'code-addition';
-            } else if (line !== compareLine) {
-              if (isWhitespaceOnlyChange(compareLine, line)) {
+            } else if (line !== this.baseLines[row.base]) {
+              if (isWhitespaceOnlyChange(this.baseLines[row.base], line)) {
                 lineClass = 'code-ws-change';
-                wsSegments = computeInlineWhitespaceDiff(compareLine, line);
+                wsSegments = computeInlineWhitespaceDiff(this.baseLines[row.base], line);
               } else {
-                lineClass = 'line-conflict';
+                lineClass = 'line-changed';
               }
             }
           }
@@ -993,7 +1114,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
           return html`
             <div class="code-line ${lineClass}">
-              <span class="line-number">${index + 1}</span>
+              <span class="line-number">${idx + 1}</span>
               <span class="line-content">${lineContent}</span>
             </div>
           `;
@@ -1002,210 +1123,171 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     `;
   }
 
-  /**
-   * Render an editable code view with line numbers
-   * Uses a synchronized gutter approach for reliable display
-   */
-  private renderEditableCodeView(content: string): ReturnType<typeof html> {
-    const lineCount = content.split('\n').length;
-
+  private renderSegmentEditor(): ReturnType<typeof html> {
+    const rows = Math.min(Math.max(this.editDraft.split('\n').length + 1, 3), 20);
     return html`
-      <div class="editable-code-container">
-        <div class="line-gutter" id="output-gutter">
-          ${Array.from({ length: lineCount }, (_, i) => html`
-            <div class="gutter-line">${i + 1}</div>
-          `)}
-        </div>
+      <div class="segment-editor">
         <textarea
-          class="editable-textarea"
-          .value=${content}
-          @input=${this.handleOutputChange}
-          @scroll=${this.handleTextareaScroll}
+          rows=${rows}
+          .value=${this.editDraft}
+          @input=${this.handleEditDraftInput}
           spellcheck="false"
         ></textarea>
+        <div class="segment-editor-actions">
+          <button class="btn" @click=${this.cancelEditSegment}>Cancel</button>
+          <button class="btn btn-primary" @click=${this.applyEditSegment}>Apply</button>
+        </div>
       </div>
     `;
   }
 
-  private renderOutputVisual(): ReturnType<typeof html> {
-    const segments = this.parseOutputSegments();
-    let lineNum = 1;
-    let lineIdx = 0;
-    let conflictIdx = 0;
+  private renderResolvedSegment(segment: OutputSegment, startLineNum: number): ReturnType<typeof html> {
+    if (this.editingSegmentId === segment.id) {
+      return this.renderSegmentEditor();
+    }
+
+    const originClass = segment.origin ? `resolved-${segment.origin}` : '';
+    const explanation = this.aiExplanations.get(segment.id);
 
     return html`
-      <div class="code-view">
-        ${segments.map((segment) => {
-          if (segment.type === 'resolved') {
-            return html`${segment.lines.map((line) => {
-              const num = lineNum++;
-              const origin = this.lineOrigins.get(lineIdx);
-              lineIdx++;
-              const originClass = origin === 'ours' ? 'resolved-ours'
-                : origin === 'theirs' ? 'resolved-theirs'
-                : origin === 'both' ? 'resolved-both'
-                : '';
-              return html`
-                <div class="code-line ${originClass}">
-                  <span class="line-number">${num}</span>
-                  <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
-                </div>
-              `;
-            })}`;
-          }
-          // Skip conflict marker lines for lineIdx tracking
-          lineIdx += 1 + segment.oursLines.length + 1 + segment.theirsLines.length + 1;
-          // Conflict segment
-          const oursStart = lineNum;
-          const oursEnd = oursStart + segment.oursLines.length;
-          const theirsEnd = oursEnd + segment.theirsLines.length;
-          // Advance lineNum past all conflict content lines
-          lineNum = theirsEnd;
-
-          const currentConflictIdx = conflictIdx++;
-          const isSuggesting = this.suggestingConflict === currentConflictIdx;
-
-          return html`
-            <div class="code-conflict-block">
-              <div class="code-conflict-header">
-                <span>Conflict</span>
-                <div class="code-conflict-header-actions">
-                  <button class="btn btn-ours conflict-pick-btn" @click=${() => this.resolveOutputConflict(currentConflictIdx, 'ours')}>
-                    Use Ours
-                  </button>
-                  <button class="btn btn-theirs conflict-pick-btn" @click=${() => this.resolveOutputConflict(currentConflictIdx, 'theirs')}>
-                    Use Theirs
-                  </button>
-                  <button class="btn btn-both conflict-pick-btn" @click=${() => this.resolveOutputConflict(currentConflictIdx, 'both')}>
-                    Use Both
-                  </button>
-                  ${this.aiAvailable ? html`
-                    <button
-                      class="btn btn-ai conflict-pick-btn"
-                      @click=${() => this.handleSuggestConflict(currentConflictIdx)}
-                      ?disabled=${isSuggesting || this.suggestingAll}
-                    >
-                      ${isSuggesting ? 'AI...' : 'AI Suggest'}
-                    </button>
-                  ` : nothing}
-                </div>
-              </div>
-              <div class="code-conflict-side-ours">
-                <div class="code-conflict-side-label">${segment.oursLabel}</div>
-                ${segment.oursLines.map((line, i) => html`
-                  <div class="code-line">
-                    <span class="line-number">${oursStart + i}</span>
-                    <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
-                  </div>
-                `)}
-              </div>
-              <div class="code-conflict-divider"></div>
-              <div class="code-conflict-side-theirs">
-                <div class="code-conflict-side-label">${segment.theirsLabel}</div>
-                ${segment.theirsLines.map((line, i) => html`
-                  <div class="code-line">
-                    <span class="line-number">${oursEnd + i}</span>
-                    <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
-                  </div>
-                `)}
-              </div>
+      <div class="output-segment ${originClass}">
+        <div class="segment-actions">
+          ${segment.origin && segment.fromConflict
+            ? html`<span class="segment-origin-chip">${ORIGIN_LABELS[segment.origin]}</span>`
+            : nothing}
+          <button
+            class="segment-btn"
+            @click=${() => this.startEditSegment(segment)}
+            title="Edit this section"
+          >
+            Edit
+          </button>
+          ${segment.fromConflict
+            ? html`
+                <button
+                  class="segment-btn"
+                  @click=${() => this.resetSegment(segment.id)}
+                  title="Undo this resolution and reopen the conflict"
+                >
+                  Reset
+                </button>
+              `
+            : nothing}
+        </div>
+        ${segment.lines.map(
+          (line, i) => html`
+            <div class="code-line">
+              <span class="line-number">${startLineNum + i}</span>
+              <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
             </div>
-          `;
-        })}
-        ${this.conflictSuggestions.size > 0 ? html`
-          <div class="ai-explanation">
-            ${Array.from(this.conflictSuggestions.values())
-              .filter(s => s.explanation)
-              .map(s => html`<div>${s.explanation}</div>`)}
-          </div>
-        ` : nothing}
+          `
+        )}
+        ${explanation ? html`<div class="ai-explanation">${explanation}</div>` : nothing}
       </div>
     `;
   }
 
-  private resolveOutputConflict(segmentIndex: number, choice: 'ours' | 'theirs' | 'both'): void {
-    const segments = this.parseOutputSegments();
+  private renderConflictSegment(segment: OutputSegment): ReturnType<typeof html> {
+    if (this.editingSegmentId === segment.id) {
+      return this.renderSegmentEditor();
+    }
 
-    const resultLines: string[] = [];
-    let conflictIdx = 0;
+    const labels = SIDE_LABELS[this.operationType] ?? SIDE_LABELS.merge;
+    const isSuggesting = this.suggestingSegment === segment.id;
 
-    for (const segment of segments) {
-      if (segment.type === 'resolved') {
-        resultLines.push(...segment.lines);
-      } else {
-        if (conflictIdx === segmentIndex) {
-          if (choice === 'ours' || choice === 'both') {
-            resultLines.push(...segment.oursLines);
+    const renderSide = (lines: string[]) =>
+      lines.length === 0 || (lines.length === 1 && lines[0] === '')
+        ? html`<div class="conflict-side-empty">(no content on this side)</div>`
+        : lines.map(
+            (line) => html`
+              <div class="code-line">
+                <span class="line-number"></span>
+                <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
+              </div>
+            `
+          );
+
+    return html`
+      <div class="code-conflict-block">
+        <div class="code-conflict-header">
+          <span>Conflict</span>
+          <div class="code-conflict-header-actions">
+            <button
+              class="btn btn-ours conflict-pick-btn"
+              @click=${() => this.resolveConflictSegment(segment.id, 'ours')}
+            >
+              Use Ours
+            </button>
+            <button
+              class="btn btn-theirs conflict-pick-btn"
+              @click=${() => this.resolveConflictSegment(segment.id, 'theirs')}
+            >
+              Use Theirs
+            </button>
+            <button
+              class="btn btn-both conflict-pick-btn"
+              @click=${() => this.resolveConflictSegment(segment.id, 'both')}
+            >
+              Use Both
+            </button>
+            <button
+              class="btn conflict-pick-btn"
+              @click=${() => this.startEditSegment(segment)}
+              title="Write this section by hand (starts from both sides)"
+            >
+              Edit
+            </button>
+            ${this.aiAvailable
+              ? html`
+                  <button
+                    class="btn btn-ai conflict-pick-btn"
+                    @click=${() => this.handleSuggestSegment(segment.id)}
+                    ?disabled=${isSuggesting || this.suggestingAll}
+                  >
+                    ${isSuggesting ? 'AI...' : 'AI Suggest'}
+                  </button>
+                `
+              : nothing}
+          </div>
+        </div>
+        <div class="conflict-sides">
+          <div class="code-conflict-side-ours">
+            <div class="code-conflict-side-label">${labels.ours}</div>
+            ${renderSide(segment.oursLines)}
+          </div>
+          <div class="code-conflict-divider"></div>
+          <div class="code-conflict-side-theirs">
+            <div class="code-conflict-side-label">${labels.theirs}</div>
+            ${renderSide(segment.theirsLines)}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderOutput(): ReturnType<typeof html> {
+    if (this.loadFailed) {
+      return html`
+        <div class="output-error">
+          <div>Could not read the merged file from the working directory.</div>
+          <button class="btn btn-primary" @click=${this.handleReload}>Retry</button>
+        </div>
+      `;
+    }
+
+    let lineNum = 1;
+    return html`
+      <div class="code-view">
+        ${this.segments.map((segment) => {
+          if (segment.type === 'resolved') {
+            const startLineNum = lineNum;
+            lineNum += segment.lines.length;
+            return this.renderResolvedSegment(segment, startLineNum);
           }
-          if (choice === 'theirs' || choice === 'both') {
-            resultLines.push(...segment.theirsLines);
-          }
-        } else {
-          // Keep conflict markers for unresolved conflicts
-          resultLines.push(`<<<<<<< ${segment.oursLabel}`);
-          resultLines.push(...segment.oursLines);
-          resultLines.push('=======');
-          resultLines.push(...segment.theirsLines);
-          resultLines.push(`>>>>>>> ${segment.theirsLabel}`);
-        }
-        conflictIdx++;
-      }
-    }
-
-    this.outputContent = resultLines.join('\n');
-    this.computeLineOrigins();
-  }
-
-  private toggleOutputEditMode(): void {
-    this.outputEditMode = this.outputEditMode === 'visual' ? 'raw' : 'visual';
-  }
-
-  /**
-   * Sync scroll position from the output panel to all source panels.
-   * Uses scroll percentage to handle panels with different content heights.
-   */
-  private handleOutputScroll(e: Event): void {
-    const output = e.target as HTMLElement;
-    const scrollRatio = output.scrollHeight > output.clientHeight
-      ? output.scrollTop / (output.scrollHeight - output.clientHeight)
-      : 0;
-
-    const panelIds = ['panel-ours', 'panel-base', 'panel-theirs'];
-    for (const id of panelIds) {
-      const panel = this.shadowRoot?.getElementById(id);
-      if (panel) {
-        const maxScroll = panel.scrollHeight - panel.clientHeight;
-        panel.scrollTop = scrollRatio * maxScroll;
-      }
-    }
-  }
-
-  /**
-   * Sync scroll position between textarea and line gutter
-   */
-  private handleTextareaScroll(e: Event): void {
-    const textarea = e.target as HTMLTextAreaElement;
-    const gutter = this.shadowRoot?.getElementById('output-gutter');
-    if (gutter) {
-      gutter.scrollTop = textarea.scrollTop;
-    }
-  }
-
-  private getLineCount(content: string): number {
-    return content ? content.split('\n').length : 0;
-  }
-
-  private getDiffCount(content: string, base: string): number {
-    const lines = content.split('\n');
-    const baseLines = base.split('\n');
-    let diffs = 0;
-
-    const maxLen = Math.max(lines.length, baseLines.length);
-    for (let i = 0; i < maxLen; i++) {
-      if (lines[i] !== baseLines[i]) diffs++;
-    }
-
-    return diffs;
+          return this.renderConflictSegment(segment);
+        })}
+      </div>
+    `;
   }
 
   private renderBinaryConflict(): ReturnType<typeof html> {
@@ -1254,10 +1336,8 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       return this.renderBinaryConflict();
     }
 
-    const oursChanges = this.getDiffCount(this.oursContent, this.baseContent);
-    const theirsChanges = this.getDiffCount(this.theirsContent, this.baseContent);
-    const outputSegments = this.parseOutputSegments();
-    const conflictCount = outputSegments.filter(s => s.type === 'conflict').length;
+    const labels = SIDE_LABELS[this.operationType] ?? SIDE_LABELS.merge;
+    const conflictCount = this.conflictCount;
 
     return html`
       <div class="toolbar">
@@ -1273,6 +1353,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               ${this.launchingExternalTool ? 'Waiting for tool...' : 'External Tool'}
             </button>
           ` : nothing}
+          <button
+            class="btn"
+            @click=${this.handleReload}
+            title="Reload the file from disk, discarding resolutions made here"
+          >
+            Reload
+          </button>
           <button class="btn" @click=${this.handleAcceptBase} title="Reset to common ancestor">
             Use Base
           </button>
@@ -1280,27 +1367,34 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             ? html`<button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} title="Ours deleted this file — keep it deleted">
                 Use Ours (delete file)
               </button>`
-            : html`<button class="btn btn-ours" @click=${this.handleAcceptOurs} title="Use entire file from current branch">
+            : html`<button class="btn btn-ours" @click=${this.handleAcceptOurs} title="Use entire file from ${labels.ours}">
                 Use Ours
               </button>`}
           ${this.conflictFile && !this.conflictFile.theirs
             ? html`<button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} title="Theirs deleted this file — delete it">
                 Use Theirs (delete file)
               </button>`
-            : html`<button class="btn btn-theirs" @click=${this.handleAcceptTheirs} title="Use entire file from incoming branch">
+            : html`<button class="btn btn-theirs" @click=${this.handleAcceptTheirs} title="Use entire file from ${labels.theirs}">
                 Use Theirs
               </button>`}
-          ${this.aiAvailable ? html`
+          ${this.aiAvailable && conflictCount > 0 ? html`
             <button
               class="btn btn-ai"
               @click=${this.handleAiResolveAll}
-              ?disabled=${this.suggestingAll || this.suggestingConflict !== null}
+              ?disabled=${this.suggestingAll || this.suggestingSegment !== null}
               title="Use AI to resolve all remaining conflicts"
             >
               ${this.suggestingAll ? 'AI Resolving...' : 'AI Resolve All'}
             </button>
           ` : nothing}
-          <button class="btn btn-primary" @click=${this.handleMarkResolved}>
+          <button
+            class="btn btn-primary"
+            @click=${this.handleMarkResolved}
+            ?disabled=${conflictCount > 0 || this.loadFailed}
+            title=${conflictCount > 0
+              ? `Resolve the remaining ${conflictCount} conflict${conflictCount === 1 ? '' : 's'} first`
+              : 'Stage this file as resolved'}
+          >
             Mark Resolved
           </button>
         </div>
@@ -1310,14 +1404,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         <div class="source-panels">
           <div class="editor-panel">
             <div class="panel-header ours">
-              Ours (Current Branch)
-              <span class="panel-stats">${oursChanges} changes from base</span>
-              <button class="panel-header-btn" @click=${this.handleAcceptOursPanel} title="Use this version">
+              ${labels.ours}
+              <span class="panel-stats">${this.getChangeCount('ours')} changes from base</span>
+              <button class="panel-header-btn" @click=${this.handleAcceptOurs} title="Use this version">
                 Use
               </button>
             </div>
-            <div class="panel-content readonly" id="panel-ours">
-              ${this.renderCodeView(this.oursContent, this.baseContent)}
+            <div class="panel-content readonly" id="panel-ours" @scroll=${this.handleSourceScroll}>
+              ${this.renderAlignedPane('ours')}
             </div>
           </div>
 
@@ -1326,21 +1420,21 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               Base (Common Ancestor)
               <span class="panel-stats">${this.getLineCount(this.baseContent)} lines</span>
             </div>
-            <div class="panel-content readonly" id="panel-base">
-              ${this.renderCodeView(this.baseContent)}
+            <div class="panel-content readonly" id="panel-base" @scroll=${this.handleSourceScroll}>
+              ${this.renderAlignedPane('base')}
             </div>
           </div>
 
           <div class="editor-panel">
             <div class="panel-header theirs">
-              Theirs (Incoming)
-              <span class="panel-stats">${theirsChanges} changes from base</span>
-              <button class="panel-header-btn" @click=${this.handleAcceptTheirsPanel} title="Use this version">
+              ${labels.theirs}
+              <span class="panel-stats">${this.getChangeCount('theirs')} changes from base</span>
+              <button class="panel-header-btn" @click=${this.handleAcceptTheirs} title="Use this version">
                 Use
               </button>
             </div>
-            <div class="panel-content readonly" id="panel-theirs">
-              ${this.renderCodeView(this.theirsContent, this.baseContent)}
+            <div class="panel-content readonly" id="panel-theirs" @scroll=${this.handleSourceScroll}>
+              ${this.renderAlignedPane('theirs')}
             </div>
           </div>
         </div>
@@ -1351,18 +1445,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             ${conflictCount > 0
               ? html`<span class="conflict-count">${conflictCount} conflict${conflictCount === 1 ? '' : 's'} remaining</span>`
               : html`<span class="conflict-count">No conflicts</span>`}
-            <button class="panel-header-btn output-mode-toggle" @click=${this.toggleOutputEditMode}>
-              ${this.outputEditMode === 'visual' ? 'Raw Edit' : 'Visual'}
-            </button>
           </div>
-          <div
-            class="panel-content${this.outputEditMode === 'visual' ? ' readonly' : ''}"
-            id="panel-output"
-            @scroll=${this.handleOutputScroll}
-          >
-            ${this.outputEditMode === 'visual'
-              ? this.renderOutputVisual()
-              : this.renderEditableCodeView(this.outputContent)}
+          <div class="panel-content" id="panel-output" @scroll=${this.handleOutputScroll}>
+            ${this.renderOutput()}
           </div>
         </div>
       </div>

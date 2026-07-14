@@ -4,13 +4,12 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state, query } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
 import type { CommandResult } from '../../types/api.types.ts';
-import type { LvMergeEditor } from '../panels/lv-merge-editor.ts';
 import '../panels/lv-merge-editor.ts';
 
 /**
@@ -173,6 +172,15 @@ export class LvConflictResolutionDialog extends LitElement {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+
+      /* Directory hint so same-named files in different folders are distinguishable */
+      .file-dir {
+        display: block;
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .editor-container {
@@ -379,8 +387,6 @@ export class LvConflictResolutionDialog extends LitElement {
   @state() private launchingExternalTool: string | null = null;
   @state() private detectedMergeTool: string | null = null;
 
-  @query('lv-merge-editor') private mergeEditor?: LvMergeEditor;
-
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
@@ -425,11 +431,11 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   };
 
-  async show(): Promise<void> {
+  show(): void {
+    // updated() reacts to the open transition: it resets per-run state
+    // (including the committed-merge markers) and loads the conflicts.
+    // Doing any of that here would run it twice and race the loads.
     this.open = true;
-    this.resolvedFiles = new Set();
-    this.selectedIndex = 0;
-    await this.loadConflicts();
   }
 
   private close(): void {
@@ -564,12 +570,15 @@ export class LvConflictResolutionDialog extends LitElement {
     this.resolvedFiles = new Set([...this.resolvedFiles, file.path]);
     this.requestUpdate();
 
-    // Move to next unresolved file
-    const nextUnresolved = this.conflicts.findIndex(
-      (c, i) => i > this.selectedIndex && !this.resolvedFiles.has(c.path)
-    );
-    if (nextUnresolved !== -1) {
-      this.selectedIndex = nextUnresolved;
+    // Move to the next unresolved file, wrapping around so files skipped
+    // earlier in the list are still reachable.
+    const total = this.conflicts.length;
+    for (let offset = 1; offset < total; offset++) {
+      const i = (this.selectedIndex + offset) % total;
+      if (!this.resolvedFiles.has(this.conflicts[i].path)) {
+        this.selectedIndex = i;
+        return;
+      }
     }
   }
 
@@ -651,6 +660,7 @@ export class LvConflictResolutionDialog extends LitElement {
           // When the conflict LOAD failed, the local list is empty but the index
           // is genuinely conflicted — re-fetch so Abort restores the real paths
           // instead of no-opping with a false success message.
+          let restoredCount = 0;
           let conflictPaths = this.conflicts.map((c) => c.path);
           if (this.loadFailed) {
             const refetch = await gitService.getConflicts(this.repositoryPath);
@@ -673,18 +683,21 @@ export class LvConflictResolutionDialog extends LitElement {
             result = unstageResult.success
               ? await gitService.discardChanges(this.repositoryPath, conflictPaths)
               : unstageResult;
+            if (result.success) restoredCount = conflictPaths.length;
+          }
+          if (result.success) {
+            showToast(
+              restoredCount === 0
+                ? 'Nothing needed restoring — your changes remain in the stash'
+                : 'Conflicted files restored — your changes remain in the stash',
+              'info',
+            );
           }
           break;
         }
       }
 
       if (result.success) {
-        if (this.operationType === 'stash') {
-          showToast(
-            'Conflicted files restored — your changes remain in the stash',
-            'info',
-          );
-        }
         if (this.operationType === 'merge' && this.priorFinishCommitLanded) {
           // Only the in-progress develop merge was rolled back — the master
           // merge and version tag from this finish are already committed.
@@ -1005,7 +1018,7 @@ export class LvConflictResolutionDialog extends LitElement {
               Resolve ${this.getOperationTitle()} Conflicts
             </div>
             <div class="header-subtitle">
-              ${this.resolvedCount} of ${this.totalCount} conflicts resolved
+              ${this.resolvedCount} of ${this.totalCount} file${this.totalCount === 1 ? '' : 's'} resolved
             </div>
           </div>
           <div class="header-actions">
@@ -1055,6 +1068,9 @@ export class LvConflictResolutionDialog extends LitElement {
                       </span>
                       <span class="file-name" title=${conflict.path}>
                         ${conflict.path.split('/').pop()}
+                        ${conflict.path.includes('/')
+                          ? html`<span class="file-dir">${conflict.path.slice(0, conflict.path.lastIndexOf('/'))}</span>`
+                          : nothing}
                       </span>
                       ${this.hasMergeTool && !this.resolvedFiles.has(conflict.path) ? html`
                         <button
@@ -1078,6 +1094,7 @@ export class LvConflictResolutionDialog extends LitElement {
                   <lv-merge-editor
                     .repositoryPath=${this.repositoryPath}
                     .conflictFile=${this.selectedConflict}
+                    .operationType=${this.operationType}
                     @conflict-resolved=${this.handleConflictResolved}
                   ></lv-merge-editor>
                 `

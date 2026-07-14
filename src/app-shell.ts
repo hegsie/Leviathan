@@ -901,16 +901,20 @@ export class AppShell extends LitElement {
     }>;
     if (customEvent.detail?.operationType) {
       this.conflictOperationType = customEvent.detail.operationType;
+      // Thread stash-completion semantics so the dialog drops the correct entry
+      // (and only when the failed operation had pop semantics).
+      this.conflictStashIndex = customEvent.detail?.stashIndex ?? 0;
+      this.conflictDropStashOnComplete = customEvent.detail?.dropStashOnComplete ?? true;
+      // A squash finish that conflicted must complete as a squash, not a merge commit.
+      this.conflictSquashMerge = customEvent.detail?.squash ?? false;
+      // A conflicted git-flow finish carries the context to complete the finish.
+      this.conflictGitflowFinish = customEvent.detail?.gitflowFinish ?? null;
+      this.showConflictDialog = true;
+    } else {
+      // No context provided (e.g. the diff view's "Open Merge Editor" button):
+      // derive the operation from repository state instead.
+      this.openConflictDialogFromState();
     }
-    // Thread stash-completion semantics so the dialog drops the correct entry
-    // (and only when the failed operation had pop semantics).
-    this.conflictStashIndex = customEvent.detail?.stashIndex ?? 0;
-    this.conflictDropStashOnComplete = customEvent.detail?.dropStashOnComplete ?? true;
-    // A squash finish that conflicted must complete as a squash, not a merge commit.
-    this.conflictSquashMerge = customEvent.detail?.squash ?? false;
-    // A conflicted git-flow finish carries the context to complete the finish.
-    this.conflictGitflowFinish = customEvent.detail?.gitflowFinish ?? null;
-    this.showConflictDialog = true;
     this.handleRefresh();
   };
 
@@ -1395,9 +1399,8 @@ export class AppShell extends LitElement {
       // Auto-stash is pop semantics: the conflicted auto-stash sits at index 0 and
       // must be dropped once its changes are applied and resolved.
       this.conflictOperationType = 'stash';
-      this.conflictStashIndex = 0;
+      this.resetConflictDetailState();
       this.conflictDropStashOnComplete = true;
-      this.conflictSquashMerge = false;
       this.showConflictDialog = true;
       this.handleRefresh();
     } else if (data.stashed && data.stashApplied) {
@@ -1565,22 +1568,45 @@ export class AppShell extends LitElement {
     return ['cherrypick', 'merge', 'rebase', 'rebase-interactive', 'rebase-merge', 'revert'].includes(state);
   }
 
-  private handleOpenConflictDialog(): void {
+  /** True when the working tree has unmerged (conflicted) files. */
+  private get hasConflictedFiles(): boolean {
+    return (this.activeRepository?.status ?? []).some((f) => f.isConflicted);
+  }
+
+  /**
+   * Derive which operation the current index conflicts belong to from the
+   * repository state. A clean state with conflicted files means a stash apply
+   * conflicted — the only conflict source that leaves no in-progress state.
+   */
+  private deriveConflictOperationType(): 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' {
+    const state = this.activeRepository?.repository.state ?? 'clean';
+    if (state === 'cherrypick') return 'cherry-pick';
+    if (state === 'rebase' || state === 'rebase-interactive' || state === 'rebase-merge') return 'rebase';
+    if (state === 'revert') return 'revert';
+    if (state === 'merge') return 'merge';
+    return 'stash';
+  }
+
+  /**
+   * Open the conflict dialog with the operation derived from repository state.
+   * Used when the trigger carries no operation context (banner button, diff
+   * view redirect, conflicted-file click).
+   */
+  private openConflictDialogFromState(): void {
     if (!this.activeRepository) return;
 
-    const state = this.activeRepository.repository.state;
-    if (state === 'cherrypick') {
-      this.conflictOperationType = 'cherry-pick';
-    } else if (state === 'merge') {
-      this.conflictOperationType = 'merge';
-    } else if (state === 'rebase' || state === 'rebase-interactive' || state === 'rebase-merge') {
-      this.conflictOperationType = 'rebase';
-    } else if (state === 'revert') {
-      this.conflictOperationType = 'revert';
-    }
-
+    this.conflictOperationType = this.deriveConflictOperationType();
     this.resetConflictDetailState();
+    // A state-derived stash conflict has unknown pop semantics — never drop a
+    // stash entry we can't identify. Completing keeps the stash (safe).
+    if (this.conflictOperationType === 'stash') {
+      this.conflictDropStashOnComplete = false;
+    }
     this.showConflictDialog = true;
+  }
+
+  private handleOpenConflictDialog(): void {
+    this.openConflictDialogFromState();
   }
 
   private async handleRevertCommit(): Promise<void> {
@@ -2041,6 +2067,12 @@ export class AppShell extends LitElement {
   }
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry; isPartiallyStaged?: boolean }>): void {
+    // A conflicted file is resolved in the merge editor, never shown as a raw
+    // diff — its working-tree content is git's conflict-marker text.
+    if (e.detail.file.isConflicted) {
+      this.openConflictDialogFromState();
+      return;
+    }
     // Close blame if open
     this.showBlame = false;
     this.blameFile = null;
@@ -3153,7 +3185,7 @@ export class AppShell extends LitElement {
               ` : ''}
 
               <main id="main-content" class="center-panel" tabindex="-1">
-                ${this.activeRepository.repository.state !== 'clean'
+                ${this.activeRepository.repository.state !== 'clean' || this.hasConflictedFiles
                   ? html`
                       <div class="operation-banner ${this.activeRepository.repository.state}">
                         <span class="operation-icon">
@@ -3171,19 +3203,25 @@ export class AppShell extends LitElement {
                             this.activeRepository.repository.state === 'rebase-merge' ? 'Rebase in progress' :
                             this.activeRepository.repository.state === 'revert' ? 'Revert in progress' :
                             this.activeRepository.repository.state === 'bisect' ? 'Bisect in progress' :
+                            this.activeRepository.repository.state === 'clean' ? 'Stash conflicts need resolution' :
                             `Operation in progress: ${this.activeRepository.repository.state}`}
                         </span>
                         <div class="operation-banner-actions">
-                          ${this.canResolveConflicts(this.activeRepository.repository.state)
+                          ${this.canResolveConflicts(this.activeRepository.repository.state) ||
+                          (this.activeRepository.repository.state === 'clean' && this.hasConflictedFiles)
                             ? html`
                                 <button class="operation-btn operation-btn-primary" @click=${this.handleOpenConflictDialog}>
                                   Resolve Conflicts
                                 </button>
                               `
                             : ''}
-                          <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
-                            Abort
-                          </button>
+                          ${this.activeRepository.repository.state !== 'clean'
+                            ? html`
+                                <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
+                                  Abort
+                                </button>
+                              `
+                            : ''}
                         </div>
                       </div>
                     `

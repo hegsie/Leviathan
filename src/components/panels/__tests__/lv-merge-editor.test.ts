@@ -1,8 +1,10 @@
 /**
  * Tests for lv-merge-editor component
  *
- * Tests merge editor core logic: auto-merge, conflict parsing,
- * accept ours/theirs/base, conflict resolution, and edit modes.
+ * Tests the structured no-markers merge editor: segment parsing, per-block
+ * resolution (ours/theirs/both/edit/reset), whole-file strategies, pane
+ * alignment, AI resolution, mark-resolved gating, and the invariant that raw
+ * conflict markers never appear in the rendered UI.
  */
 
 // ── Tauri mock (must be set before any imports) ────────────────────────────
@@ -29,6 +31,11 @@ import type { ConflictFile } from '../../../types/git.types.ts';
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
 
+const MARKER_CHARS = ['<<<<<<<', '=======', '>>>>>>>', '|||||||'];
+
+const DEFAULT_WORKDIR_CONTENT =
+  'line1\n<<<<<<< HEAD\nline2-ours\n=======\nline2-theirs\n>>>>>>> feature\nline3';
+
 function makeConflictFile(path: string): ConflictFile {
   return {
     path,
@@ -39,8 +46,42 @@ function makeConflictFile(path: string): ConflictFile {
   };
 }
 
+interface OutputSegmentShape {
+  id: number;
+  type: 'resolved' | 'conflict';
+  lines: string[];
+  oursLines: string[];
+  theirsLines: string[];
+  oursLabel: string;
+  theirsLabel: string;
+  origin: string | null;
+  fromConflict: boolean;
+}
+
+interface EditorInternal {
+  conflictFile: ConflictFile | null;
+  baseContent: string;
+  oursContent: string;
+  theirsContent: string;
+  segments: OutputSegmentShape[];
+  loading: boolean;
+  loadFailed: boolean;
+  aiAvailable: boolean;
+  parseSegments: (text: string) => OutputSegmentShape[];
+  loadContents: () => Promise<void>;
+  handleMarkResolved: () => Promise<void>;
+  handleAiResolveAll: () => Promise<void>;
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
+let workdirContent: string | (() => Promise<unknown>) = DEFAULT_WORKDIR_CONTENT;
+let aiAvailable = false;
+let aiSuggestion: (() => Promise<unknown>) | null = null;
+
 function setupDefaultMocks(): void {
+  workdirContent = DEFAULT_WORKDIR_CONTENT;
+  aiAvailable = false;
+  aiSuggestion = null;
   mockInvoke = async (command: string, args?: unknown) => {
     switch (command) {
       case 'get_blob_content': {
@@ -51,12 +92,15 @@ function setupDefaultMocks(): void {
         return '';
       }
       case 'read_file_content':
-        // Working directory file with conflict markers
-        return 'line1\n<<<<<<< HEAD\nline2-ours\n=======\nline2-theirs\n>>>>>>> feature\nline3';
+        if (typeof workdirContent === 'function') return workdirContent();
+        return workdirContent;
       case 'get_merge_tool_config':
         return null;
       case 'is_ai_available':
-        return false;
+        return aiAvailable;
+      case 'suggest_conflict_resolution':
+        if (aiSuggestion) return aiSuggestion();
+        return { resolvedContent: 'ai-resolved', explanation: 'merged by ai' };
       case 'resolve_conflict':
         return { success: true };
       default:
@@ -72,6 +116,43 @@ async function renderEditor(): Promise<LvMergeEditor> {
     ></lv-merge-editor>
   `);
   return el;
+}
+
+/** Render the editor and load a conflict file through the real load path. */
+async function renderLoadedEditor(path = 'src/test.ts'): Promise<LvMergeEditor> {
+  const el = await renderEditor();
+  const internal = el as unknown as EditorInternal;
+  internal.conflictFile = makeConflictFile(path);
+  await el.updateComplete;
+  // loadContents runs from updated(); wait for it to settle.
+  await new Promise((r) => setTimeout(r, 50));
+  await el.updateComplete;
+  return el;
+}
+
+function internalOf(el: LvMergeEditor): EditorInternal {
+  return el as unknown as EditorInternal;
+}
+
+function shadowText(el: LvMergeEditor): string {
+  return el.shadowRoot!.textContent ?? '';
+}
+
+function expectNoMarkers(el: LvMergeEditor): void {
+  const text = shadowText(el);
+  for (const marker of MARKER_CHARS) {
+    expect(text, `UI must never contain "${marker}"`).to.not.include(marker);
+  }
+}
+
+function findConflictButton(el: LvMergeEditor, label: string): HTMLButtonElement {
+  const block = el.shadowRoot!.querySelector('.code-conflict-block');
+  expect(block, 'conflict block rendered').to.not.be.null;
+  const btn = Array.from(block!.querySelectorAll('button')).find(
+    (b) => b.textContent?.trim() === label
+  );
+  expect(btn, `conflict button "${label}"`).to.not.be.undefined;
+  return btn as HTMLButtonElement;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -96,143 +177,32 @@ describe('lv-merge-editor', () => {
       expect(empty!.textContent).to.include('Select a file');
     });
 
-    it('renders toolbar when conflict file is set', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        conflictFile: ConflictFile;
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        outputContent: string;
-        loading: boolean;
-      };
-      internal.conflictFile = makeConflictFile('src/test.ts');
-      internal.baseContent = 'base';
-      internal.oursContent = 'ours';
-      internal.theirsContent = 'theirs';
-      internal.outputContent = 'output';
-      internal.loading = false;
-      await el.updateComplete;
-
-      const toolbar = el.shadowRoot!.querySelector('.toolbar');
-      expect(toolbar).to.exist;
+    it('renders toolbar and panes when a conflict file loads', async () => {
+      const el = await renderLoadedEditor();
+      expect(el.shadowRoot!.querySelector('.toolbar')).to.exist;
+      expect(el.shadowRoot!.querySelector('#panel-ours')).to.exist;
+      expect(el.shadowRoot!.querySelector('#panel-base')).to.exist;
+      expect(el.shadowRoot!.querySelector('#panel-theirs')).to.exist;
+      expect(el.shadowRoot!.querySelector('#panel-output')).to.exist;
     });
 
-    it('renders loading state initially', async () => {
-      const el = await renderEditor();
-      // Without conflictFile, it shouldn't be in loading state
-      const internal = el as unknown as { loading: boolean };
-      expect(internal.loading).to.be.false;
+    it('never renders raw conflict markers even though the file has them', async () => {
+      const el = await renderLoadedEditor();
+      expect(internalOf(el).segments.some((s) => s.type === 'conflict')).to.be.true;
+      expectNoMarkers(el);
+    });
+
+    it('shows the remaining conflict count', async () => {
+      const el = await renderLoadedEditor();
+      expect(shadowText(el)).to.include('1 conflict remaining');
     });
   });
 
-  // ── performAutoMerge ───────────────────────────────────────────────────
-  describe('performAutoMerge', () => {
-    it('merges when both sides agree', async () => {
+  // ── parseSegments ────────────────────────────────────────────────────
+  describe('parseSegments', () => {
+    it('parses content without conflicts as a single resolved segment', async () => {
       const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        performAutoMerge: () => string;
-      };
-
-      internal.baseContent = 'line1\nline2';
-      internal.oursContent = 'line1\nline2';
-      internal.theirsContent = 'line1\nline2';
-
-      const result = internal.performAutoMerge();
-      expect(result).to.equal('line1\nline2');
-    });
-
-    it('takes theirs when only theirs changed', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        performAutoMerge: () => string;
-      };
-
-      internal.baseContent = 'old line';
-      internal.oursContent = 'old line';
-      internal.theirsContent = 'new line';
-
-      const result = internal.performAutoMerge();
-      expect(result).to.equal('new line');
-    });
-
-    it('takes ours when only ours changed', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        performAutoMerge: () => string;
-      };
-
-      internal.baseContent = 'old line';
-      internal.oursContent = 'our change';
-      internal.theirsContent = 'old line';
-
-      const result = internal.performAutoMerge();
-      expect(result).to.equal('our change');
-    });
-
-    it('produces conflict markers when both sides changed differently', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        performAutoMerge: () => string;
-      };
-
-      internal.baseContent = 'original';
-      internal.oursContent = 'our version';
-      internal.theirsContent = 'their version';
-
-      const result = internal.performAutoMerge();
-      expect(result).to.include('<<<<<<< OURS');
-      expect(result).to.include('our version');
-      expect(result).to.include('=======');
-      expect(result).to.include('their version');
-      expect(result).to.include('>>>>>>> THEIRS');
-    });
-
-    it('handles different-length files', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        performAutoMerge: () => string;
-      };
-
-      internal.baseContent = 'line1\nline2';
-      internal.oursContent = 'line1\nline2\nline3-ours';
-      internal.theirsContent = 'line1\nline2';
-
-      const result = internal.performAutoMerge();
-      expect(result).to.include('line1');
-      expect(result).to.include('line2');
-      // Third line: ours added, theirs is empty, base is empty, both different from base
-      // Since ours != theirs and both differ from base (which is empty), it'll be a conflict or auto-resolved
-    });
-  });
-
-  // ── parseOutputSegments ────────────────────────────────────────────────
-  describe('parseOutputSegments', () => {
-    it('parses content without conflicts as single resolved segment', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        parseOutputSegments: () => Array<{ type: string; lines: string[] }>;
-      };
-
-      internal.outputContent = 'line1\nline2\nline3';
-
-      const segments = internal.parseOutputSegments();
+      const segments = internalOf(el).parseSegments('line1\nline2\nline3');
       expect(segments.length).to.equal(1);
       expect(segments[0].type).to.equal('resolved');
       expect(segments[0].lines).to.deep.equal(['line1', 'line2', 'line3']);
@@ -240,492 +210,539 @@ describe('lv-merge-editor', () => {
 
     it('parses content with one conflict', async () => {
       const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        parseOutputSegments: () => Array<{
-          type: string;
-          lines: string[];
-          oursLines: string[];
-          theirsLines: string[];
-          oursLabel: string;
-          theirsLabel: string;
-        }>;
-      };
-
-      internal.outputContent = 'before\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\nafter';
-
-      const segments = internal.parseOutputSegments();
-      expect(segments.length).to.equal(3);
-
-      expect(segments[0].type).to.equal('resolved');
-      expect(segments[0].lines).to.deep.equal(['before']);
-
-      expect(segments[1].type).to.equal('conflict');
-      expect(segments[1].oursLines).to.deep.equal(['ours']);
-      expect(segments[1].theirsLines).to.deep.equal(['theirs']);
-      expect(segments[1].oursLabel).to.equal('HEAD');
-      expect(segments[1].theirsLabel).to.equal('feature');
-
-      expect(segments[2].type).to.equal('resolved');
-      expect(segments[2].lines).to.deep.equal(['after']);
+      const segments = internalOf(el).parseSegments(DEFAULT_WORKDIR_CONTENT);
+      expect(segments.map((s) => s.type)).to.deep.equal(['resolved', 'conflict', 'resolved']);
+      expect(segments[1].oursLines).to.deep.equal(['line2-ours']);
+      expect(segments[1].theirsLines).to.deep.equal(['line2-theirs']);
     });
 
     it('parses multiple conflicts', async () => {
       const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        parseOutputSegments: () => Array<{ type: string }>;
-      };
-
-      internal.outputContent = [
-        'top',
-        '<<<<<<< HEAD',
-        'ours1',
-        '=======',
-        'theirs1',
-        '>>>>>>> branch',
-        'middle',
-        '<<<<<<< HEAD',
-        'ours2',
-        '=======',
-        'theirs2',
-        '>>>>>>> branch',
-        'bottom',
+      const text = [
+        'a',
+        '<<<<<<< HEAD', 'b-ours', '=======', 'b-theirs', '>>>>>>> other',
+        'c',
+        '<<<<<<< HEAD', 'd-ours', '=======', 'd-theirs', '>>>>>>> other',
+        'e',
       ].join('\n');
-
-      const segments = internal.parseOutputSegments();
-      const conflictCount = segments.filter(s => s.type === 'conflict').length;
-      expect(conflictCount).to.equal(2);
+      const segments = internalOf(el).parseSegments(text);
+      expect(segments.filter((s) => s.type === 'conflict').length).to.equal(2);
     });
 
     it('extracts labels from conflict markers', async () => {
       const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        parseOutputSegments: () => Array<{
-          type: string;
-          oursLabel: string;
-          theirsLabel: string;
-        }>;
-      };
-
-      internal.outputContent = '<<<<<<< my-branch\nours\n=======\ntheirs\n>>>>>>> other-branch';
-
-      const segments = internal.parseOutputSegments();
-      const conflict = segments.find(s => s.type === 'conflict')!;
-      expect(conflict.oursLabel).to.equal('my-branch');
-      expect(conflict.theirsLabel).to.equal('other-branch');
+      const segments = internalOf(el).parseSegments(
+        '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature/x'
+      );
+      expect(segments[0].oursLabel).to.equal('HEAD');
+      expect(segments[0].theirsLabel).to.equal('feature/x');
     });
 
     it('defaults to OURS/THEIRS when labels are missing', async () => {
       const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        parseOutputSegments: () => Array<{
-          type: string;
-          oursLabel: string;
-          theirsLabel: string;
-        }>;
-      };
-
-      internal.outputContent = '<<<<<<< \nours\n=======\ntheirs\n>>>>>>> ';
-
-      const segments = internal.parseOutputSegments();
-      const conflict = segments.find(s => s.type === 'conflict')!;
-      // Empty labels default based on implementation
-      expect(conflict.oursLabel).to.not.be.undefined;
-      expect(conflict.theirsLabel).to.not.be.undefined;
+      const segments = internalOf(el).parseSegments('<<<<<<<\nours\n=======\ntheirs\n>>>>>>>');
+      expect(segments[0].oursLabel).to.equal('OURS');
+      expect(segments[0].theirsLabel).to.equal('THEIRS');
     });
 
-    it('treats a nested "<<<<<<<" line as content, preserving prior conflict content', async () => {
+    it('treats a nested "<<<<<<<" line as content', async () => {
       const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        parseOutputSegments: () => Array<{
-          type: string;
-          oursLines: string[];
-          theirsLines: string[];
-        }>;
-      };
-
-      // A '<<<<<<<' line appears within an already-open conflict's ours side.
-      internal.outputContent = [
-        '<<<<<<< HEAD',
-        'real-ours',
-        '<<<<<<< nested-marker-as-content',
-        '=======',
-        'real-theirs',
-        '>>>>>>> feature',
-      ].join('\n');
-
-      const segments = internal.parseOutputSegments();
-      const conflict = segments.find(s => s.type === 'conflict')!;
-      // The nested marker line is retained as ours content (not discarded).
-      expect(conflict.oursLines).to.deep.equal(['real-ours', '<<<<<<< nested-marker-as-content']);
-      expect(conflict.theirsLines).to.deep.equal(['real-theirs']);
+      const segments = internalOf(el).parseSegments(
+        '<<<<<<< HEAD\nours\n<<<<<<< nested\n=======\ntheirs\n>>>>>>> other'
+      );
+      expect(segments.length).to.equal(1);
+      expect(segments[0].oursLines).to.deep.equal(['ours', '<<<<<<< nested']);
     });
 
     it('supports diff3 output without leaking the base section into ours', async () => {
       const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        parseOutputSegments: () => Array<{
-          type: string;
-          oursLines: string[];
-          theirsLines: string[];
-        }>;
-      };
+      const segments = internalOf(el).parseSegments(
+        '<<<<<<< HEAD\nours\n||||||| base\nbase-line\n=======\ntheirs\n>>>>>>> other'
+      );
+      expect(segments.length).to.equal(1);
+      expect(segments[0].oursLines).to.deep.equal(['ours']);
+      expect(segments[0].theirsLines).to.deep.equal(['theirs']);
+    });
 
-      // diff3-style conflict: ours ||||||| base ======= theirs
-      internal.outputContent = [
-        '<<<<<<< HEAD',
-        'our-line',
-        '||||||| merged common ancestors',
-        'base-line',
-        '=======',
-        'their-line',
-        '>>>>>>> feature',
-      ].join('\n');
-
-      const segments = internal.parseOutputSegments();
-      const conflict = segments.find(s => s.type === 'conflict')!;
-      expect(conflict.oursLines).to.deep.equal(['our-line']);
-      expect(conflict.theirsLines).to.deep.equal(['their-line']);
-      // Base content must NOT appear in ours or theirs.
-      expect(conflict.oursLines).to.not.include('base-line');
-      expect(conflict.theirsLines).to.not.include('base-line');
+    it('keeps an unterminated conflict as a conflict block', async () => {
+      const el = await renderEditor();
+      const segments = internalOf(el).parseSegments(
+        'ok\n<<<<<<< HEAD\nours\n=======\ntheirs'
+      );
+      expect(segments.map((s) => s.type)).to.deep.equal(['resolved', 'conflict']);
+      expect(segments[1].theirsLines).to.deep.equal(['theirs']);
     });
   });
 
-  // ── Accept ours/theirs/base ────────────────────────────────────────────
-  describe('accept strategies', () => {
-    it('handleAcceptOurs sets output to ours content', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        outputContent: string;
-        handleAcceptOurs: () => void;
-      };
+  // ── Load failure handling ────────────────────────────────────────────
+  describe('load failure', () => {
+    it('shows an error state with Retry instead of fabricating a merge', async () => {
+      setupDefaultMocks();
+      workdirContent = () => Promise.reject(new Error('read failed'));
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
 
-      internal.baseContent = 'base';
-      internal.oursContent = 'ours content';
-      internal.theirsContent = 'theirs content';
-
-      internal.handleAcceptOurs();
-      expect(internal.outputContent).to.equal('ours content');
+      expect(internal.loadFailed).to.be.true;
+      expect(internal.segments).to.deep.equal([]);
+      expect(shadowText(el)).to.include('Could not read the merged file');
+      const retry = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Retry'
+      );
+      expect(retry).to.not.be.undefined;
+      // Mark Resolved must be disabled — there is nothing trustworthy to write.
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled).to.be.true;
     });
 
-    it('handleAcceptTheirs sets output to theirs content', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        outputContent: string;
-        handleAcceptTheirs: () => void;
-      };
+    it('Retry reloads the file and clears the error state', async () => {
+      setupDefaultMocks();
+      let fail = true;
+      workdirContent = () =>
+        fail ? Promise.reject(new Error('read failed')) : Promise.resolve(DEFAULT_WORKDIR_CONTENT);
+      const el = await renderLoadedEditor();
+      expect(internalOf(el).loadFailed).to.be.true;
 
-      internal.baseContent = 'base';
-      internal.oursContent = 'ours content';
-      internal.theirsContent = 'theirs content';
+      fail = false;
+      const retry = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Retry'
+      ) as HTMLButtonElement;
+      retry.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
 
-      internal.handleAcceptTheirs();
-      expect(internal.outputContent).to.equal('theirs content');
+      expect(internalOf(el).loadFailed).to.be.false;
+      expect(internalOf(el).segments.length).to.be.greaterThan(0);
     });
 
-    it('handleAcceptBase sets output to base content', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        outputContent: string;
-        handleAcceptBase: () => void;
-      };
-
-      internal.baseContent = 'base content';
-      internal.oursContent = 'ours';
-      internal.theirsContent = 'theirs';
-
-      internal.handleAcceptBase();
-      expect(internal.outputContent).to.equal('base content');
+    it('treats an empty working-directory file as valid content, not a failure', async () => {
+      setupDefaultMocks();
+      workdirContent = '';
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+      expect(internal.loadFailed).to.be.false;
+      expect(internal.segments.length).to.equal(1);
+      expect(internal.segments[0].type).to.equal('resolved');
     });
   });
 
-  // ── resolveOutputConflict ──────────────────────────────────────────────
-  describe('resolveOutputConflict', () => {
-    it('resolves a conflict choosing ours', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        resolveOutputConflict: (segmentIndex: number, choice: 'ours' | 'theirs' | 'both') => void;
-      };
+  // ── Per-block resolution ─────────────────────────────────────────────
+  describe('per-block resolution', () => {
+    it('Use Ours resolves the block with ours lines and records the origin', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
 
-      internal.outputContent = 'before\n<<<<<<< HEAD\nours-line\n=======\ntheirs-line\n>>>>>>> branch\nafter';
-
-      internal.resolveOutputConflict(0, 'ours');
-
-      expect(internal.outputContent).to.include('ours-line');
-      expect(internal.outputContent).to.not.include('<<<<<<<');
-      expect(internal.outputContent).to.not.include('theirs-line');
-      expect(internal.outputContent).to.include('before');
-      expect(internal.outputContent).to.include('after');
+      const internal = internalOf(el);
+      const resolved = internal.segments[1];
+      expect(resolved.type).to.equal('resolved');
+      expect(resolved.lines).to.deep.equal(['line2-ours']);
+      expect(resolved.origin).to.equal('ours');
+      expect(resolved.fromConflict).to.be.true;
+      expect(shadowText(el)).to.include('No conflicts');
+      expectNoMarkers(el);
     });
 
-    it('resolves a conflict choosing theirs', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        resolveOutputConflict: (segmentIndex: number, choice: 'ours' | 'theirs' | 'both') => void;
-      };
+    it('Use Theirs resolves the block with theirs lines', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Theirs').click();
+      await el.updateComplete;
 
-      internal.outputContent = 'before\n<<<<<<< HEAD\nours-line\n=======\ntheirs-line\n>>>>>>> branch\nafter';
-
-      internal.resolveOutputConflict(0, 'theirs');
-
-      expect(internal.outputContent).to.include('theirs-line');
-      expect(internal.outputContent).to.not.include('<<<<<<<');
-      expect(internal.outputContent).to.not.include('ours-line');
+      const resolved = internalOf(el).segments[1];
+      expect(resolved.lines).to.deep.equal(['line2-theirs']);
+      expect(resolved.origin).to.equal('theirs');
     });
 
-    it('resolves a conflict choosing both', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        resolveOutputConflict: (segmentIndex: number, choice: 'ours' | 'theirs' | 'both') => void;
-      };
+    it('Use Both keeps ours then theirs', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Both').click();
+      await el.updateComplete;
 
-      internal.outputContent = 'before\n<<<<<<< HEAD\nours-line\n=======\ntheirs-line\n>>>>>>> branch\nafter';
-
-      internal.resolveOutputConflict(0, 'both');
-
-      expect(internal.outputContent).to.include('ours-line');
-      expect(internal.outputContent).to.include('theirs-line');
-      expect(internal.outputContent).to.not.include('<<<<<<<');
+      const resolved = internalOf(el).segments[1];
+      expect(resolved.lines).to.deep.equal(['line2-ours', 'line2-theirs']);
+      expect(resolved.origin).to.equal('both');
     });
 
     it('resolves only the targeted conflict, preserving others', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        resolveOutputConflict: (segmentIndex: number, choice: 'ours' | 'theirs' | 'both') => void;
-      };
-
-      internal.outputContent = [
-        '<<<<<<< HEAD',
-        'ours1',
-        '=======',
-        'theirs1',
-        '>>>>>>> branch',
-        'middle',
-        '<<<<<<< HEAD',
-        'ours2',
-        '=======',
-        'theirs2',
-        '>>>>>>> branch',
+      setupDefaultMocks();
+      workdirContent = [
+        'a',
+        '<<<<<<< HEAD', 'b-ours', '=======', 'b-theirs', '>>>>>>> other',
+        'c',
+        '<<<<<<< HEAD', 'd-ours', '=======', 'd-theirs', '>>>>>>> other',
       ].join('\n');
+      const el = await renderLoadedEditor();
 
-      // Resolve first conflict, keep second
-      internal.resolveOutputConflict(0, 'ours');
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
 
-      expect(internal.outputContent).to.include('ours1');
-      // Second conflict should still have markers
-      expect(internal.outputContent).to.include('<<<<<<< HEAD');
-      expect(internal.outputContent).to.include('ours2');
-      expect(internal.outputContent).to.include('theirs2');
+      const internal = internalOf(el);
+      const conflicts = internal.segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['d-ours']);
+      expect(shadowText(el)).to.include('1 conflict remaining');
+      expectNoMarkers(el);
+    });
+
+    it('Reset reopens a resolved-from-conflict block', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+
+      const resetBtn = Array.from(el.shadowRoot!.querySelectorAll('.segment-btn')).find(
+        (b) => b.textContent?.trim() === 'Reset'
+      ) as HTMLButtonElement;
+      expect(resetBtn, 'Reset button on resolved-from-conflict segment').to.not.be.undefined;
+      resetBtn.click();
+      await el.updateComplete;
+
+      const internal = internalOf(el);
+      expect(internal.segments[1].type).to.equal('conflict');
+      expect(internal.segments[1].oursLines).to.deep.equal(['line2-ours']);
+      expect(shadowText(el)).to.include('1 conflict remaining');
     });
   });
 
-  // ── applyAiSuggestion ─────────────────────────────────────────────────
-  describe('applyAiSuggestion', () => {
-    it('replaces conflict with AI suggestion', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        applyAiSuggestion: (conflictIndex: number, resolvedContent: string) => void;
-      };
+  // ── Inline editing ───────────────────────────────────────────────────
+  describe('inline editing', () => {
+    it('editing a conflict block starts from both sides, never marker text', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Edit').click();
+      await el.updateComplete;
 
-      internal.outputContent = 'before\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\nafter';
+      const textarea = el.shadowRoot!.querySelector('.segment-editor textarea') as HTMLTextAreaElement;
+      expect(textarea).to.not.be.null;
+      expect(textarea.value).to.equal('line2-ours\nline2-theirs');
+      for (const marker of MARKER_CHARS) {
+        expect(textarea.value).to.not.include(marker);
+      }
+    });
 
-      internal.applyAiSuggestion(0, 'ai-resolved-content');
+    it('applying a conflict edit resolves the block as manual', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Edit').click();
+      await el.updateComplete;
 
-      expect(internal.outputContent).to.include('ai-resolved-content');
-      expect(internal.outputContent).to.not.include('<<<<<<<');
-      expect(internal.outputContent).to.include('before');
-      expect(internal.outputContent).to.include('after');
+      const textarea = el.shadowRoot!.querySelector('.segment-editor textarea') as HTMLTextAreaElement;
+      textarea.value = 'hand-merged';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      const applyBtn = Array.from(el.shadowRoot!.querySelectorAll('.segment-editor button')).find(
+        (b) => b.textContent?.trim() === 'Apply'
+      ) as HTMLButtonElement;
+      applyBtn.click();
+      await el.updateComplete;
+
+      const resolved = internalOf(el).segments[1];
+      expect(resolved.type).to.equal('resolved');
+      expect(resolved.lines).to.deep.equal(['hand-merged']);
+      expect(resolved.origin).to.equal('manual');
+      expect(shadowText(el)).to.include('No conflicts');
+    });
+
+    it('cancelling a conflict edit leaves the block unresolved', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Edit').click();
+      await el.updateComplete;
+
+      const cancelBtn = Array.from(el.shadowRoot!.querySelectorAll('.segment-editor button')).find(
+        (b) => b.textContent?.trim() === 'Cancel'
+      ) as HTMLButtonElement;
+      cancelBtn.click();
+      await el.updateComplete;
+
+      expect(internalOf(el).segments[1].type).to.equal('conflict');
+      expect(shadowText(el)).to.include('1 conflict remaining');
+    });
+
+    it('resolved text is editable in place', async () => {
+      const el = await renderLoadedEditor();
+      // First resolved segment ("line1") has an Edit hover action.
+      const editBtn = el.shadowRoot!.querySelector('.output-segment .segment-btn') as HTMLButtonElement;
+      expect(editBtn.textContent?.trim()).to.equal('Edit');
+      editBtn.click();
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.segment-editor textarea') as HTMLTextAreaElement;
+      expect(textarea.value).to.equal('line1');
+      textarea.value = 'line1-edited';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      const applyBtn = Array.from(el.shadowRoot!.querySelectorAll('.segment-editor button')).find(
+        (b) => b.textContent?.trim() === 'Apply'
+      ) as HTMLButtonElement;
+      applyBtn.click();
+      await el.updateComplete;
+
+      expect(internalOf(el).segments[0].lines).to.deep.equal(['line1-edited']);
+      expect(shadowText(el)).to.include('line1-edited');
     });
   });
 
-  // ── Edit mode toggle ───────────────────────────────────────────────────
-  describe('edit mode', () => {
-    it('starts in visual mode', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as { outputEditMode: string };
-      expect(internal.outputEditMode).to.equal('visual');
+  // ── Whole-file strategies ────────────────────────────────────────────
+  describe('whole-file strategies', () => {
+    it('Use Ours replaces the output with ours content', async () => {
+      const el = await renderLoadedEditor();
+      const btn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn-ours')).find(
+        (b) => b.textContent?.trim() === 'Use Ours'
+      ) as HTMLButtonElement;
+      btn.click();
+      await el.updateComplete;
+
+      const internal = internalOf(el);
+      expect(internal.segments.length).to.equal(1);
+      expect(internal.segments[0].lines).to.deep.equal(['line1', 'line2-ours', 'line3']);
+      expect(internal.segments[0].origin).to.equal('ours');
+      expect(shadowText(el)).to.include('No conflicts');
     });
 
-    it('toggles between visual and raw mode', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        outputEditMode: string;
-        toggleOutputEditMode: () => void;
-      };
+    it('Use Theirs replaces the output with theirs content', async () => {
+      const el = await renderLoadedEditor();
+      const btn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn-theirs')).find(
+        (b) => b.textContent?.trim() === 'Use Theirs'
+      ) as HTMLButtonElement;
+      btn.click();
+      await el.updateComplete;
 
-      internal.toggleOutputEditMode();
-      expect(internal.outputEditMode).to.equal('raw');
-
-      internal.toggleOutputEditMode();
-      expect(internal.outputEditMode).to.equal('visual');
-    });
-  });
-
-  // ── Output change ──────────────────────────────────────────────────────
-  describe('output change', () => {
-    it('updates outputContent on textarea change', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        outputContent: string;
-        handleOutputChange: (e: Event) => void;
-      };
-
-      const fakeEvent = {
-        target: { value: 'new content' },
-      } as unknown as Event;
-
-      internal.handleOutputChange(fakeEvent);
-      expect(internal.outputContent).to.equal('new content');
-    });
-  });
-
-  // ── getResolvedContent ─────────────────────────────────────────────────
-  describe('getResolvedContent', () => {
-    it('returns current output content', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as { outputContent: string };
-      internal.outputContent = 'final resolved content';
-
-      expect(el.getResolvedContent()).to.equal('final resolved content');
-    });
-  });
-
-  // ── computeLineOrigins ─────────────────────────────────────────────────
-  describe('computeLineOrigins', () => {
-    it('identifies lines that came from ours', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        outputContent: string;
-        lineOrigins: Map<number, string>;
-        computeLineOrigins: () => void;
-      };
-
-      internal.baseContent = 'shared';
-      internal.oursContent = 'shared\nours-only';
-      internal.theirsContent = 'shared';
-      internal.outputContent = 'shared\nours-only';
-
-      internal.computeLineOrigins();
-
-      // Line 1 ("ours-only") should be marked as 'ours'
-      expect(internal.lineOrigins.get(1)).to.equal('ours');
+      expect(internalOf(el).segments[0].lines).to.deep.equal(['line1', 'line2-theirs', 'line3']);
     });
 
-    it('identifies lines that came from theirs', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        outputContent: string;
-        lineOrigins: Map<number, string>;
-        computeLineOrigins: () => void;
-      };
+    it('Use Base resets the output to the ancestor content', async () => {
+      const el = await renderLoadedEditor();
+      const btn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn')).find(
+        (b) => b.textContent?.trim() === 'Use Base'
+      ) as HTMLButtonElement;
+      btn.click();
+      await el.updateComplete;
 
-      internal.baseContent = 'shared';
-      internal.oursContent = 'shared';
-      internal.theirsContent = 'shared\ntheirs-only';
-      internal.outputContent = 'shared\ntheirs-only';
-
-      internal.computeLineOrigins();
-
-      expect(internal.lineOrigins.get(1)).to.equal('theirs');
+      expect(internalOf(el).segments[0].lines).to.deep.equal(['line1', 'line2', 'line3']);
+      expect(internalOf(el).segments[0].origin).to.equal('base');
     });
 
-    it('identifies lines present in both as "both"', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        baseContent: string;
-        oursContent: string;
-        theirsContent: string;
-        outputContent: string;
-        lineOrigins: Map<number, string>;
-        computeLineOrigins: () => void;
-      };
+    it('Reload re-reads the on-disk merge, restoring conflicts', async () => {
+      const el = await renderLoadedEditor();
+      const useOurs = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn-ours')).find(
+        (b) => b.textContent?.trim() === 'Use Ours'
+      ) as HTMLButtonElement;
+      useOurs.click();
+      await el.updateComplete;
+      expect(internalOf(el).segments.filter((s) => s.type === 'conflict').length).to.equal(0);
 
-      internal.baseContent = 'base';
-      internal.oursContent = 'base\nnew-in-both';
-      internal.theirsContent = 'base\nnew-in-both';
-      internal.outputContent = 'base\nnew-in-both';
+      const reload = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn')).find(
+        (b) => b.textContent?.trim() === 'Reload'
+      ) as HTMLButtonElement;
+      reload.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
 
-      internal.computeLineOrigins();
-
-      expect(internal.lineOrigins.get(1)).to.equal('both');
+      expect(internalOf(el).segments.filter((s) => s.type === 'conflict').length).to.equal(1);
     });
   });
 
   // ── Mark resolved ──────────────────────────────────────────────────────
   describe('mark resolved', () => {
-    it('dispatches conflict-resolved event', async () => {
-      const el = await renderEditor();
-      const internal = el as unknown as {
-        conflictFile: ConflictFile;
-        outputContent: string;
-      };
+    it('is disabled while conflicts remain', async () => {
+      const el = await renderLoadedEditor();
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled).to.be.true;
+    });
 
-      internal.conflictFile = makeConflictFile('src/test.ts');
-      internal.outputContent = 'resolved content';
+    it('refuses to write while conflicts remain even if invoked directly', async () => {
+      const el = await renderLoadedEditor();
+      invokeHistory.length = 0;
+      await internalOf(el).handleMarkResolved();
+      expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
+    });
 
-      let eventFired = false;
+    it('writes marker-free content and dispatches conflict-resolved once resolved', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Both').click();
+      await el.updateComplete;
+
       let eventFile: string | null = null;
       el.addEventListener('conflict-resolved', ((e: CustomEvent) => {
-        eventFired = true;
         eventFile = e.detail.file.path;
       }) as EventListener);
 
-      const handleMarkResolved = (el as unknown as {
-        handleMarkResolved: () => Promise<void>;
-      }).handleMarkResolved.bind(el);
+      invokeHistory.length = 0;
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled).to.be.false;
+      markBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
 
-      await handleMarkResolved();
-
-      expect(eventFired).to.be.true;
+      const resolveCall = invokeHistory.find((h) => h.command === 'resolve_conflict');
+      expect(resolveCall).to.exist;
+      const content = (resolveCall!.args as { content: string }).content;
+      expect(content).to.equal('line1\nline2-ours\nline2-theirs\nline3');
+      for (const marker of MARKER_CHARS) {
+        expect(content).to.not.include(marker);
+      }
       expect(eventFile).to.equal('src/test.ts');
     });
+  });
 
-    it('calls resolve_conflict with correct args', async () => {
+  // ── getResolvedContent ───────────────────────────────────────────────
+  describe('getResolvedContent', () => {
+    it('joins resolved segment lines', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(el.getResolvedContent()).to.equal('line1\nline2-ours\nline3');
+    });
+  });
+
+  // ── Pane alignment ───────────────────────────────────────────────────
+  describe('pane alignment', () => {
+    it('renders the same number of rows in all three source panes', async () => {
+      setupDefaultMocks();
+      mockInvoke = (async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'a\nb\nc';
+          // ours inserts two lines at the top; theirs deletes one line.
+          if (blobArgs?.oid === 'ours-oid') return 'x\ny\na\nb\nc';
+          if (blobArgs?.oid === 'theirs-oid') return 'a\nc';
+          return '';
+        }
+        if (command === 'read_file_content') return 'a\nb\nc';
+        if (command === 'get_merge_tool_config') return null;
+        if (command === 'is_ai_available') return false;
+        return null;
+      }) as MockInvoke;
+
+      const el = await renderLoadedEditor();
+      const rows = (side: string) =>
+        el.shadowRoot!.querySelectorAll(`#panel-${side} .code-line`).length;
+      expect(rows('ours')).to.equal(rows('base'));
+      expect(rows('base')).to.equal(rows('theirs'));
+    });
+
+    it('an insertion does not mark every following line as changed', async () => {
+      setupDefaultMocks();
+      mockInvoke = (async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'a\nb\nc\nd';
+          if (blobArgs?.oid === 'ours-oid') return 'new\na\nb\nc\nd';
+          if (blobArgs?.oid === 'theirs-oid') return 'a\nb\nc\nd';
+          return '';
+        }
+        if (command === 'read_file_content') return 'a\nb\nc\nd';
+        if (command === 'get_merge_tool_config') return null;
+        if (command === 'is_ai_available') return false;
+        return null;
+      }) as MockInvoke;
+
+      const el = await renderLoadedEditor();
+      // Exactly one added line in ours; nothing else may be highlighted.
+      const additions = el.shadowRoot!.querySelectorAll('#panel-ours .code-addition');
+      const changed = el.shadowRoot!.querySelectorAll('#panel-ours .line-changed');
+      expect(additions.length).to.equal(1);
+      expect(changed.length).to.equal(0);
+      expect(shadowText(el)).to.include('1 changes from base');
+    });
+  });
+
+  // ── Operation-aware labels ───────────────────────────────────────────
+  describe('operation-aware labels', () => {
+    it('labels sides for merge by default', async () => {
+      const el = await renderLoadedEditor();
+      const text = shadowText(el);
+      expect(text).to.include('Ours (Current Branch)');
+      expect(text).to.include('Theirs (Incoming)');
+    });
+
+    it('labels the swapped sides during a rebase', async () => {
       const el = await renderEditor();
-      const internal = el as unknown as {
-        conflictFile: ConflictFile;
-        outputContent: string;
+      el.operationType = 'rebase';
+      const internal = internalOf(el);
+      internal.conflictFile = makeConflictFile('src/test.ts');
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const text = shadowText(el);
+      expect(text).to.include('Ours (Rebasing Onto)');
+      expect(text).to.include('Theirs (Your Commit)');
+    });
+
+    it('labels stash conflicts as working tree vs stashed changes', async () => {
+      const el = await renderEditor();
+      el.operationType = 'stash';
+      const internal = internalOf(el);
+      internal.conflictFile = makeConflictFile('src/test.ts');
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const text = shadowText(el);
+      expect(text).to.include('Ours (Working Tree)');
+      expect(text).to.include('Theirs (Stashed Changes)');
+    });
+  });
+
+  // ── AI resolution ────────────────────────────────────────────────────
+  describe('AI resolution', () => {
+    it('applies a per-block AI suggestion with origin "ai"', async () => {
+      setupDefaultMocks();
+      aiAvailable = true;
+      const el = await renderLoadedEditor();
+
+      findConflictButton(el, 'AI Suggest').click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const resolved = internalOf(el).segments[1];
+      expect(resolved.type).to.equal('resolved');
+      expect(resolved.lines).to.deep.equal(['ai-resolved']);
+      expect(resolved.origin).to.equal('ai');
+      expect(shadowText(el)).to.include('merged by ai');
+    });
+
+    it('AI Resolve All stops after the first failure instead of retrying forever', async () => {
+      setupDefaultMocks();
+      aiAvailable = true;
+      workdirContent = [
+        '<<<<<<< HEAD', 'a-ours', '=======', 'a-theirs', '>>>>>>> other',
+        'mid',
+        '<<<<<<< HEAD', 'b-ours', '=======', 'b-theirs', '>>>>>>> other',
+      ].join('\n');
+      let aiCalls = 0;
+      aiSuggestion = () => {
+        aiCalls++;
+        return Promise.reject(new Error('ai down'));
       };
 
-      internal.conflictFile = makeConflictFile('src/test.ts');
-      internal.outputContent = 'final content';
+      const el = await renderLoadedEditor();
+      await internalOf(el).handleAiResolveAll();
 
-      invokeHistory.length = 0;
+      expect(aiCalls).to.equal(1);
+      expect(internalOf(el).segments.filter((s) => s.type === 'conflict').length).to.equal(2);
+    });
 
-      const handleMarkResolved = (el as unknown as {
-        handleMarkResolved: () => Promise<void>;
-      }).handleMarkResolved.bind(el);
+    it('clears AI explanations when a different file loads', async () => {
+      setupDefaultMocks();
+      aiAvailable = true;
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'AI Suggest').click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+      expect(shadowText(el)).to.include('merged by ai');
 
-      await handleMarkResolved();
+      const internal = internalOf(el);
+      internal.conflictFile = makeConflictFile('src/other.ts');
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
 
-      const resolveCall = invokeHistory.find(h => h.command === 'resolve_conflict');
-      expect(resolveCall).to.exist;
+      expect(shadowText(el)).to.not.include('merged by ai');
     });
   });
 
@@ -787,7 +804,7 @@ describe('lv-merge-editor', () => {
       internal.loading = false;
       await el.updateComplete;
 
-      const theirsBtn = el.shadowRoot!.querySelector('.btn-theirs') as HTMLButtonElement;
+      const theirsBtn = el.shadowRoot!.querySelector('.toolbar-actions .btn-theirs') as HTMLButtonElement;
       expect(theirsBtn.textContent).to.include('delete file');
 
       let resolvedFired = false;
