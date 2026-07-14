@@ -414,6 +414,64 @@ test.describe('Merge Editor - Live diff transitions', () => {
   });
 });
 
+test.describe('Merge Editor - Stash source certainty', () => {
+  test('inferred-stash wording does not leak into a later explicit stash flow', async ({
+    page,
+  }) => {
+    // Clean repository state with conflicted files = a state-INFERRED stash.
+    await setupOpenRepository(page, {
+      status: {
+        staged: [],
+        unstaged: [
+          { path: 'src/conflict.ts', status: 'conflicted', isStaged: false, isConflicted: true },
+        ],
+      },
+    });
+    await injectCommandMock(page, {
+      ...conflictMocks([
+        {
+          path: 'src/conflict.ts',
+          ancestor: { oid: 'ancestor_oid_123' },
+          ours: { oid: 'ours_oid_456' },
+          theirs: { oid: 'theirs_oid_789' },
+        },
+      ]),
+      unstage_files: null,
+      discard_changes: null,
+    });
+
+    // Open via the conflicted-file click (state-derived: uncertain source).
+    await page.locator('lv-file-status .file-item', { hasText: 'conflict.ts' }).first().click();
+    await expect(page.locator('lv-conflict-resolution-dialog[open]')).toBeVisible();
+
+    const abortBtn = page.locator('lv-conflict-resolution-dialog .footer-actions .btn-danger');
+    await abortBtn.click();
+    const confirmMsg = page.locator('lv-conflict-resolution-dialog .confirm-message');
+    await expect(confirmMsg).toContainText('not saved anywhere else');
+
+    // Abort for real to close the dialog.
+    await page.locator('lv-conflict-resolution-dialog .confirm-actions .btn-danger').click();
+    await expect(page.locator('lv-conflict-resolution-dialog[open]')).not.toBeVisible();
+
+    // Now an EXPLICIT stash conflict (as the stash panel dispatches it) —
+    // the earlier uncertainty must not leak into its wording.
+    await page.evaluate(() => {
+      const shell = document.querySelector('lv-app-shell');
+      shell?.dispatchEvent(
+        new CustomEvent('open-conflict-dialog', {
+          detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: false },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    });
+    await expect(page.locator('lv-conflict-resolution-dialog[open]')).toBeVisible();
+
+    await abortBtn.click();
+    await expect(confirmMsg).toContainText('remains in the stash list');
+  });
+});
+
 test.describe('Merge Editor - Error Handling', () => {
   const oneConflictFile = [
     {

@@ -917,6 +917,9 @@ export class AppShell extends LitElement {
       // A conflicted git-flow finish carries the context to complete the finish.
       this.conflictGitflowFinish = customEvent.detail?.gitflowFinish ?? null;
       this.conflictInitialFilePath = customEvent.detail?.filePath ?? null;
+      // An explicit operation always knows its source — clear any uncertainty
+      // left over from a previous state-inferred stash flow.
+      this.conflictStashSourceCertain = true;
       this.showConflictDialog = true;
     } else {
       // No operation context (the diff view's "Open Merge Editor" button, a
