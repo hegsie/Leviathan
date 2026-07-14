@@ -40,6 +40,23 @@ describe('computeLineAlignment', () => {
     expect(computeLineAlignment([], ['b'])).to.deep.equal([[null, 0]]);
   });
 
+  it('stays index-complete when the middle exceeds the LCS cell limit', () => {
+    // 1100 x 1100 fully-distinct middles exceed the 1M-cell DP guard, forcing
+    // the replace-block fallback — it must still emit every index exactly once.
+    const a = ['same-head', ...Array.from({ length: 1100 }, (_, i) => `a-${i}`), 'same-tail'];
+    const b = ['same-head', ...Array.from({ length: 1100 }, (_, i) => `b-${i}`), 'same-tail'];
+    const rows = computeLineAlignment(a, b);
+
+    const aIdx = rows.map(([x]) => x).filter((x) => x !== null);
+    const bIdx = rows.map(([, y]) => y).filter((y) => y !== null);
+    expect(aIdx).to.deep.equal(Array.from({ length: a.length }, (_, i) => i));
+    expect(bIdx).to.deep.equal(Array.from({ length: b.length }, (_, i) => i));
+    // Equal-length replace middles pair index-wise; head/tail stay matched.
+    expect(rows[0]).to.deep.equal([0, 0]);
+    expect(rows[rows.length - 1]).to.deep.equal([a.length - 1, b.length - 1]);
+    expect(rows.length).to.equal(a.length);
+  });
+
   it('produces a row for every index on both sides exactly once', () => {
     const a = ['1', '2', '3', '4', '5'];
     const b = ['0', '1', '3', 'x', '5', '6'];

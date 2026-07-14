@@ -1262,6 +1262,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   private handleOpenMergeEditor(): void {
     this.dispatchEvent(
       new CustomEvent('open-conflict-dialog', {
+        // Pass the file so the dialog opens preselected on it.
+        detail: { filePath: this.file?.path },
         bubbles: true,
         composed: true,
       })

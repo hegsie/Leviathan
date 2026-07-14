@@ -539,6 +539,9 @@ export class AppShell extends LitElement {
   // When a git-flow finish conflicts, the finish context so the dialog can COMPLETE
   // the finish (tag / merge develop / delete branch) after the conflict is resolved.
   @state() private conflictGitflowFinish: GitflowFinishContext | null = null;
+  // The file the user clicked to enter the conflict flow — the dialog opens
+  // preselected on it instead of always starting at the first conflict.
+  @state() private conflictInitialFilePath: string | null = null;
 
   // Command palette
   @state() private showCommandPalette = false;
@@ -898,6 +901,7 @@ export class AppShell extends LitElement {
       dropStashOnComplete?: boolean;
       squash?: boolean;
       gitflowFinish?: GitflowFinishContext;
+      filePath?: string;
     }>;
     if (customEvent.detail?.operationType) {
       this.conflictOperationType = customEvent.detail.operationType;
@@ -909,11 +913,13 @@ export class AppShell extends LitElement {
       this.conflictSquashMerge = customEvent.detail?.squash ?? false;
       // A conflicted git-flow finish carries the context to complete the finish.
       this.conflictGitflowFinish = customEvent.detail?.gitflowFinish ?? null;
+      this.conflictInitialFilePath = customEvent.detail?.filePath ?? null;
       this.showConflictDialog = true;
     } else {
-      // No context provided (e.g. the diff view's "Open Merge Editor" button):
-      // derive the operation from repository state instead.
-      this.openConflictDialogFromState();
+      // No operation context (the diff view's "Open Merge Editor" button, a
+      // conflicted-file stage click): derive the operation from repository
+      // state, keeping the clicked file preselected when one was given.
+      this.openConflictDialogFromState(customEvent.detail?.filePath);
     }
     this.handleRefresh();
   };
@@ -934,6 +940,7 @@ export class AppShell extends LitElement {
     this.conflictDropStashOnComplete = true;
     this.conflictSquashMerge = false;
     this.conflictGitflowFinish = null;
+    this.conflictInitialFilePath = null;
   }
 
   // Handle gitflow events (init, feature/release/hotfix operations) to trigger refresh
@@ -961,6 +968,27 @@ export class AppShell extends LitElement {
       const newActiveRepo = state.getActiveRepository();
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
+
+      // The open diff binds a click-time StatusEntry snapshot. Re-derive it
+      // from every status refresh so a file that became conflicted since the
+      // click (e.g. a merge run in an external terminal) hits the diff view's
+      // isConflicted guards instead of rendering raw marker text — and stays
+      // in sync in the other direction once it's resolved.
+      if (this.diffFile && !repoChanged && newActiveRepo) {
+        const fresh =
+          newActiveRepo.status.find(
+            (f) => f.path === this.diffFile!.path && f.isStaged === this.diffFile!.isStaged
+          ) ?? newActiveRepo.status.find((f) => f.path === this.diffFile!.path);
+        // Only swap on a real transition — reassigning every refresh would
+        // needlessly reload the visible diff.
+        if (
+          fresh &&
+          (fresh.isConflicted !== this.diffFile.isConflicted ||
+            fresh.status !== this.diffFile.status)
+        ) {
+          this.diffFile = fresh;
+        }
+      }
 
       // Start/stop per-repo services as tabs open and close. Every OPEN repo
       // gets a watcher (not just the active one) so background repos don't go
@@ -1592,7 +1620,7 @@ export class AppShell extends LitElement {
    * Used when the trigger carries no operation context (banner button, diff
    * view redirect, conflicted-file click).
    */
-  private openConflictDialogFromState(): void {
+  private openConflictDialogFromState(initialFilePath?: string): void {
     if (!this.activeRepository) return;
 
     this.conflictOperationType = this.deriveConflictOperationType();
@@ -1602,6 +1630,7 @@ export class AppShell extends LitElement {
     if (this.conflictOperationType === 'stash') {
       this.conflictDropStashOnComplete = false;
     }
+    this.conflictInitialFilePath = initialFilePath ?? null;
     this.showConflictDialog = true;
   }
 
@@ -2068,9 +2097,10 @@ export class AppShell extends LitElement {
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry; isPartiallyStaged?: boolean }>): void {
     // A conflicted file is resolved in the merge editor, never shown as a raw
-    // diff — its working-tree content is git's conflict-marker text.
+    // diff — its working-tree content is git's conflict-marker text. Open the
+    // dialog on the file that was actually clicked.
     if (e.detail.file.isConflicted) {
-      this.openConflictDialogFromState();
+      this.openConflictDialogFromState(e.detail.file.path);
       return;
     }
     // Close blame if open
@@ -3373,6 +3403,7 @@ export class AppShell extends LitElement {
               open
               repositoryPath=${this.activeRepository.repository.path}
               operationType=${this.conflictOperationType}
+              .initialFilePath=${this.conflictInitialFilePath}
               .stashIndex=${this.conflictStashIndex}
               .dropStashOnComplete=${this.conflictDropStashOnComplete}
               .squashMerge=${this.conflictSquashMerge}

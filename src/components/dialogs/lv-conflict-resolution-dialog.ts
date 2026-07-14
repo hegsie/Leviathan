@@ -337,6 +337,8 @@ export class LvConflictResolutionDialog extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
   @property({ type: String }) operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
+  /** The file the user clicked to get here — preselected over the first conflict. */
+  @property({ attribute: false }) initialFilePath: string | null = null;
   /** For 'stash' completion: which stash entry to drop once conflicts are resolved. */
   @property({ type: Number }) stashIndex = 0;
   /**
@@ -431,13 +433,6 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   };
 
-  show(): void {
-    // updated() reacts to the open transition: it resets per-run state
-    // (including the committed-merge markers) and loads the conflicts.
-    // Doing any of that here would run it twice and race the loads.
-    this.open = true;
-  }
-
   private close(): void {
     this.open = false;
     this.conflicts = [];
@@ -464,6 +459,14 @@ export class LvConflictResolutionDialog extends LitElement {
       if (result.success && result.data) {
         this.conflicts = result.data;
         this.loadFailed = false;
+        // Open on the file the user clicked, when it's one of the conflicts.
+        // (Continue-with-new-conflicts paths reset the index to 0 afterwards.)
+        if (this.initialFilePath) {
+          const initialIndex = this.conflicts.findIndex((c) => c.path === this.initialFilePath);
+          if (initialIndex >= 0) {
+            this.selectedIndex = initialIndex;
+          }
+        }
       } else {
         console.error('Failed to load conflicts:', result.error);
         showToast('Failed to load conflicts', 'error');

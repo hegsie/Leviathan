@@ -670,7 +670,8 @@ export class LvFileStatus extends LitElement {
     const filesToStage = this.getFilesUnderPath(this.unstagedFiles, dirPath);
     if (filesToStage.length === 0) return;
 
-    const paths = filesToStage.map((f) => f.path);
+    const paths = this.stageablePaths(filesToStage);
+    if (paths.length === 0) return;
     const result = await gitService.stageFiles(this.repositoryPath, { paths });
     if (result.success) {
       await this.loadStatus();
@@ -1150,15 +1151,50 @@ export class LvFileStatus extends LitElement {
     return inStaged && inUnstaged;
   }
 
+  /**
+   * Staging a conflicted file would put git's conflict-marker text into the
+   * index and clear the conflict entries — git would then treat the file as
+   * "resolved" with markers in it. Route to the merge editor instead.
+   */
+  private redirectConflictedToMergeEditor(file: StatusEntry): void {
+    this.dispatchEvent(
+      new CustomEvent('open-conflict-dialog', {
+        detail: { filePath: file.path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Filter conflicted files out of a bulk stage, with feedback for what was
+   * skipped — they must be resolved in the merge editor, not staged raw.
+   */
+  private stageablePaths(files: StatusEntry[]): string[] {
+    const conflicted = files.filter((f) => f.isConflicted);
+    if (conflicted.length > 0) {
+      showToast(
+        `${conflicted.length} conflicted file${conflicted.length === 1 ? '' : 's'} skipped — resolve ${conflicted.length === 1 ? 'it' : 'them'} in the merge editor first`,
+        'warning',
+      );
+    }
+    return files.filter((f) => !f.isConflicted).map((f) => f.path);
+  }
+
   private async handleStageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
-    
+
+    if (file.isConflicted) {
+      this.redirectConflictedToMergeEditor(file);
+      return;
+    }
+
     // If multiple files are selected and this file is one of them, stage all selected
     if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
       await this.handleStageSelected();
       return;
     }
-    
+
     const result = await gitService.stageFiles(this.repositoryPath, {
       paths: [file.path],
     });
@@ -1216,7 +1252,7 @@ export class LvFileStatus extends LitElement {
   }
 
   private async handleStageAll(): Promise<void> {
-    const paths = this.unstagedFiles.map((f) => f.path);
+    const paths = this.stageablePaths(this.unstagedFiles);
     if (paths.length === 0) return;
 
     const result = await gitService.stageFiles(this.repositoryPath, { paths });
@@ -1294,9 +1330,9 @@ export class LvFileStatus extends LitElement {
 
   // Batch operation handlers
   private async handleStageSelected(): Promise<void> {
-    const paths = this.unstagedFiles
-      .filter((f) => this.selectedFiles.has(f.path))
-      .map((f) => f.path);
+    const paths = this.stageablePaths(
+      this.unstagedFiles.filter((f) => this.selectedFiles.has(f.path))
+    );
     if (paths.length === 0) return;
 
     const result = await gitService.stageFiles(this.repositoryPath, { paths });
@@ -1375,6 +1411,10 @@ export class LvFileStatus extends LitElement {
     const file = this.contextMenu.file;
     if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
+    if (file.isConflicted) {
+      this.redirectConflictedToMergeEditor(file);
+      return;
+    }
     const result = await gitService.stageFiles(this.repositoryPath, {
       paths: [file.path],
     });

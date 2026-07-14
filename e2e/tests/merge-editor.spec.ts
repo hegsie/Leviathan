@@ -341,14 +341,21 @@ test.describe('Merge Editor - Conflict Resolution Dialog', () => {
   test('clicking a conflicted file in the sidebar opens the conflict dialog, not the diff view', async ({
     page,
   }) => {
-    // Click the conflicted file in the working-changes list
-    const fileItem = page.locator('lv-file-status .file-item', { hasText: 'conflict.ts' }).first();
+    // Click the SECOND conflicted file — the dialog must open on the file
+    // that was actually clicked, not just the first conflict in the list.
+    const fileItem = page.locator('lv-file-status .file-item', { hasText: 'another.ts' }).first();
     await expect(fileItem).toBeVisible();
     await fileItem.click();
 
     // The conflict resolution dialog opens instead of the raw diff view
     await expect(page.locator('lv-conflict-resolution-dialog[open]')).toBeVisible();
     await expect(page.locator('lv-merge-editor .toolbar')).toBeVisible();
+
+    // Preselected on the clicked file
+    await expect(page.locator('lv-merge-editor .toolbar-title')).toContainText('another.ts');
+    await expect(
+      page.locator('lv-conflict-resolution-dialog .file-item.selected')
+    ).toContainText('another.ts');
 
     // And no raw conflict markers are visible anywhere on the page
     const dialogText = await page.locator('lv-conflict-resolution-dialog').innerText();
@@ -484,10 +491,10 @@ test.describe('Merge Editor - UI Outcome Verification', () => {
     // The output panel should now reflect the ours content (no conflict markers)
     const outputPanel = page.locator('lv-merge-editor .output-panel');
     await expect(outputPanel).toBeVisible();
-    // There should be no conflict action buttons remaining in the output
-    const conflictActions = page.locator('lv-merge-editor .output-panel .conflict-actions');
-    const actionCount = await conflictActions.count();
-    expect(actionCount).toBe(0);
+    // There should be no conflict blocks remaining in the output
+    const conflictBlocks = page.locator('lv-merge-editor .output-panel .code-conflict-block');
+    const blockCount = await conflictBlocks.count();
+    expect(blockCount).toBe(0);
   });
 
   test('Use Theirs resolves conflicts and output panel reflects no remaining conflicts', async ({
@@ -517,9 +524,9 @@ test.describe('Merge Editor - UI Outcome Verification', () => {
     // The output panel should reflect the theirs content (no conflict markers)
     const outputPanel = page.locator('lv-merge-editor .output-panel');
     await expect(outputPanel).toBeVisible();
-    const conflictActions = page.locator('lv-merge-editor .output-panel .conflict-actions');
-    const actionCount = await conflictActions.count();
-    expect(actionCount).toBe(0);
+    const conflictBlocks = page.locator('lv-merge-editor .output-panel .code-conflict-block');
+    const blockCount = await conflictBlocks.count();
+    expect(blockCount).toBe(0);
   });
 
   test('Continue button enables after all conflicts are resolved', async ({ page }) => {

@@ -430,6 +430,34 @@ describe('lv-conflict-resolution-dialog', () => {
       // Should advance to index 2 (src/app.ts), skipping resolved src/utils.ts
       expect(internal.selectedIndex).to.equal(2);
     });
+
+    it('wraps around to earlier unresolved files after resolving the last one', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        resolvedFiles: Set<string>;
+      };
+      // User skipped ahead and resolved the LAST file first; the earlier
+      // files (index 0, 1) are still unresolved and must be reachable.
+      internal.selectedIndex = 2;
+
+      const handleConflictResolved = (el as unknown as {
+        handleConflictResolved: (e: CustomEvent) => void;
+      }).handleConflictResolved.bind(el);
+
+      handleConflictResolved(
+        new CustomEvent('conflict-resolved', {
+          detail: { file: makeConflict('src/app.ts') },
+        })
+      );
+
+      expect(internal.selectedIndex).to.equal(0);
+    });
   });
 
   // ── Abort flow ─────────────────────────────────────────────────────────
@@ -664,15 +692,47 @@ describe('lv-conflict-resolution-dialog', () => {
     });
   });
 
-  // ── Show/close methods ─────────────────────────────────────────────────
-  describe('show/close', () => {
-    it('sets open to true and resets state on show()', async () => {
+  // ── Open/close behavior ─────────────────────────────────────────────────
+  describe('open/close', () => {
+    it('resets state and loads conflicts once when opened', async () => {
       const el = await renderDialog();
+      invokeHistory.length = 0;
 
-      await el.show();
+      el.open = true;
+      await el.updateComplete;
       await new Promise(r => setTimeout(r, 100));
 
       expect(el.open).to.be.true;
+      const internal = el as unknown as { selectedIndex: number };
+      expect(internal.selectedIndex).to.equal(0);
+      // The open transition must trigger exactly one conflicts load — a
+      // second load would race the first.
+      const loads = invokeHistory.filter(h => h.command === 'get_conflicts');
+      expect(loads.length).to.equal(1);
+    });
+
+    it('preselects the file the user clicked to enter the flow', async () => {
+      const el = await renderDialog();
+      el.initialFilePath = 'src/app.ts';
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as { selectedIndex: number };
+      // TEST_CONFLICTS order: main.ts (0), utils.ts (1), app.ts (2)
+      expect(internal.selectedIndex).to.equal(2);
+      const selected = el.shadowRoot!.querySelector('.file-item.selected');
+      expect(selected!.textContent).to.include('app.ts');
+    });
+
+    it('falls back to the first conflict when the clicked file is not conflicted', async () => {
+      const el = await renderDialog();
+      el.initialFilePath = 'src/not-conflicted.ts';
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
       const internal = el as unknown as { selectedIndex: number };
       expect(internal.selectedIndex).to.equal(0);
     });

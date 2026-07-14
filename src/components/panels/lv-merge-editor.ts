@@ -445,6 +445,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         font-size: var(--font-size-xs);
       }
 
+      /* Placeholder row for a resolution that removed all lines — keeps the
+         segment hoverable so its Edit/Reset actions stay reachable */
+      .segment-empty-note {
+        color: var(--color-text-muted);
+        font-style: italic;
+        font-size: var(--font-size-xs);
+      }
+
       .loading {
         display: flex;
         align-items: center;
@@ -632,9 +640,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       this.oursContent = oursResult.success ? (oursResult.data || '') : '';
       this.theirsContent = theirsResult.success ? (theirsResult.data || '') : '';
 
-      this.baseLines = this.baseContent.split('\n');
-      this.oursLines = this.oursContent.split('\n');
-      this.theirsLines = this.theirsContent.split('\n');
+      // A side with no entry (add/add conflicts have no ancestor; delete/modify
+      // conflicts miss one side) has ZERO lines — ''.split('\n') would invent a
+      // phantom blank line that misaligns and miscolors the panes.
+      this.baseLines = this.conflictFile.ancestor ? this.baseContent.split('\n') : [];
+      this.oursLines = this.conflictFile.ours ? this.oursContent.split('\n') : [];
+      this.theirsLines = this.conflictFile.theirs ? this.theirsContent.split('\n') : [];
       this.alignmentRows = alignThreeWay(this.baseLines, this.oursLines, this.theirsLines);
 
       // Only git's own merge output is trustworthy. If the working directory
@@ -661,8 +672,22 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    * place markers are ever interpreted; they never reach the DOM.
    * Handles diff3-style `|||||||` base sections (discarded) and tolerates an
    * unterminated conflict at EOF (kept as a conflict block).
+   *
+   * Git emits exactly seven marker characters, optionally followed by a
+   * space and label (the `=======` separator is always bare). Content lines
+   * that merely BEGIN with 7+ of the character — banner comments, Markdown
+   * setext underlines, `====…` dividers — must not match, or the ours/theirs
+   * split silently corrupts and the real separator leaks in as content.
+   * Lines are compared with a trailing CR stripped so CRLF files parse, but
+   * content lines are stored verbatim to round-trip their line endings.
    */
   private parseSegments(text: string): OutputSegment[] {
+    const stripCr = (l: string): string => (l.endsWith('\r') ? l.slice(0, -1) : l);
+    const isConflictStart = (l: string): boolean => /^<{7}( |$)/.test(stripCr(l));
+    const isBaseMarker = (l: string): boolean => /^\|{7}( |$)/.test(stripCr(l));
+    const isSeparator = (l: string): boolean => stripCr(l) === '=======';
+    const isConflictEnd = (l: string): boolean => /^>{7}( |$)/.test(stripCr(l));
+
     const lines = text.split('\n');
     const segments: OutputSegment[] = [];
     let currentResolved: string[] = [];
@@ -694,21 +719,22 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     };
 
     for (const line of lines) {
-      if (!inConflict && line.startsWith('<<<<<<<')) {
+      if (!inConflict && isConflictStart(line)) {
         flushResolved();
         inConflict = true;
         section = 'ours';
         oursLines = [];
         theirsLines = [];
-        oursLabel = line.slice(7).trim() || 'OURS';
+        oursLabel = stripCr(line).slice(7).trim() || 'OURS';
         theirsLabel = '';
-      } else if (inConflict && line.startsWith('|||||||')) {
-        // diff3 common-ancestor marker — begin discarding base lines
+      } else if (inConflict && section === 'ours' && isBaseMarker(line)) {
+        // diff3 common-ancestor marker — begin discarding base lines. Only
+        // valid directly after the ours section; anywhere else it's content.
         section = 'base';
-      } else if (inConflict && section !== 'theirs' && line.startsWith('=======')) {
+      } else if (inConflict && section !== 'theirs' && isSeparator(line)) {
         section = 'theirs';
-      } else if (inConflict && line.startsWith('>>>>>>>')) {
-        theirsLabel = line.slice(7).trim() || 'THEIRS';
+      } else if (inConflict && isConflictEnd(line)) {
+        theirsLabel = stripCr(line).slice(7).trim() || 'THEIRS';
         pushConflict();
         inConflict = false;
         section = 'ours';
@@ -768,14 +794,22 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     return this.segments.flatMap((s) => s.lines).join('\n');
   }
 
-  public getResolvedContent(): string {
-    return this.buildResolvedContent();
-  }
-
   // ── Segment operations ────────────────────────────────────────────────
 
   private updateSegment(id: number, update: Partial<OutputSegment>): void {
     this.segments = this.segments.map((s) => (s.id === id ? { ...s, ...update } : s));
+  }
+
+  /**
+   * Drop a stored AI explanation once the segment's content no longer comes
+   * from that suggestion (reset, re-picked, or hand-edited) — a stale
+   * rationale under unrelated content is worse than none.
+   */
+  private clearAiExplanation(id: number): void {
+    if (!this.aiExplanations.has(id)) return;
+    const next = new Map(this.aiExplanations);
+    next.delete(id);
+    this.aiExplanations = next;
   }
 
   private resolveConflictSegment(id: number, choice: 'ours' | 'theirs' | 'both'): void {
@@ -788,6 +822,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         : choice === 'theirs'
           ? [...segment.theirsLines]
           : [...segment.oursLines, ...segment.theirsLines];
+    this.clearAiExplanation(id);
     this.updateSegment(id, { type: 'resolved', lines, origin: choice, fromConflict: true });
   }
 
@@ -796,6 +831,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const segment = this.segments.find((s) => s.id === id);
     if (!segment || !segment.fromConflict) return;
     if (this.editingSegmentId === id) this.editingSegmentId = null;
+    this.clearAiExplanation(id);
     this.updateSegment(id, { type: 'conflict', lines: [], origin: null, fromConflict: false });
   }
 
@@ -818,6 +854,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       return;
     }
 
+    this.clearAiExplanation(id);
     this.updateSegment(id, {
       type: 'resolved',
       lines: this.editDraft.split('\n'),
@@ -926,7 +963,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.suggestingAll = true;
     try {
       for (const id of conflictIds) {
-        // Stop on the first failure — retrying would just repeat the error.
+        // The user may have resolved this block manually while the batch was
+        // running — that's not a failure, just skip it.
+        const segment = this.segments.find((s) => s.id === id);
+        if (!segment || segment.type !== 'conflict') continue;
+        // Stop on the first real failure — retrying would just repeat the error.
         if (!(await this.handleSuggestSegment(id))) break;
       }
     } finally {
@@ -939,9 +980,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   private async handleMarkResolved(): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile) return;
 
-    // The button is disabled while conflicts remain; this guard keeps the
-    // invariant even if invoked directly. A file with open conflict blocks
-    // must never be written out (it would re-serialize markers).
+    // The button is disabled in these states; the guards keep the invariant
+    // even if invoked directly. A file with open conflict blocks must never
+    // be written out (it would re-serialize markers), and a failed load has
+    // no trustworthy content to write (it would truncate the file to empty).
+    if (this.loadFailed) {
+      showToast('The merged file could not be read — retry loading it before resolving', 'warning');
+      return;
+    }
     if (this.conflictCount > 0) {
       showToast('Resolve all conflict blocks before marking the file resolved', 'warning');
       return;
@@ -998,28 +1044,32 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   // ── Scroll synchronization ────────────────────────────────────────────
 
   /**
-   * The three source panes share identical row geometry (same aligned row
-   * count), so they mirror scrollTop exactly; the output pane has different
-   * content and is synced proportionally.
+   * All panes sync proportionally. The source panes share a row COUNT, but
+   * line wrapping (`white-space: pre-wrap`) gives them different pixel
+   * heights, so mirroring absolute scrollTop would misalign and, at the
+   * bottom of a taller pane, snap the user's scroll back. Writes are skipped
+   * when the target is already in place, so the echo scroll event a synced
+   * pane fires (after the rAF guard has cleared) finds nothing to change and
+   * the loop terminates instead of yanking the source pane around.
    */
-  private handleSourceScroll(e: Event): void {
+  private syncScrollTo(target: HTMLElement, top: number): void {
+    if (Math.abs(target.scrollTop - top) > 1) {
+      target.scrollTop = top;
+    }
+  }
+
+  private syncPanesFrom(source: HTMLElement, targetIds: string[]): void {
     if (this.syncingScroll) return;
     this.syncingScroll = true;
 
-    const source = e.target as HTMLElement;
-    for (const id of ['panel-ours', 'panel-base', 'panel-theirs']) {
+    const sourceMax = source.scrollHeight - source.clientHeight;
+    const ratio = sourceMax > 0 ? source.scrollTop / sourceMax : 0;
+
+    for (const id of targetIds) {
       const panel = this.shadowRoot?.getElementById(id);
       if (panel && panel !== source) {
-        panel.scrollTop = source.scrollTop;
-        panel.scrollLeft = source.scrollLeft;
+        this.syncScrollTo(panel, ratio * (panel.scrollHeight - panel.clientHeight));
       }
-    }
-
-    const output = this.shadowRoot?.getElementById('panel-output');
-    if (output) {
-      const sourceMax = source.scrollHeight - source.clientHeight;
-      const ratio = sourceMax > 0 ? source.scrollTop / sourceMax : 0;
-      output.scrollTop = ratio * (output.scrollHeight - output.clientHeight);
     }
 
     requestAnimationFrame(() => {
@@ -1027,24 +1077,17 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     });
   }
 
+  private handleSourceScroll(e: Event): void {
+    this.syncPanesFrom(e.target as HTMLElement, [
+      'panel-ours',
+      'panel-base',
+      'panel-theirs',
+      'panel-output',
+    ]);
+  }
+
   private handleOutputScroll(e: Event): void {
-    if (this.syncingScroll) return;
-    this.syncingScroll = true;
-
-    const output = e.target as HTMLElement;
-    const outputMax = output.scrollHeight - output.clientHeight;
-    const ratio = outputMax > 0 ? output.scrollTop / outputMax : 0;
-
-    for (const id of ['panel-ours', 'panel-base', 'panel-theirs']) {
-      const panel = this.shadowRoot?.getElementById(id);
-      if (panel) {
-        panel.scrollTop = ratio * (panel.scrollHeight - panel.clientHeight);
-      }
-    }
-
-    requestAnimationFrame(() => {
-      this.syncingScroll = false;
-    });
+    this.syncPanesFrom(e.target as HTMLElement, ['panel-ours', 'panel-base', 'panel-theirs']);
   }
 
   // ── Change statistics ─────────────────────────────────────────────────
@@ -1067,6 +1110,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   private getLineCount(content: string): number {
     return content ? content.split('\n').length : 0;
+  }
+
+  private formatChangeCount(count: number): string {
+    return `${count} change${count === 1 ? '' : 's'} from base`;
   }
 
   // ── Rendering ─────────────────────────────────────────────────────────
@@ -1174,14 +1221,21 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               `
             : nothing}
         </div>
-        ${segment.lines.map(
-          (line, i) => html`
-            <div class="code-line">
-              <span class="line-number">${startLineNum + i}</span>
-              <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
-            </div>
-          `
-        )}
+        ${segment.lines.length === 0
+          ? html`
+              <div class="code-line">
+                <span class="line-number"></span>
+                <span class="line-content segment-empty-note">(this resolution removed the section)</span>
+              </div>
+            `
+          : segment.lines.map(
+              (line, i) => html`
+                <div class="code-line">
+                  <span class="line-number">${startLineNum + i}</span>
+                  <span class="line-content">${this.renderHighlightedContent(line) || html`${' '}`}</span>
+                </div>
+              `
+            )}
         ${explanation ? html`<div class="ai-explanation">${explanation}</div>` : nothing}
       </div>
     `;
@@ -1194,10 +1248,20 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
     const labels = SIDE_LABELS[this.operationType] ?? SIDE_LABELS.merge;
     const isSuggesting = this.suggestingSegment === segment.id;
+    // Surface the labels git recorded (branch names, commit refs) alongside
+    // the generic role — they disambiguate the sides better than roles alone.
+    const oursSideLabel = segment.oursLabel && segment.oursLabel !== 'OURS'
+      ? `${labels.ours} · ${segment.oursLabel}`
+      : labels.ours;
+    const theirsSideLabel = segment.theirsLabel && segment.theirsLabel !== 'THEIRS'
+      ? `${labels.theirs} · ${segment.theirsLabel}`
+      : labels.theirs;
 
+    // A side with a single empty string is one blank line, NOT empty —
+    // choosing it inserts a blank line, so it must render as one.
     const renderSide = (lines: string[]) =>
-      lines.length === 0 || (lines.length === 1 && lines[0] === '')
-        ? html`<div class="conflict-side-empty">(no content on this side)</div>`
+      lines.length === 0
+        ? html`<div class="conflict-side-empty">(no lines on this side)</div>`
         : lines.map(
             (line) => html`
               <div class="code-line">
@@ -1242,7 +1306,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
                   <button
                     class="btn btn-ai conflict-pick-btn"
                     @click=${() => this.handleSuggestSegment(segment.id)}
-                    ?disabled=${isSuggesting || this.suggestingAll}
+                    ?disabled=${this.suggestingSegment !== null || this.suggestingAll}
                   >
                     ${isSuggesting ? 'AI...' : 'AI Suggest'}
                   </button>
@@ -1252,12 +1316,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         </div>
         <div class="conflict-sides">
           <div class="code-conflict-side-ours">
-            <div class="code-conflict-side-label">${labels.ours}</div>
+            <div class="code-conflict-side-label">${oursSideLabel}</div>
             ${renderSide(segment.oursLines)}
           </div>
           <div class="code-conflict-divider"></div>
           <div class="code-conflict-side-theirs">
-            <div class="code-conflict-side-label">${labels.theirs}</div>
+            <div class="code-conflict-side-label">${theirsSideLabel}</div>
             ${renderSide(segment.theirsLines)}
           </div>
         </div>
@@ -1405,7 +1469,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <div class="editor-panel">
             <div class="panel-header ours">
               ${labels.ours}
-              <span class="panel-stats">${this.getChangeCount('ours')} changes from base</span>
+              <span class="panel-stats">${this.formatChangeCount(this.getChangeCount('ours'))}</span>
               <button class="panel-header-btn" @click=${this.handleAcceptOurs} title="Use this version">
                 Use
               </button>
@@ -1428,7 +1492,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <div class="editor-panel">
             <div class="panel-header theirs">
               ${labels.theirs}
-              <span class="panel-stats">${this.getChangeCount('theirs')} changes from base</span>
+              <span class="panel-stats">${this.formatChangeCount(this.getChangeCount('theirs'))}</span>
               <button class="panel-header-btn" @click=${this.handleAcceptTheirs} title="Use this version">
                 Use
               </button>
