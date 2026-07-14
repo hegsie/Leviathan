@@ -124,8 +124,12 @@ async function renderLoadedEditor(path = 'src/test.ts'): Promise<LvMergeEditor> 
   const internal = el as unknown as EditorInternal;
   internal.conflictFile = makeConflictFile(path);
   await el.updateComplete;
-  // loadContents runs from updated(); wait for it to settle.
-  await new Promise((r) => setTimeout(r, 50));
+  // loadContents runs from updated(); poll until it settles (the first load
+  // also initializes the syntax highlighter, which can take a while).
+  for (let i = 0; i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 20));
+    if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+  }
   await el.updateComplete;
   return el;
 }
