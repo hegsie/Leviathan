@@ -1226,7 +1226,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           const line = sideLines[idx];
           let lineClass = '';
           let wsSegments: ReturnType<typeof computeInlineWhitespaceDiff> | null = null;
-          if (side !== 'base') {
+          // With an unreadable base there is nothing honest to diff against —
+          // don't paint every line as an "addition" relative to a base we
+          // never saw.
+          if (side !== 'base' && !this.sideReadErrors.base) {
             if (row.base === null) {
               lineClass = 'code-addition';
             } else if (!this.sideReadErrors.base && line !== this.baseLines[row.base]) {
@@ -1566,12 +1569,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             <div class="panel-header ours">
               ${labels.ours}
               <span class="panel-stats">
-                ${this.sideReadErrors.ours ? 'read failed' : this.formatChangeCount(this.getChangeCount('ours'))}
+                ${this.sideReadErrors.ours
+                  ? 'read failed'
+                  : this.sideReadErrors.base
+                    ? 'base unavailable'
+                    : this.formatChangeCount(this.getChangeCount('ours'))}
               </span>
               <button
                 class="panel-header-btn"
                 @click=${this.conflictFile.ours ? this.handleAcceptOurs : () => this.handleTakeSide('ours')}
-                ?disabled=${this.loadFailed}
+                ?disabled=${this.conflictFile.ours ? this.loadFailed : false}
                 title=${this.conflictFile.ours ? 'Use this version' : 'This side deleted the file — stage the deletion'}
               >
                 ${this.conflictFile.ours ? 'Use' : 'Use (delete)'}
@@ -1598,12 +1605,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             <div class="panel-header theirs">
               ${labels.theirs}
               <span class="panel-stats">
-                ${this.sideReadErrors.theirs ? 'read failed' : this.formatChangeCount(this.getChangeCount('theirs'))}
+                ${this.sideReadErrors.theirs
+                  ? 'read failed'
+                  : this.sideReadErrors.base
+                    ? 'base unavailable'
+                    : this.formatChangeCount(this.getChangeCount('theirs'))}
               </span>
               <button
                 class="panel-header-btn"
                 @click=${this.conflictFile.theirs ? this.handleAcceptTheirs : () => this.handleTakeSide('theirs')}
-                ?disabled=${this.loadFailed}
+                ?disabled=${this.conflictFile.theirs ? this.loadFailed : false}
                 title=${this.conflictFile.theirs ? 'Use this version' : 'This side deleted the file — stage the deletion'}
               >
                 ${this.conflictFile.theirs ? 'Use' : 'Use (delete)'}

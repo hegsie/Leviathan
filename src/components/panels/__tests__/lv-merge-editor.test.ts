@@ -862,6 +862,14 @@ describe('lv-merge-editor', () => {
       expect(baseHeader.textContent).to.not.include('0 lines');
       const basePane = el.shadowRoot!.getElementById('panel-base')!;
       expect(basePane.textContent).to.include('Could not read this version');
+
+      // The surviving panes must not pretend to know the diff from a base
+      // that never loaded: no fake change counts, no addition highlighting.
+      const oursHeader = el.shadowRoot!.querySelector('.panel-header.ours')!;
+      expect(oursHeader.textContent).to.include('base unavailable');
+      expect(oursHeader.textContent).to.not.include('changes from base');
+      expect(el.shadowRoot!.querySelectorAll('#panel-ours .code-addition').length).to.equal(0);
+      expect(el.shadowRoot!.querySelectorAll('#panel-ours .line-changed').length).to.equal(0);
     });
 
     it('routes a failed read of an existing side to the Retry state', async () => {
@@ -1280,6 +1288,34 @@ describe('lv-merge-editor', () => {
       expect((takeSide!.args as Record<string, unknown>).side).to.equal('theirs');
       expect(invokeHistory.some(h => h.command === 'resolve_conflict')).to.be.false;
       expect(resolvedFired).to.be.true;
+    });
+
+    it('the pane-header Use (delete) stays enabled during a failed load, like the toolbar', async () => {
+      setupDefaultMocks();
+      // theirs deleted the file AND the workdir read fails: deletion staging
+      // is backend-side and content-independent, so it must stay available.
+      workdirContent = () => Promise.reject(new Error('read failed'));
+      const el = await renderEditor();
+      const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean; loadFailed: boolean };
+      internal.conflictFile = { ...makeConflictFile('src/gone.ts'), theirs: null };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.loadFailed) break;
+      }
+      await el.updateComplete;
+      expect(internal.loadFailed).to.be.true;
+
+      const theirsHeaderUse = el.shadowRoot!.querySelector(
+        '.panel-header.theirs .panel-header-btn'
+      ) as HTMLButtonElement;
+      expect(theirsHeaderUse.textContent).to.include('delete');
+      expect(theirsHeaderUse.disabled).to.be.false;
+      // The content-dependent ours side stays disabled.
+      const oursHeaderUse = el.shadowRoot!.querySelector(
+        '.panel-header.ours .panel-header-btn'
+      ) as HTMLButtonElement;
+      expect(oursHeaderUse.disabled).to.be.true;
     });
 
     it('the pane-header Use button also resolves a deleted side as a deletion', async () => {
