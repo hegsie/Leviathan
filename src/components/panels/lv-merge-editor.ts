@@ -663,7 +663,6 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       this.baseLines = file.ancestor ? this.baseContent.split('\n') : [];
       this.oursLines = file.ours ? this.oursContent.split('\n') : [];
       this.theirsLines = file.theirs ? this.theirsContent.split('\n') : [];
-      this.alignmentRows = alignThreeWay(this.baseLines, this.oursLines, this.theirsLines);
 
       // A failed read of a side that EXISTS must not masquerade as empty
       // content — the panes would lie and whole-file Use Ours/Theirs would
@@ -680,6 +679,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (this.sideReadErrors.theirs) this.theirsLines = [];
       const sideReadFailed =
         this.sideReadErrors.base || this.sideReadErrors.ours || this.sideReadErrors.theirs;
+
+      // Align AFTER dropping failed sides, or the rows would reference lines
+      // that no longer exist and pane rendering would crash on them.
+      this.alignmentRows = alignThreeWay(this.baseLines, this.oursLines, this.theirsLines);
 
       // Only git's own merge output is trustworthy. If the working directory
       // file can't be read, show an error state — never fabricate a merge.
@@ -1226,7 +1229,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           if (side !== 'base') {
             if (row.base === null) {
               lineClass = 'code-addition';
-            } else if (line !== this.baseLines[row.base]) {
+            } else if (!this.sideReadErrors.base && line !== this.baseLines[row.base]) {
               if (isWhitespaceOnlyChange(this.baseLines[row.base], line)) {
                 lineClass = 'code-ws-change';
                 wsSegments = computeInlineWhitespaceDiff(this.baseLines[row.base], line);
@@ -1412,9 +1415,17 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   private renderOutput(): ReturnType<typeof html> {
     if (this.loadFailed) {
+      // Say what actually failed — blaming the working-directory file when
+      // only a side blob was unreadable would be wrong and alarming.
+      const sideFailed =
+        this.sideReadErrors.base || this.sideReadErrors.ours || this.sideReadErrors.theirs;
       return html`
         <div class="output-error">
-          <div>Could not read the merged file from the working directory.</div>
+          <div>
+            ${sideFailed
+              ? 'Could not read all of this file’s versions.'
+              : 'Could not read the merged file from the working directory.'}
+          </div>
           <button class="btn btn-primary" @click=${this.handleReload}>Retry</button>
         </div>
       `;
@@ -1574,7 +1585,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <div class="editor-panel">
             <div class="panel-header base">
               Base (Common Ancestor)
-              <span class="panel-stats">${this.getLineCount(this.baseContent)} lines</span>
+              <span class="panel-stats">
+                ${this.sideReadErrors.base ? 'read failed' : `${this.getLineCount(this.baseContent)} lines`}
+              </span>
             </div>
             <div class="panel-content readonly" id="panel-base" @scroll=${this.handleSourceScroll}>
               ${this.renderAlignedPane('base')}

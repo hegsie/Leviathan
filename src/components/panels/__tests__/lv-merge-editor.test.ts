@@ -840,6 +840,30 @@ describe('lv-merge-editor', () => {
 
   // ── Side blob read failures ──────────────────────────────────────────
   describe('side blob read failures', () => {
+    it('shows read failed in the base header when the ancestor blob fails', async () => {
+      setupDefaultMocks();
+      mockInvoke = (async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return Promise.reject(new Error('read failed'));
+          if (blobArgs?.oid === 'ours-oid') return 'line1\nline2-ours\nline3';
+          if (blobArgs?.oid === 'theirs-oid') return 'line1\nline2-theirs\nline3';
+          return '';
+        }
+        if (command === 'read_file_content') return DEFAULT_WORKDIR_CONTENT;
+        if (command === 'get_merge_tool_config') return null;
+        if (command === 'is_ai_available') return false;
+        return null;
+      }) as MockInvoke;
+
+      const el = await renderLoadedEditor();
+      const baseHeader = el.shadowRoot!.querySelector('.panel-header.base')!;
+      expect(baseHeader.textContent).to.include('read failed');
+      expect(baseHeader.textContent).to.not.include('0 lines');
+      const basePane = el.shadowRoot!.getElementById('panel-base')!;
+      expect(basePane.textContent).to.include('Could not read this version');
+    });
+
     it('routes a failed read of an existing side to the Retry state', async () => {
       setupDefaultMocks();
       mockInvoke = (async (command: string, args?: unknown) => {
@@ -861,7 +885,9 @@ describe('lv-merge-editor', () => {
       const el = await renderLoadedEditor();
       const internal = internalOf(el);
       expect(internal.loadFailed).to.be.true;
-      expect(shadowText(el)).to.include('Could not read the merged file');
+      // The message must blame the side version, not the (readable) workdir file.
+      expect(shadowText(el)).to.include('Could not read all of this file’s versions');
+      expect(shadowText(el)).to.not.include('merged file from the working directory');
       const markBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
         (b) => b.textContent?.trim() === 'Mark Resolved'
       ) as HTMLButtonElement;
