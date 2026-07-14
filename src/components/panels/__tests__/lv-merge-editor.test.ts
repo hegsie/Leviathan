@@ -342,6 +342,53 @@ describe('lv-merge-editor', () => {
     });
   });
 
+  // ── Stale-load races ─────────────────────────────────────────────────
+  describe('stale-load races', () => {
+    it('ignores a stale load when the user switches files quickly', async () => {
+      setupDefaultMocks();
+      let releaseA: ((v: string) => void) | null = null;
+      mockInvoke = (async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') return 'x';
+        if (command === 'read_file_content') {
+          const filePath = (args as { filePath: string }).filePath;
+          if (filePath === 'src/a.ts') {
+            // File A's read hangs until we release it — simulating a slow
+            // load that resolves AFTER the user has switched to file B.
+            return new Promise((res) => {
+              releaseA = res as (v: string) => void;
+            });
+          }
+          return 'b-content';
+        }
+        if (command === 'get_merge_tool_config') return null;
+        if (command === 'is_ai_available') return false;
+        return null;
+      }) as MockInvoke;
+
+      const el = await renderEditor();
+      const internal = internalOf(el);
+      internal.conflictFile = makeConflictFile('src/a.ts');
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 30));
+
+      internal.conflictFile = makeConflictFile('src/b.ts');
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.segments.length > 0) break;
+      }
+
+      // The stale A load finally resolves — it must NOT overwrite B's state
+      // (Mark Resolved would otherwise stage A's content under B's path).
+      releaseA!('a-content');
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+
+      expect(internal.segments.flatMap((s) => s.lines).join('\n')).to.equal('b-content');
+      expect(internal.loading).to.be.false;
+    });
+  });
+
   // ── Load failure handling ────────────────────────────────────────────
   describe('load failure', () => {
     it('shows an error state with Retry instead of fabricating a merge', async () => {
@@ -627,6 +674,27 @@ describe('lv-merge-editor', () => {
       expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
     });
 
+    it('refuses to write while an inline edit is open (unapplied draft)', async () => {
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+
+      // Open Edit on the resolved segment — the draft is unapplied.
+      const editBtn = el.shadowRoot!.querySelector('.output-segment .segment-btn') as HTMLButtonElement;
+      editBtn.click();
+      await el.updateComplete;
+
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled).to.be.true;
+
+      // Direct invocation must also refuse — it would stage the PRE-edit text.
+      invokeHistory.length = 0;
+      await internalOf(el).handleMarkResolved();
+      expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
+    });
+
     it('refuses to write after a failed load even if invoked directly', async () => {
       setupDefaultMocks();
       workdirContent = () => Promise.reject(new Error('read failed'));
@@ -798,6 +866,27 @@ describe('lv-merge-editor', () => {
         (b) => b.textContent?.trim() === 'Mark Resolved'
       ) as HTMLButtonElement;
       expect(markBtn.disabled).to.be.true;
+
+      // The failed pane shows an error, not fabricated empty content.
+      const oursPane = el.shadowRoot!.getElementById('panel-ours')!;
+      expect(oursPane.textContent).to.include('Could not read this version');
+      expect(oursPane.querySelectorAll('.code-line').length).to.equal(0);
+      expect(shadowText(el)).to.include('read failed');
+
+      // Whole-file accepts are disabled — their content is not trustworthy.
+      const useOurs = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn-ours')).find(
+        (b) => b.textContent?.trim() === 'Use Ours'
+      ) as HTMLButtonElement;
+      expect(useOurs.disabled).to.be.true;
+      const headerUse = el.shadowRoot!.querySelector(
+        '.panel-header.ours .panel-header-btn'
+      ) as HTMLButtonElement;
+      expect(headerUse.disabled).to.be.true;
+
+      // The output header must not contradict the retry box with "No conflicts".
+      expect(el.shadowRoot!.querySelector('.conflict-count')!.textContent).to.not.include(
+        'No conflicts'
+      );
     });
   });
 
@@ -1013,6 +1102,21 @@ describe('lv-merge-editor', () => {
       release!();
       await new Promise((r) => setTimeout(r, 20));
       await el.updateComplete;
+    });
+
+    it('treats an empty AI suggestion as removing the section, not a blank line', async () => {
+      setupDefaultMocks();
+      aiAvailable = true;
+      aiSuggestion = () => Promise.resolve({ resolvedContent: '', explanation: '' });
+
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'AI Suggest').click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const resolved = internalOf(el).segments[1];
+      expect(resolved.type).to.equal('resolved');
+      expect(resolved.lines).to.deep.equal([]);
     });
 
     it('rejects an AI suggestion that contains conflict markers', async () => {

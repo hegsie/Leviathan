@@ -786,6 +786,46 @@ describe('lv-conflict-resolution-dialog', () => {
     });
   });
 
+  // ── Continue re-entry guard ──────────────────────────────────────────────
+  describe('continue re-entry guard', () => {
+    it('a double-click on Complete drops the stash only once', async () => {
+      const el = await renderDialog('stash');
+      el.dropStashOnComplete = true;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      await el.updateComplete;
+
+      let dropCalls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'drop_stash') {
+          dropCalls++;
+          // Slow backend call — the second click arrives while this awaits.
+          await new Promise(r => setTimeout(r, 30));
+          return null;
+        }
+        return null;
+      };
+
+      // Double-click: both invocations start before the first completes. A
+      // second dropStash would delete an UNRELATED entry after indices shift.
+      const first = internal.handleContinue.call(el);
+      const second = internal.handleContinue.call(el);
+      await Promise.all([first, second]);
+
+      expect(dropCalls).to.equal(1);
+    });
+  });
+
   // ── Merge completion ─────────────────────────────────────────────────────
   describe('merge completion', () => {
     beforeEach(() => clearToasts());

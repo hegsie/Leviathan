@@ -3249,7 +3249,7 @@ export class AppShell extends LitElement {
                             this.activeRepository.repository.state === 'rebase-merge' ? 'Rebase in progress' :
                             this.activeRepository.repository.state === 'revert' ? 'Revert in progress' :
                             this.activeRepository.repository.state === 'bisect' ? 'Bisect in progress' :
-                            this.activeRepository.repository.state === 'clean' ? 'Stash conflicts need resolution' :
+                            this.activeRepository.repository.state === 'clean' ? 'Conflicts need resolution' :
                             `Operation in progress: ${this.activeRepository.repository.state}`}
                         </span>
                         <div class="operation-banner-actions">

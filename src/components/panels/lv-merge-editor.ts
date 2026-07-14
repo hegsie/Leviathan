@@ -547,9 +547,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   @state() private aiExplanations: Map<number, string> = new Map();
 
   private nextSegmentId = 1;
+  /** Invalidates in-flight loads when a newer one starts (rapid file switches). */
+  private loadEpoch = 0;
   private baseLines: string[] = [];
   private oursLines: string[] = [];
   private theirsLines: string[] = [];
+  /** Per-pane read failures — that pane shows an error, not fake content. */
+  private sideReadErrors = { base: false, ours: false, theirs: false };
   private alignmentRows: ThreeWayRow[] = [];
   /** Guards against scroll-sync feedback loops between the panes. */
   private syncingScroll = false;
@@ -610,31 +614,44 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   private async loadContents(): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile) return;
 
+    // Rapid file switches start overlapping loads; only the NEWEST may write
+    // state, or a slow earlier load would overwrite the panes/segments with
+    // another file's content under the current file's path — and Mark
+    // Resolved would then stage that wrong content.
+    const epoch = ++this.loadEpoch;
+    const file = this.conflictFile;
+
     this.loading = true;
     this.loadFailed = false;
     // Per-file UI state must not leak between files.
     this.editingSegmentId = null;
     this.aiExplanations = new Map();
     this.suggestingSegment = null;
-
-    // Initialize Shiki highlighter and detect language
-    await this.initCodeLanguage(this.conflictFile.path);
+    this.sideReadErrors = { base: false, ours: false, theirs: false };
 
     try {
+      // Initialize Shiki highlighter and detect language. Inside the try so
+      // a highlighter failure cannot wedge the editor in a permanent
+      // loading state (the finally below always clears it).
+      await this.initCodeLanguage(file.path);
+
       // Load all three versions and the working directory file in parallel.
       // The working directory file contains git's authoritative diff3 merge.
       const [ancestorResult, oursResult, theirsResult, workdirResult] = await Promise.all([
-        this.conflictFile.ancestor?.oid
-          ? gitService.getBlobContent(this.repositoryPath, this.conflictFile.ancestor.oid)
+        file.ancestor?.oid
+          ? gitService.getBlobContent(this.repositoryPath, file.ancestor.oid)
           : Promise.resolve({ success: true, data: '' }),
-        this.conflictFile.ours?.oid
-          ? gitService.getBlobContent(this.repositoryPath, this.conflictFile.ours.oid)
+        file.ours?.oid
+          ? gitService.getBlobContent(this.repositoryPath, file.ours.oid)
           : Promise.resolve({ success: true, data: '' }),
-        this.conflictFile.theirs?.oid
-          ? gitService.getBlobContent(this.repositoryPath, this.conflictFile.theirs.oid)
+        file.theirs?.oid
+          ? gitService.getBlobContent(this.repositoryPath, file.theirs.oid)
           : Promise.resolve({ success: true, data: '' }),
-        gitService.readFileContent(this.repositoryPath, this.conflictFile.path),
+        gitService.readFileContent(this.repositoryPath, file.path),
       ]);
+
+      // A newer load superseded this one while it was awaiting.
+      if (epoch !== this.loadEpoch) return;
 
       this.baseContent = ancestorResult.success ? (ancestorResult.data || '') : '';
       this.oursContent = oursResult.success ? (oursResult.data || '') : '';
@@ -643,19 +660,26 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       // A side with no entry (add/add conflicts have no ancestor; delete/modify
       // conflicts miss one side) has ZERO lines — ''.split('\n') would invent a
       // phantom blank line that misaligns and miscolors the panes.
-      this.baseLines = this.conflictFile.ancestor ? this.baseContent.split('\n') : [];
-      this.oursLines = this.conflictFile.ours ? this.oursContent.split('\n') : [];
-      this.theirsLines = this.conflictFile.theirs ? this.theirsContent.split('\n') : [];
+      this.baseLines = file.ancestor ? this.baseContent.split('\n') : [];
+      this.oursLines = file.ours ? this.oursContent.split('\n') : [];
+      this.theirsLines = file.theirs ? this.theirsContent.split('\n') : [];
       this.alignmentRows = alignThreeWay(this.baseLines, this.oursLines, this.theirsLines);
 
       // A failed read of a side that EXISTS must not masquerade as empty
       // content — the panes would lie and whole-file Use Ours/Theirs would
       // truncate the file. Route it to the same Retry state as a failed
-      // workdir read.
+      // workdir read, track which pane failed, and drop its fabricated
+      // ''-split line so nothing renders as fake content.
+      this.sideReadErrors = {
+        base: !!file.ancestor?.oid && !ancestorResult.success,
+        ours: !!file.ours?.oid && !oursResult.success,
+        theirs: !!file.theirs?.oid && !theirsResult.success,
+      };
+      if (this.sideReadErrors.base) this.baseLines = [];
+      if (this.sideReadErrors.ours) this.oursLines = [];
+      if (this.sideReadErrors.theirs) this.theirsLines = [];
       const sideReadFailed =
-        (!!this.conflictFile.ancestor?.oid && !ancestorResult.success) ||
-        (!!this.conflictFile.ours?.oid && !oursResult.success) ||
-        (!!this.conflictFile.theirs?.oid && !theirsResult.success);
+        this.sideReadErrors.base || this.sideReadErrors.ours || this.sideReadErrors.theirs;
 
       // Only git's own merge output is trustworthy. If the working directory
       // file can't be read, show an error state — never fabricate a merge.
@@ -669,10 +693,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       }
     } catch (err) {
       console.error('Failed to load conflict contents:', err);
-      this.segments = [];
-      this.loadFailed = true;
+      if (epoch === this.loadEpoch) {
+        this.segments = [];
+        this.loadFailed = true;
+      }
     } finally {
-      this.loading = false;
+      // A superseding load owns the loading flag now — don't clear it early.
+      if (epoch === this.loadEpoch) {
+        this.loading = false;
+      }
     }
   }
 
@@ -892,6 +921,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   // ── Whole-file operations ─────────────────────────────────────────────
 
   private acceptWholeFile(origin: 'ours' | 'theirs' | 'base'): void {
+    // With a failed load the side contents are not trustworthy — accepting
+    // one would replace the segments with fabricated (possibly empty) text.
+    if (this.loadFailed) return;
+
     // A side with no entry DELETED the file — accepting it means staging the
     // deletion, not writing a 0-byte file from its empty content.
     if (
@@ -966,7 +999,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         }
         this.updateSegment(id, {
           type: 'resolved',
-          lines: result.data.resolvedContent.split('\n'),
+          // An empty suggestion means ZERO lines (remove the section) —
+          // ''.split('\n') would fabricate one blank line.
+          lines: result.data.resolvedContent === '' ? [] : result.data.resolvedContent.split('\n'),
           origin: 'ai',
           fromConflict: true,
         });
@@ -1022,6 +1057,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
     if (this.conflictCount > 0) {
       showToast('Resolve all conflict blocks before marking the file resolved', 'warning');
+      return;
+    }
+    // An open inline edit holds an unapplied draft — writing now would stage
+    // the PRE-edit text while the screen shows the draft, silently losing it.
+    if (this.editingSegmentId !== null) {
+      showToast('Apply or cancel the open edit before marking the file resolved', 'warning');
       return;
     }
 
@@ -1152,6 +1193,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   /** Render one source pane from the shared three-way alignment rows. */
   private renderAlignedPane(side: 'ours' | 'base' | 'theirs'): ReturnType<typeof html> {
+    if (this.sideReadErrors[side]) {
+      return html`
+        <div class="output-error">
+          <div>Could not read this version.</div>
+        </div>
+      `;
+    }
+
     const sideLines =
       side === 'ours' ? this.oursLines : side === 'theirs' ? this.theirsLines : this.baseLines;
 
@@ -1457,7 +1506,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             Reload
           </button>
           ${this.conflictFile.ancestor
-            ? html`<button class="btn" @click=${this.handleAcceptBase} title="Reset to common ancestor">
+            ? html`<button class="btn" @click=${this.handleAcceptBase} ?disabled=${this.loadFailed} title="Reset to common ancestor">
                 Use Base
               </button>`
             : nothing}
@@ -1465,14 +1514,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             ? html`<button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} title="Ours deleted this file — keep it deleted">
                 Use Ours (delete file)
               </button>`
-            : html`<button class="btn btn-ours" @click=${this.handleAcceptOurs} title="Use entire file from ${labels.ours}">
+            : html`<button class="btn btn-ours" @click=${this.handleAcceptOurs} ?disabled=${this.loadFailed} title="Use entire file from ${labels.ours}">
                 Use Ours
               </button>`}
           ${this.conflictFile && !this.conflictFile.theirs
             ? html`<button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} title="Theirs deleted this file — delete it">
                 Use Theirs (delete file)
               </button>`
-            : html`<button class="btn btn-theirs" @click=${this.handleAcceptTheirs} title="Use entire file from ${labels.theirs}">
+            : html`<button class="btn btn-theirs" @click=${this.handleAcceptTheirs} ?disabled=${this.loadFailed} title="Use entire file from ${labels.theirs}">
                 Use Theirs
               </button>`}
           ${this.aiAvailable && conflictCount > 0 ? html`
@@ -1488,10 +1537,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <button
             class="btn btn-primary"
             @click=${this.handleMarkResolved}
-            ?disabled=${conflictCount > 0 || this.loadFailed}
+            ?disabled=${conflictCount > 0 || this.loadFailed || this.editingSegmentId !== null}
             title=${conflictCount > 0
               ? `Resolve the remaining ${conflictCount} conflict${conflictCount === 1 ? '' : 's'} first`
-              : 'Stage this file as resolved'}
+              : this.editingSegmentId !== null
+                ? 'Apply or cancel the open edit first'
+                : 'Stage this file as resolved'}
           >
             Mark Resolved
           </button>
@@ -1503,9 +1554,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <div class="editor-panel">
             <div class="panel-header ours">
               ${labels.ours}
-              <span class="panel-stats">${this.formatChangeCount(this.getChangeCount('ours'))}</span>
-              <button class="panel-header-btn" @click=${this.handleAcceptOurs} title="Use this version">
-                Use
+              <span class="panel-stats">
+                ${this.sideReadErrors.ours ? 'read failed' : this.formatChangeCount(this.getChangeCount('ours'))}
+              </span>
+              <button
+                class="panel-header-btn"
+                @click=${this.conflictFile.ours ? this.handleAcceptOurs : () => this.handleTakeSide('ours')}
+                ?disabled=${this.loadFailed}
+                title=${this.conflictFile.ours ? 'Use this version' : 'This side deleted the file — stage the deletion'}
+              >
+                ${this.conflictFile.ours ? 'Use' : 'Use (delete)'}
               </button>
             </div>
             <div class="panel-content readonly" id="panel-ours" @scroll=${this.handleSourceScroll}>
@@ -1526,9 +1584,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <div class="editor-panel">
             <div class="panel-header theirs">
               ${labels.theirs}
-              <span class="panel-stats">${this.formatChangeCount(this.getChangeCount('theirs'))}</span>
-              <button class="panel-header-btn" @click=${this.handleAcceptTheirs} title="Use this version">
-                Use
+              <span class="panel-stats">
+                ${this.sideReadErrors.theirs ? 'read failed' : this.formatChangeCount(this.getChangeCount('theirs'))}
+              </span>
+              <button
+                class="panel-header-btn"
+                @click=${this.conflictFile.theirs ? this.handleAcceptTheirs : () => this.handleTakeSide('theirs')}
+                ?disabled=${this.loadFailed}
+                title=${this.conflictFile.theirs ? 'Use this version' : 'This side deleted the file — stage the deletion'}
+              >
+                ${this.conflictFile.theirs ? 'Use' : 'Use (delete)'}
               </button>
             </div>
             <div class="panel-content readonly" id="panel-theirs" @scroll=${this.handleSourceScroll}>
@@ -1540,9 +1605,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         <div class="output-panel">
           <div class="panel-header output">
             Output
-            ${conflictCount > 0
-              ? html`<span class="conflict-count">${conflictCount} conflict${conflictCount === 1 ? '' : 's'} remaining</span>`
-              : html`<span class="conflict-count">No conflicts</span>`}
+            ${this.loadFailed
+              ? html`<span class="conflict-count">load failed</span>`
+              : conflictCount > 0
+                ? html`<span class="conflict-count">${conflictCount} conflict${conflictCount === 1 ? '' : 's'} remaining</span>`
+                : html`<span class="conflict-count">No conflicts</span>`}
           </div>
           <div class="panel-content" id="panel-output" @scroll=${this.handleOutputScroll}>
             ${this.renderOutput()}

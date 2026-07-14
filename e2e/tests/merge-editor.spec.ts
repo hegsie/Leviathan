@@ -440,6 +440,10 @@ test.describe('Merge Editor - Stash source certainty', () => {
       discard_changes: null,
     });
 
+    // The clean-state banner must not overclaim a stash source either.
+    await expect(page.locator('.operation-text')).toContainText('Conflicts need resolution');
+    await expect(page.locator('.operation-text')).not.toContainText('Stash');
+
     // Open via the conflicted-file click (state-derived: uncertain source).
     await page.locator('lv-file-status .file-item', { hasText: 'conflict.ts' }).first().click();
     await expect(page.locator('lv-conflict-resolution-dialog[open]')).toBeVisible();

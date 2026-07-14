@@ -391,6 +391,7 @@ export class LvConflictResolutionDialog extends LitElement {
    */
   private priorFinishCommitLanded = false;
   @state() private aborting = false;
+  @state() private continuing = false;
   @state() private showAbortConfirm = false;
   @state() private hasMergeTool = false;
   @state() private launchingExternalTool: string | null = null;
@@ -761,7 +762,19 @@ export class LvConflictResolutionDialog extends LitElement {
   }
 
   private async handleContinue(): Promise<void> {
-    if (!this.repositoryPath) return;
+    // Re-entry guard: a double-click during the awaited backend call must not
+    // run the flow twice — a duplicate dropStash would delete an UNRELATED
+    // stash entry after the indices shift.
+    if (!this.repositoryPath || this.continuing) return;
+    this.continuing = true;
+    try {
+      await this.runContinue();
+    } finally {
+      this.continuing = false;
+    }
+  }
+
+  private async runContinue(): Promise<void> {
 
     // A failed load leaves us with no conflict data even though the index IS
     // conflicted. Never proceed (or drop the stash) in that state — keep the
@@ -1148,7 +1161,8 @@ export class LvConflictResolutionDialog extends LitElement {
             <button
               class="btn btn-primary"
               @click=${this.handleContinue}
-              ?disabled=${this.loadFailed ||
+              ?disabled=${this.continuing ||
+                this.loadFailed ||
                 this.resolvedCount < this.totalCount ||
                 (this.operationType === 'stash' && this.conflicts.length === 0)}
             >
