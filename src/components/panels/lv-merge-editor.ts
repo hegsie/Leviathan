@@ -992,6 +992,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         resolvedAfter.slice(0, 20).join('\n') || undefined,
       );
 
+      // The user may have resolved this block manually while the call was in
+      // flight — their explicit pick wins; never overwrite it. Not a failure,
+      // so Resolve All continues past it.
+      const current = this.segments.find((s) => s.id === id);
+      if (!current || current.type !== 'conflict') return true;
+
       if (result.success && result.data) {
         // AI output bypasses parseSegments, so it must be validated here:
         // a suggestion that echoes marker lines would otherwise render them

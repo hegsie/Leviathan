@@ -824,6 +824,50 @@ describe('lv-conflict-resolution-dialog', () => {
 
       expect(dropCalls).to.equal(1);
     });
+
+    it('blocks Abort while Complete is running (and vice versa)', async () => {
+      const el = await renderDialog('stash');
+      el.dropStashOnComplete = true;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        showAbortConfirm: boolean;
+        handleContinue: () => Promise<void>;
+        handleAbort: () => void;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      await el.updateComplete;
+
+      let release: (() => void) | null = null;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'drop_stash') {
+          await new Promise<void>(r => { release = r; });
+          return null;
+        }
+        return null;
+      };
+
+      const completing = internal.handleContinue.call(el);
+      await el.updateComplete;
+
+      // While Complete awaits the backend, Abort must be inert — aborting now
+      // would revert the files AND lose the stash entry, with a false toast.
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      expect(abortBtn.disabled).to.be.true;
+      internal.handleAbort.call(el);
+      expect(internal.showAbortConfirm).to.be.false;
+
+      release!();
+      await completing;
+    });
   });
 
   // ── Merge completion ─────────────────────────────────────────────────────

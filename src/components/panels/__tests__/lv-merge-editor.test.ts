@@ -1138,6 +1138,36 @@ describe('lv-merge-editor', () => {
       await el.updateComplete;
     });
 
+    it('a slow AI suggestion never overwrites a manual resolution made mid-flight', async () => {
+      setupDefaultMocks();
+      aiAvailable = true;
+      let releaseAi: (() => void) | null = null;
+      aiSuggestion = () =>
+        new Promise((resolve) => {
+          releaseAi = () =>
+            resolve({ resolvedContent: 'ai-resolved', explanation: 'from ai' });
+        });
+
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'AI Suggest').click();
+      await el.updateComplete;
+
+      // While the suggestion is in flight, the user picks a side manually.
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(internalOf(el).segments[1].origin).to.equal('ours');
+
+      // The late AI response must not replace the user's explicit pick.
+      releaseAi!();
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+
+      const resolved = internalOf(el).segments[1];
+      expect(resolved.origin).to.equal('ours');
+      expect(resolved.lines).to.deep.equal(['line2-ours']);
+      expect(shadowText(el)).to.not.include('from ai');
+    });
+
     it('treats an empty AI suggestion as removing the section, not a blank line', async () => {
       setupDefaultMocks();
       aiAvailable = true;

@@ -594,7 +594,9 @@ export class LvConflictResolutionDialog extends LitElement {
   }
 
   private handleAbort(): void {
-    if (this.aborting) return;
+    // Mutually exclusive with Complete: aborting while a stash-drop Complete
+    // is in flight would revert the files AND lose the stash entry.
+    if (this.aborting || this.continuing) return;
     // Once the merge commit has landed (only the follow-up git-flow finish
     // step failed), there is nothing to abort — exit directly WITHOUT the
     // "all resolved changes will be lost" confirm, which would be false here
@@ -632,7 +634,7 @@ export class LvConflictResolutionDialog extends LitElement {
   }
 
   private async handleAbortConfirm(): Promise<void> {
-    if (!this.repositoryPath || this.aborting) return;
+    if (!this.repositoryPath || this.aborting || this.continuing) return;
 
     // Safety net: if the merge was committed after the confirm opened, exit
     // without a no-op abort_merge. handleAbort normally routes here before the
@@ -764,8 +766,8 @@ export class LvConflictResolutionDialog extends LitElement {
   private async handleContinue(): Promise<void> {
     // Re-entry guard: a double-click during the awaited backend call must not
     // run the flow twice — a duplicate dropStash would delete an UNRELATED
-    // stash entry after the indices shift.
-    if (!this.repositoryPath || this.continuing) return;
+    // stash entry after the indices shift. Also mutually exclusive with Abort.
+    if (!this.repositoryPath || this.continuing || this.aborting) return;
     this.continuing = true;
     try {
       await this.runContinue();
@@ -1155,13 +1157,18 @@ export class LvConflictResolutionDialog extends LitElement {
               : 'No file selected'}
           </div>
           <div class="footer-actions">
-            <button class="btn btn-danger" @click=${this.handleAbort}>
+            <button
+              class="btn btn-danger"
+              @click=${this.handleAbort}
+              ?disabled=${this.continuing || this.aborting}
+            >
               Abort ${this.getOperationTitle()}
             </button>
             <button
               class="btn btn-primary"
               @click=${this.handleContinue}
               ?disabled=${this.continuing ||
+                this.aborting ||
                 this.loadFailed ||
                 this.resolvedCount < this.totalCount ||
                 (this.operationType === 'stash' && this.conflicts.length === 0)}
