@@ -305,6 +305,25 @@ describe('lv-merge-editor', () => {
       expect(segments[1].theirsLabel).to.equal('feature');
     });
 
+    it('treats a >>>>>>>-shaped line before the separator as content', async () => {
+      const el = await renderEditor();
+      // A quoted diff or docs line resembling an end marker inside the ours
+      // section must not terminate the conflict — that would drop the real
+      // theirs side and leak the true markers as "resolved" text.
+      const segments = internalOf(el).parseSegments(
+        '<<<<<<< HEAD\nline1\n>>>>>>> quoted diff header\nline3\n=======\ntheirs line\n>>>>>>> feature'
+      );
+      expect(segments.length).to.equal(1);
+      expect(segments[0].type).to.equal('conflict');
+      expect(segments[0].oursLines).to.deep.equal([
+        'line1',
+        '>>>>>>> quoted diff header',
+        'line3',
+      ]);
+      expect(segments[0].theirsLines).to.deep.equal(['theirs line']);
+      expect(segments[0].theirsLabel).to.equal('feature');
+    });
+
     it('does not mistake 8+ angle brackets for conflict markers', async () => {
       const el = await renderEditor();
       const segments = internalOf(el).parseSegments('<<<<<<<< not a marker\ncontent');
@@ -677,6 +696,32 @@ describe('lv-merge-editor', () => {
       expect(emptySegment, 'placeholder row rendered').to.not.be.undefined;
       expect(emptySegment!.querySelector('.segment-actions .segment-btn')).to.not.be.null;
     });
+
+    it('Edit → Apply on an empty resolution keeps zero lines, not one blank line', async () => {
+      setupDefaultMocks();
+      workdirContent = 'ctx\n<<<<<<< HEAD\n=======\ntheirs-line\n>>>>>>> other\ntail';
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(internalOf(el).segments[1].lines).to.deep.equal([]);
+
+      // Open Edit on the empty placeholder and Apply without typing anything.
+      const segmentEls = el.shadowRoot!.querySelectorAll('.output-segment');
+      const emptySegment = Array.from(segmentEls).find((s) =>
+        s.textContent?.includes('removed the section')
+      )!;
+      (emptySegment.querySelector('.segment-actions .segment-btn') as HTMLButtonElement).click();
+      await el.updateComplete;
+
+      const applyBtn = Array.from(el.shadowRoot!.querySelectorAll('.segment-editor button')).find(
+        (b) => b.textContent?.trim() === 'Apply'
+      ) as HTMLButtonElement;
+      applyBtn.click();
+      await el.updateComplete;
+
+      // Still zero lines — no spurious blank line was inserted.
+      expect(internalOf(el).segments[1].lines).to.deep.equal([]);
+    });
   });
 
   // ── Add/add conflicts (no common ancestor) ───────────────────────────
@@ -932,6 +977,25 @@ describe('lv-merge-editor', () => {
       await el.updateComplete;
     });
 
+    it('rejects an AI suggestion that contains conflict markers', async () => {
+      setupDefaultMocks();
+      aiAvailable = true;
+      aiSuggestion = () =>
+        Promise.resolve({
+          resolvedContent: 'ok line\n<<<<<<< HEAD\nleak\n=======',
+          explanation: 'bad',
+        });
+
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'AI Suggest').click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      // The block stays unresolved and no marker text reaches the DOM.
+      expect(internalOf(el).segments[1].type).to.equal('conflict');
+      expectNoMarkers(el);
+    });
+
     it('drops a stale AI explanation when the block is reset or re-picked', async () => {
       setupDefaultMocks();
       aiAvailable = true;
@@ -1045,6 +1109,35 @@ describe('lv-merge-editor', () => {
 
       const takeSide = invokeHistory.find(h => h.command === 'resolve_conflict_take_side');
       expect(takeSide, 'take-side called for deleted side').to.exist;
+      expect((takeSide!.args as Record<string, unknown>).side).to.equal('theirs');
+      expect(invokeHistory.some(h => h.command === 'resolve_conflict')).to.be.false;
+      expect(resolvedFired).to.be.true;
+    });
+
+    it('the pane-header Use button also resolves a deleted side as a deletion', async () => {
+      const el = await renderEditor();
+      const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean };
+      // theirs deleted the file; ours modified it.
+      internal.conflictFile = { ...makeConflictFile('src/gone.ts'), theirs: null };
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 50));
+      internal.loading = false;
+      await el.updateComplete;
+
+      let resolvedFired = false;
+      el.addEventListener('conflict-resolved', () => { resolvedFired = true; });
+
+      // The THEIRS pane-header "Use" button must stage the deletion like the
+      // toolbar button — not write a 0-byte file from the empty side content.
+      invokeHistory.length = 0;
+      const theirsHeaderUse = el.shadowRoot!.querySelector(
+        '.panel-header.theirs .panel-header-btn'
+      ) as HTMLButtonElement;
+      theirsHeaderUse.click();
+      await new Promise(r => setTimeout(r, 50));
+
+      const takeSide = invokeHistory.find(h => h.command === 'resolve_conflict_take_side');
+      expect(takeSide, 'take-side called from pane header').to.exist;
       expect((takeSide!.args as Record<string, unknown>).side).to.equal('theirs');
       expect(invokeHistory.some(h => h.command === 'resolve_conflict')).to.be.false;
       expect(resolvedFired).to.be.true;

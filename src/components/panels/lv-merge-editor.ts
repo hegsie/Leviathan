@@ -733,7 +733,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         section = 'base';
       } else if (inConflict && section !== 'theirs' && isSeparator(line)) {
         section = 'theirs';
-      } else if (inConflict && isConflictEnd(line)) {
+      } else if (inConflict && section === 'theirs' && isConflictEnd(line)) {
+        // Git always emits '=======' before '>>>>>>>', so an end marker is
+        // only valid in the theirs section — anywhere earlier it's content
+        // (a quoted diff, docs about conflicts) and treating it as the end
+        // would drop the real theirs side and leak the true markers.
         theirsLabel = stripCr(line).slice(7).trim() || 'THEIRS';
         pushConflict();
         inConflict = false;
@@ -857,7 +861,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.clearAiExplanation(id);
     this.updateSegment(id, {
       type: 'resolved',
-      lines: this.editDraft.split('\n'),
+      // An empty draft means ZERO lines (section removed) — ''.split('\n')
+      // would silently turn it into one blank line.
+      lines: this.editDraft === '' ? [] : this.editDraft.split('\n'),
       origin: 'manual',
       fromConflict: segment.type === 'conflict' ? true : segment.fromConflict,
     });
@@ -877,6 +883,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   // ── Whole-file operations ─────────────────────────────────────────────
 
   private acceptWholeFile(origin: 'ours' | 'theirs' | 'base'): void {
+    // A side with no entry DELETED the file — accepting it means staging the
+    // deletion, not writing a 0-byte file from its empty content.
+    if (
+      (origin === 'ours' && !this.conflictFile?.ours) ||
+      (origin === 'theirs' && !this.conflictFile?.theirs)
+    ) {
+      void this.handleTakeSide(origin);
+      return;
+    }
+
     const content =
       origin === 'ours' ? this.oursContent : origin === 'theirs' ? this.theirsContent : this.baseContent;
     this.editingSegmentId = null;
@@ -932,6 +948,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       );
 
       if (result.success && result.data) {
+        // AI output bypasses parseSegments, so it must be validated here:
+        // a suggestion that echoes marker lines would otherwise render them
+        // as "resolved" text and let them be written back to the file.
+        if (/^(<{7}|={7}|>{7}|\|{7})( |\r?$)/m.test(result.data.resolvedContent)) {
+          showToast('AI suggestion contained conflict markers — block left unresolved', 'error');
+          return false;
+        }
         this.updateSegment(id, {
           type: 'resolved',
           lines: result.data.resolvedContent.split('\n'),

@@ -1184,14 +1184,17 @@ export class LvFileStatus extends LitElement {
   private async handleStageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
 
-    if (file.isConflicted) {
-      this.redirectConflictedToMergeEditor(file);
+    // If multiple files are selected and this file is one of them, stage all
+    // selected — handleStageSelected stages the non-conflicted subset with a
+    // toast for what was skipped. This must run BEFORE the single-file
+    // conflict redirect, or the other selected files would be silently dropped.
+    if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
+      await this.handleStageSelected();
       return;
     }
 
-    // If multiple files are selected and this file is one of them, stage all selected
-    if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
-      await this.handleStageSelected();
+    if (file.isConflicted) {
+      this.redirectConflictedToMergeEditor(file);
       return;
     }
 

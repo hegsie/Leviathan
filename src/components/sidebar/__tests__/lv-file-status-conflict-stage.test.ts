@@ -127,6 +127,25 @@ describe('lv-file-status conflicted staging guards', () => {
     expect(stageCalls().length).to.equal(0);
   });
 
+  it('stage-click on a conflicted file in a multi-selection stages the clean subset', async () => {
+    const clean = makeEntry({ path: 'src/ok.ts' });
+    const conflicted = makeEntry({ path: 'src/conflict.ts', status: 'conflicted', isConflicted: true });
+    const el = await renderFileStatus([clean, conflicted]);
+
+    const internal = internalOf(el);
+    internal.selectedFiles = new Set(['src/ok.ts', 'src/conflict.ts']);
+
+    // Clicking the stage button on the CONFLICTED row of a multi-selection
+    // must still stage the other selected files (skipping the conflicted
+    // one), not silently drop them.
+    invokeHistory.length = 0;
+    await internal.handleStageFile(conflicted, new Event('click'));
+
+    const calls = stageCalls();
+    expect(calls.length).to.equal(1);
+    expect((calls[0].args as { paths: string[] }).paths).to.deep.equal(['src/ok.ts']);
+  });
+
   it('stage-selected skips conflicted files', async () => {
     const clean = makeEntry({ path: 'src/ok.ts' });
     const conflicted = makeEntry({ path: 'src/conflict.ts', status: 'conflicted', isConflicted: true });
