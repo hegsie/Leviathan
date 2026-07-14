@@ -726,6 +726,40 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(selected!.textContent).to.include('app.ts');
     });
 
+    it('uses honest non-stash wording when the stash source is only inferred', async () => {
+      const el = await renderDialog('stash');
+      el.stashSourceCertain = false;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      // Open the abort confirm and check its message doesn't promise the
+      // changes are safe in a stash entry that may not exist.
+      const abortBtn = el.shadowRoot!.querySelector('.footer-actions .btn-danger') as HTMLElement;
+      abortBtn.click();
+      await el.updateComplete;
+
+      const msg = el.shadowRoot!.querySelector('.confirm-message')!;
+      expect(msg.textContent).to.include('not saved anywhere else');
+      expect(msg.textContent).to.not.include('remains in the stash list');
+    });
+
+    it('keeps the reassuring stash wording when the stash source is known', async () => {
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const abortBtn = el.shadowRoot!.querySelector('.footer-actions .btn-danger') as HTMLElement;
+      abortBtn.click();
+      await el.updateComplete;
+
+      const msg = el.shadowRoot!.querySelector('.confirm-message')!;
+      expect(msg.textContent).to.include('remains in the stash list');
+    });
+
     it('falls back to the first conflict when the clicked file is not conflicted', async () => {
       const el = await renderDialog();
       el.initialFilePath = 'src/not-conflicted.ts';

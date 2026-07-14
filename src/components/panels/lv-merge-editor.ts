@@ -648,11 +648,20 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       this.theirsLines = this.conflictFile.theirs ? this.theirsContent.split('\n') : [];
       this.alignmentRows = alignThreeWay(this.baseLines, this.oursLines, this.theirsLines);
 
+      // A failed read of a side that EXISTS must not masquerade as empty
+      // content — the panes would lie and whole-file Use Ours/Theirs would
+      // truncate the file. Route it to the same Retry state as a failed
+      // workdir read.
+      const sideReadFailed =
+        (!!this.conflictFile.ancestor?.oid && !ancestorResult.success) ||
+        (!!this.conflictFile.ours?.oid && !oursResult.success) ||
+        (!!this.conflictFile.theirs?.oid && !theirsResult.success);
+
       // Only git's own merge output is trustworthy. If the working directory
       // file can't be read, show an error state — never fabricate a merge.
       // An empty string is valid content (empty merged file), so test the
       // type, not truthiness.
-      if (workdirResult.success && typeof workdirResult.data === 'string') {
+      if (!sideReadFailed && workdirResult.success && typeof workdirResult.data === 'string') {
         this.segments = this.parseSegments(workdirResult.data);
       } else {
         this.segments = [];
@@ -1447,9 +1456,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           >
             Reload
           </button>
-          <button class="btn" @click=${this.handleAcceptBase} title="Reset to common ancestor">
-            Use Base
-          </button>
+          ${this.conflictFile.ancestor
+            ? html`<button class="btn" @click=${this.handleAcceptBase} title="Reset to common ancestor">
+                Use Base
+              </button>`
+            : nothing}
           ${this.conflictFile && !this.conflictFile.ours
             ? html`<button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} title="Ours deleted this file — keep it deleted">
                 Use Ours (delete file)

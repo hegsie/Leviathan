@@ -364,6 +364,56 @@ test.describe('Merge Editor - Conflict Resolution Dialog', () => {
   });
 });
 
+test.describe('Merge Editor - Live diff transitions', () => {
+  test('an open diff transitions when its file becomes conflicted and closes when resolved', async ({
+    page,
+  }) => {
+    await setupOpenRepository(page, {
+      status: {
+        staged: [],
+        unstaged: [
+          { path: 'src/live.ts', status: 'modified', isStaged: false, isConflicted: false },
+        ],
+      },
+    });
+
+    // Open the diff on the (not yet conflicted) file
+    const fileItem = page.locator('lv-file-status .file-item', { hasText: 'live.ts' }).first();
+    await expect(fileItem).toBeVisible();
+    await fileItem.click();
+    await expect(page.locator('lv-diff-view')).toBeVisible();
+    await expect(page.locator('lv-diff-view .conflict-redirect')).toHaveCount(0);
+
+    // An external merge conflicts the file — the status refresh must flip the
+    // open diff to the merge-editor redirect instead of rendering marker text.
+    await page.evaluate(() => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        repositoryStore: { getState: () => { setStatus: (s: unknown[]) => void } };
+      };
+      stores.repositoryStore.getState().setStatus([
+        { path: 'src/live.ts', status: 'conflicted', isStaged: false, isConflicted: true },
+      ]);
+    });
+
+    await expect(page.locator('lv-diff-view .conflict-redirect')).toBeVisible();
+    const text = await page.locator('lv-diff-view').innerText();
+    expect(text).not.toContain('<<<<<<<');
+
+    // The conflict is resolved and committed externally — the file leaves the
+    // status entirely. The stale interstitial must close, not claim conflicts
+    // forever.
+    await page.evaluate(() => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        repositoryStore: { getState: () => { setStatus: (s: unknown[]) => void } };
+      };
+      stores.repositoryStore.getState().setStatus([]);
+    });
+
+    await expect(page.locator('lv-diff-view .conflict-redirect')).toHaveCount(0);
+    await expect(page.locator('lv-diff-view')).toHaveCount(0);
+  });
+});
+
 test.describe('Merge Editor - Error Handling', () => {
   const oneConflictFile = [
     {

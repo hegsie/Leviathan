@@ -760,6 +760,44 @@ describe('lv-merge-editor', () => {
       // All ours lines are additions, none miscolored as changed.
       expect(el.shadowRoot!.querySelectorAll('#panel-ours .code-addition').length).to.equal(2);
       expect(el.shadowRoot!.querySelectorAll('#panel-ours .line-changed').length).to.equal(0);
+
+      // There is no ancestor version — offering "Use Base" would stage an
+      // empty file as a "common ancestor" that never existed.
+      const useBase = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn')).find(
+        (b) => b.textContent?.trim() === 'Use Base'
+      );
+      expect(useBase).to.be.undefined;
+    });
+  });
+
+  // ── Side blob read failures ──────────────────────────────────────────
+  describe('side blob read failures', () => {
+    it('routes a failed read of an existing side to the Retry state', async () => {
+      setupDefaultMocks();
+      mockInvoke = (async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          // The ours blob EXISTS but its read fails — this must not
+          // masquerade as an empty file (Use Ours would truncate it).
+          if (blobArgs?.oid === 'ours-oid') return Promise.reject(new Error('read failed'));
+          if (blobArgs?.oid === 'base-oid') return 'line1\nline2\nline3';
+          if (blobArgs?.oid === 'theirs-oid') return 'line1\nline2-theirs\nline3';
+          return '';
+        }
+        if (command === 'read_file_content') return DEFAULT_WORKDIR_CONTENT;
+        if (command === 'get_merge_tool_config') return null;
+        if (command === 'is_ai_available') return false;
+        return null;
+      }) as MockInvoke;
+
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+      expect(internal.loadFailed).to.be.true;
+      expect(shadowText(el)).to.include('Could not read the merged file');
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled).to.be.true;
     });
   });
 

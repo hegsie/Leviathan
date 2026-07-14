@@ -339,6 +339,13 @@ export class LvConflictResolutionDialog extends LitElement {
   @property({ type: String }) operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
   /** The file the user clicked to get here — preselected over the first conflict. */
   @property({ attribute: false }) initialFilePath: string | null = null;
+  /**
+   * False when 'stash' was merely INFERRED from a clean repository state
+   * (external `git stash apply`/`checkout -m`/`apply -3` — indistinguishable).
+   * Messaging must then not promise the changes are safe in a stash entry
+   * that may not exist.
+   */
+  @property({ type: Boolean }) stashSourceCertain = true;
   /** For 'stash' completion: which stash entry to drop once conflicts are resolved. */
   @property({ type: Number }) stashIndex = 0;
   /**
@@ -691,8 +698,10 @@ export class LvConflictResolutionDialog extends LitElement {
           if (result.success) {
             showToast(
               restoredCount === 0
-                ? 'Nothing needed restoring — your changes remain in the stash'
-                : 'Conflicted files restored — your changes remain in the stash',
+                ? 'Nothing needed restoring'
+                : this.stashSourceCertain
+                  ? 'Conflicted files restored — your changes remain in the stash'
+                  : 'Conflicted files restored to their committed (HEAD) state',
               'info',
             );
           }
@@ -737,8 +746,10 @@ export class LvConflictResolutionDialog extends LitElement {
    */
   private handleStashNotApplied(): void {
     showToast(
-      'The stash was not applied — your changes are still in the stash',
-      'warning',
+      this.stashSourceCertain
+        ? 'The stash was not applied — your changes are still in the stash'
+        : 'No conflicted files remain — nothing to resolve',
+      this.stashSourceCertain ? 'warning' : 'info',
     );
     this.dispatchEvent(
       new CustomEvent('operation-aborted', {
@@ -1157,7 +1168,9 @@ export class LvConflictResolutionDialog extends LitElement {
                   <div class="confirm-title">Abort ${this.getOperationTitle()}?</div>
                   <div class="confirm-message">
                     ${this.operationType === 'stash'
-                      ? 'The conflicted files will be reverted to their committed (HEAD) state, discarding the applied stash changes in those files. Any unrelated uncommitted changes are kept, and the stash entry itself remains in the stash list.'
+                      ? this.stashSourceCertain
+                        ? 'The conflicted files will be reverted to their committed (HEAD) state, discarding the applied stash changes in those files. Any unrelated uncommitted changes are kept, and the stash entry itself remains in the stash list.'
+                        : 'The conflicted files will be reverted to their committed (HEAD) state, discarding those changes. If they did not come from a stash apply, they are not saved anywhere else — this cannot be undone.'
                       : 'All resolved changes will be lost. This cannot be undone.'}
                   </div>
                   <div class="confirm-actions">

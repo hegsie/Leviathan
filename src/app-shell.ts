@@ -542,6 +542,9 @@ export class AppShell extends LitElement {
   // The file the user clicked to enter the conflict flow — the dialog opens
   // preselected on it instead of always starting at the first conflict.
   @state() private conflictInitialFilePath: string | null = null;
+  // False when 'stash' was only inferred from a clean repo state — the dialog
+  // must not promise the changes are safe in a stash that may not exist.
+  @state() private conflictStashSourceCertain = true;
 
   // Command palette
   @state() private showCommandPalette = false;
@@ -941,6 +944,7 @@ export class AppShell extends LitElement {
     this.conflictSquashMerge = false;
     this.conflictGitflowFinish = null;
     this.conflictInitialFilePath = null;
+    this.conflictStashSourceCertain = true;
   }
 
   // Handle gitflow events (init, feature/release/hotfix operations) to trigger refresh
@@ -987,6 +991,12 @@ export class AppShell extends LitElement {
             fresh.status !== this.diffFile.status)
         ) {
           this.diffFile = fresh;
+        } else if (!fresh && this.diffFile.isConflicted) {
+          // A conflicted file that left the status entirely was resolved and
+          // committed (e.g. Complete Merge) — close the diff rather than
+          // showing a permanently stale "has merge conflicts" interstitial.
+          this.diffFile = null;
+          this.showDiff = false;
         }
       }
 
@@ -1626,9 +1636,12 @@ export class AppShell extends LitElement {
     this.conflictOperationType = this.deriveConflictOperationType();
     this.resetConflictDetailState();
     // A state-derived stash conflict has unknown pop semantics — never drop a
-    // stash entry we can't identify. Completing keeps the stash (safe).
+    // stash entry we can't identify (completing keeps the stash), and the
+    // source is only inferred (checkout -m / apply -3 look identical), so the
+    // dialog must not promise the changes are safe in a stash.
     if (this.conflictOperationType === 'stash') {
       this.conflictDropStashOnComplete = false;
+      this.conflictStashSourceCertain = false;
     }
     this.conflictInitialFilePath = initialFilePath ?? null;
     this.showConflictDialog = true;
@@ -3404,6 +3417,7 @@ export class AppShell extends LitElement {
               repositoryPath=${this.activeRepository.repository.path}
               operationType=${this.conflictOperationType}
               .initialFilePath=${this.conflictInitialFilePath}
+              .stashSourceCertain=${this.conflictStashSourceCertain}
               .stashIndex=${this.conflictStashIndex}
               .dropStashOnComplete=${this.conflictDropStashOnComplete}
               .squashMerge=${this.conflictSquashMerge}
