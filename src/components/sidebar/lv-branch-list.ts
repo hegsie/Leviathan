@@ -596,10 +596,20 @@ export class LvBranchList extends LitElement {
     // stable template) floats over a closed repo and Execute would rewrite
     // a repo with no tab to observe it.
     this.storeUnsubscribe = repositoryStore.subscribe((state) => {
-      const pinned = this.interactiveRebaseDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (pinned && !state.openRepositories.some((r) => r.repository.path === pinned)) {
+      const gone = (p: string | null): boolean =>
+        !!p && !state.openRepositories.some((r) => r.repository.path === p);
+      const rbPinned = this.interactiveRebaseDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (gone(rbPinned)) {
         this.interactiveRebaseDialog.close();
         showToast('The repository tab was closed — interactive rebase cancelled', 'warning');
+      }
+      // Same for our OWN embedded create-branch dialog: app-shell's guard only
+      // reaches app-shell's instance, not this one in the sidebar's shadow
+      // root. Create + checkout on a closed repo would be a silent mutation.
+      const cbPinned = this.createBranchDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (gone(cbPinned)) {
+        this.createBranchDialog.close();
+        showToast('The repository tab was closed — branch creation cancelled', 'warning');
       }
     });
   }

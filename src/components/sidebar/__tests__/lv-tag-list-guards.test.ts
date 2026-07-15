@@ -27,9 +27,25 @@ import type { LvTagList } from '../lv-tag-list.ts';
 
 // Import the actual component
 import '../lv-tag-list.ts';
+import { repositoryStore } from '../../../stores/repository.store.ts';
+import type { Repository } from '../../../types/git.types.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
+
+function mockRepo(path: string, name: string): Repository {
+  return {
+    path,
+    name,
+    isValid: true,
+    isBare: false,
+    headRef: 'main',
+    state: 'clean',
+    isShallow: false,
+    isPartialClone: false,
+    cloneFilter: null,
+  };
+}
 
 function makeTag(overrides: Partial<{
   name: string;
@@ -75,6 +91,62 @@ describe('lv-tag-list operationInProgress guards', () => {
   it('should have operationInProgress initially false', async () => {
     const el = await createComponent();
     expect((el as unknown as { operationInProgress: boolean }).operationInProgress).to.equal(false);
+  });
+
+  it('preserves the create-tag dialog element across an empty<->non-empty tag flip', async () => {
+    // The dialog must live at ONE template position; flipping the tag list
+    // empty<->non-empty (e.g. a watcher refresh after an external git tag) must
+    // not destroy an open dialog (losing its pinned repo / in-progress input).
+    const el = await createComponent();
+    await el.updateComplete;
+    const before = el.shadowRoot!.querySelector('lv-create-tag-dialog');
+    expect(before, 'dialog present when empty').to.not.be.null;
+
+    (el as unknown as { tags: unknown[] }).tags = [makeTag({ name: 'v1.0.0' })];
+    await el.updateComplete;
+    expect(
+      el.shadowRoot!.querySelector('lv-create-tag-dialog'),
+      'same element instance after tags appear',
+    ).to.equal(before);
+
+    (el as unknown as { tags: unknown[] }).tags = [];
+    await el.updateComplete;
+    expect(
+      el.shadowRoot!.querySelector('lv-create-tag-dialog'),
+      'same element instance after flipping back to empty',
+    ).to.equal(before);
+  });
+
+  it('closes its embedded create-tag dialog when the pinned repo tab is removed', async () => {
+    // lv-tag-list embeds its own create-tag dialog; app-shell's self-close
+    // guard can't reach it. Closing the pinned tab must dismiss it, or Create
+    // would run against a repo no longer in the tab bar.
+    repositoryStore.getState().reset();
+    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+    const el = await createComponent();
+    for (let i = 0; i < 50; i++) {
+      if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    let closed = false;
+    Object.defineProperty(el, 'createTagDialog', {
+      configurable: true,
+      value: {
+        pinnedRepositoryPathIfOpen: '/repo/a',
+        close: () => {
+          closed = true;
+        },
+      },
+    });
+
+    repositoryStore.getState().removeRepository('/repo/a');
+    await el.updateComplete;
+
+    expect(closed, 'create-tag dialog closed when its pinned tab was removed').to.be.true;
+    repositoryStore.getState().reset();
   });
 
   it('handleCheckoutTag should skip when operationInProgress is true', async () => {

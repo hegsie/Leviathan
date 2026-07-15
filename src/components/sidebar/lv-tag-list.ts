@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { repositoryStore } from '../../stores/repository.store.ts';
 import type { Tag } from '../../types/git.types.ts';
 import '../dialogs/lv-create-tag-dialog.ts';
 import type { LvCreateTagDialog } from '../dialogs/lv-create-tag-dialog.ts';
@@ -322,12 +323,25 @@ export class LvTagList extends LitElement {
 
   @query('lv-create-tag-dialog') private createTagDialog!: LvCreateTagDialog;
 
+  private storeUnsubscribe?: () => void;
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     // Keep in sync with app-level refreshes (e.g. a gitflow release finish
     // creating a tag completes inside the shared conflict dialog) — same
     // subscription as the sibling branch/stash/gitflow lists.
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
+    // Close our OWN embedded create-tag dialog when its pinned repo's tab is
+    // closed — app-shell's guard only reaches app-shell's instance, not this
+    // one in the sidebar's shadow root. A create on a closed repo would be a
+    // silent mutation of a repo no longer in the tab bar.
+    this.storeUnsubscribe = repositoryStore.subscribe((state) => {
+      const pinned = this.createTagDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (pinned && !state.openRepositories.some((r) => r.repository.path === pinned)) {
+        this.createTagDialog.close();
+        showToast('The repository tab was closed — tag creation cancelled', 'warning');
+      }
+    });
     await this.loadTags();
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
@@ -338,6 +352,7 @@ export class LvTagList extends LitElement {
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
+    this.storeUnsubscribe?.();
   }
 
   private handleRepositoryRefresh = (): void => {
@@ -862,6 +877,23 @@ export class LvTagList extends LitElement {
   }
 
   render() {
+    // Single stable outer template: the create-tag dialog must live at ONE
+    // template position, or an open dialog would be destroyed (losing its
+    // pinned repo, in-progress input, and open modal) when the tag list flips
+    // empty<->non-empty (e.g. a watcher refresh after an external `git tag`).
+    // Lit re-clones a subtree when the enclosing template literal changes, so
+    // the varying content goes through renderBody() while the dialog stays put.
+    return html`
+      ${this.renderBody()}
+      ${this.renderContextMenu()}
+      <lv-create-tag-dialog
+        .repositoryPath=${this.repositoryPath}
+        @tag-created=${this.handleTagCreated}
+      ></lv-create-tag-dialog>
+    `;
+  }
+
+  private renderBody() {
     if (this.loading) {
       return html`<div class="loading">Loading tags...</div>`;
     }
@@ -870,10 +902,6 @@ export class LvTagList extends LitElement {
       return html`
         ${this.renderControls()}
         <div class="empty">No tags</div>
-        <lv-create-tag-dialog
-          .repositoryPath=${this.repositoryPath}
-          @tag-created=${this.handleTagCreated}
-        ></lv-create-tag-dialog>
       `;
     }
 
@@ -916,13 +944,6 @@ export class LvTagList extends LitElement {
                 ` : nothing}
               `;
             })}
-
-      ${this.renderContextMenu()}
-
-      <lv-create-tag-dialog
-        .repositoryPath=${this.repositoryPath}
-        @tag-created=${this.handleTagCreated}
-      ></lv-create-tag-dialog>
     `;
   }
 }

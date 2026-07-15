@@ -287,6 +287,39 @@ describe('lv-branch-list operationInProgress guards', () => {
     repositoryStore.getState().reset();
   });
 
+  it('closes its embedded create-branch dialog when the pinned repo tab is removed', async () => {
+    // The sidebar's own create-branch dialog persists across tab switches;
+    // app-shell's self-close guard only reaches app-shell's instance. Closing
+    // the pinned tab must dismiss this one too, or Create + checkout would run
+    // on a repo no longer in the tab bar.
+    repositoryStore.getState().reset();
+    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+    const el = await createComponent();
+    for (let i = 0; i < 50; i++) {
+      if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    let closed = false;
+    Object.defineProperty(el, 'createBranchDialog', {
+      configurable: true,
+      value: {
+        pinnedRepositoryPathIfOpen: '/repo/a',
+        close: () => {
+          closed = true;
+        },
+      },
+    });
+
+    repositoryStore.getState().removeRepository('/repo/a');
+    await el.updateComplete;
+
+    expect(closed, 'create-branch dialog closed when its pinned tab was removed').to.be.true;
+    repositoryStore.getState().reset();
+  });
+
   it('leaves the dialog open when a DIFFERENT repo tab is removed', async () => {
     // Only the pinned repo's removal cancels the rebase; unrelated tab churn
     // must not disrupt an in-progress plan.

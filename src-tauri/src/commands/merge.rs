@@ -1036,6 +1036,7 @@ fn detected_marker_sizes(content: &str, min_size: usize) -> Vec<u32> {
     let mut stage: HashMap<usize, u8> = HashMap::new();
     let mut sizes: Vec<u32> = Vec::new();
     let mut min_complete: Option<u32> = None;
+    let mut min_complete_ge3: Option<u32> = None;
     for line in content.lines() {
         let (ch, exact) = match line.chars().next() {
             Some('<') => ('<', false),
@@ -1064,6 +1065,9 @@ fn detected_marker_sizes(content: &str, min_size: usize) -> Vec<u32> {
                 *s = 3;
                 let sz = n as u32;
                 min_complete = Some(min_complete.map_or(sz, |m| m.min(sz)));
+                if sz >= 3 {
+                    min_complete_ge3 = Some(min_complete_ge3.map_or(sz, |m| m.min(sz)));
+                }
                 if sizes.len() < MAX_DETECTED_SIZES {
                     sizes.push(sz);
                 }
@@ -1071,13 +1075,18 @@ fn detected_marker_sizes(content: &str, min_size: usize) -> Vec<u32> {
             _ => {}
         }
     }
-    // Always retain the smallest demonstrated complete size, even if the
-    // cap already filled with larger (possibly hostile/quoted) ones. A
-    // small real conflict size (git honors conflict-marker-size as low as
-    // 1) evicted from the list would make the structural fallback floor to
-    // 7, and the frontend would then parse the real sub-7 markers as plain
-    // content and stage them silently.
-    if let Some(m) = min_complete {
+    // Always retain the smallest demonstrated complete size, even if the cap
+    // already filled with larger (possibly hostile/quoted) ones. A small real
+    // conflict size (git honors conflict-marker-size as low as 1) evicted from
+    // the list would make the structural fallback floor to 7, and the frontend
+    // would then parse the real sub-7 markers as plain content and stage them
+    // silently. Retain the smallest complete size >= 3 SEPARATELY: the
+    // structural fallback filters to >= 3, so a sub-3 decoy occupying the
+    // global-min slot would be dropped there while a cap-evicted real size in
+    // [3,6] is not retained — floating the reported size above the real markers
+    // and leaking them. Retaining both closes that hole for at most one extra
+    // entry.
+    for m in [min_complete, min_complete_ge3].into_iter().flatten() {
         if !sizes.contains(&m) {
             sizes.push(m);
         }
@@ -1289,7 +1298,11 @@ fn detect_conflict_emission(
         .chain((attr_size != 7).then_some(attr_size))
         .filter(|&n| n >= 3)
         .min()
-        .unwrap_or(attr_size);
+        // Nothing >=3 survived. attr_size is only reached here when it is 7 or
+        // sub-3 (a 3-6 attr would have passed the filter above); reporting a
+        // sub-3 attr would make the frontend parse `<<`/`==`/`>>` in ordinary
+        // prose as markers. Fall back to the safe default (7).
+        .unwrap_or_else(crate::models::conflict::default_marker_size);
     let style = if diff3_within_first_conflict(&content, size as usize) {
         "diff3"
     } else {
@@ -3578,6 +3591,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_conflicts_fallback_never_reports_a_sub3_attribute_size() {
+        // conflict-marker-size=2 is legal (git honors sizes as low as 1), but
+        // reporting 2 would make the frontend parse ordinary `<<`/`==`/`>>`
+        // prose as markers. When nothing >=3 is demonstrated (here the file was
+        // hand-resolved to plain content with no markers left, yet the index is
+        // still conflicted), the fallback must report the safe default 7, never
+        // the sub-3 attribute size.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=2\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Hand-resolved to plain content — no conflict markers remain, so no
+        // size is demonstrated and replay cannot match.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "just ordinary prose\n<< not a marker, only two\nmore text\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 7);
+    }
+
+    #[tokio::test]
     async fn test_get_conflicts_fallback_uses_explicit_attr_when_real_conflict_hand_broken() {
         // The structural fallback runs only for HAND-EDITED files, and a hand
         // edit can break the real conflict's structure (delete its separator) so
@@ -3863,6 +3922,42 @@ mod tests {
         assert!(
             sizes.contains(&4),
             "the smallest demonstrated size must be retained past the cap; got {sizes:?}"
+        );
+    }
+
+    #[test]
+    fn test_detected_marker_sizes_retains_smallest_ge3_when_global_min_is_sub3() {
+        // A sub-3 decoy (size 2) is the GLOBAL smallest, so it occupies the
+        // "retain smallest" slot — but the structural fallback filters to >= 3,
+        // dropping it. Meanwhile a real size-5 conflict is cap-evicted. Without
+        // separately retaining the smallest complete size >= 3, the fallback
+        // would floor to 6 and leak the real size-5 markers.
+        let mut content = String::new();
+        // Sub-3 complete conflict → sets the global min to 2.
+        content.push_str("<<\na\n==\nb\n>>\n");
+        // 20 distinct decoys at sizes 6..=25 fill the 16-slot cap first.
+        for n in 6..=25usize {
+            content.push_str(&"<".repeat(n));
+            content.push('\n');
+            content.push_str("a\n");
+            content.push_str(&"=".repeat(n));
+            content.push('\n');
+            content.push_str("b\n");
+            content.push_str(&">".repeat(n));
+            content.push('\n');
+        }
+        // The REAL size-5 conflict, LAST — its slot push is cap-blocked.
+        content.push_str("<<<<<\nours\n=====\ntheirs\n>>>>>\n");
+
+        let sizes = detected_marker_sizes(&content, 1);
+        assert!(
+            sizes.contains(&5),
+            "the smallest complete size >=3 must be retained past the cap; got {sizes:?}"
+        );
+        let min_ge3 = sizes.iter().copied().filter(|&n| n >= 3).min().unwrap();
+        assert_eq!(
+            min_ge3, 5,
+            "the >=3 structural fallback would floor to {min_ge3}, leaking size-5 markers"
         );
     }
 
