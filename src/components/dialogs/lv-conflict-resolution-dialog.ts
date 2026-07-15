@@ -396,6 +396,8 @@ export class LvConflictResolutionDialog extends LitElement {
   @state() private continuing = false;
   /** True while the EMBEDDED merge editor has an external tool session open. */
   @state() private editorToolActive = false;
+  /** True while the embedded editor's resolve/take-side write is in flight. */
+  @state() private editorResolving = false;
   @state() private showAbortConfirm = false;
   @state() private hasMergeTool = false;
   @state() private launchingExternalTool: string | null = null;
@@ -421,6 +423,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting = false;
       this.continuing = false;
       this.editorToolActive = false;
+      this.editorResolving = false;
       this.showAbortConfirm = false;
       this.mergeCommitted = false;
       // Seed from the finish context: a first-run release/hotfix whose master
@@ -454,6 +457,7 @@ export class LvConflictResolutionDialog extends LitElement {
     this.aborting = false;
     this.continuing = false;
     this.editorToolActive = false;
+    this.editorResolving = false;
     this.showAbortConfirm = false;
     this.mergeCommitted = false;
     this.priorFinishCommitLanded = false;
@@ -546,8 +550,14 @@ export class LvConflictResolutionDialog extends LitElement {
       this.launchingExternalTool !== null ||
       this.aborting ||
       this.continuing ||
-      this.editorToolActive
+      this.editorToolActive ||
+      this.editorResolving
     ) {
+      return;
+    }
+    // Launching on the SELECTED file replaces the editor's unsaved picks with
+    // the tool's output on reload — same confirm as a file switch.
+    if (this.selectedConflict?.path === conflictPath && !(await this.confirmLeaveInProgress())) {
       return;
     }
 
@@ -665,7 +675,8 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting ||
       this.continuing ||
       this.launchingExternalTool !== null ||
-      this.editorToolActive
+      this.editorToolActive ||
+      this.editorResolving
     ) {
       return;
     }
@@ -711,7 +722,8 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting ||
       this.continuing ||
       this.launchingExternalTool !== null ||
-      this.editorToolActive
+      this.editorToolActive ||
+      this.editorResolving
     ) {
       return;
     }
@@ -852,7 +864,8 @@ export class LvConflictResolutionDialog extends LitElement {
       this.continuing ||
       this.aborting ||
       this.launchingExternalTool !== null ||
-      this.editorToolActive
+      this.editorToolActive ||
+      this.editorResolving
     ) {
       return;
     }
@@ -1197,7 +1210,8 @@ export class LvConflictResolutionDialog extends LitElement {
                           ?disabled=${this.launchingExternalTool !== null ||
                           this.aborting ||
                           this.continuing ||
-                          this.editorToolActive}
+                          this.editorToolActive ||
+                          this.editorResolving}
                           title="Open in external merge tool"
                         >
                           ${this.launchingExternalTool === conflict.path ? '...' : 'External'}
@@ -1221,6 +1235,8 @@ export class LvConflictResolutionDialog extends LitElement {
                     @conflict-resolved=${this.handleConflictResolved}
                     @external-tool-started=${() => { this.editorToolActive = true; }}
                     @external-tool-finished=${() => { this.editorToolActive = false; }}
+                    @resolve-started=${() => { this.editorResolving = true; }}
+                    @resolve-finished=${() => { this.editorResolving = false; }}
                   ></lv-merge-editor>
                 `
               : html`

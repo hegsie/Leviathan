@@ -510,11 +510,13 @@ describe('lv-conflict-resolution-dialog', () => {
       // Give the embedded editor unsaved in-memory picks.
       const editor = el.shadowRoot!.querySelector('lv-merge-editor') as unknown as {
         segments: Array<Record<string, unknown>>;
+        userTouched: boolean;
         updateComplete: Promise<boolean>;
       };
       editor.segments = [
         { id: 1, type: 'resolved', lines: ['picked'], oursLines: ['a'], theirsLines: ['b'], oursLabel: '', theirsLabel: '', origin: 'ours', fromConflict: true },
       ];
+      editor.userTouched = true;
       await editor.updateComplete;
 
       // Confirm declined → the switch is cancelled and the picks survive.

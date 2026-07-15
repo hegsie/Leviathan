@@ -26,6 +26,7 @@ import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
 import {
@@ -614,6 +615,17 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
 
     const file = this.conflictFile;
+    // The tool edits the ON-DISK file, which doesn't have the editor's
+    // unsaved picks — its output will replace them on reload. Confirm first.
+    if (this.hasUnsavedResolutions()) {
+      const proceed = await showConfirm(
+        'Discard in-progress resolution?',
+        'The external tool works on the file as saved on disk — your unsaved picks here will be replaced by its result.',
+        'warning',
+      );
+      if (!proceed) return;
+    }
+
     this.launchingExternalTool = true;
     // Tell the host a tool session is open so its Abort/Complete stay inert —
     // they would otherwise race the tool's eventual save.
@@ -623,7 +635,6 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     try {
       const result = await gitService.launchMergeTool(this.repositoryPath, file.path);
       if (result.success && result.data?.success) {
-        showToast('Merge tool completed', 'success');
         // The tool may have fully resolved (and staged) the file — verify
         // against the index and let the host mark it, so this path behaves
         // like the dialog's own external tool instead of leaving the file
@@ -640,7 +651,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         if (this.conflictFile?.path === file.path) {
           await this.loadContents();
         }
-        if (!stillConflicted) {
+        // Mirror the dialog's launcher: success only when the index confirms
+        // the resolution — a green toast over "N conflicts remaining" would
+        // read as success for an unfinished merge.
+        if (stillConflicted) {
+          showToast('File still has conflicts', 'warning');
+        } else {
+          showToast('Merge tool completed', 'success');
           this.dispatchEvent(new CustomEvent('conflict-resolved', {
             detail: { file },
             bubbles: true,
@@ -684,6 +701,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.suggestingAll = false;
     this.aiResolveAllToken++;
     this.lastSavedContent = null;
+    this.userTouched = false;
     this.sideReadErrors = { base: false, ours: false, theirs: false };
 
     try {
@@ -812,8 +830,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       const n = markerRun(lines[index], '<');
       if (n === 0) return 0;
       if (n === 7) return 7;
+      // A raised size must look like a REAL git conflict: both the exact-size
+      // separator AND an exact-size end marker must follow. Requiring only
+      // the separator would let a banner line plus one coincidental divider
+      // swallow the rest of the file into a phantom conflict.
       const sep = '='.repeat(n);
-      return lines.slice(index + 1).some((l) => stripCr(l) === sep) ? n : 0;
+      const rest = lines.slice(index + 1);
+      const hasSeparator = rest.some((l) => stripCr(l) === sep);
+      const hasEnd = rest.some((l) => markerRun(l, '>') === n);
+      return hasSeparator && hasEnd ? n : 0;
     };
 
     const segments: OutputSegment[] = [];
@@ -930,15 +955,19 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   /** Serialized output of the last successful Mark Resolved for this file —
    * work matching it is on disk and safe to navigate away from. */
   private lastSavedContent: string | null = null;
+  /** True once the user changed the output in this file (per-block picks,
+   * edits, OR whole-file accepts — the latter carry no fromConflict flag). */
+  private userTouched = false;
 
   /**
    * True when the output holds work not yet written to disk: per-block
-   * resolutions or an open inline edit. Nothing persists until Mark
-   * Resolved, so hosts should confirm before navigating away.
+   * resolutions, whole-file accepts, or an open inline edit. Nothing
+   * persists until Mark Resolved, so hosts should confirm before
+   * navigating away.
    */
   public hasUnsavedResolutions(): boolean {
     if (this.editingSegmentId !== null) return true;
-    if (!this.segments.some((s) => s.fromConflict)) return false;
+    if (!this.userTouched) return false;
     return this.buildResolvedContent() !== this.lastSavedContent;
   }
 
@@ -980,6 +1009,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           ? [...segment.theirsLines]
           : [...segment.oursLines, ...segment.theirsLines];
     this.clearAiExplanation(id);
+    this.userTouched = true;
     this.updateSegment(id, { type: 'resolved', lines, origin: choice, fromConflict: true });
   }
 
@@ -1012,6 +1042,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
 
     this.clearAiExplanation(id);
+    this.userTouched = true;
     this.updateSegment(id, {
       type: 'resolved',
       // An empty draft means ZERO lines (section removed) — ''.split('\n')
@@ -1053,6 +1084,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const content =
       origin === 'ours' ? this.oursContent : origin === 'theirs' ? this.theirsContent : this.baseContent;
     this.editingSegmentId = null;
+    this.userTouched = true;
     this.segments = [this.makeResolvedSegment(content.split('\n'), origin, false)];
   }
 
@@ -1120,6 +1152,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           showToast('AI suggestion contained conflict markers — block left unresolved', 'error');
           return false;
         }
+        this.userTouched = true;
         this.updateSegment(id, {
           type: 'resolved',
           // An empty suggestion means ZERO lines (remove the section) —
@@ -1209,6 +1242,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const token = ++this.resolveToken;
     const content = this.buildResolvedContent();
     this.resolving = true;
+    // Announce the write so the host can lock its own tool launcher against
+    // it (same pattern as the external-tool session events).
+    this.dispatchEvent(new CustomEvent('resolve-started', { bubbles: true, composed: true }));
     try {
       const result = await gitService.resolveConflict(
         this.repositoryPath,
@@ -1234,6 +1270,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (token === this.resolveToken) {
         this.resolving = false;
       }
+      this.dispatchEvent(new CustomEvent('resolve-finished', { bubbles: true, composed: true }));
     }
   }
 
@@ -1254,6 +1291,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const file = this.conflictFile;
     const token = ++this.resolveToken;
     this.resolving = true;
+    this.dispatchEvent(new CustomEvent('resolve-started', { bubbles: true, composed: true }));
     try {
       const result = await gitService.resolveConflictTakeSide(
         this.repositoryPath,
@@ -1275,6 +1313,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (token === this.resolveToken) {
         this.resolving = false;
       }
+      this.dispatchEvent(new CustomEvent('resolve-finished', { bubbles: true, composed: true }));
     }
   }
 

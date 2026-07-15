@@ -27,6 +27,7 @@ import { expect, fixture, html } from '@open-wc/testing';
 import '../lv-merge-editor.ts';
 import type { LvMergeEditor } from '../lv-merge-editor.ts';
 import type { ConflictFile } from '../../../types/git.types.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -330,6 +331,18 @@ describe('lv-merge-editor', () => {
       expect(segments.length).to.equal(1);
       expect(segments[0].type).to.equal('resolved');
       expect(segments[0].lines).to.deep.equal(['<<<<<<<< not a marker', 'content']);
+    });
+
+    it('a long bracket run with only a coincidental divider stays content', async () => {
+      const el = await renderEditor();
+      // An 8-char banner plus a stray 8-equals divider is NOT a conflict —
+      // without a matching 8-char end marker the size lookahead must reject
+      // it instead of swallowing the file into a phantom conflict.
+      const segments = internalOf(el).parseSegments(
+        '<<<<<<<< banner heading\ntext\n========\nmore text'
+      );
+      expect(segments.length).to.equal(1);
+      expect(segments[0].type).to.equal('resolved');
     });
 
     it('parses raised conflict-marker-size markers (gitattribute)', async () => {
@@ -1517,6 +1530,18 @@ describe('lv-merge-editor', () => {
       await el.updateComplete;
       expect(el.hasUnsavedResolutions()).to.be.true;
     });
+
+    it('counts a whole-file accept as unsaved work too', async () => {
+      const el = await renderLoadedEditor();
+      // Whole-file accepts create segments without fromConflict — they must
+      // still be protected from a silent discard on file switch.
+      const useOurs = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn-ours')).find(
+        (b) => b.textContent?.trim() === 'Use Ours'
+      ) as HTMLButtonElement;
+      useOurs.click();
+      await el.updateComplete;
+      expect(el.hasUnsavedResolutions()).to.be.true;
+    });
   });
 
   // ── External tool session signaling ──────────────────────────────────
@@ -1604,6 +1629,45 @@ describe('lv-merge-editor', () => {
       expect(resolvedCountAfter, 'B\'s WIP resolution must survive an unrelated file\'s external tool completing').to.equal(1);
     });
 
+    it('a still-conflicted tool exit warns instead of toasting success', async () => {
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'launch_merge_tool') return { success: true };
+        // Post-tool index check: the file is STILL conflicted.
+        if (command === 'get_conflicts') {
+          return [
+            { path: 'src/test.ts', ancestor: null, ours: null, theirs: null, isBinary: false },
+          ];
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/test.ts');
+      let resolvedFired = false;
+      el.addEventListener('conflict-resolved', () => {
+        resolvedFired = true;
+      });
+
+      // Clear toasts accumulated by earlier tests — the store is global.
+      const uiState = uiStore.getState();
+      uiState.toasts.forEach((t) => uiState.removeToast(t.id));
+
+      const toolBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.includes('External Tool')
+      ) as HTMLButtonElement;
+      toolBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Not resolved: no conflict-resolved dispatch, and the toast is the
+      // warning, not the success (mirroring the dialog's launcher).
+      expect(resolvedFired).to.be.false;
+      const toasts = uiStore.getState().toasts.map((t) => t.message);
+      expect(toasts.some((m) => m.includes('still has conflicts'))).to.be.true;
+      expect(toasts.some((m) => m.includes('Merge tool completed'))).to.be.false;
+    });
+
     it('a still-conflicted tool exit reloads only when the file is still selected', async () => {
       setupDefaultMocks();
       let releaseTool: (() => void) | null = null;
@@ -1649,6 +1713,49 @@ describe('lv-merge-editor', () => {
       // B's pick survived — the still-conflicted branch did not reload B.
       const resolved = internal.segments.filter((s) => s.origin === 'ours').length;
       expect(resolved).to.equal(1);
+    });
+
+    it('launching the tool with unsaved picks asks for confirmation first', async () => {
+      setupDefaultMocks();
+      let launchCalls = 0;
+      const baseMock = mockInvoke;
+      let confirmAnswer: unknown = false;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'plugin:dialog|message') return confirmAnswer;
+        if (command === 'launch_merge_tool') {
+          launchCalls++;
+          return { success: true };
+        }
+        if (command === 'get_conflicts') {
+          return [
+            { path: 'src/test.ts', ancestor: null, ours: null, theirs: null, isBinary: false },
+          ];
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/test.ts');
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(el.hasUnsavedResolutions()).to.be.true;
+
+      const toolBtn = () =>
+        Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+          (b) => b.textContent?.includes('External Tool')
+        ) as HTMLButtonElement;
+
+      // Declined: the tool never launches and the picks stay.
+      toolBtn().click();
+      await new Promise((r) => setTimeout(r, 50));
+      expect(launchCalls).to.equal(0);
+      expect(el.hasUnsavedResolutions()).to.be.true;
+
+      // Accepted ('Ok' is the plugin's confirmed value): the tool launches.
+      confirmAnswer = 'Ok';
+      toolBtn().click();
+      await new Promise((r) => setTimeout(r, 80));
+      expect(launchCalls).to.equal(1);
     });
 
     it('resolve actions and the external tool are mutually exclusive', async () => {
