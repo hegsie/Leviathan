@@ -1395,6 +1395,37 @@ pub async fn resolve_conflict(
     let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
     let mut index = repo.index()?;
 
+    // Inspect this file's conflict entries once. Two invariants are enforced
+    // server-side rather than trusting the frontend's routing:
+    //  - a NON-UTF-8 filename cannot round-trip through the String API
+    //    (get_conflicts already lossy-encoded it), so building a path from
+    //    file_path here would target a DIFFERENT (U+FFFD-mangled) file —
+    //    silently creating a ghost and leaving the real file conflicted.
+    //  - a SYMLINK/SUBMODULE conflict must be resolved by choosing a side
+    //    (take-side), never by writing text content over it.
+    let mut special_mode = false;
+    for c in index.conflicts()?.filter_map(|r| r.ok()) {
+        for entry in [&c.our, &c.their, &c.ancestor].into_iter().flatten() {
+            if String::from_utf8_lossy(&entry.path) == file_path.as_str() {
+                if std::str::from_utf8(&entry.path).is_err() {
+                    return Err(LeviathanError::OperationFailed(format!(
+                        "'{}' has a non-UTF-8 name and can't be resolved in the app — resolve it with git in a terminal",
+                        file_path
+                    )));
+                }
+                if entry.mode == 0o120000 || entry.mode == 0o160000 {
+                    special_mode = true;
+                }
+            }
+        }
+    }
+    if special_mode && !delete_file.unwrap_or(false) {
+        return Err(LeviathanError::OperationFailed(format!(
+            "'{}' is a symlink or submodule conflict — choose a side instead of writing text",
+            file_path
+        )));
+    }
+
     if delete_file.unwrap_or(false) {
         // symlink_metadata, not exists(): exists() FOLLOWS symlinks, so a
         // dangling link reports false and would be left on disk while the
@@ -1409,6 +1440,12 @@ pub async fn resolve_conflict(
         // THROUGH an existing symlink — fs::write follows it and would
         // corrupt the link's target file (and stage the wrong blob).
         remove_if_symlink(&full_path)?;
+        // The parent directory can be missing (deleted out-of-band, or a
+        // file↔directory resolution) — create it so the write gives a
+        // sensible result instead of a raw NotFound.
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::write(&full_path, &content)?;
         index.add_path(Path::new(&file_path))?;
     }
@@ -1455,6 +1492,22 @@ pub async fn resolve_conflict_take_side(
         .ok_or_else(|| {
             LeviathanError::OperationFailed(format!("No conflict found for '{}'", file_path))
         })?;
+
+    // A NON-UTF-8 filename cannot round-trip through the String API — the
+    // matched-by-lossy path here differs from the entry's real bytes, so
+    // every fs/index op below would target a DIFFERENT (mangled) path,
+    // silently creating a ghost file and leaving the real one conflicted.
+    // Refuse honestly instead.
+    if [&conflict.our, &conflict.their, &conflict.ancestor]
+        .into_iter()
+        .flatten()
+        .any(|e| std::str::from_utf8(&e.path).is_err())
+    {
+        return Err(LeviathanError::OperationFailed(format!(
+            "'{}' has a non-UTF-8 name and can't be resolved in the app — resolve it with git in a terminal",
+            file_path
+        )));
+    }
 
     let entry = match side.as_str() {
         "ours" => conflict.our,
@@ -2859,6 +2912,100 @@ mod tests {
         );
         assert!(!repo.path.join("shared.txt").exists());
         assert!(!repo.repo().index().unwrap().has_conflicts());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_resolve_conflict_rejects_writing_text_over_a_symlink() {
+        // resolve_conflict (the text pipeline) must refuse a symlink
+        // conflict server-side — writing text content would corrupt the
+        // link. The UI routes these to take-side; this enforces it.
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        let link = repo.path.join("link");
+        symlink("base-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Add link", &[]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::remove_file(&link).unwrap();
+        symlink("theirs-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Feature retargets", &[]);
+        repo.checkout_branch(&initial_branch);
+        std::fs::remove_file(&link).unwrap();
+        symlink("ours-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Main retargets", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let err = resolve_conflict(
+            repo.path_str(),
+            "link".to_string(),
+            "arbitrary text".to_string(),
+            None,
+        )
+        .await
+        .expect_err("must refuse to write text over a symlink conflict");
+        assert!(err.to_string().contains("symlink or submodule conflict"));
+        // The link is untouched and still conflicted.
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert!(repo.repo().index().unwrap().has_conflicts());
+    }
+
+    #[tokio::test]
+    async fn test_take_side_refuses_a_non_utf8_filename() {
+        // A non-UTF-8 filename cannot round-trip through the String API —
+        // the frontend already has a lossy name — so resolving would target
+        // a DIFFERENT (mangled) path. Refuse honestly instead of silently
+        // creating a ghost and leaving the real file conflicted.
+        let repo = TestRepo::with_initial_commit();
+        let git_repo = repo.repo();
+        let ours_oid = git_repo.blob(b"ours\n").unwrap();
+        let theirs_oid = git_repo.blob(b"theirs\n").unwrap();
+        // café.txt where é is the raw Latin-1 byte 0xE9 (not valid UTF-8).
+        let raw_path: &[u8] = b"caf\xe9.txt";
+
+        let mut index = git_repo.index().unwrap();
+        for (stage, oid) in [(2u16, ours_oid), (3u16, theirs_oid)] {
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: oid,
+                flags: stage << 12,
+                flags_extended: 0,
+                path: raw_path.to_vec(),
+            };
+            index.add(&entry).unwrap();
+        }
+        index.write().unwrap();
+        assert!(git_repo.index().unwrap().has_conflicts());
+
+        // The frontend would send the LOSSY name (get_conflicts lossy-
+        // encoded it). take-side finds the entry by lossy match, then
+        // refuses because the entry's real bytes aren't UTF-8.
+        let lossy = String::from_utf8_lossy(raw_path).to_string();
+        let err = resolve_conflict_take_side(repo.path_str(), lossy, "ours".to_string())
+            .await
+            .expect_err("must refuse a non-UTF-8 filename rather than corrupt");
+        assert!(err.to_string().contains("non-UTF-8 name"));
     }
 
     #[tokio::test]

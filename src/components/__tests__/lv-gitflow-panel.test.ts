@@ -369,6 +369,50 @@ describe('lv-gitflow-panel', () => {
   });
 
   // ── Start operations ───────────────────────────────────────────────────
+  describe('load race safety', () => {
+    it('a slow load for the previous repo cannot overwrite the current repo panel', async () => {
+      // The Finish buttons bind directly to the active items; a stale load
+      // for repo A landing after the user switched to repo B would show A's
+      // branches under B's tab and could finish/delete the wrong branch.
+      let releaseA: ((v: unknown) => void) | null = null;
+      mockInvoke = async (command: string, args?: unknown) => {
+        const path = (args as { path?: string })?.path;
+        if (command === 'get_gitflow_config') {
+          if (path === '/repo/A') return new Promise((res) => { releaseA = res; });
+          return DEFAULT_CONFIG;
+        }
+        if (command === 'get_branches') {
+          return path === '/repo/A'
+            ? [makeBranch({ name: 'feature/A-only', shorthand: 'feature/A-only', isHead: false })]
+            : [makeBranch({ name: 'feature/B-only', shorthand: 'feature/B-only', isHead: false })];
+        }
+        return null;
+      };
+
+      const el = await fixture<LvGitflowPanel>(
+        html`<lv-gitflow-panel .repositoryPath=${'/repo/A'}></lv-gitflow-panel>`
+      );
+      // A's config load is deferred (in flight). Switch to B, which resolves.
+      el.repositoryPath = '/repo/B';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 60));
+      await el.updateComplete;
+
+      const internal = el as unknown as { activeFeatures: Array<{ name: string }> };
+      expect(internal.activeFeatures.map((f) => f.name)).to.deep.equal(['B-only']);
+
+      // A's slow response finally lands — it must be discarded, not applied.
+      releaseA!(DEFAULT_CONFIG);
+      await new Promise((r) => setTimeout(r, 60));
+      await el.updateComplete;
+
+      expect(
+        internal.activeFeatures.map((f) => f.name),
+        "the stale repo's items must not overwrite the current panel",
+      ).to.deep.equal(['B-only']);
+    });
+  });
+
   describe('start operations', () => {
     it('calls gitflow_start_feature when New Feature action button is clicked', async () => {
       setupMocks({ branches: emptyBranches });

@@ -887,6 +887,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         if (epoch !== this.loadEpoch) return;
         this.segments = [];
         this.resolvedAsDeleted = true;
+      } else if ((sideReadFailed || !workdirResult.success) && (await this.isNoLongerConflicted(file.path))) {
+        // RE-SELECTING a text file already resolved via a verbatim take
+        // (its side blob is undecodable): the same reads fail again, but
+        // the file is no longer conflicted. The generic error state would
+        // loop forever on Retry and its verbatim buttons would error "No
+        // conflict found" — present the terminal resolved state instead.
+        if (epoch !== this.loadEpoch) return;
+        this.segments = [];
+        this.resolvedInPlace = true;
       } else {
         this.segments = [];
         this.loadFailed = true;
@@ -1374,6 +1383,39 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
     flushResolved();
 
+    // Invariant-1 safety net. The region scan above only OPENS on a
+    // start-shaped line, so a hand edit that deleted the `<<<<<<<` (leaving
+    // an orphaned `=======`/`>>>>>>>`) sweeps those markers into resolved
+    // text — a raw marker in the UI. If any resolved segment carries a
+    // marker-shaped line that is in NEITHER blob (a real orphaned marker,
+    // not quoted content), the heuristic parse is unreliable: present the
+    // whole file as a single unresolved conflict (ours vs theirs from the
+    // blobs) so it is resolved cleanly and no marker is ever displayed. The
+    // user's on-disk hand edits are untouched (Reload re-reads them).
+    if (blobsAvailable) {
+      const echo = this.markerEchoPattern();
+      const hasOrphanMarker = segments.some(
+        (s) =>
+          s.type === 'resolved' &&
+          s.lines.some((l) => echo.test(l) && !this.lineIsBlobContent(l)),
+      );
+      if (hasOrphanMarker) {
+        return [
+          {
+            id: this.nextSegmentId++,
+            type: 'conflict',
+            lines: [],
+            oursLines: this.oursLines,
+            theirsLines: this.theirsLines,
+            oursLabel: 'OURS',
+            theirsLabel: 'THEIRS',
+            origin: null,
+            fromConflict: false,
+          },
+        ];
+      }
+    }
+
     return segments;
   }
 
@@ -1613,11 +1655,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     // so Use Base must check its own side too.
     if (this.loadFailed || this.actionsBlocked) return;
     if (origin === 'base' && this.sideReadErrors.base) return;
+    const startFile = this.conflictFile;
     if (this.editingSegmentId !== null) {
       if (!(await this.confirmDiscardOpenEdit())) return;
       // Re-check after the confirm's await — a resolve/tool session may
-      // have started while it was up (same re-check as Reload and Apply).
+      // have started while it was up (same re-check as Reload and Apply),
+      // and file IDENTITY too: a switch during the confirm must not let
+      // this call overwrite a DIFFERENT file's segments with this side.
       if (this.loadFailed || this.actionsBlocked) return;
+      if (this.conflictFile !== startFile) return;
       this.editingSegmentId = null;
       this.editDraft = '';
     }

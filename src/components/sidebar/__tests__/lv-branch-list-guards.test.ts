@@ -93,6 +93,45 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect((el as unknown as { operationInProgress: boolean }).operationInProgress).to.equal(false);
   });
 
+  it('renders the embedded dialogs in BOTH the loading and loaded templates', async () => {
+    // A background refresh flips loading true→false. If the loading
+    // placeholder replaced the whole template, the embedded rebase dialog
+    // would be torn down and recreated, silently discarding an in-progress
+    // rebase plan the user built before switching tabs. Both the loading
+    // and loaded render outputs must contain the dialogs. We inspect the
+    // TemplateResult directly (no DOM commit) to avoid re-rendering the
+    // live modal in the headless test env.
+    const el = await createComponent();
+    const internal = el as unknown as {
+      loading: boolean;
+      render: () => unknown;
+    };
+
+    // Recurse through nested TemplateResults (the dialogs live in a `${...}`
+    // interpolation, so they're in `.values`, not the outer `.strings`).
+    const containsDialog = (t: unknown): boolean => {
+      if (Array.isArray(t)) return t.some(containsDialog);
+      const tr = t as { strings?: readonly string[]; values?: unknown[] } | null;
+      if (!tr || !tr.strings) return false;
+      return (
+        tr.strings.some((s) => s.includes('lv-interactive-rebase-dialog')) ||
+        (tr.values ?? []).some(containsDialog)
+      );
+    };
+    const templateHasDialog = (): boolean => containsDialog(internal.render());
+
+    // Loaded state.
+    internal.loading = false;
+    expect(templateHasDialog(), 'dialog in the loaded template').to.be.true;
+
+    // Loading state — the dialog must still be present (same position).
+    internal.loading = true;
+    expect(templateHasDialog(), 'dialog in the loading template').to.be.true;
+
+    // Restore so the scheduled reactive update renders a valid state.
+    internal.loading = false;
+  });
+
   it('handleCheckout should skip when operationInProgress is true', async () => {
     const el = await createComponent();
 

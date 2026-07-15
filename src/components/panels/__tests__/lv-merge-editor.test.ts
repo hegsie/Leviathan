@@ -1926,6 +1926,10 @@ describe('lv-merge-editor', () => {
         if (command === 'read_file_content') return DEFAULT_WORKDIR_CONTENT;
         if (command === 'get_merge_tool_config') return null;
         if (command === 'is_ai_available') return false;
+        // The file is genuinely STILL conflicted — the read failure is a
+        // side-blob error, not a resolution — so it must land in the error
+        // state, not the resolved terminal.
+        if (command === 'get_conflicts') return [{ path: 'src/test.ts' }];
         return null;
       }) as MockInvoke;
 
@@ -3458,17 +3462,18 @@ describe('lv-merge-editor', () => {
       expect(badButtons.length, 'no resurrect/retry affordances').to.equal(0);
     });
 
-    it('a KEPT but undecodable file is a read error, never a false "was deleted"', async () => {
-      // The file was resolved externally by KEEPING it (checkout --ours &&
-      // add) but its content is legacy-encoded, so the strict read fails
-      // the same way a missing file would. The deletion claim requires
-      // FILE_NOT_FOUND — anything else lands in the honest error state.
+    it('a STILL-conflicted but undecodable file is a read error, never a false "was deleted"', async () => {
+      // The file is genuinely still conflicted but its content is
+      // legacy-encoded, so the strict read fails the same way a missing
+      // file would. Because the index STILL lists it as conflicted, it must
+      // land in the honest error state (Retry/verbatim), not a false
+      // "was deleted" or a false "resolved" terminal.
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'read_file_content')
           throw { code: 'IO_ERROR', message: 'stream did not contain valid UTF-8' };
-        if (command === 'get_conflicts') return [];
+        if (command === 'get_conflicts') return [{ path: 'src/latin1.ts' }];
         return baseMock(command, args);
       };
       const el = await renderEditor();
@@ -3484,6 +3489,37 @@ describe('lv-merge-editor', () => {
       expect(internal.loadFailed).to.be.true;
       expect(shadowText(el)).to.include('Could not read the merged file');
       expect(shadowText(el)).to.not.include('deleted by the resolution');
+      expect(shadowText(el)).to.not.include('the chosen version was staged');
+    });
+
+    it('re-selecting a text file resolved via verbatim take lands terminal, not forever-Retry', async () => {
+      // A legacy-encoded file resolved via "Use Theirs (verbatim)" is no
+      // longer conflicted, but re-selecting it re-fails the same undecodable
+      // read. The index confirms it is resolved, so it must show the
+      // terminal notice, not the error state with a looping Retry and
+      // verbatim buttons that error "No conflict found".
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'read_file_content')
+          throw { code: 'IO_ERROR', message: 'stream did not contain valid UTF-8' };
+        // The index no longer lists it — the verbatim take resolved it.
+        if (command === 'get_conflicts') return [];
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = el as unknown as EditorInternal;
+      internal.conflictFile = makeConflictFile('src/latin1.ts');
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading) break;
+      }
+      await el.updateComplete;
+
+      expect(internal.loadFailed, 'no forever-Retry error state').to.be.false;
+      expect(shadowText(el)).to.include('Resolved — the chosen version was staged');
+      expect(el.shadowRoot!.querySelector('.output-error')).to.be.null;
     });
 
     it('a take-side that KEEPS the file reloads the fresh content', async () => {
@@ -3574,6 +3610,29 @@ describe('lv-merge-editor', () => {
       // the region's terminator, not content.
       expect(internal.segments[1].oursLines).to.deep.equal(['line2-ours']);
       expect(internal.segments[1].theirsLines).to.deep.equal(['line2-theirs']);
+      expectNoMarkers(el);
+    });
+
+    it('a hand-deleted START marker never leaks the orphan =======/>>>>>>> into the UI', async () => {
+      // The region scan only OPENS on a <<<<<<< line; deleting it leaves an
+      // orphaned separator/end that would otherwise render as resolved text.
+      // The safety net presents the whole file as one clean conflict block.
+      setupDefaultMocks();
+      workdirContent = [
+        'line1',
+        // <<<<<<< HEAD deleted by hand
+        'line2-ours',
+        '=======',
+        'line2-theirs',
+        '>>>>>>> feature',
+        'line3',
+      ].join('\n');
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+
+      // Falls back to a single conflict block (ours-blob vs theirs-blob).
+      const conflicts = internal.segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
       expectNoMarkers(el);
     });
 

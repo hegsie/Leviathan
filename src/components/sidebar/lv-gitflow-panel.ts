@@ -279,6 +279,12 @@ export class LvGitflowPanel extends LitElement {
   @state() private activeHotfixes: ActiveItem[] = [];
   @state() private expandedSections = new Set<GitFlowCategory>(['feature', 'release', 'hotfix']);
   @state() private operationInProgress = false;
+  /** Per-path load sequence: a slow load for repo A must not overwrite the
+   * panel with A's config/items after the user switched to repo B (whose
+   * load already resolved). Mirrors lv-branch-list's branchesLoadSeq. The
+   * Finish buttons bind directly to these items, so stale data here could
+   * finish/delete the wrong branch. */
+  private configLoadSeq = new Map<string, number>();
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -311,33 +317,61 @@ export class LvGitflowPanel extends LitElement {
   private async loadConfig(): Promise<void> {
     if (!this.repositoryPath) return;
 
+    // Capture the repo and bump the per-path sequence at the START — a
+    // response that lands after a newer load (for this or another repo) is
+    // discarded rather than overwriting the panel with stale data.
+    const loadedPath = this.repositoryPath;
+    const seq = (this.configLoadSeq.get(loadedPath) ?? 0) + 1;
+    this.configLoadSeq.set(loadedPath, seq);
+    const isLatest = (): boolean =>
+      this.repositoryPath === loadedPath && this.configLoadSeq.get(loadedPath) === seq;
+
     this.loading = true;
     this.error = null;
 
     try {
-      const result = await gitService.getGitFlowConfig(this.repositoryPath);
+      const result = await gitService.getGitFlowConfig(loadedPath);
+      if (!isLatest()) return;
       if (result.success && result.data) {
         this.config = result.data;
         if (this.config.initialized) {
-          await this.loadActiveItems();
+          await this.loadActiveItems(loadedPath, isLatest);
         }
       } else {
         this.config = null;
       }
     } catch (err) {
       console.error('Failed to load git flow config:', err);
-      this.error = 'Failed to load Git Flow configuration';
+      if (isLatest()) this.error = 'Failed to load Git Flow configuration';
     } finally {
-      this.loading = false;
+      if (isLatest()) this.loading = false;
     }
   }
 
-  private async loadActiveItems(): Promise<void> {
+  private async loadActiveItems(
+    loadedPath: string = this.repositoryPath,
+    isLatest?: () => boolean,
+  ): Promise<void> {
     if (!this.config || !this.config.initialized) return;
 
+    // Post-operation callers (start/finish handlers) pass no guard — they
+    // just refresh the panel for whatever repo it currently shows. Establish
+    // a fresh sequence guard so their reload is subject to the same
+    // stale-response discard as loadConfig's.
+    let latest = isLatest;
+    if (!latest) {
+      const seq = (this.configLoadSeq.get(loadedPath) ?? 0) + 1;
+      this.configLoadSeq.set(loadedPath, seq);
+      latest = (): boolean =>
+        this.repositoryPath === loadedPath && this.configLoadSeq.get(loadedPath) === seq;
+    }
+
     try {
-      const branchResult = await gitService.getBranches(this.repositoryPath);
-      if (!branchResult.success || !branchResult.data) return;
+      const branchResult = await gitService.getBranches(loadedPath);
+      // Discard a stale response — the Finish buttons bind directly to these
+      // items, so writing repo A's items under repo B's tab could
+      // finish/delete the wrong branch.
+      if (!latest() || !branchResult.success || !branchResult.data) return;
 
       const branches = branchResult.data.filter((b: Branch) => !b.isRemote);
 

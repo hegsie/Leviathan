@@ -2140,17 +2140,14 @@ export class LvBranchList extends LitElement {
   }
 
   render() {
-    if (this.loading) {
-      return html`<div class="loading">Loading branches...</div>`;
-    }
-
-    if (this.error) {
-      return html`<div class="error">${this.error}</div>`;
-    }
-
-    return html`
-      ${this.renderControls()}
-
+    // The dialogs are rendered UNCONDITIONALLY and FIRST so a background
+    // refresh (which flips `loading` true→false and would otherwise swap the
+    // whole template for the loading placeholder) cannot tear down and
+    // recreate the embedded interactive-rebase dialog — that would silently
+    // discard an in-progress rebase plan the user built before switching
+    // tabs. Keeping them at a stable template position preserves the element
+    // instances across loading/error toggles.
+    const dialogs = html`
       <lv-create-branch-dialog
         .repositoryPath=${this.repositoryPath}
         @branch-created=${this.handleBranchCreated}
@@ -2165,6 +2162,19 @@ export class LvBranchList extends LitElement {
         .repositoryPath=${this.repositoryPath}
         @cleanup-complete=${this.handleCleanupComplete}
       ></lv-branch-cleanup-dialog>
+    `;
+
+    if (this.loading) {
+      return html`${dialogs}<div class="loading">Loading branches...</div>`;
+    }
+
+    if (this.error) {
+      return html`${dialogs}<div class="error">${this.error}</div>`;
+    }
+
+    return html`
+      ${dialogs}
+      ${this.renderControls()}
 
       <!-- Local branches -->
       ${this.localBranchGroups.length > 0 ? html`
