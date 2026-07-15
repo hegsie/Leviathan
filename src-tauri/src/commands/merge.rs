@@ -1238,7 +1238,21 @@ fn detect_conflict_emission(
     } else if complete_7 {
         7
     } else {
-        detected_all.iter().copied().find(|&n| n >= 7).unwrap_or(7)
+        // Nothing complete at the attribute size or 7. Prefer a
+        // demonstrated 7+ size; failing that, a demonstrated SUB-7 size
+        // (largest first — long runs are least likely to be quoted
+        // content). Flooring to 7 here would be the dangerous direction:
+        // a stale sub-7 attribute (git honors conflict-marker-size=4) on
+        // a hand-edited file would then parse as ZERO conflicts and let
+        // Mark Resolved silently stage the raw markers, while a sub-7
+        // false positive merely shows a spurious conflict block that the
+        // frontend's blob-validated parsing already contains.
+        detected_all
+            .iter()
+            .copied()
+            .find(|&n| n >= 7)
+            .or_else(|| detected_all.iter().copied().max())
+            .unwrap_or(7)
     };
     let style = if diff3_within_first_conflict(&content, size as usize) {
         "diff3"
@@ -1443,6 +1457,20 @@ pub async fn resolve_conflict_take_side(
             // it, which would corrupt the link's TARGET file and stage the
             // pre-existing (wrong) link blob instead of the chosen side.
             remove_if_symlink(&full_path)?;
+            // A DIRECTORY here is the other side's submodule worktree
+            // (gitlink↔file/symlink type conflict) — fs::write/symlink on
+            // it fails with a raw EISDIR/EEXIST. An empty placeholder dir
+            // (uninitialized submodule) is removed; a populated one is
+            // refused with an actionable message — never delete a tree
+            // that may hold uncommitted submodule work.
+            if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+                if meta.file_type().is_dir() && std::fs::remove_dir(&full_path).is_err() {
+                    return Err(LeviathanError::OperationFailed(format!(
+                        "'{}' is a submodule directory with files in it — move or remove it, then take this side again",
+                        file_path
+                    )));
+                }
+            }
             if e.mode == 0o120000 {
                 // The chosen side IS a symlink — its blob content is the
                 // link target path; recreate the link rather than writing
@@ -3363,6 +3391,185 @@ mod tests {
         assert!(
             !txt.conflict_hunks.is_empty(),
             "replay-certified files get authoritative hunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_structural_fallback_recovers_sub7_size_on_hand_edited_files() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // Markers were written at size 4 (git honors sub-7 attribute
+        // values) but the attribute has since gone back to the default,
+        // AND the user hand-edited the file so no replay can match. The
+        // structural fallback must still report the demonstrated size —
+        // flooring to 7 would parse the surviving size-4 hunk as ZERO
+        // conflicts and let Mark Resolved stage the raw markers silently.
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // What git's CLI wrote at conflict-marker-size=4 before the
+        // attribute was resolved away, then hand-edited (an extra line),
+        // so every replay candidate fails the exact-content match.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "hand-added line\n<<<< HEAD\nmain content\n====\nfeature content\n>>>> feature\n",
+        )
+        .unwrap();
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 4,
+            "the structural fallback must keep the content-demonstrated sub-7 size"
+        );
+        assert!(
+            txt.conflict_hunks.is_empty(),
+            "hand-edited files get heuristics, not authoritative hunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_take_side_writes_the_file_side_of_a_submodule_type_conflict() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        let ptr = repo.create_commit("ptr", &[("a.txt", "1")]);
+        let git_repo = repo.repo();
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        stage_gitlink(&git_repo, "sub", ptr);
+        repo.create_commit("Add submodule", &[]);
+
+        // Feature replaces the submodule with a vendored regular FILE.
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        {
+            let mut index = git_repo.index().unwrap();
+            index.remove_path(Path::new("sub")).unwrap();
+            index.write().unwrap();
+        }
+        std::fs::remove_dir_all(repo.path.join("sub")).ok();
+        std::fs::write(repo.path.join("sub"), "vendored contents\n").unwrap();
+        repo.stage_file("sub");
+        repo.create_commit("Feature vendors sub", &[]);
+
+        // Main moves the submodule pointer.
+        repo.checkout_branch(&initial_branch);
+        let ptr2 = repo.create_commit("ptr2", &[("a.txt", "2")]);
+        stage_gitlink(&git_repo, "sub", ptr2);
+        repo.create_commit("Main moves submodule", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        assert!(
+            conflicts.iter().any(|c| c.path == "sub" && c.is_submodule),
+            "gitlink<->file type conflict should be listed as a submodule conflict"
+        );
+        // Model an initialized submodule: its worktree DIRECTORY sits at
+        // the conflicted path (empty placeholder here). fs::write on it
+        // would fail with EISDIR.
+        if std::fs::symlink_metadata(repo.path.join("sub")).is_err() {
+            std::fs::create_dir(repo.path.join("sub")).unwrap();
+        } else if std::fs::symlink_metadata(repo.path.join("sub"))
+            .unwrap()
+            .file_type()
+            .is_file()
+        {
+            std::fs::remove_file(repo.path.join("sub")).unwrap();
+            std::fs::create_dir(repo.path.join("sub")).unwrap();
+        }
+
+        resolve_conflict_take_side(repo.path_str(), "sub".to_string(), "theirs".to_string())
+            .await
+            .expect("taking the FILE side over an empty submodule dir must succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("sub")).unwrap(),
+            "vendored contents\n"
+        );
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index.get_path(Path::new("sub"), 0).expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o100644, "staged as a regular file");
+    }
+
+    #[tokio::test]
+    async fn test_take_side_refuses_to_delete_a_populated_submodule_worktree() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        let ptr = repo.create_commit("ptr", &[("a.txt", "1")]);
+        let git_repo = repo.repo();
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        stage_gitlink(&git_repo, "sub", ptr);
+        repo.create_commit("Add submodule", &[]);
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        {
+            let mut index = git_repo.index().unwrap();
+            index.remove_path(Path::new("sub")).unwrap();
+            index.write().unwrap();
+        }
+        std::fs::remove_dir_all(repo.path.join("sub")).ok();
+        std::fs::write(repo.path.join("sub"), "vendored contents\n").unwrap();
+        repo.stage_file("sub");
+        repo.create_commit("Feature vendors sub", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        let ptr2 = repo.create_commit("ptr2", &[("a.txt", "2")]);
+        stage_gitlink(&git_repo, "sub", ptr2);
+        repo.create_commit("Main moves submodule", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // A POPULATED submodule worktree — possibly uncommitted work.
+        std::fs::remove_file(repo.path.join("sub")).ok();
+        std::fs::remove_dir_all(repo.path.join("sub")).ok();
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        std::fs::write(repo.path.join("sub/work.txt"), "uncommitted\n").unwrap();
+
+        let err =
+            resolve_conflict_take_side(repo.path_str(), "sub".to_string(), "theirs".to_string())
+                .await
+                .expect_err("must refuse rather than delete a populated tree");
+        assert!(
+            err.to_string().contains("submodule directory"),
+            "actionable message, not a raw OS error; got: {err}"
+        );
+        // The tree is untouched.
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("sub/work.txt")).unwrap(),
+            "uncommitted\n"
         );
     }
 

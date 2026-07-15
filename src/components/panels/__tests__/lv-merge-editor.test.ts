@@ -2710,6 +2710,56 @@ describe('lv-merge-editor', () => {
       expect(launchCalls, 'only one tool session may launch').to.equal(1);
     });
 
+    it('a lock engaging during the launch confirm makes the launch inert', async () => {
+      // The host's Abort/Complete are NOT disabled during this confirm
+      // (the tool-session lock is only announced after it) — a launch
+      // proceeding after an abort would edit a file the operation no
+      // longer owns.
+      setupDefaultMocks();
+      let launchCalls = 0;
+      let startedFired = false;
+      let releaseConfirm: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'plugin:dialog|message') {
+          return new Promise((res) => {
+            releaseConfirm = () => res('Ok');
+          });
+        }
+        if (command === 'launch_merge_tool') {
+          launchCalls++;
+          return { success: true };
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/test.ts');
+      el.addEventListener('external-tool-started', () => {
+        startedFired = true;
+      });
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+
+      const internal = el as unknown as EditorInternal & {
+        handleOpenExternalMergeTool: () => Promise<void>;
+        externalToolLocked: boolean;
+        launchingExternalTool: boolean;
+      };
+      const pending = internal.handleOpenExternalMergeTool();
+      await new Promise((r) => setTimeout(r, 30));
+      // The host locks the editor while the confirm is up (abort/complete
+      // started).
+      internal.externalToolLocked = true;
+      releaseConfirm!();
+      await pending;
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(launchCalls, 'the tool must not launch under a host lock').to.equal(0);
+      expect(startedFired, 'no tool session may be announced').to.be.false;
+      expect(internal.launchingExternalTool, 'the claim is released').to.be.false;
+    });
+
     it('cancelling the confirm releases the launch claim for a later attempt', async () => {
       setupDefaultMocks();
       let launchCalls = 0;

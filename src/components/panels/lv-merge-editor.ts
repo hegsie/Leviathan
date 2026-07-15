@@ -643,6 +643,22 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         if (!proceed) this.launchingExternalTool = false;
       }
       if (!proceed) return;
+      // Re-check after the await: the HOST's Abort/Complete are not
+      // disabled during this confirm — editorToolActive is only set below,
+      // and the internal launch claim is invisible to the dialog — so an
+      // abort/complete/resolve or a file switch may have happened while
+      // the confirm was up. Launching now would edit a file the operation
+      // no longer owns (e.g. write stale conflict text into a post-abort
+      // clean tree). Same re-check as every sibling confirm.
+      if (
+        this.externalToolLocked ||
+        this.resolving ||
+        this.resolvedAsDeleted ||
+        this.conflictFile !== file
+      ) {
+        this.launchingExternalTool = false;
+        return;
+      }
     }
 
     // Tell the host a tool session is open so its Abort/Complete stay inert —
