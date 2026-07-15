@@ -1100,6 +1100,21 @@ export class AppShell extends LitElement {
         this.interactiveRebaseDialog?.close();
         showToast('The repository tab was closed — interactive rebase cancelled', 'warning');
       }
+      // Same for the create-tag / create-branch dialogs: they pin to their repo
+      // at open() and stay open across tab switches, so closing the pinned tab
+      // must dismiss them — otherwise a successful create (create-branch even
+      // moves HEAD via checkout) would silently mutate a repo no longer in the
+      // tab bar, invisible in the visible one.
+      const ctPinned = this.createTagDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (ctPinned && !repoOpen(ctPinned)) {
+        this.createTagDialog?.close();
+        showToast('The repository tab was closed — tag creation cancelled', 'warning');
+      }
+      const cbPinned = this.createBranchDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (cbPinned && !repoOpen(cbPinned)) {
+        this.createBranchDialog?.close();
+        showToast('The repository tab was closed — branch creation cancelled', 'warning');
+      }
 
       // The open diff binds a click-time StatusEntry snapshot. Re-derive it
       // from every status refresh so a file that became conflicted since the

@@ -1252,41 +1252,41 @@ fn detect_conflict_emission(
         }
     }
 
-    // Structural fallback (hand-edited files, missing sides). When BOTH
-    // the attribute size and 7 show a complete conflict the bytes are
-    // genuinely undecidable — one size is the real marker, the other is
-    // quoted content (e.g. a README showing `<<<<<<<`) that coincidentally
-    // forms a complete conflict at its own size. Prefer the SMALLER size:
-    // the frontend parser matches markers of EXACTLY the reported size,
-    // while its orphan safety-net matches runs of `>=` that size. Reporting
-    // the smaller size means a real marker of the LARGER size is still caught
-    // by the safety net (which collapses to a clean whole-file conflict),
-    // whereas reporting the LARGER size lets a real SMALLER marker slip under
-    // both the exact-match parser and the `>=` net — leaking raw markers into
-    // the pane and letting Mark Resolved round-trip them to disk. When NEITHER
-    // matches, fall back to a size the content itself demonstrates (stale
-    // attribute).
-    // Choose the reported size. The frontend parses markers of EXACTLY this
-    // size, and its orphan safety-net matches runs of `>=` this size. Reporting
-    // a size LARGER than a real marker makes BOTH miss it — raw markers leak
-    // into the pane and round-trip to disk; reporting SMALLER is safe, because
-    // a real LARGER marker is still caught by the `>=` net (which collapses to
-    // a clean whole-file conflict). Every real marker forms a COMPLETE conflict
-    // structure, so its size is in `detected_all`; take the SMALLEST
-    // demonstrated size. This subsumes both the attribute size and 7 (each is
-    // in `detected_all` iff it has a complete structure) — crucially, it still
-    // recovers a real sub-7 size even when the current attribute has drifted
-    // back to the default 7 (e.g. .gitattributes' own conflict was resolved
-    // after git wrote the markers), the case a two-candidate attr-vs-7 check
-    // blind-spots. Exclude runs of 1-2 chars: git's practical minimum
-    // conflict-marker-size is 3, and a lone `<`/`=`/`>` content line forming a
-    // "complete" size-1 structure would otherwise make the whole file parse as
-    // markers. A quoted LARGER conflict block only yields a spurious,
-    // blob-validated conflict block the frontend already contains. When nothing
-    // >=3 is demonstrated, fall back to the attribute size (default 7).
+    // Structural fallback (hand-edited files, missing sides). Choose the
+    // reported size. The frontend parses markers of EXACTLY this size, and its
+    // orphan safety-net matches runs of `>=` this size. Reporting a size LARGER
+    // than a real marker makes BOTH miss it — raw markers leak into the pane and
+    // round-trip to disk; reporting SMALLER is safe, because a real LARGER
+    // marker is still caught by the `>=` net (which collapses to a clean
+    // whole-file conflict). So take the SMALLEST candidate:
+    //  - every DEMONSTRATED complete size (`detected_all`) — this recovers a
+    //    real sub-7 size even when the current attribute has drifted back to the
+    //    default 7 (.gitattributes' own conflict resolved after git wrote the
+    //    markers), which a two-candidate attr-vs-7 check blind-spots; and
+    //  - the EXPLICIT attribute size (`attr_size != 7`) — because this fallback
+    //    runs only for HAND-EDITED files, and a hand edit that breaks the real
+    //    conflict's structure (e.g. deletes its separator) removes its size from
+    //    `detected_all`, so without the attribute a real sub-7 size would be
+    //    floored UP to a larger quoted-but-complete block and leak. `attr_size`
+    //    is only a real signal when it names a non-default size; a bare 7 is
+    //    indistinguishable from "no attribute", so folding it would wrongly cap
+    //    a genuine raised size (e.g. 12) down to 7.
+    // Exclude runs of 1-2 chars: git's practical minimum conflict-marker-size is
+    // 3, and a lone `<`/`=`/`>` content line forming a "complete" size-1
+    // structure would otherwise make the whole file parse as markers. A quoted
+    // LARGER conflict block only yields a spurious, blob-validated conflict block
+    // the frontend already contains. When nothing >=3 remains, fall back to the
+    // attribute size (default 7).
+    // Residual (accepted): if the attribute ALSO drifted to the default 7 AND
+    // the real markers are sub-7 AND a hand edit broke their structure, no
+    // signal of the real size survives; the min still floors >=7 and sub-7
+    // markers leak. Closing it would need the frontend echo-net floor below 7,
+    // which the design avoids (3-6-char `===`/`>>>` content dividers would then
+    // false-positive).
     let size = detected_all
         .iter()
         .copied()
+        .chain((attr_size != 7).then_some(attr_size))
         .filter(|&n| n >= 3)
         .min()
         .unwrap_or(attr_size);
@@ -3575,6 +3575,54 @@ mod tests {
             .find(|c| c.path == "shared.txt")
             .expect("conflict should be listed");
         assert_eq!(txt.marker_size, 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_fallback_uses_explicit_attr_when_real_conflict_hand_broken() {
+        // The structural fallback runs only for HAND-EDITED files, and a hand
+        // edit can break the real conflict's structure (delete its separator) so
+        // its size is NOT demonstrated-complete in the content. Here the real
+        // markers are size 5 (explicit conflict-marker-size=5) but hand-broken,
+        // and the file quotes a COMPLETE size-10 block. Without folding the
+        // explicit attribute, the fallback would floor UP to 10 and leak the real
+        // size-5 markers; folding attr_size (5) caps the reported size at 5.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=5\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // A quoted COMPLETE size-10 block + the REAL size-5 conflict with its
+        // separator hand-DELETED (so size 5 is not demonstrated-complete), plus a
+        // stray edit so no replay matches.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<<<<< ex\nx\n==========\ny\n>>>>>>>>>> ex\nhand edit\n<<<<< HEAD\nmain content\nfeature content\n>>>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 5);
     }
 
     #[tokio::test]

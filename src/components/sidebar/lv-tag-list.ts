@@ -626,12 +626,15 @@ export class LvTagList extends LitElement {
     this.createTagDialog.open(tag?.targetOid);
   }
 
-  private async handleTagCreated(): Promise<void> {
-    // Captured BEFORE the loadTags await: the refresh must pin to the repo the
-    // tag was created on, not whichever tab is active if the user switches
-    // during the reload (which rebinds this.repositoryPath).
-    const repoPath = this.repositoryPath;
-    await this.loadTags();
+  private async handleTagCreated(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
+    // The dialog pins to the repo it was opened for and reports it here. The
+    // user may have switched tabs while the dialog was open (rebinding our live
+    // repositoryPath), so trust the event's repo — not our current prop — and
+    // only reload OUR view when it matches the repo we're showing.
+    const repoPath = e?.detail?.repositoryPath ?? this.repositoryPath;
+    if (repoPath === this.repositoryPath) {
+      await this.loadTags();
+    }
     this.dispatchEvent(new CustomEvent('tags-changed', {
       detail: { repositoryPath: repoPath },
       bubbles: true,

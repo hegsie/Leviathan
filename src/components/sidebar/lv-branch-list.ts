@@ -1074,12 +1074,16 @@ export class LvBranchList extends LitElement {
     }
   }
 
-  private async handleBranchCreated(): Promise<void> {
-    // Captured BEFORE the loadBranches await: the refresh must pin to the repo
-    // the branch was created on, not whichever tab is active if the user
-    // switches during the reload (which rebinds this.repositoryPath).
-    const repoPath = this.repositoryPath;
-    await this.loadBranches();
+  private async handleBranchCreated(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
+    // The dialog pins to the repo it was opened for and reports it here. The
+    // user may have switched tabs while the dialog was open (rebinding our live
+    // repositoryPath), so trust the event's repo — not our current prop — and
+    // only reload OUR view when it matches the repo we're showing. Mirrors
+    // handleRebaseComplete.
+    const repoPath = e?.detail?.repositoryPath ?? this.repositoryPath;
+    if (repoPath === this.repositoryPath) {
+      await this.loadBranches();
+    }
     this.dispatchBranchesChanged(repoPath);
   }
 

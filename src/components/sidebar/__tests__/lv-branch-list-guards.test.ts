@@ -496,6 +496,42 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect(detail!.repositoryPath).to.equal(REPO_PATH);
   });
 
+  it('handleBranchCreated pins to the event repo when the tab switched before the event fired', async () => {
+    // The create-branch dialog captures its repo at open() and reports it in
+    // branch-created.detail. If the user switched tabs while the dialog was
+    // open, our live repositoryPath is now the OTHER repo — the refresh must
+    // follow the event's repo, and we must NOT reload our (mismatched) view.
+    const el = await createComponent();
+
+    let branchesCalls = 0;
+    mockInvoke = (command: string) => {
+      if (command === 'get_branches') {
+        branchesCalls++;
+        return Promise.resolve([]);
+      }
+      return defaultMockInvoke(command);
+    };
+
+    let detail: { repositoryPath?: string } | null = null;
+    el.addEventListener('branches-changed', (e) => {
+      detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    });
+
+    branchesCalls = 0;
+    // The tag/branch was created on /origin/repo, but we're now showing REPO_PATH.
+    await (
+      el as unknown as {
+        handleBranchCreated: (e: CustomEvent<{ repositoryPath?: string }>) => Promise<void>;
+      }
+    ).handleBranchCreated(
+      new CustomEvent('branch-created', { detail: { repositoryPath: '/origin/repo' } }),
+    );
+
+    expect(detail, 'branches-changed dispatched').to.not.be.null;
+    expect(detail!.repositoryPath, 'refresh pinned to the event repo').to.equal('/origin/repo');
+    expect(branchesCalls, 'no reload of the mismatched active view').to.equal(0);
+  });
+
   it('handleMergeBranch merges the origin repo, not the tab switched to during the confirm', async () => {
     // showConfirm's await yields; a tab switch during it rebinds
     // this.repositoryPath. The merge must run on the repo it was invoked on.

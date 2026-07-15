@@ -130,6 +130,15 @@ export class LvCreateBranchDialog extends LitElement {
    * `repositoryPath` property is bound live to the active tab, so a tab switch
    * while the modal is open would otherwise make Create target the wrong repo. */
   private pinnedRepoPath = '';
+  private isOpen = false;
+
+  /** The pinned repo while the dialog is open, else null — lets the host
+   * self-close the dialog when that repo's tab is closed (a successful create
+   * + checkout on a closed repo would otherwise be a silent, invisible
+   * mutation). */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.isOpen ? this.pinnedRepoPath : null;
+  }
 
   @state() private branchName = '';
   @state() private checkoutAfterCreate = true;
@@ -142,6 +151,7 @@ export class LvCreateBranchDialog extends LitElement {
   public open(startPoint?: string): void {
     this.reset();
     this.pinnedRepoPath = this.repositoryPath;
+    this.isOpen = true;
     if (startPoint) {
       this.startPoint = startPoint;
     }
@@ -151,6 +161,7 @@ export class LvCreateBranchDialog extends LitElement {
   }
 
   public close(): void {
+    this.isOpen = false;
     this.modal.open = false;
   }
 
@@ -225,6 +236,7 @@ export class LvCreateBranchDialog extends LitElement {
   }
 
   private handleModalClose(): void {
+    this.isOpen = false;
     if (!this.isCreating) {
       this.reset();
     }

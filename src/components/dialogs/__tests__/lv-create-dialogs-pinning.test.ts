@@ -74,6 +74,20 @@ describe('create-tag / create-branch dialog pinning', () => {
     expect(detail!.repositoryPath).to.equal(REPO_A);
   });
 
+  it('create-tag exposes its pinned repo only while open, for host self-close', async () => {
+    const el = await fixture<LvCreateTagDialog>(
+      html`<lv-create-tag-dialog .repositoryPath=${REPO_A}></lv-create-tag-dialog>`,
+    );
+    await el.updateComplete;
+
+    expect(el.pinnedRepositoryPathIfOpen, 'null before open').to.be.null;
+    el.open();
+    await el.updateComplete;
+    expect(el.pinnedRepositoryPathIfOpen, 'pinned repo while open').to.equal(REPO_A);
+    el.close();
+    expect(el.pinnedRepositoryPathIfOpen, 'null after close').to.be.null;
+  });
+
   it('create-branch targets the repo it was opened for after a mid-dialog tab switch', async () => {
     const el = await fixture<LvCreateBranchDialog>(
       html`<lv-create-branch-dialog .repositoryPath=${REPO_A}></lv-create-branch-dialog>`,
@@ -103,5 +117,19 @@ describe('create-tag / create-branch dialog pinning', () => {
     expect((call!.args as { path: string }).path).to.equal(REPO_A);
     expect(detail, 'branch-created dispatched').to.not.be.null;
     expect(detail!.repositoryPath).to.equal(REPO_A);
+  });
+
+  it('create-branch exposes its pinned repo only while open, for host self-close', async () => {
+    const el = await fixture<LvCreateBranchDialog>(
+      html`<lv-create-branch-dialog .repositoryPath=${REPO_A}></lv-create-branch-dialog>`,
+    );
+    await el.updateComplete;
+
+    expect(el.pinnedRepositoryPathIfOpen, 'null before open').to.be.null;
+    el.open();
+    await el.updateComplete;
+    expect(el.pinnedRepositoryPathIfOpen, 'pinned repo while open').to.equal(REPO_A);
+    el.close();
+    expect(el.pinnedRepositoryPathIfOpen, 'null after close').to.be.null;
   });
 });
