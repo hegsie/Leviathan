@@ -6,7 +6,7 @@ use tauri::command;
 use super::path_utils::validate_path_within_repo;
 use crate::error::{LeviathanError, Result};
 use crate::models::{
-    ConflictDetails, ConflictEntry, ConflictFile, ConflictMarker, ConflictMarkerFile,
+    ConflictDetails, ConflictEntry, ConflictFile, ConflictHunk, ConflictMarker, ConflictMarkerFile,
 };
 use crate::utils::create_command;
 
@@ -908,10 +908,11 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
         // Binary conflicts have no marker hunks to detect (and libgit2's
         // binary merge result has no content to replay against) — report
         // the defaults; the text merge editor never parses them anyway.
-        let (marker_size, conflict_style) = if is_binary {
+        let (marker_size, conflict_style, conflict_hunks) = if is_binary {
             (
                 crate::models::conflict::default_marker_size(),
                 crate::models::conflict::default_conflict_style(),
+                Vec::new(),
             )
         } else {
             detect_conflict_emission(
@@ -932,6 +933,7 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             is_binary,
             marker_size,
             conflict_style,
+            conflict_hunks,
         });
     }
 
@@ -983,6 +985,28 @@ fn has_complete_conflict(content: &str, size: usize) -> bool {
         }
     }
     false
+}
+
+/// Marker sizes the file's content DEMONSTRATES: distinct start-run lengths
+/// (7+, space/EOL-terminated) that form a complete conflict at their own
+/// size. Used when the conflict-marker-size attribute no longer matches
+/// what git wrote (it can change mid-operation via .gitattributes' own
+/// resolution). The 7+ floor avoids false positives on `< quoted` lines.
+fn detected_marker_sizes(content: &str) -> Vec<u32> {
+    let mut sizes: Vec<u32> = Vec::new();
+    for line in content.lines() {
+        let n = line.chars().take_while(|&c| c == '<').count();
+        if n >= 7
+            && n <= u16::MAX as usize
+            && matches!(line.chars().nth(n), None | Some(' '))
+            && !sizes.contains(&(n as u32))
+            && has_complete_conflict(content, n)
+        {
+            sizes.push(n as u32);
+        }
+    }
+    sizes.sort_unstable();
+    sizes
 }
 
 /// True when the FIRST complete conflict at `size` contains a base marker
@@ -1040,18 +1064,36 @@ fn detect_conflict_emission(
     ancestor: Option<&git2::IndexEntry>,
     ours: Option<&git2::IndexEntry>,
     theirs: Option<&git2::IndexEntry>,
-) -> (u32, String) {
+) -> (u32, String, Vec<ConflictHunk>) {
     let attr_size = attr_marker_size(repo, file_path);
     let content = match std::fs::read_to_string(repo_root.join(file_path)) {
         Ok(c) => c,
         // Unreadable working file (deleted side, binary) — size and style
         // are moot for parsing; report the attribute value.
-        Err(_) => return (attr_size, crate::models::conflict::default_conflict_style()),
+        Err(_) => {
+            return (
+                attr_size,
+                crate::models::conflict::default_conflict_style(),
+                Vec::new(),
+            )
+        }
     };
 
+    // Sizes actually WRITTEN in the file. The attribute reflects the repo's
+    // configuration NOW, not when git wrote the markers — resolving
+    // .gitattributes' own conflict mid-operation can change it under the
+    // markers' feet, and trusting only the attribute would then report a
+    // size the file does not use (the frontend would find zero conflicts
+    // and let Mark Resolved stage the raw markers as resolved content).
+    let detected = detected_marker_sizes(&content);
     let mut candidates: Vec<u32> = vec![attr_size];
     if attr_size != 7 {
         candidates.push(7);
+    }
+    for &d in &detected {
+        if !candidates.contains(&d) {
+            candidates.push(d);
+        }
     }
 
     // Replay from blob CONTENTS (not index entries): a missing ancestor —
@@ -1083,34 +1125,125 @@ fn detect_conflict_emission(
                 if matches_replay(&content, &replay, size as usize) {
                     // zdiff3 emits the same structure as diff3 to a parser.
                     let reported = if style == "merge" { "merge" } else { "diff3" };
-                    return (size, reported.to_string());
+                    // The replay matched line-for-line, so marker positions
+                    // in the replay ARE positions in the working file. But
+                    // the replay's own content can quote marker-shaped
+                    // lines just like the file — re-replay at a size no
+                    // blob line collides with, where marker detection is
+                    // unambiguous, and hand the frontend AUTHORITATIVE
+                    // hunk positions instead of shape heuristics.
+                    let replay_line_count = replay.lines().count();
+                    let star =
+                        collision_free_size(&[&anc_bytes, &our_bytes, &their_bytes], size as usize);
+                    let mut star_opts = git2::MergeFileOptions::new();
+                    star_opts.marker_size(star);
+                    star_opts.style_diff3(style == "diff3");
+                    star_opts.style_zdiff3(style == "zdiff3");
+                    let hunks = git2::merge_file(&anc_in, &our_in, &their_in, Some(&mut star_opts))
+                        .ok()
+                        .and_then(|star_result| {
+                            let star_replay =
+                                String::from_utf8_lossy(star_result.content()).to_string();
+                            // Marker lines are one line each at any
+                            // size, so the line counts must agree —
+                            // bail to heuristics if they somehow don't.
+                            if star_replay.lines().count() != replay_line_count {
+                                return None;
+                            }
+                            replay_hunks(&star_replay, star as usize, style != "merge")
+                        })
+                        .unwrap_or_default();
+                    return (size, reported.to_string(), hunks);
                 }
             }
         }
     }
 
     // Structural fallback (hand-edited files, missing sides). When BOTH
-    // sizes show a complete conflict the bytes are genuinely undecidable —
-    // prefer 7: it is what this app's own merge engine (libgit2) always
-    // writes, and CLI-written files at the raised size are certified by the
-    // replay above before any user edit could break its equality.
-    let size = if attr_size == 7 {
+    // the attribute size and 7 show a complete conflict the bytes are
+    // genuinely undecidable — prefer 7: it is what this app's own merge
+    // engine (libgit2) always writes, and CLI-written files at the raised
+    // size are certified by the replay above before any user edit could
+    // break its equality. When NEITHER matches, fall back to a size the
+    // content itself demonstrates (stale attribute).
+    let complete_attr = attr_size != 7 && has_complete_conflict(&content, attr_size as usize);
+    let complete_7 = has_complete_conflict(&content, 7);
+    let size = if complete_attr && !complete_7 {
+        attr_size
+    } else if complete_7 {
         7
     } else {
-        match (
-            has_complete_conflict(&content, attr_size as usize),
-            has_complete_conflict(&content, 7),
-        ) {
-            (true, false) => attr_size,
-            _ => 7,
-        }
+        detected.first().copied().unwrap_or(7)
     };
     let style = if diff3_within_first_conflict(&content, size as usize) {
         "diff3"
     } else {
         "merge"
     };
-    (size, style.to_string())
+    // No replay match — the file was hand-edited; positions would be
+    // guesses, so the frontend's validated heuristics take over.
+    (size, style.to_string(), Vec::new())
+}
+
+/// A marker size that cannot collide with any content line: strictly longer
+/// than every leading `<`/`=`/`>`/`|` run in any input blob.
+fn collision_free_size(blobs: &[&[u8]], at_least: usize) -> u16 {
+    let mut max_run = at_least;
+    for bytes in blobs {
+        for line in String::from_utf8_lossy(bytes).lines() {
+            for ch in ['<', '=', '>', '|'] {
+                let n = line.chars().take_while(|&c| c == ch).count();
+                if n > max_run {
+                    max_run = n;
+                }
+            }
+        }
+    }
+    (max_run + 3).min(u16::MAX as usize) as u16
+}
+
+/// Extract hunk marker positions from a replay generated at a
+/// collision-free size — every marker-shaped line is a REAL marker there.
+/// Returns None on any malformed structure (never expected).
+fn replay_hunks(replay: &str, size: usize, has_base: bool) -> Option<Vec<ConflictHunk>> {
+    let sep: String = "=".repeat(size);
+    let mut hunks: Vec<ConflictHunk> = Vec::new();
+    let mut cur: Option<(u32, Option<u32>, Option<u32>)> = None; // (start, base, separator)
+    for (i, line) in replay.lines().enumerate() {
+        let i = i as u32;
+        match cur {
+            None => {
+                if is_marker_run(line, '<', size) {
+                    cur = Some((i, None, None));
+                }
+            }
+            Some((start, base, separator)) => {
+                if separator.is_none()
+                    && has_base
+                    && base.is_none()
+                    && is_marker_run(line, '|', size)
+                {
+                    cur = Some((start, Some(i), None));
+                } else if separator.is_none() && line == sep {
+                    cur = Some((start, base, Some(i)));
+                } else if let Some(sep_idx) = separator {
+                    if is_marker_run(line, '>', size) {
+                        hunks.push(ConflictHunk {
+                            start,
+                            separator: sep_idx,
+                            end: i,
+                            base,
+                        });
+                        cur = None;
+                    }
+                }
+            }
+        }
+    }
+    if cur.is_some() {
+        return None;
+    }
+    Some(hunks)
 }
 
 /// Get content of a blob by OID
@@ -1126,7 +1259,13 @@ pub async fn get_blob_content(path: String, oid: String) -> Result<String> {
         ));
     }
 
-    Ok(String::from_utf8_lossy(blob.content()).to_string())
+    // STRICT decoding, matching read_file_content: a lossy read would put
+    // U+FFFD substitutions on screen, and resolving from such a pane (Use
+    // Base on a legacy-encoded ancestor) would silently bake the corrupted
+    // text into the resolved file. The caller treats the error like any
+    // other unreadable side and offers verbatim (raw-bytes) resolution.
+    String::from_utf8(blob.content().to_vec())
+        .map_err(|_| LeviathanError::OperationFailed("File content is not valid UTF-8".to_string()))
 }
 
 /// Mark a file as resolved with the given content.
@@ -1206,10 +1345,13 @@ pub async fn resolve_conflict_take_side(
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                // Preserve the executable bit recorded in the index entry
-                if e.mode == 0o100755 {
-                    std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(0o755))?;
-                }
+                // Apply the chosen side's mode in BOTH directions: fs::write
+                // keeps the existing file's permissions, so taking a
+                // non-executable side over an executable on-disk file must
+                // chmod DOWN too, or the resolved file is staged with the
+                // mode of the side the user rejected.
+                let mode = if e.mode == 0o100755 { 0o755 } else { 0o644 };
+                std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(mode))?;
             }
             index.add_path(Path::new(&file_path))?;
         }
@@ -2854,6 +2996,193 @@ mod tests {
             .find(|c| c.path == "shared.txt")
             .expect("conflict should be listed");
         assert_eq!(txt.marker_size, 7);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_detects_size_when_attribute_went_stale() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // NO conflict-marker-size attribute — but the file's markers were
+        // written at 12 (the attribute was dropped mid-operation, e.g. by
+        // resolving .gitattributes' own conflict). The size must be
+        // detected from the content, or the frontend would find zero
+        // conflicts and Mark Resolved would stage the raw markers.
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Simulate CLI-written raised markers (with a hand edit so replay
+        // cannot match and the structural fallback must decide).
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<<<<<<< HEAD\nmain content\nhand edit\n============\nfeature content\n>>>>>>>>>>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 12,
+            "the written size must be detected from content when no size matches the attribute"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_reports_authoritative_hunk_positions() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        // Workdir: <<<<<<< ours / main content / ======= / feature content
+        // / >>>>>>> theirs — the replay matched, so positions are exact.
+        assert_eq!(txt.conflict_hunks.len(), 1);
+        let h = &txt.conflict_hunks[0];
+        assert_eq!((h.start, h.separator, h.end, h.base), (0, 2, 4, None));
+
+        // The positions must actually point at the marker lines on disk.
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        assert!(lines[h.start as usize].starts_with("<<<<<<<"));
+        assert!(lines[h.separator as usize].starts_with("======="));
+        assert!(lines[h.end as usize].starts_with(">>>>>>>"));
+    }
+
+    #[tokio::test]
+    async fn test_hand_edited_file_reports_no_hunk_positions() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        // A hand edit breaks the replay match — positions would be guesses,
+        // so none may be reported (the frontend heuristics take over).
+        let mut content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        content.push_str("hand edit\n");
+        std::fs::write(repo.path.join("shared.txt"), content).unwrap();
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert!(txt.conflict_hunks.is_empty());
+    }
+
+    #[test]
+    fn test_replay_hunks_and_collision_free_size() {
+        let replay = "ctx\n<<<<<<<<<< ours\na\n==========\nb\n>>>>>>>>>> theirs\ntail\n";
+        let hunks = replay_hunks(replay, 10, false).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(
+            (
+                hunks[0].start,
+                hunks[0].separator,
+                hunks[0].end,
+                hunks[0].base
+            ),
+            (1, 3, 5, None)
+        );
+
+        let diff3 = "<<<<<<<<<< o\na\n||||||||||\nbase\n==========\nb\n>>>>>>>>>> t\n";
+        let hunks = replay_hunks(diff3, 10, true).unwrap();
+        assert_eq!(hunks[0].base, Some(2));
+
+        // Collision-free size must exceed every marker-shaped run in blobs.
+        let blob = b"content\n<<<<<<<<<<<<<<< quoted long run\n" as &[u8];
+        let star = collision_free_size(&[blob], 7);
+        assert!(star as usize > 15);
+    }
+
+    #[test]
+    fn test_detected_marker_sizes() {
+        let raised = "ctx\n<<<<<<<<<<<< HEAD\nours\n============\ntheirs\n>>>>>>>>>>>> f\n";
+        assert_eq!(detected_marker_sizes(raised), vec![12]);
+
+        let none = "just\nplain\ntext\n< quoted line\n";
+        assert!(detected_marker_sizes(none).is_empty());
+
+        // An incomplete start-shaped line demonstrates nothing.
+        let incomplete = "<<<<<<< HEAD\nno separator or end\n";
+        assert!(detected_marker_sizes(incomplete).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_applies_the_chosen_sides_mode_downward() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Base + theirs: non-executable. Ours: executable.
+        repo.create_commit("Add script", &[("script.sh", "#!/bin/sh\nbase\n")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("script.sh", "#!/bin/sh\ntheirs\n")]);
+        repo.checkout_branch(&initial_branch);
+        let script = repo.path.join("script.sh");
+        std::fs::write(&script, "#!/bin/sh\nours\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        repo.stage_file("script.sh");
+        repo.create_commit("Main change makes executable", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        // The conflicted on-disk file carries ours' executable bit.
+        assert_ne!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o111,
+            0,
+            "precondition: conflicted file is executable"
+        );
+
+        // Taking THEIRS (non-executable) must chmod DOWN, not keep ours' bit.
+        resolve_conflict_take_side(
+            repo.path_str(),
+            "script.sh".to_string(),
+            "theirs".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o111,
+            0,
+            "the resolved file must carry the CHOSEN side's mode"
+        );
     }
 
     #[tokio::test]

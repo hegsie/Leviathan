@@ -974,6 +974,20 @@ export class AppShell extends LitElement {
     // dialog whose Complete/Abort target a repo with no operation at all.
     const repoPath = repoPathOverride ?? this.activeRepository?.repository.path;
     if (!repoPath) return;
+    // The tab may have been CLOSED during the operation's await — a dialog
+    // pinned to a closed repo would float over the empty screen with a
+    // post-close refresh that no-ops. The repo on disk still holds the
+    // in-progress operation; re-opening the tab surfaces it again.
+    if (
+      repoPath !== this.activeRepository?.repository.path &&
+      !repositoryStore.getState().openRepositories.some((r) => r.repository.path === repoPath)
+    ) {
+      showToast(
+        'Conflicts were detected in a repository whose tab was closed — reopen it to resolve them',
+        'warning',
+      );
+      return;
+    }
     if (this.showConflictDialog) {
       showToast(
         'A conflict resolution is already in progress — finish or close it first',

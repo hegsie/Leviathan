@@ -1002,6 +1002,93 @@ describe('lv-merge-editor', () => {
       expect(markBtn.disabled).to.be.true;
     });
 
+    it('authoritative hunk positions beat every quoted-marker ambiguity', async () => {
+      // Fable round-16's killer case: theirs quotes a line byte-identical
+      // to the REAL end marker AND the auto-merged trailing interleaves
+      // insertions from both sides, defeating both close-justification
+      // tiers. With backend positions the parse is exact regardless.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'intro\nalpha\nctx1\nctx2\nctx3\ntail';
+          if (blobArgs?.oid === 'ours-oid')
+            return 'intro\nfrom-ours\nctx1\nours-insert\nctx2\nctx3\ntail';
+          if (blobArgs?.oid === 'theirs-oid')
+            return 'intro\nfrom-theirs\nquoted:\n>>>>>>> feature\nctx1\nctx2\ntheirs-insert\nctx3\ntail';
+          return '';
+        }
+        if (command === 'read_file_content') {
+          return [
+            'intro',
+            '<<<<<<< HEAD',
+            'from-ours',
+            '=======',
+            'from-theirs',
+            'quoted:',
+            '>>>>>>> feature',
+            '>>>>>>> feature',
+            'ctx1',
+            'ours-insert',
+            'ctx2',
+            'theirs-insert',
+            'ctx3',
+            'tail',
+          ].join('\n');
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderEditor();
+      const internal = el as unknown as EditorInternal;
+      internal.conflictFile = {
+        ...makeConflictFile('docs/notes.md'),
+        conflictHunks: [{ start: 1, separator: 3, end: 7 }],
+      };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+
+      const conflicts = internal.segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['from-ours']);
+      expect(conflicts[0].theirsLines).to.deep.equal([
+        'from-theirs',
+        'quoted:',
+        '>>>>>>> feature',
+      ]);
+      const resolvedText = internal.segments
+        .filter((s) => s.type === 'resolved')
+        .flatMap((s) => s.lines);
+      expect(resolvedText, 'the real end marker is consumed, never resolved text').to.deep.equal([
+        'intro',
+        'ctx1',
+        'ours-insert',
+        'ctx2',
+        'theirs-insert',
+        'ctx3',
+        'tail',
+      ]);
+    });
+
+    it('malformed hunk positions fall back to the shape heuristics', async () => {
+      const el = await renderEditor();
+      const internal = el as unknown as EditorInternal;
+      // End index far out of range — positions do not describe this text.
+      internal.conflictFile = {
+        ...makeConflictFile('src/test.ts'),
+        conflictHunks: [{ start: 1, separator: 3, end: 999 }],
+      };
+      const segments = internal.parseSegments(DEFAULT_WORKDIR_CONTENT);
+      expect(segments.filter((s) => s.type === 'conflict').length).to.equal(1);
+      const conflict = segments.find((s) => s.type === 'conflict')!;
+      expect(conflict.oursLines).to.deep.equal(['line2-ours']);
+    });
+
     it('keeps an unterminated conflict as a conflict block', async () => {
       const el = await renderEditor();
       const segments = internalOf(el).parseSegments(
@@ -2818,6 +2905,17 @@ describe('lv-merge-editor', () => {
       // theirs deleted the file AND the workdir read fails: deletion staging
       // is backend-side and content-independent, so it must stay available.
       workdirContent = () => Promise.reject(new Error('read failed'));
+      // The file is STILL conflicted in the index (this is a genuine read
+      // failure, not an already-staged deletion).
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_conflicts') {
+          return [
+            { path: 'src/gone.ts', ancestor: null, ours: null, theirs: null, isBinary: false },
+          ];
+        }
+        return baseMock(command, args);
+      };
       const el = await renderEditor();
       const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean; loadFailed: boolean };
       internal.conflictFile = { ...makeConflictFile('src/gone.ts'), theirs: null };
@@ -3176,6 +3274,43 @@ describe('lv-merge-editor', () => {
         (b) => b.textContent?.includes('verbatim') || b.textContent?.trim() === 'Retry'
       );
       expect(verbatimBtns.length).to.equal(0);
+    });
+
+    it('RE-SELECTING a file resolved as a deletion shows the terminal state, not an error', async () => {
+      // The user resolved file A as a deletion, advanced to B, then clicks
+      // A again to double-check. The workdir read fails because the file
+      // is correctly GONE — presenting that as a read error (with a Retry
+      // that loops forever and a verbatim button that resurrects the
+      // deletion) would make a correct resolution look broken.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'read_file_content') throw new Error('file deleted');
+        // The index no longer lists the file — its deletion is staged.
+        if (command === 'get_conflicts') return [];
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = el as unknown as EditorInternal;
+      internal.conflictFile = { ...makeConflictFile('src/gone.ts'), theirs: null };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (
+          !internal.loading &&
+          ((el as unknown as { resolvedAsDeleted: boolean }).resolvedAsDeleted ||
+            internal.loadFailed)
+        )
+          break;
+      }
+      await el.updateComplete;
+
+      expect(internal.loadFailed, 'a staged deletion is not an error').to.be.false;
+      expect(shadowText(el)).to.include('deleted by the resolution');
+      const badButtons = Array.from(el.shadowRoot!.querySelectorAll('button')).filter(
+        (b) => b.textContent?.includes('verbatim') || b.textContent?.trim() === 'Retry'
+      );
+      expect(badButtons.length, 'no resurrect/retry affordances').to.equal(0);
     });
 
     it('a take-side that KEEPS the file reloads the fresh content', async () => {

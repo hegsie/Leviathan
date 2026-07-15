@@ -788,6 +788,19 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       // type, not truthiness.
       if (!sideReadFailed && workdirResult.success && typeof workdirResult.data === 'string') {
         this.segments = this.parseSegments(workdirResult.data);
+      } else if (
+        !workdirResult.success &&
+        (!file.ours || !file.theirs) &&
+        (await this.isResolvedDeletion(file.path))
+      ) {
+        // RE-SELECTING a file already resolved as a deletion: the workdir
+        // read fails because the file is correctly GONE. The generic error
+        // state would present the success as a failure — with a Retry that
+        // loops forever and a verbatim button that resurrects the staged
+        // deletion. Land in the terminal deleted state instead.
+        if (epoch !== this.loadEpoch) return;
+        this.segments = [];
+        this.resolvedAsDeleted = true;
       } else {
         this.segments = [];
         this.loadFailed = true;
@@ -804,6 +817,18 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         this.loading = false;
       }
     }
+  }
+
+  /**
+   * True when `path`'s deletion is already STAGED: the file has a missing
+   * side, the workdir copy is gone, and the index no longer lists it as
+   * conflicted. Distinguishes a resolved deletion from a genuine read
+   * failure.
+   */
+  private async isResolvedDeletion(path: string): Promise<boolean> {
+    if (!this.repositoryPath) return false;
+    const conflicts = await gitService.getConflicts(this.repositoryPath);
+    return conflicts.success && !(conflicts.data ?? []).some((c) => c.path === path);
   }
 
   /**
@@ -838,7 +863,77 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    * Lines are compared with a trailing CR stripped so CRLF files parse, but
    * content lines are stored verbatim to round-trip their line endings.
    */
+  /**
+   * Parse using the backend's authoritative marker positions. Returns null
+   * when the positions don't describe this text (out of range, unordered,
+   * or not pointing at marker-shaped lines) — the caller then falls back
+   * to the validated shape heuristics.
+   */
+  private parseSegmentsFromHunks(
+    text: string,
+    hunks: NonNullable<ConflictFile['conflictHunks']>,
+  ): OutputSegment[] | null {
+    const markerSize = this.effectiveMarkerSize;
+    const stripCr = (l: string): string => (l.endsWith('\r') ? l.slice(0, -1) : l);
+    const runIs = (l: string, ch: string): boolean => {
+      const s = stripCr(l);
+      let n = 0;
+      while (n < s.length && s[n] === ch) n++;
+      return n === markerSize && (s.length === n || s[n] === ' ');
+    };
+    const lines = text.split('\n');
+    const ordered = [...hunks].sort((a, b) => a.start - b.start);
+
+    const segments: OutputSegment[] = [];
+    let cursor = 0;
+    for (const h of ordered) {
+      const base = h.base ?? null;
+      // Sanity: markers must be ordered, in range, and actually marker-shaped.
+      if (
+        h.start < cursor ||
+        h.end >= lines.length ||
+        h.start >= h.separator ||
+        h.separator >= h.end ||
+        (base !== null && (base <= h.start || base >= h.separator)) ||
+        !runIs(lines[h.start], '<') ||
+        stripCr(lines[h.separator]) !== '='.repeat(markerSize) ||
+        !runIs(lines[h.end], '>') ||
+        (base !== null && !runIs(lines[base], '|'))
+      ) {
+        return null;
+      }
+      if (h.start > cursor) {
+        segments.push(this.makeResolvedSegment(lines.slice(cursor, h.start), null, false));
+      }
+      segments.push({
+        id: this.nextSegmentId++,
+        type: 'conflict',
+        lines: [],
+        oursLines: lines.slice(h.start + 1, base ?? h.separator),
+        theirsLines: lines.slice(h.separator + 1, h.end),
+        oursLabel: stripCr(lines[h.start]).slice(markerSize).trim() || 'OURS',
+        theirsLabel: stripCr(lines[h.end]).slice(markerSize).trim() || 'THEIRS',
+        origin: null,
+        fromConflict: false,
+      });
+      cursor = h.end + 1;
+    }
+    if (cursor < lines.length) {
+      segments.push(this.makeResolvedSegment(lines.slice(cursor), null, false));
+    }
+    return segments;
+  }
+
   private parseSegments(text: string): OutputSegment[] {
+    // AUTHORITATIVE positions from the backend's collision-free replay win
+    // outright — position-based parsing cannot be confused by content that
+    // quotes marker lines, even byte-identical ones. Heuristics remain for
+    // hand-edited files (no replay match) and malformed position data.
+    const hunks = this.conflictFile?.conflictHunks;
+    if (hunks && hunks.length > 0) {
+      const fromHunks = this.parseSegmentsFromHunks(text, hunks);
+      if (fromHunks) return fromHunks;
+    }
     const markerSize = this.effectiveMarkerSize;
     const stripCr = (l: string): string => (l.endsWith('\r') ? l.slice(0, -1) : l);
     /**
@@ -2063,6 +2158,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   private renderBinaryConflict(): ReturnType<typeof html> {
     if (!this.conflictFile) {
       return html`<div class="empty">Select a file to resolve</div>`;
+    }
+    // Same terminal notice as the text path — without it, a binary
+    // deletion take on the last file leaves the "Choose which version to
+    // keep" prompt on screen with both buttons dead forever.
+    if (this.resolvedAsDeleted) {
+      return html`
+        <div class="loading">
+          Resolved — this file was deleted by the resolution. Nothing further to do here.
+        </div>
+      `;
     }
 
     const oursDeleted = !this.conflictFile.ours;

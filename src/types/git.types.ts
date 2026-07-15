@@ -397,6 +397,23 @@ export interface ConflictFile {
    * silently lose lines.
    */
   conflictStyle?: 'merge' | 'diff3';
+  /**
+   * AUTHORITATIVE marker positions (0-based working-file line indices)
+   * from the backend's collision-free replay. When present the parser
+   * uses them directly — content quoting marker lines (even byte-identical
+   * to the real ones) can never confuse position-based parsing. Empty for
+   * hand-edited files (no replay match), where validated shape heuristics
+   * take over.
+   */
+  conflictHunks?: ConflictHunk[];
+}
+
+/** One conflict hunk's marker line positions in the working file. */
+export interface ConflictHunk {
+  start: number;
+  separator: number;
+  end: number;
+  base?: number | null;
 }
 
 export interface ConflictEntry {

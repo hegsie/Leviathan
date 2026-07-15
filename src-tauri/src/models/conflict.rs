@@ -34,6 +34,28 @@ pub struct ConflictFile {
     /// to start with a pipe run.
     #[serde(default = "default_conflict_style")]
     pub conflict_style: String,
+    /// AUTHORITATIVE marker positions in the working file (0-based line
+    /// indices), derived from a collision-free re-replay when the merge
+    /// replay matched the file. When present the frontend parses by these
+    /// positions instead of shape heuristics — content that quotes marker
+    /// lines (even byte-identical to the real ones) can never confuse
+    /// them. Empty when the file was hand-edited (no replay match).
+    #[serde(default)]
+    pub conflict_hunks: Vec<ConflictHunk>,
+}
+
+/// One conflict hunk's marker line positions in the working file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictHunk {
+    /// `<<<<<<<` line index
+    pub start: u32,
+    /// `=======` line index
+    pub separator: u32,
+    /// `>>>>>>>` line index
+    pub end: u32,
+    /// `|||||||` line index for diff3-style emission
+    pub base: Option<u32>,
 }
 
 pub(crate) fn default_marker_size() -> u32 {

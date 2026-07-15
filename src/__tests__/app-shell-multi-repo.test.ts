@@ -912,6 +912,34 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('refuses to open for a repo whose tab was closed mid-operation', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        await el.updateComplete;
+
+        // The merge ran on repo A; the user closed A's tab during the
+        // await. A dialog pinned to a closed repo would float over the
+        // wrong screen with dead completion plumbing.
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+        (el as any).handleMergeConflictEvent(
+          new CustomEvent('merge-conflict', { detail: { repositoryPath: '/repo/a' } })
+        );
+        await el.updateComplete;
+
+        expect((el as any).showConflictDialog).to.be.false;
+        expect(el.shadowRoot!.querySelector('lv-conflict-resolution-dialog')).to.be.null;
+        const toasts = uiStore.getState().toasts;
+        expect(toasts.some((t) => t.type === 'warning' && t.message.includes('tab was closed')))
+          .to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('a second conflict event cannot hijack an open dialog', async () => {
       const el = createAppShell();
       document.body.appendChild(el);

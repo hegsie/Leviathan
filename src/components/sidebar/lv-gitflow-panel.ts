@@ -383,6 +383,10 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleStartFeature(): Promise<void> {
+    // Captured BEFORE the prompt: it is an in-app overlay, so Ctrl+Tab can
+    // switch the active repo (rebinding this prop) while it is open — the
+    // branch must be created in the repo the panel showed at click time.
+    const repoPath = this.repositoryPath;
     const name = await showPrompt('Start Feature', 'Enter feature name:');
     if (!name || !name.trim()) return;
 
@@ -390,7 +394,7 @@ export class LvGitflowPanel extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.gitFlowStartFeature(this.repositoryPath, name.trim());
+      const result = await gitService.gitFlowStartFeature(repoPath, name.trim());
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
@@ -453,6 +457,7 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleStartRelease(): Promise<void> {
+    const repoPath = this.repositoryPath;
     const version = await showPrompt('Start Release', 'Enter release version:');
     if (!version || !version.trim()) return;
 
@@ -460,7 +465,7 @@ export class LvGitflowPanel extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.gitFlowStartRelease(this.repositoryPath, version.trim());
+      const result = await gitService.gitFlowStartRelease(repoPath, version.trim());
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
@@ -480,13 +485,16 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishRelease(item: ActiveItem): Promise<void> {
+    // Captured BEFORE the prompt (an in-app overlay — Ctrl+Tab can rebind
+    // this prop while it is open): the finish must run on the repo whose
+    // release the user clicked, and the conflict dialog must pin to it.
+    const repoPath = this.repositoryPath;
     const tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
     if (tagMessage === null) return;
 
     this.error = null;
     this.operationInProgress = true;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.gitFlowFinishRelease(
         repoPath,
@@ -529,6 +537,7 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleStartHotfix(): Promise<void> {
+    const repoPath = this.repositoryPath;
     const version = await showPrompt('Start Hotfix', 'Enter hotfix version:');
     if (!version || !version.trim()) return;
 
@@ -536,7 +545,7 @@ export class LvGitflowPanel extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.gitFlowStartHotfix(this.repositoryPath, version.trim());
+      const result = await gitService.gitFlowStartHotfix(repoPath, version.trim());
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
@@ -556,13 +565,13 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishHotfix(item: ActiveItem): Promise<void> {
+    const repoPath = this.repositoryPath;
     const tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
     if (tagMessage === null) return;
 
     this.error = null;
     this.operationInProgress = true;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.gitFlowFinishHotfix(
         repoPath,
