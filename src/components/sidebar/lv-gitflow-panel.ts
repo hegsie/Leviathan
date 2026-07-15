@@ -488,7 +488,10 @@ export class LvGitflowPanel extends LitElement {
     // Captured BEFORE the prompt (an in-app overlay — Ctrl+Tab can rebind
     // this prop while it is open): the finish must run on the repo whose
     // release the user clicked, and the conflict dialog must pin to it.
+    // The develop-branch NAME is per-repo config that reloads on switch —
+    // capture it with the path.
     const repoPath = this.repositoryPath;
+    const developBranch = this.config?.developBranch ?? 'develop';
     const tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
     if (tagMessage === null) return;
 
@@ -521,7 +524,7 @@ export class LvGitflowPanel extends LitElement {
             tagMessage: tagMessage || undefined,
             // The backend merges+tags master BEFORE the develop merge; a conflict
             // while HEAD is on develop means that master merge + tag already landed.
-            priorFinishCommitLanded: await this.isOnDevelopBranch(repoPath),
+            priorFinishCommitLanded: await this.isOnDevelopBranch(repoPath, developBranch),
           },
           repoPath,
         );
@@ -566,6 +569,7 @@ export class LvGitflowPanel extends LitElement {
 
   private async handleFinishHotfix(item: ActiveItem): Promise<void> {
     const repoPath = this.repositoryPath;
+    const developBranch = this.config?.developBranch ?? 'develop';
     const tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
     if (tagMessage === null) return;
 
@@ -598,7 +602,7 @@ export class LvGitflowPanel extends LitElement {
             tagMessage: tagMessage || undefined,
             // The backend merges+tags master BEFORE the develop merge; a conflict
             // while HEAD is on develop means that master merge + tag already landed.
-            priorFinishCommitLanded: await this.isOnDevelopBranch(repoPath),
+            priorFinishCommitLanded: await this.isOnDevelopBranch(repoPath, developBranch),
           },
           repoPath,
         );
@@ -628,14 +632,16 @@ export class LvGitflowPanel extends LitElement {
    * conflict this means the backend already merged into master and created the
    * version tag (both happen before the develop merge), so those survive an abort.
    */
-  private async isOnDevelopBranch(repoPath: string): Promise<boolean> {
-    const develop = this.config?.developBranch ?? 'develop';
-    // The caller's PRE-AWAIT capture — this runs after the finish's awaits,
-    // when this.repositoryPath may already point at another repo whose HEAD
-    // would answer for the wrong repository.
+  private async isOnDevelopBranch(repoPath: string, developBranch: string): Promise<boolean> {
+    // BOTH parameters are the caller's PRE-AWAIT captures — this runs after
+    // the finish's awaits, when this.repositoryPath (and with it
+    // this.config, which reloads on repo switch) may already describe
+    // another repo. Reading the live config here would compare repo A's
+    // HEAD against repo B's develop-branch NAME and seed a dishonest
+    // priorFinishCommitLanded into the abort wording.
     const result = await gitService.getBranches(repoPath);
     if (!result.success || !result.data) return false;
-    return result.data.some((b) => b.isHead && b.name === develop);
+    return result.data.some((b) => b.isHead && b.name === developBranch);
   }
 
   private openConflictDialog(

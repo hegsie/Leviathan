@@ -442,12 +442,19 @@ export class LvConflictResolutionDialog extends LitElement {
       // Capture the to-be-dropped stash entry's IDENTITY at open. Complete
       // may run much later, and an external `git stash drop` in a terminal
       // meanwhile shifts the indices — dropping blindly by the open-time
-      // index could then delete an UNRELATED stash.
+      // index could then delete an UNRELATED stash. The index AND a session
+      // epoch are captured with the request: the dialog can close and
+      // reopen for a different stash before this resolves, and a late
+      // first-session response must not pair its list with the SECOND
+      // session's index.
       this.stashOidToDrop = null;
+      this.stashCaptureEpoch++;
       if (this.operationType === 'stash' && this.dropStashOnComplete) {
+        const idx = this.stashIndex;
+        const epoch = this.stashCaptureEpoch;
         void gitService.getStashes(this.repositoryPath).then((result) => {
-          if (this.open && result.success) {
-            this.stashOidToDrop = result.data?.[this.stashIndex]?.oid ?? null;
+          if (this.open && epoch === this.stashCaptureEpoch && result.success) {
+            this.stashOidToDrop = result.data?.[idx]?.oid ?? null;
           }
         });
       }
@@ -456,6 +463,8 @@ export class LvConflictResolutionDialog extends LitElement {
 
   /** OID of the stash entry Complete must drop, captured at dialog open. */
   private stashOidToDrop: string | null = null;
+  /** Bumped per open/close so a stale identity capture can't cross sessions. */
+  private stashCaptureEpoch = 0;
 
   private handleKeyDown = (e: KeyboardEvent): void => {
     if (!this.open) return;
@@ -484,6 +493,7 @@ export class LvConflictResolutionDialog extends LitElement {
     this.mergeCommitted = false;
     this.priorFinishCommitLanded = false;
     this.stashOidToDrop = null;
+    this.stashCaptureEpoch++;
   }
 
   /** Re-run the conflict load after a failure, resetting resolution progress. */

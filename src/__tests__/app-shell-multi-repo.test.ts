@@ -940,6 +940,55 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('closing the pinned repo tab while the dialog is OPEN closes it with a warning', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        expect((el as any).showConflictDialog).to.be.true;
+
+        // The user clicks the × on repo A's tab with the dialog up. The
+        // dialog must not stay floating over whatever renders next.
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect((el as any).showConflictDialog).to.be.false;
+        expect(el.shadowRoot!.querySelector('lv-conflict-resolution-dialog')).to.be.null;
+        const toasts = uiStore.getState().toasts;
+        expect(
+          toasts.some((t) => t.type === 'warning' && t.message.includes('reopen it'))
+        ).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('closing an UNRELATED tab leaves the dialog alone', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        repositoryStore.getState().removeRepository('/repo/b');
+        await el.updateComplete;
+
+        expect((el as any).showConflictDialog).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('a second conflict event cannot hijack an open dialog', async () => {
       const el = createAppShell();
       document.body.appendChild(el);

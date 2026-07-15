@@ -1051,6 +1051,26 @@ export class AppShell extends LitElement {
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
 
+      // Closing the pinned repo's TAB while its conflict dialog is up
+      // would leave the dialog floating over whatever renders next, with
+      // dead completion plumbing (the open-time guard only covers closes
+      // during the triggering operation's await). Close it with an
+      // explanation — the operation itself persists on disk and resurfaces
+      // when the repo is reopened.
+      if (
+        this.showConflictDialog &&
+        this.conflictDialogConfig &&
+        !state.openRepositories.some(
+          (r) => r.repository.path === this.conflictDialogConfig!.repoPath,
+        )
+      ) {
+        this.closeConflictDialog();
+        showToast(
+          'The repository tab was closed — reopen it to continue resolving its conflicts',
+          'warning',
+        );
+      }
+
       // The open diff binds a click-time StatusEntry snapshot. Re-derive it
       // from every status refresh so a file that became conflicted since the
       // click (e.g. a merge run in an external terminal) hits the diff view's

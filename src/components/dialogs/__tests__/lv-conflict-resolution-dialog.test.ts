@@ -1561,6 +1561,60 @@ describe('lv-conflict-resolution-dialog', () => {
       ).to.equal(0);
     });
 
+    it('a late identity capture from a PREVIOUS dialog session cannot cross over', async () => {
+      // Session 1 opens for stashIndex=1 and its getStashes hangs; the
+      // dialog closes and reopens (session 2, stashIndex=0). When session
+      // 1's response finally lands it must be discarded — pairing its list
+      // with session 2's index would capture the wrong entry's identity.
+      let releaseFirst: ((v: unknown) => void) | null = null;
+      let call = 0;
+      const stale = [
+        { index: 0, message: 'other', oid: 'oid-wrong' },
+        { index: 1, message: 'first session target', oid: 'oid-session1' },
+      ];
+      const fresh = [{ index: 0, message: 'second session target', oid: 'oid-session2' }];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') {
+          call++;
+          if (call === 1) {
+            return new Promise((res) => {
+              releaseFirst = () => res(stale);
+            });
+          }
+          return fresh;
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderDialog('stash');
+      (el as unknown as { stashIndex: number }).stashIndex = 1;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 50));
+
+      // Close and reopen for a different stash.
+      (el as unknown as { close: () => void }).close.call(el);
+      await el.updateComplete;
+      (el as unknown as { stashIndex: number }).stashIndex = 0;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 50));
+
+      // Session 2's capture landed.
+      expect(
+        (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop
+      ).to.equal('oid-session2');
+
+      // Session 1's response arrives late — it must not overwrite.
+      releaseFirst!(stale);
+      await new Promise(r => setTimeout(r, 20));
+      expect(
+        (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop,
+        "a stale session's list must not pair with the new session's index"
+      ).to.equal('oid-session2');
+    });
+
     it('skips the drop with a warning when the stash entry vanished mid-dialog', async () => {
       let stashList: Array<{ index: number; message: string; oid: string }> = [
         { index: 0, message: 'the conflicted stash', oid: 'oid-target' },
