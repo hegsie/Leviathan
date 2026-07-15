@@ -559,12 +559,23 @@ export class LvConflictResolutionDialog extends LitElement {
         const stillConflicted =
           conflictsResult.success &&
           (conflictsResult.data ?? []).some((c) => c.path === conflictPath);
+        // The embedded editor is bound to this file's ConflictFile object and
+        // only reloads on identity change — refresh it so it shows the tool's
+        // output instead of a stale parse that Mark Resolved would write back
+        // OVER the merge the user just crafted in the tool.
+        const wasSelected = this.selectedConflict?.path === conflictPath;
+        this.conflicts = this.conflicts.map((c) =>
+          c.path === conflictPath ? { ...c } : c
+        );
         if (stillConflicted) {
           showToast('File still has conflicts', 'warning');
         } else {
           this.resolvedFiles = new Set([...this.resolvedFiles, conflictPath]);
           this.requestUpdate();
           showToast('Merge tool completed', 'success');
+          if (wasSelected) {
+            this.advanceToNextUnresolved();
+          }
         }
       } else {
         showToast(result.data?.message ?? result.error?.message ?? 'Merge tool failed', 'error');
@@ -592,13 +603,9 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   }
 
-  private handleConflictResolved(e: CustomEvent): void {
-    const { file } = e.detail as { file: ConflictFile };
-    this.resolvedFiles = new Set([...this.resolvedFiles, file.path]);
-    this.requestUpdate();
-
-    // Move to the next unresolved file, wrapping around so files skipped
-    // earlier in the list are still reachable.
+  /** Move selection to the next unresolved file, wrapping around so files
+   * skipped earlier in the list are still reachable. */
+  private advanceToNextUnresolved(): void {
     const total = this.conflicts.length;
     for (let offset = 1; offset < total; offset++) {
       const i = (this.selectedIndex + offset) % total;
@@ -607,6 +614,20 @@ export class LvConflictResolutionDialog extends LitElement {
         return;
       }
     }
+  }
+
+  private handleConflictResolved(e: CustomEvent): void {
+    const { file } = e.detail as { file: ConflictFile };
+    // A resolve call can land AFTER the user has moved on to another file —
+    // only auto-advance when the resolved file is still the selected one, or
+    // the completion would yank them off the file they're actively working on
+    // (losing its in-memory picks on the way back).
+    const wasSelected = this.conflicts[this.selectedIndex]?.path === file.path;
+    this.resolvedFiles = new Set([...this.resolvedFiles, file.path]);
+    this.requestUpdate();
+    if (!wasSelected) return;
+
+    this.advanceToNextUnresolved();
   }
 
   private handleAbort(): void {

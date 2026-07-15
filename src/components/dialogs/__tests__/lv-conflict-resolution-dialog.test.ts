@@ -431,6 +431,71 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(internal.selectedIndex).to.equal(2);
     });
 
+    it('does not yank selection when a mid-flight resolution lands for another file', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        resolvedFiles: Set<string>;
+      };
+      // User clicked Mark Resolved on main.ts (index 0), then switched to
+      // utils.ts (index 1) and is working there when the call completes.
+      internal.selectedIndex = 1;
+
+      const handleConflictResolved = (el as unknown as {
+        handleConflictResolved: (e: CustomEvent) => void;
+      }).handleConflictResolved.bind(el);
+
+      handleConflictResolved(
+        new CustomEvent('conflict-resolved', {
+          detail: { file: makeConflict('src/main.ts') },
+        })
+      );
+
+      // main.ts is marked resolved but the selection stays on the file the
+      // user is actively editing.
+      expect(internal.resolvedFiles.has('src/main.ts')).to.be.true;
+      expect(internal.selectedIndex).to.equal(1);
+    });
+
+    it('refreshes the embedded editor when the external tool resolves the selected file', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        conflicts: ConflictFile[];
+        resolvedFiles: Set<string>;
+        handleOpenExternalTool: (path: string) => Promise<void>;
+      };
+      const before = internal.conflicts[0];
+      expect(internal.selectedIndex).to.equal(0);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'launch_merge_tool') return { success: true };
+        // After the tool, the file is no longer conflicted.
+        if (command === 'get_conflicts') return TEST_CONFLICTS.slice(1);
+        return null;
+      };
+
+      await internal.handleOpenExternalTool.call(el, 'src/main.ts');
+      await el.updateComplete;
+
+      // The conflict object identity changed (forcing the editor to reload
+      // the tool's output instead of a stale parse), the file is resolved,
+      // and selection advanced off it.
+      expect(internal.conflicts[0]).to.not.equal(before);
+      expect(internal.resolvedFiles.has('src/main.ts')).to.be.true;
+      expect(internal.selectedIndex).to.equal(1);
+    });
+
     it('wraps around to earlier unresolved files after resolving the last one', async () => {
       const el = await renderDialog();
       el.open = true;
