@@ -700,6 +700,69 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(continueBtn.disabled).to.be.false;
     });
 
+    it('Complete confirms when the editor holds unsaved rework', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      // The selected file was Mark-Resolved earlier, then reworked: an
+      // unsaved pick sits on screen. Complete must not silently commit the
+      // older on-disk content.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      const editorInternal = editor as unknown as {
+        segments: Array<Record<string, unknown>>;
+        userTouched: boolean;
+      };
+      editorInternal.segments = [
+        {
+          id: 1,
+          type: 'resolved',
+          lines: ['rework'],
+          oursLines: [],
+          theirsLines: [],
+          oursLabel: '',
+          theirsLabel: '',
+          origin: 'ours',
+          fromConflict: true,
+        },
+      ];
+      editorInternal.userTouched = true;
+
+      let confirmAnswer: unknown = false;
+      let confirmCalls = 0;
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => {
+        completedFired = true;
+      });
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return confirmAnswer;
+        }
+        return baseMock(command, args);
+      };
+
+      // Declined: nothing commits, the dialog stays open with the rework.
+      await internal.handleContinue.call(el);
+      expect(confirmCalls).to.equal(1);
+      expect(completedFired).to.be.false;
+
+      // Accepted: the continue proceeds normally.
+      confirmAnswer = 'Ok';
+      await internal.handleContinue.call(el);
+      expect(completedFired).to.be.true;
+    });
+
     it('dispatches operation-completed on successful continue', async () => {
       const el = await renderDialog();
       el.open = true;
@@ -1122,6 +1185,45 @@ describe('lv-conflict-resolution-dialog', () => {
       fire('resolve-finished');
       await el.updateComplete;
       expect(abortBtn.disabled).to.be.false;
+    });
+
+    it('file navigation is blocked while a resolve write is in flight', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      // Navigating away mid-write and back lets a SECOND write start against
+      // the same file — two overlapping writes, last-to-land wins silently.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      editor.dispatchEvent(
+        new CustomEvent('resolve-started', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        handleFileSelect: (i: number) => Promise<void>;
+        handleNext: () => Promise<void>;
+      };
+      expect(internal.selectedIndex).to.equal(0);
+      await internal.handleFileSelect.call(el, 1);
+      expect(internal.selectedIndex, 'file-list click must be inert mid-write').to.equal(0);
+      await internal.handleNext.call(el);
+      expect(internal.selectedIndex, 'Next must be inert mid-write').to.equal(0);
+
+      const nextBtn = Array.from(el.shadowRoot!.querySelectorAll('.nav-btn')).find(
+        (b) => b.textContent?.includes('Next')
+      ) as HTMLButtonElement;
+      expect(nextBtn.disabled, 'Next renders disabled mid-write').to.be.true;
+
+      editor.dispatchEvent(
+        new CustomEvent('resolve-finished', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+      await internal.handleNext.call(el);
+      expect(internal.selectedIndex, 'navigation works again after the write').to.equal(1);
     });
 
     it('a double-click on External during the confirm window launches one tool session', async () => {

@@ -2125,13 +2125,32 @@ export class AppShell extends LitElement {
   }
 
   private handleConflictResolved(): void {
+    const pinnedPath = this.conflictDialogConfig?.repoPath ?? null;
     this.closeConflictDialog();
-    this.handleRefresh();
+    this.refreshConflictDialogRepo(pinnedPath);
   }
 
   private handleConflictAborted(): void {
+    const pinnedPath = this.conflictDialogConfig?.repoPath ?? null;
     this.closeConflictDialog();
-    this.handleRefresh();
+    this.refreshConflictDialogRepo(pinnedPath);
+  }
+
+  /**
+   * The dialog operated on the repo it was PINNED to. If the user switched
+   * tabs while it was up, refreshing the ACTIVE repo would leave the
+   * operated-on repo showing a stale merge state (state/status/graph) until
+   * some unrelated event refreshed it. Refresh the pinned repo instead:
+   * live when it is still active, via the stale-on-activate path (plus a
+   * badge hydration so its tab clears promptly) when it is backgrounded.
+   */
+  private refreshConflictDialogRepo(pinnedPath: string | null): void {
+    if (!pinnedPath || pinnedPath === this.activeRepository?.repository.path) {
+      this.handleRefresh();
+      return;
+    }
+    this.staleRepoPaths.add(pinnedPath);
+    this.scheduleBadgeHydration(pinnedPath);
   }
 
   private handleResizeStart(e: MouseEvent, type: 'left' | 'right'): void {

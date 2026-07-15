@@ -945,6 +945,33 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('completing on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+
+        // User tabs to B, then completes the operation on pinned repo A.
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+        (el as any).handleConflictResolved();
+        await el.updateComplete;
+
+        // A is backgrounded — it must be marked stale (refreshed when
+        // re-activated) so its tab doesn't keep showing merge state.
+        expect((el as any).staleRepoPaths.has('/repo/a')).to.be.true;
+        expect((el as any).showConflictDialog).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('re-pins to the repo active at the NEXT open', async () => {
       const el = createAppShell();
       document.body.appendChild(el);

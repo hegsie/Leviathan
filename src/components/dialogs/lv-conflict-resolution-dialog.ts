@@ -644,22 +644,40 @@ export class LvConflictResolutionDialog extends LitElement {
     );
   }
 
+  /**
+   * Navigating away mid-write lets the user come BACK and start a second
+   * write against the same file — two overlapping writes, last one wins.
+   * The file-list rows and keyboard shortcuts have no disabled affordance
+   * (unlike the Prev/Next buttons), so the refusal must not be silent.
+   */
+  private navBlockedByResolve(): boolean {
+    if (this.editorResolveDepth === 0) return false;
+    showToast('Wait for the current resolve to finish', 'info');
+    return true;
+  }
+
   private async handleFileSelect(index: number): Promise<void> {
     if (index === this.selectedIndex) return;
+    if (this.navBlockedByResolve()) return;
     if (!(await this.confirmLeaveInProgress())) return;
+    if (this.editorResolveDepth > 0) return;
     this.selectedIndex = index;
   }
 
   private async handlePrevious(): Promise<void> {
     if (this.selectedIndex > 0) {
+      if (this.navBlockedByResolve()) return;
       if (!(await this.confirmLeaveInProgress())) return;
+      if (this.editorResolveDepth > 0) return;
       this.selectedIndex--;
     }
   }
 
   private async handleNext(): Promise<void> {
     if (this.selectedIndex < this.conflicts.length - 1) {
+      if (this.navBlockedByResolve()) return;
       if (!(await this.confirmLeaveInProgress())) return;
+      if (this.editorResolveDepth > 0) return;
       this.selectedIndex++;
     }
   }
@@ -893,6 +911,30 @@ export class LvConflictResolutionDialog extends LitElement {
       this.editorResolveDepth > 0
     ) {
       return;
+    }
+    // The editor can hold visible rework that was never Mark-Resolved: a
+    // reopened block (Reset), fresh picks, or a mid-typing edit draft. All
+    // files still COUNT as resolved (their last Mark Resolved is on disk),
+    // so Complete would silently commit that older content — a mere file
+    // switch confirms in this state, and completing is far more final.
+    const editor = this.shadowRoot?.querySelector('lv-merge-editor') as LvMergeEditor | null;
+    if (editor?.hasUnsavedResolutions()) {
+      const proceed = await showConfirm(
+        'Complete without the latest changes?',
+        'This file has picks or edits that were not saved with Mark Resolved — completing uses the last saved content and discards them.',
+        'warning',
+      );
+      if (!proceed) return;
+      // Re-check the exclusion guards after the confirm's await.
+      if (
+        this.continuing ||
+        this.aborting ||
+        this.launchingExternalTool !== null ||
+        this.editorToolActive ||
+        this.editorResolveDepth > 0
+      ) {
+        return;
+      }
     }
     this.continuing = true;
     try {
@@ -1181,7 +1223,7 @@ export class LvConflictResolutionDialog extends LitElement {
               <button
                 class="nav-btn"
                 @click=${this.handlePrevious}
-                ?disabled=${this.selectedIndex === 0}
+                ?disabled=${this.selectedIndex === 0 || this.editorResolveDepth > 0}
                 title="Previous file (Alt+Up)"
               >
                 ← Prev
@@ -1189,7 +1231,8 @@ export class LvConflictResolutionDialog extends LitElement {
               <button
                 class="nav-btn"
                 @click=${this.handleNext}
-                ?disabled=${this.selectedIndex >= this.conflicts.length - 1}
+                ?disabled=${this.selectedIndex >= this.conflicts.length - 1 ||
+                this.editorResolveDepth > 0}
                 title="Next file (Alt+Down)"
               >
                 Next →

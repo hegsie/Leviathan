@@ -852,11 +852,6 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
     const segments: OutputSegment[] = [];
     let currentResolved: string[] = [];
-    let inConflict = false;
-    let seenSeparator = false;
-    let body: string[] = [];
-    let oursLabel = '';
-    let theirsLabel = '';
 
     /** True when `needle` appears as a consecutive slice of `hay`
      * (CR-insensitively — the workdir may be CRLF while blobs are LF). */
@@ -871,49 +866,72 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       }
       return false;
     };
+    // With no blob content at all there is nothing to validate against —
+    // the parser falls back to first-candidate closing (the shape-only
+    // behavior), which is also what direct unit-test invocations exercise.
+    const blobsAvailable = this.oursLines.length > 0 || this.theirsLines.length > 0;
+    const lineInBlobs = (l: string): boolean =>
+      isContiguousRun([l], this.oursLines) || isContiguousRun([l], this.theirsLines);
 
-    /**
-     * Split a conflict block's raw body (the lines between the start and
-     * end markers) into ours/theirs. Content shaped exactly like the
-     * separator — a Markdown setext underline is `=======` — is
-     * indistinguishable from git's separator by shape alone, so when more
-     * than one candidate exists each split is validated against the
-     * ours/theirs blob contents: each side of a hunk is a contiguous slice
-     * of its blob. The first candidate whose BOTH sides validate wins;
-     * with no valid candidate the first is kept (blobs unavailable).
-     */
-    const splitConflictBody = (b: string[]): { ours: string[]; theirs: string[] } => {
-      const baseIdxBefore = (limit: number): number => {
-        for (let i = 0; i < limit; i++) {
-          if (isBaseMarker(b[i])) return i;
-        }
-        return -1;
-      };
-      const oursUpTo = (limit: number): string[] => {
-        const bi = baseIdxBefore(limit);
-        // diff3 base sections (between ||||||| and the separator) are
-        // discarded — never leak base into ours.
-        return b.slice(0, bi < 0 ? limit : bi);
-      };
-      const candidates: number[] = [];
+    const splitCandidates = (b: string[]): number[] => {
+      const out: number[] = [];
       for (let i = 0; i < b.length; i++) {
-        if (isSeparator(b[i])) candidates.push(i);
+        if (isSeparator(b[i])) out.push(i);
       }
-      if (candidates.length === 0) {
-        // Unterminated at EOF before any separator — everything is ours.
-        return { ours: oursUpTo(b.length), theirs: [] };
-      }
-      if (candidates.length > 1) {
-        for (const s of candidates) {
-          const ours = oursUpTo(s);
-          const theirs = b.slice(s + 1);
-          if (isContiguousRun(ours, this.oursLines) && isContiguousRun(theirs, this.theirsLines)) {
-            return { ours, theirs };
-          }
+      return out;
+    };
+    const splitAt = (b: string[], s: number): { ours: string[]; theirs: string[] } => {
+      // diff3 base sections (between ||||||| and the separator) are
+      // discarded — never leak base into ours.
+      let baseIdx = -1;
+      for (let i = 0; i < s; i++) {
+        if (isBaseMarker(b[i])) {
+          baseIdx = i;
+          break;
         }
       }
-      const s = candidates[0];
-      return { ours: oursUpTo(s), theirs: b.slice(s + 1) };
+      return { ours: b.slice(0, baseIdx < 0 ? s : baseIdx), theirs: b.slice(s + 1) };
+    };
+    /**
+     * A split is VALID when each side is a contiguous slice of its blob —
+     * content shaped exactly like the separator (a Markdown setext
+     * underline is `=======`) is indistinguishable from git's separator by
+     * shape alone. Returns the first candidate split that validates.
+     */
+    const validSplitOf = (b: string[]): { ours: string[]; theirs: string[] } | null => {
+      for (const s of splitCandidates(b)) {
+        const split = splitAt(b, s);
+        if (
+          isContiguousRun(split.ours, this.oursLines) &&
+          isContiguousRun(split.theirs, this.theirsLines)
+        ) {
+          return split;
+        }
+      }
+      return null;
+    };
+    const fallbackSplitOf = (b: string[]): { ours: string[]; theirs: string[] } => {
+      const cs = splitCandidates(b);
+      // Unterminated with no separator — everything is ours.
+      if (cs.length === 0) return splitAt(b, b.length);
+      return splitAt(b, cs[0]);
+    };
+    /**
+     * True when the text after a candidate close (up to the next
+     * start-shaped line) contains a marker-shaped line that is NOT content
+     * from either blob — i.e. a real, orphaned git marker. Closing early
+     * (at a QUOTED end marker inside the theirs section) strands the real
+     * separator/end below as "resolved" text; this detects exactly that.
+     * A validated split alone cannot: a PREFIX of the theirs hunk also
+     * validates as contiguous.
+     */
+    const orphanMarkerAfter = (endIdx: number): boolean => {
+      for (let k = endIdx + 1; k < lines.length; k++) {
+        const l = lines[k];
+        if (isConflictStart(l)) return false;
+        if ((isConflictEnd(l) || isSeparator(l)) && !lineInBlobs(l)) return true;
+      }
+      return false;
     };
 
     const flushResolved = (): void => {
@@ -922,58 +940,109 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         currentResolved = [];
       }
     };
-    const pushConflict = (): void => {
-      const { ours, theirs } = splitConflictBody(body);
+    const pushConflict = (
+      split: { ours: string[]; theirs: string[] },
+      oursLabel: string,
+      theirsLabel: string,
+    ): void => {
+      flushResolved();
       segments.push({
         id: this.nextSegmentId++,
         type: 'conflict',
         lines: [],
-        oursLines: ours,
-        theirsLines: theirs,
+        oursLines: split.ours,
+        theirsLines: split.theirs,
         oursLabel,
         theirsLabel,
         origin: null,
         fromConflict: false,
       });
     };
+    const labelOf = (markerLine: string, fallback: string): string =>
+      stripCr(markerLine).slice(markerSize).trim() || fallback;
 
-    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-      const line = lines[lineIndex];
-      if (!inConflict && isConflictStart(line)) {
-        flushResolved();
-        inConflict = true;
-        seenSeparator = false;
-        body = [];
-        oursLabel = stripCr(line).slice(markerSize).trim() || 'OURS';
-        theirsLabel = '';
-      } else if (inConflict && seenSeparator && isConflictEnd(line)) {
-        // Git always emits '=======' before '>>>>>>>', so an end marker is
-        // only valid once a separator was seen — anywhere earlier it's
-        // content (a quoted diff, docs about conflicts) and treating it as
-        // the end would drop the real theirs side and leak the true markers.
-        theirsLabel = stripCr(line).slice(markerSize).trim() || 'THEIRS';
-        pushConflict();
-        inConflict = false;
-        body = [];
-      } else if (inConflict) {
-        // Everything between the start and end markers — including nested
-        // '<<<<<<<' lines, separator candidates, and diff3 base sections —
-        // is collected raw; splitConflictBody derives the ours/theirs split.
-        if (isSeparator(line)) seenSeparator = true;
-        body.push(line);
-      } else {
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!isConflictStart(line)) {
         currentResolved.push(line);
+        i++;
+        continue;
+      }
+
+      // A start-shaped line opens a candidate conflict region. Walk forward
+      // collecting the body and candidate end markers (end-shaped lines
+      // after at least one separator-shaped line — git always emits
+      // '=======' before '>>>>>>>'). Content can QUOTE markers, so a
+      // candidate close is only accepted when it can be justified against
+      // the blobs; otherwise the end-shaped line is content and scanning
+      // continues to the next candidate.
+      const oursLabel = labelOf(line, 'OURS');
+      const body: string[] = [];
+      let seenSep = false;
+      let firstCandidate: { end: number; body: string[] } | null = null;
+      let closed: { end: number; split: { ours: string[]; theirs: string[] } | null } | null =
+        null;
+
+      for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j];
+        if (seenSep && isConflictEnd(l)) {
+          if (!blobsAvailable) {
+            closed = { end: j, split: fallbackSplitOf(body) };
+            break;
+          }
+          if (!firstCandidate) firstCandidate = { end: j, body: [...body] };
+          // The whole region (markers included) existing verbatim in a
+          // blob means it is QUOTED content — a docs example that survived
+          // the merge — not a git-generated conflict. Real markers are in
+          // neither blob.
+          const region = lines.slice(i, j + 1);
+          if (isContiguousRun(region, this.oursLines) || isContiguousRun(region, this.theirsLines)) {
+            closed = { end: j, split: null };
+            break;
+          }
+          const split = validSplitOf(body);
+          if (split && !orphanMarkerAfter(j)) {
+            closed = { end: j, split };
+            break;
+          }
+          // Rejected — this end-shaped line is content; keep scanning.
+          body.push(l);
+          continue;
+        }
+        if (isSeparator(l)) seenSep = true;
+        body.push(l);
+      }
+
+      if (closed && closed.split === null) {
+        // Quoted region — plain content, merged into the surrounding run.
+        currentResolved.push(...lines.slice(i, closed.end + 1));
+        i = closed.end + 1;
+      } else if (closed) {
+        pushConflict(closed.split!, oursLabel, labelOf(lines[closed.end], 'THEIRS'));
+        i = closed.end + 1;
+      } else if (firstCandidate) {
+        // No candidate could be justified (nothing validates) — close at
+        // the FIRST candidate, the pre-validation behavior.
+        pushConflict(
+          fallbackSplitOf(firstCandidate.body),
+          oursLabel,
+          labelOf(lines[firstCandidate.end], 'THEIRS'),
+        );
+        i = firstCandidate.end + 1;
+      } else {
+        // Unterminated conflict (truncated file) — keep it as a conflict
+        // block rather than silently promoting marker content to resolved
+        // text.
+        pushConflict(
+          validSplitOf(body) ?? fallbackSplitOf(body),
+          oursLabel,
+          'THEIRS',
+        );
+        i = lines.length;
       }
     }
-
-    if (inConflict) {
-      // Unterminated conflict (truncated file) — keep it as a conflict block
-      // rather than silently promoting marker content to resolved text.
-      theirsLabel = theirsLabel || 'THEIRS';
-      pushConflict();
-    } else {
-      flushResolved();
-    }
+    flushResolved();
 
     return segments;
   }
@@ -1080,8 +1149,17 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.updateSegment(id, { type: 'conflict', lines: [], origin: null, fromConflict: false });
   }
 
-  private startEditSegment(segment: OutputSegment): void {
+  private async startEditSegment(segment: OutputSegment): Promise<void> {
     if (this.actionsBlocked) return;
+    // Opening an edit on ANOTHER segment throws away the current typed
+    // draft — confirm like every other draft-discarding path.
+    if (this.editingSegmentId !== null && this.editingSegmentId !== segment.id) {
+      if (!(await this.confirmDiscardOpenEdit())) return;
+      // Re-check after the confirm's await, and re-find the segment — a
+      // resolve/tool session or reload may have happened while it was up.
+      if (this.actionsBlocked) return;
+      if (!this.segments.some((s) => s.id === segment.id)) return;
+    }
     this.editingSegmentId = segment.id;
     // Editing an open conflict starts from both sides so the user trims what
     // they don't want — never from marker text.
@@ -1385,8 +1463,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       );
 
       if (result.success) {
-        // This exact output is on disk now — navigation away is safe.
-        this.lastSavedContent = content;
+        // This exact output is on disk now — navigation away is safe. But
+        // only record it while this call still owns the editor's state: a
+        // file switch mid-write resets per-file state, and a stale write's
+        // content must not masquerade as the CURRENT file's saved state.
+        if (token === this.resolveToken) {
+          this.lastSavedContent = content;
+        }
         this.dispatchEvent(new CustomEvent('conflict-resolved', {
           detail: { file },
           bubbles: true,
@@ -1783,34 +1866,43 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               : 'Could not read the merged file from the working directory.'}
           </div>
           <button class="btn btn-primary" @click=${this.handleReload}>Retry</button>
-          ${!sideFailed
-            ? html`
-                <div>
-                  This can happen for text files in a legacy (non-UTF-8) encoding. You can
-                  still resolve the conflict by taking one side verbatim:
-                </div>
-                <div>
-                  ${this.conflictFile?.ours
-                    ? html`<button
-                        class="btn btn-ours"
-                        @click=${() => this.handleTakeSide('ours')}
-                        ?disabled=${this.actionsBlocked}
-                      >
-                        Use ${labels.ours} (verbatim)
-                      </button>`
-                    : nothing}
-                  ${this.conflictFile?.theirs
-                    ? html`<button
-                        class="btn btn-theirs"
-                        @click=${() => this.handleTakeSide('theirs')}
-                        ?disabled=${this.actionsBlocked}
-                      >
-                        Use ${labels.theirs} (verbatim)
-                      </button>`
-                    : nothing}
-                </div>
-              `
-            : nothing}
+          ${
+            // Take-side writes one side's blob verbatim — it never touches the
+            // BASE blob or the workdir text, so each side is offerable
+            // whenever ITS OWN blob was readable (per-side, not all-or-none:
+            // a missing base object in a shallow clone must not strand the
+            // user with only Retry and Abort).
+            (this.conflictFile?.ours && !this.sideReadErrors.ours) ||
+            (this.conflictFile?.theirs && !this.sideReadErrors.theirs)
+              ? html`
+                  <div>
+                    This can happen for text files in a legacy (non-UTF-8) encoding or a
+                    missing version object. You can still resolve the conflict by taking one
+                    side verbatim:
+                  </div>
+                  <div>
+                    ${this.conflictFile?.ours && !this.sideReadErrors.ours
+                      ? html`<button
+                          class="btn btn-ours"
+                          @click=${() => this.handleTakeSide('ours')}
+                          ?disabled=${this.actionsBlocked}
+                        >
+                          Use ${labels.ours} (verbatim)
+                        </button>`
+                      : nothing}
+                    ${this.conflictFile?.theirs && !this.sideReadErrors.theirs
+                      ? html`<button
+                          class="btn btn-theirs"
+                          @click=${() => this.handleTakeSide('theirs')}
+                          ?disabled=${this.actionsBlocked}
+                        >
+                          Use ${labels.theirs} (verbatim)
+                        </button>`
+                      : nothing}
+                  </div>
+                `
+              : nothing
+          }
         </div>
       `;
     }
