@@ -1526,6 +1526,78 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(el.open).to.be.false;
     });
 
+    it('drops the stash by IDENTITY when the list shifted while the dialog was open', async () => {
+      // An external `git stash drop` in a terminal mid-resolution shifts
+      // the indices — dropping blindly by the open-time index would delete
+      // an UNRELATED stash.
+      let stashList = [
+        { index: 0, message: 'the conflicted stash', oid: 'oid-target' },
+        { index: 1, message: 'other', oid: 'oid-other' },
+      ];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') return stashList;
+        return baseMock(command, args);
+      };
+
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      // The external drop removes an entry ABOVE ours: our stash is now index 0.
+      stashList = [{ index: 0, message: 'the conflicted stash', oid: 'oid-target' }];
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      const dropCall = invokeHistory.find(h => h.command === 'drop_stash');
+      expect(dropCall, 'drop_stash called').to.exist;
+      expect(
+        (dropCall!.args as Record<string, unknown>).index,
+        'dropped at the RE-LOCATED index'
+      ).to.equal(0);
+    });
+
+    it('skips the drop with a warning when the stash entry vanished mid-dialog', async () => {
+      let stashList: Array<{ index: number; message: string; oid: string }> = [
+        { index: 0, message: 'the conflicted stash', oid: 'oid-target' },
+      ];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') return stashList;
+        return baseMock(command, args);
+      };
+
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      // The entry is gone entirely (dropped externally).
+      stashList = [];
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => {
+        completedFired = true;
+      });
+      clearToasts();
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(
+        invokeHistory.some(h => h.command === 'drop_stash'),
+        'nothing may be dropped'
+      ).to.be.false;
+      expect(completedFired, 'the resolution itself still completes').to.be.true;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn?.message).to.include('left in place');
+    });
+
     it('aborts a stash conflict by restoring ONLY the conflicted files (no hard reset, stash kept)', async () => {
       const el = await renderDialog('stash');
       el.open = true;

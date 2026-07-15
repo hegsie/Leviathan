@@ -439,8 +439,23 @@ export class LvConflictResolutionDialog extends LitElement {
       // (not just the dialog-internal re-run).
       this.priorFinishCommitLanded = this.gitflowFinish?.priorFinishCommitLanded ?? false;
       this.loadConflicts();
+      // Capture the to-be-dropped stash entry's IDENTITY at open. Complete
+      // may run much later, and an external `git stash drop` in a terminal
+      // meanwhile shifts the indices — dropping blindly by the open-time
+      // index could then delete an UNRELATED stash.
+      this.stashOidToDrop = null;
+      if (this.operationType === 'stash' && this.dropStashOnComplete) {
+        void gitService.getStashes(this.repositoryPath).then((result) => {
+          if (this.open && result.success) {
+            this.stashOidToDrop = result.data?.[this.stashIndex]?.oid ?? null;
+          }
+        });
+      }
     }
   }
+
+  /** OID of the stash entry Complete must drop, captured at dialog open. */
+  private stashOidToDrop: string | null = null;
 
   private handleKeyDown = (e: KeyboardEvent): void => {
     if (!this.open) return;
@@ -468,6 +483,7 @@ export class LvConflictResolutionDialog extends LitElement {
     this.showAbortConfirm = false;
     this.mergeCommitted = false;
     this.priorFinishCommitLanded = false;
+    this.stashOidToDrop = null;
   }
 
   /** Re-run the conflict load after a failure, resetting resolution progress. */
@@ -1060,18 +1076,48 @@ export class LvConflictResolutionDialog extends LitElement {
             return;
           }
           break;
-        case 'stash':
+        case 'stash': {
           // All conflicts resolved. Drop the stash only for pop semantics
           // (dropAfter/pop/auto-stash) — a plain apply must keep the stash entry.
           if (this.dropStashOnComplete) {
-            result = await gitService.dropStash({ path: this.repositoryPath, index: this.stashIndex });
-            if (!result.success) {
-              console.error('Failed to drop stash:', result.error);
-              showToast(result.error?.message ?? 'Failed to drop stash', 'error');
-              return;
+            // Re-locate the entry by the identity captured at open — an
+            // external `git stash drop` while the dialog was up shifts the
+            // indices, and a blind index drop could delete an unrelated
+            // stash. Skipping the drop (with a warning) is always safer
+            // than dropping the wrong entry.
+            let dropIndex: number | null = this.stashIndex;
+            if (this.stashOidToDrop) {
+              const stashes = await gitService.getStashes(this.repositoryPath);
+              if (!stashes.success || !stashes.data) {
+                showToast(
+                  'Could not verify the stash entry — it was left in the stash list',
+                  'warning',
+                );
+                dropIndex = null;
+              } else {
+                const found = stashes.data.findIndex((s) => s.oid === this.stashOidToDrop);
+                if (found < 0) {
+                  showToast(
+                    'The stash list changed while resolving — the entry was left in place',
+                    'warning',
+                  );
+                  dropIndex = null;
+                } else {
+                  dropIndex = found;
+                }
+              }
+            }
+            if (dropIndex !== null) {
+              result = await gitService.dropStash({ path: this.repositoryPath, index: dropIndex });
+              if (!result.success) {
+                console.error('Failed to drop stash:', result.error);
+                showToast(result.error?.message ?? 'Failed to drop stash', 'error');
+                return;
+              }
             }
           }
           break;
+        }
       }
 
       this.dispatchEvent(
