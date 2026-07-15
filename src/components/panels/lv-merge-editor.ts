@@ -632,9 +632,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         const stillConflicted =
           !conflictsResult.success ||
           (conflictsResult.data ?? []).some((c) => c.path === file.path);
-        if (stillConflicted) {
+        // Reload ONLY when the tool's file is still the one on screen: it
+        // must show the tool's output (a stale parse could be written over
+        // the tool's merge if this was the last file and selection stays),
+        // but after a mid-session switch a reload would wipe the picks of
+        // the file the user is now working on.
+        if (this.conflictFile?.path === file.path) {
           await this.loadContents();
-        } else {
+        }
+        if (!stillConflicted) {
           this.dispatchEvent(new CustomEvent('conflict-resolved', {
             detail: { file },
             bubbles: true,
@@ -677,6 +683,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.resolveToken++;
     this.suggestingAll = false;
     this.aiResolveAllToken++;
+    this.lastSavedContent = null;
     this.sideReadErrors = { base: false, ours: false, theirs: false };
 
     try {
@@ -774,12 +781,41 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    */
   private parseSegments(text: string): OutputSegment[] {
     const stripCr = (l: string): string => (l.endsWith('\r') ? l.slice(0, -1) : l);
-    const isConflictStart = (l: string): boolean => /^<{7}( |$)/.test(stripCr(l));
-    const isBaseMarker = (l: string): boolean => /^\|{7}( |$)/.test(stripCr(l));
-    const isSeparator = (l: string): boolean => stripCr(l) === '=======';
-    const isConflictEnd = (l: string): boolean => /^>{7}( |$)/.test(stripCr(l));
+    /**
+     * Length of a marker run of `ch` at the start of the line, or 0 when the
+     * line is not a marker (fewer than 7 chars, or followed by anything other
+     * than a space/EOL). Repos can raise the run length above git's default 7
+     * via the conflict-marker-size gitattribute, so the start marker's run
+     * defines the size the rest of that conflict's markers must match exactly.
+     */
+    const markerRun = (l: string, ch: string): number => {
+      const s = stripCr(l);
+      let n = 0;
+      while (n < s.length && s[n] === ch) n++;
+      return n >= 7 && (s.length === n || s[n] === ' ') ? n : 0;
+    };
+    let markerSize = 7;
+    const isBaseMarker = (l: string): boolean => markerRun(l, '|') === markerSize;
+    const isSeparator = (l: string): boolean => stripCr(l) === '='.repeat(markerSize);
+    const isConflictEnd = (l: string): boolean => markerRun(l, '>') === markerSize;
 
     const lines = text.split('\n');
+
+    /**
+     * A start-marker run of git's default size (7) always opens a conflict.
+     * A LONGER run (raised conflict-marker-size gitattribute) only counts
+     * when a matching exact-size separator follows later — otherwise a
+     * content line like '<<<<<<<< not a marker' would swallow the rest of
+     * the file into a phantom conflict.
+     */
+    const conflictStartSize = (index: number): number => {
+      const n = markerRun(lines[index], '<');
+      if (n === 0) return 0;
+      if (n === 7) return 7;
+      const sep = '='.repeat(n);
+      return lines.slice(index + 1).some((l) => stripCr(l) === sep) ? n : 0;
+    };
+
     const segments: OutputSegment[] = [];
     let currentResolved: string[] = [];
     let inConflict = false;
@@ -809,14 +845,17 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       });
     };
 
-    for (const line of lines) {
-      if (!inConflict && isConflictStart(line)) {
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      const line = lines[lineIndex];
+      const startSize = inConflict ? 0 : conflictStartSize(lineIndex);
+      if (!inConflict && startSize > 0) {
         flushResolved();
         inConflict = true;
         section = 'ours';
         oursLines = [];
         theirsLines = [];
-        oursLabel = stripCr(line).slice(7).trim() || 'OURS';
+        markerSize = startSize;
+        oursLabel = stripCr(line).slice(markerSize).trim() || 'OURS';
         theirsLabel = '';
       } else if (inConflict && section === 'ours' && isBaseMarker(line)) {
         // diff3 common-ancestor marker — begin discarding base lines. Only
@@ -829,7 +868,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         // only valid in the theirs section — anywhere earlier it's content
         // (a quoted diff, docs about conflicts) and treating it as the end
         // would drop the real theirs side and leak the true markers.
-        theirsLabel = stripCr(line).slice(7).trim() || 'THEIRS';
+        theirsLabel = stripCr(line).slice(markerSize).trim() || 'THEIRS';
         pushConflict();
         inConflict = false;
         section = 'ours';
@@ -886,6 +925,21 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    * abort/complete runs against this same file. */
   private get actionsBlocked(): boolean {
     return this.resolving || this.launchingExternalTool || this.externalToolLocked;
+  }
+
+  /** Serialized output of the last successful Mark Resolved for this file —
+   * work matching it is on disk and safe to navigate away from. */
+  private lastSavedContent: string | null = null;
+
+  /**
+   * True when the output holds work not yet written to disk: per-block
+   * resolutions or an open inline edit. Nothing persists until Mark
+   * Resolved, so hosts should confirm before navigating away.
+   */
+  public hasUnsavedResolutions(): boolean {
+    if (this.editingSegmentId !== null) return true;
+    if (!this.segments.some((s) => s.fromConflict)) return false;
+    return this.buildResolvedContent() !== this.lastSavedContent;
   }
 
   private get conflictCount(): number {
@@ -1059,8 +1113,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (result.success && result.data) {
         // AI output bypasses parseSegments, so it must be validated here:
         // a suggestion that echoes marker lines would otherwise render them
-        // as "resolved" text and let them be written back to the file.
-        if (/^(<{7}|={7}|>{7}|\|{7})( |\r?$)/m.test(result.data.resolvedContent)) {
+        // as "resolved" text and let them be written back to the file. Runs
+        // of 7+ cover repos with a raised conflict-marker-size; being overly
+        // conservative here just leaves the block unresolved, which is safe.
+        if (/^(<{7,}|={7,}|>{7,}|\|{7,})( |\r?$)/m.test(result.data.resolvedContent)) {
           showToast('AI suggestion contained conflict markers — block left unresolved', 'error');
           return false;
         }
@@ -1151,15 +1207,18 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     // with a still-conflicted file).
     const file = this.conflictFile;
     const token = ++this.resolveToken;
+    const content = this.buildResolvedContent();
     this.resolving = true;
     try {
       const result = await gitService.resolveConflict(
         this.repositoryPath,
         file.path,
-        this.buildResolvedContent()
+        content
       );
 
       if (result.success) {
+        // This exact output is on disk now — navigation away is safe.
+        this.lastSavedContent = content;
         this.dispatchEvent(new CustomEvent('conflict-resolved', {
           detail: { file },
           bubbles: true,

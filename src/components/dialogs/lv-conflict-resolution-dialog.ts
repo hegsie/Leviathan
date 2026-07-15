@@ -8,6 +8,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
+import type { LvMergeEditor } from '../panels/lv-merge-editor.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
 import type { CommandResult } from '../../types/api.types.ts';
 import '../panels/lv-merge-editor.ts';
@@ -556,8 +558,11 @@ export class LvConflictResolutionDialog extends LitElement {
         // The tool's exit code alone isn't authoritative — re-check the index to
         // confirm the file is no longer conflicted before marking it resolved.
         const conflictsResult = await gitService.getConflicts(this.repositoryPath);
+        // A FAILED re-check must count as still conflicted — treating it as
+        // resolved would enable Complete (and a stash drop) on a file that
+        // may still hold marker text.
         const stillConflicted =
-          conflictsResult.success &&
+          !conflictsResult.success ||
           (conflictsResult.data ?? []).some((c) => c.path === conflictPath);
         // The embedded editor is bound to this file's ConflictFile object and
         // only reloads on identity change — refresh it so it shows the tool's
@@ -587,18 +592,39 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   }
 
-  private handleFileSelect(index: number): void {
+  /**
+   * The editor's picks live only in memory until Mark Resolved — navigating
+   * away re-parses the file from disk and silently discards them. Confirm
+   * before a user-driven switch when in-progress work would be lost.
+   * (Auto-advance after a resolution goes straight to selectedIndex — the
+   * resolved file's work IS on disk by then.)
+   */
+  private async confirmLeaveInProgress(): Promise<boolean> {
+    const editor = this.shadowRoot?.querySelector('lv-merge-editor') as LvMergeEditor | null;
+    if (!editor?.hasUnsavedResolutions()) return true;
+    return showConfirm(
+      'Discard in-progress resolution?',
+      'This file has conflict resolutions that are not saved yet — switching files discards them. Use Mark Resolved to keep them.',
+      'warning',
+    );
+  }
+
+  private async handleFileSelect(index: number): Promise<void> {
+    if (index === this.selectedIndex) return;
+    if (!(await this.confirmLeaveInProgress())) return;
     this.selectedIndex = index;
   }
 
-  private handlePrevious(): void {
+  private async handlePrevious(): Promise<void> {
     if (this.selectedIndex > 0) {
+      if (!(await this.confirmLeaveInProgress())) return;
       this.selectedIndex--;
     }
   }
 
-  private handleNext(): void {
+  private async handleNext(): Promise<void> {
     if (this.selectedIndex < this.conflicts.length - 1) {
+      if (!(await this.confirmLeaveInProgress())) return;
       this.selectedIndex++;
     }
   }

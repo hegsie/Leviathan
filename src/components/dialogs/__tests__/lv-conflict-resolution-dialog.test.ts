@@ -496,6 +496,51 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(internal.selectedIndex).to.equal(1);
     });
 
+    it('confirms before a file switch that would discard in-progress picks', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        handleFileSelect: (index: number) => Promise<void>;
+      };
+      // Give the embedded editor unsaved in-memory picks.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor') as unknown as {
+        segments: Array<Record<string, unknown>>;
+        updateComplete: Promise<boolean>;
+      };
+      editor.segments = [
+        { id: 1, type: 'resolved', lines: ['picked'], oursLines: ['a'], theirsLines: ['b'], oursLabel: '', theirsLabel: '', origin: 'ours', fromConflict: true },
+      ];
+      await editor.updateComplete;
+
+      // Confirm declined → the switch is cancelled and the picks survive.
+      let confirmCalls = 0;
+      const prevMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return false;
+        }
+        return prevMock(command, args);
+      };
+      await internal.handleFileSelect.call(el, 2);
+      expect(confirmCalls).to.be.greaterThan(0);
+      expect(internal.selectedIndex).to.equal(0);
+
+      // Confirm accepted → the switch proceeds. (The plugin maps the native
+      // dialog's button label: 'Ok' means confirmed.)
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') return 'Ok';
+        return prevMock(command, args);
+      };
+      await internal.handleFileSelect.call(el, 2);
+      expect(internal.selectedIndex).to.equal(2);
+    });
+
     it('wraps around to earlier unresolved files after resolving the last one', async () => {
       const el = await renderDialog();
       el.open = true;

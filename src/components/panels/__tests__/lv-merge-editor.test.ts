@@ -332,6 +332,30 @@ describe('lv-merge-editor', () => {
       expect(segments[0].lines).to.deep.equal(['<<<<<<<< not a marker', 'content']);
     });
 
+    it('parses raised conflict-marker-size markers (gitattribute)', async () => {
+      const el = await renderEditor();
+      const m = (ch: string) => ch.repeat(32);
+      const segments = internalOf(el).parseSegments(
+        [
+          'ctx',
+          `${m('<')} HEAD`,
+          'ours-line',
+          '=======',
+          m('='),
+          'theirs-line',
+          `${m('>')} feature`,
+          'tail',
+        ].join('\n')
+      );
+      expect(segments.map((s) => s.type)).to.deep.equal(['resolved', 'conflict', 'resolved']);
+      // The bare 7-equals line inside the ours side is CONTENT for a
+      // 32-char-marker conflict; only the exact 32-equals line separates.
+      expect(segments[1].oursLines).to.deep.equal(['ours-line', '=======']);
+      expect(segments[1].theirsLines).to.deep.equal(['theirs-line']);
+      expect(segments[1].oursLabel).to.equal('HEAD');
+      expect(segments[1].theirsLabel).to.equal('feature');
+    });
+
     it('keeps an unterminated conflict as a conflict block', async () => {
       const el = await renderEditor();
       const segments = internalOf(el).parseSegments(
@@ -1467,6 +1491,34 @@ describe('lv-merge-editor', () => {
     });
   });
 
+  // ── Unsaved-work tracking ─────────────────────────────────────────────
+  describe('hasUnsavedResolutions', () => {
+    it('tracks picks as unsaved until Mark Resolved writes them', async () => {
+      const el = await renderLoadedEditor();
+      expect(el.hasUnsavedResolutions()).to.be.false;
+
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(el.hasUnsavedResolutions()).to.be.true;
+
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      markBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      // The picks are on disk now — navigating away is safe.
+      expect(el.hasUnsavedResolutions()).to.be.false;
+
+      // A new edit after saving is unsaved again.
+      const editBtn = el.shadowRoot!.querySelector('.output-segment .segment-btn') as HTMLButtonElement;
+      editBtn.click();
+      await el.updateComplete;
+      expect(el.hasUnsavedResolutions()).to.be.true;
+    });
+  });
+
   // ── External tool session signaling ──────────────────────────────────
   describe('external tool session signaling', () => {
     it('announces tool start/finish so the host can lock destructive actions', async () => {
@@ -1504,7 +1556,7 @@ describe('lv-merge-editor', () => {
       expect(events).to.deep.equal(['started', 'finished']);
     });
 
-    it('POC: switching files during an external tool session discards the new file\'s WIP', async () => {
+    it("an unrelated file's tool completion must not wipe the current file's picks", async () => {
       setupDefaultMocks();
       let releaseTool: (() => void) | null = null;
       const baseMock = mockInvoke;
@@ -1542,17 +1594,61 @@ describe('lv-merge-editor', () => {
       const resolvedCountBefore = internal.segments.filter((s) => s.type === 'resolved' && s.origin === 'ours').length;
       expect(resolvedCountBefore, 'B has a manual resolution in progress').to.equal(1);
 
-      // A's external tool now finishes.
+      // A's external tool now finishes — its completion must only touch A,
+      // never reload (and wipe) the file the user has since switched to.
       releaseTool!();
       await toolPromise;
       await el.updateComplete;
-      console.error('DEBUG conflictFile after tool:', internal.conflictFile?.path, 'segments:', JSON.stringify(internal.segments.map(s => ({type: s.type, origin: s.origin}))));
 
-      // BUG: B's WIP resolution should still be there (untouched by A's tool),
-      // but the unconditional loadContents() in handleOpenExternalMergeTool
-      // reloads whatever this.conflictFile currently is (B), wiping it.
       const resolvedCountAfter = internal.segments.filter((s) => s.type === 'resolved' && s.origin === 'ours').length;
       expect(resolvedCountAfter, 'B\'s WIP resolution must survive an unrelated file\'s external tool completing').to.equal(1);
+    });
+
+    it('a still-conflicted tool exit reloads only when the file is still selected', async () => {
+      setupDefaultMocks();
+      let releaseTool: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'launch_merge_tool') {
+          return new Promise((res) => {
+            releaseTool = () => res({ success: true });
+          });
+        }
+        // Post-tool index check: the file is STILL conflicted.
+        if (command === 'get_conflicts') {
+          return [
+            { path: 'src/a.ts', ancestor: null, ours: null, theirs: null, isBinary: false },
+          ];
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/a.ts');
+      const internal = el as unknown as EditorInternal & {
+        handleOpenExternalMergeTool: () => Promise<void>;
+      };
+      const toolPromise = internal.handleOpenExternalMergeTool.call(el);
+      await el.updateComplete;
+
+      // Switch to B and make a pick while A's tool is open.
+      internal.conflictFile = makeConflictFile('src/b.ts');
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.segments.length > 0) break;
+      }
+      await el.updateComplete;
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+
+      releaseTool!();
+      await toolPromise;
+      await el.updateComplete;
+
+      // B's pick survived — the still-conflicted branch did not reload B.
+      const resolved = internal.segments.filter((s) => s.origin === 'ours').length;
+      expect(resolved).to.equal(1);
     });
 
     it('resolve actions and the external tool are mutually exclusive', async () => {
