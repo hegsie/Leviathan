@@ -556,6 +556,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   private nextSegmentId = 1;
   /** Invalidates in-flight loads when a newer one starts (rapid file switches). */
   private loadEpoch = 0;
+  /** Ownership tokens so stale async completions can't clobber newer state. */
+  private resolveToken = 0;
+  private aiResolveAllToken = 0;
   private baseLines: string[] = [];
   private oursLines: string[] = [];
   private theirsLines: string[] = [];
@@ -600,7 +603,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   }
 
   private async handleOpenExternalMergeTool(): Promise<void> {
-    if (!this.repositoryPath || !this.conflictFile || this.externalToolLocked) return;
+    if (
+      !this.repositoryPath ||
+      !this.conflictFile ||
+      this.externalToolLocked ||
+      this.launchingExternalTool ||
+      this.resolving
+    ) {
+      return;
+    }
 
     this.launchingExternalTool = true;
     // Tell the host a tool session is open so its Abort/Complete stay inert —
@@ -642,6 +653,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.editingSegmentId = null;
     this.aiExplanations = new Map();
     this.suggestingSegment = null;
+    // A resolve or resolve-all bound to the previous file must not keep the
+    // new file's buttons disabled; bump the tokens so their finally blocks
+    // can't clear state a newer operation owns.
+    this.resolving = false;
+    this.resolveToken++;
+    this.suggestingAll = false;
+    this.aiResolveAllToken++;
     this.sideReadErrors = { base: false, ours: false, theirs: false };
 
     try {
@@ -843,6 +861,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       origin,
       fromConflict,
     };
+  }
+
+  /** Resolve writes and an open external tool must never overlap — both
+   * mutate the same on-disk file and the last write would silently win. */
+  private get actionsBlocked(): boolean {
+    return this.resolving || this.launchingExternalTool;
   }
 
   private get conflictCount(): number {
@@ -1056,9 +1080,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const conflictIds = this.segments.filter((s) => s.type === 'conflict').map((s) => s.id);
     if (conflictIds.length === 0) return;
 
+    const epoch = this.loadEpoch;
+    const token = ++this.aiResolveAllToken;
     this.suggestingAll = true;
     try {
       for (const id of conflictIds) {
+        // The file changed under the batch — its ids are stale; stop instead
+        // of grinding through no-op calls while the new file's AI is locked.
+        if (this.loadEpoch !== epoch) break;
         // The user may have resolved this block manually while the batch was
         // running — that's not a failure, just skip it.
         const segment = this.segments.find((s) => s.id === id);
@@ -1067,14 +1096,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         if (!(await this.handleSuggestSegment(id))) break;
       }
     } finally {
-      this.suggestingAll = false;
+      if (token === this.aiResolveAllToken) {
+        this.suggestingAll = false;
+      }
     }
   }
 
   // ── Completion ────────────────────────────────────────────────────────
 
   private async handleMarkResolved(): Promise<void> {
-    if (!this.repositoryPath || !this.conflictFile || this.resolving) return;
+    if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
 
     // The button is disabled in these states; the guards keep the invariant
     // even if invoked directly. A file with open conflict blocks must never
@@ -1100,6 +1131,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     // mark the wrong file resolved (and let a stash Complete drop the stash
     // with a still-conflicted file).
     const file = this.conflictFile;
+    const token = ++this.resolveToken;
     this.resolving = true;
     try {
       const result = await gitService.resolveConflict(
@@ -1119,7 +1151,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         showToast(`Failed to mark file as resolved: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
-      this.resolving = false;
+      // Only the call that owns the flag may clear it — a file switch resets
+      // it and a newer call may own it by now.
+      if (token === this.resolveToken) {
+        this.resolving = false;
+      }
     }
   }
 
@@ -1133,11 +1169,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    * the file (avoids the text pipeline truncating binary/deleted files).
    */
   private async handleTakeSide(side: 'ours' | 'theirs'): Promise<void> {
-    if (!this.repositoryPath || !this.conflictFile || this.resolving) return;
+    if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
 
     // Same capture-before-await as handleMarkResolved: the dispatched file
     // must be the one the call actually resolved.
     const file = this.conflictFile;
+    const token = ++this.resolveToken;
     this.resolving = true;
     try {
       const result = await gitService.resolveConflictTakeSide(
@@ -1157,7 +1194,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         showToast(`Failed to resolve conflict: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
-      this.resolving = false;
+      if (token === this.resolveToken) {
+        this.resolving = false;
+      }
     }
   }
 
@@ -1513,10 +1552,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           This file is binary and cannot be merged as text. Choose which version to keep.
         </div>
         <div class="toolbar-actions">
-          <button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} ?disabled=${this.resolving}>
+          <button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} ?disabled=${this.actionsBlocked}>
             ${oursDeleted ? 'Use Ours (delete file)' : 'Use Ours'}
           </button>
-          <button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} ?disabled=${this.resolving}>
+          <button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} ?disabled=${this.actionsBlocked}>
             ${theirsDeleted ? 'Use Theirs (delete file)' : 'Use Theirs'}
           </button>
         </div>
@@ -1550,7 +1589,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             <button
               class="btn"
               @click=${this.handleOpenExternalMergeTool}
-              ?disabled=${this.launchingExternalTool || this.externalToolLocked}
+              ?disabled=${this.launchingExternalTool || this.externalToolLocked || this.resolving}
               title="Open in external merge tool"
             >
               ${this.launchingExternalTool ? 'Waiting for tool...' : 'External Tool'}
@@ -1569,14 +1608,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               </button>`
             : nothing}
           ${this.conflictFile && !this.conflictFile.ours
-            ? html`<button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} ?disabled=${this.resolving} title="Ours deleted this file — keep it deleted">
+            ? html`<button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} ?disabled=${this.actionsBlocked} title="Ours deleted this file — keep it deleted">
                 Use Ours (delete file)
               </button>`
             : html`<button class="btn btn-ours" @click=${this.handleAcceptOurs} ?disabled=${this.loadFailed} title="Use entire file from ${labels.ours}">
                 Use Ours
               </button>`}
           ${this.conflictFile && !this.conflictFile.theirs
-            ? html`<button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} ?disabled=${this.resolving} title="Theirs deleted this file — delete it">
+            ? html`<button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} ?disabled=${this.actionsBlocked} title="Theirs deleted this file — delete it">
                 Use Theirs (delete file)
               </button>`
             : html`<button class="btn btn-theirs" @click=${this.handleAcceptTheirs} ?disabled=${this.loadFailed} title="Use entire file from ${labels.theirs}">
@@ -1595,7 +1634,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <button
             class="btn btn-primary"
             @click=${this.handleMarkResolved}
-            ?disabled=${conflictCount > 0 || this.loadFailed || this.editingSegmentId !== null || this.resolving}
+            ?disabled=${conflictCount > 0 ||
+              this.loadFailed ||
+              this.editingSegmentId !== null ||
+              this.actionsBlocked}
             title=${conflictCount > 0
               ? `Resolve the remaining ${conflictCount} conflict${conflictCount === 1 ? '' : 's'} first`
               : this.editingSegmentId !== null
@@ -1622,7 +1664,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               <button
                 class="panel-header-btn"
                 @click=${this.conflictFile.ours ? this.handleAcceptOurs : () => this.handleTakeSide('ours')}
-                ?disabled=${this.resolving || (this.conflictFile.ours ? this.loadFailed : false)}
+                ?disabled=${this.actionsBlocked || (this.conflictFile.ours ? this.loadFailed : false)}
                 title=${this.conflictFile.ours ? 'Use this version' : 'This side deleted the file — stage the deletion'}
               >
                 ${this.conflictFile.ours ? 'Use' : 'Use (delete)'}
@@ -1658,7 +1700,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               <button
                 class="panel-header-btn"
                 @click=${this.conflictFile.theirs ? this.handleAcceptTheirs : () => this.handleTakeSide('theirs')}
-                ?disabled=${this.resolving || (this.conflictFile.theirs ? this.loadFailed : false)}
+                ?disabled=${this.actionsBlocked || (this.conflictFile.theirs ? this.loadFailed : false)}
                 title=${this.conflictFile.theirs ? 'Use this version' : 'This side deleted the file — stage the deletion'}
               >
                 ${this.conflictFile.theirs ? 'Use' : 'Use (delete)'}

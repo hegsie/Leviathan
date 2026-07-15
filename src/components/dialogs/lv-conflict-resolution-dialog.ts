@@ -417,6 +417,8 @@ export class LvConflictResolutionDialog extends LitElement {
       this.resolvedFiles = new Set();
       this.selectedIndex = 0;
       this.aborting = false;
+      this.continuing = false;
+      this.editorToolActive = false;
       this.showAbortConfirm = false;
       this.mergeCommitted = false;
       // Seed from the finish context: a first-run release/hotfix whose master
@@ -448,6 +450,8 @@ export class LvConflictResolutionDialog extends LitElement {
     this.conflicts = [];
     this.resolvedFiles = new Set();
     this.aborting = false;
+    this.continuing = false;
+    this.editorToolActive = false;
     this.showAbortConfirm = false;
     this.mergeCommitted = false;
     this.priorFinishCommitLanded = false;
@@ -533,7 +537,17 @@ export class LvConflictResolutionDialog extends LitElement {
   }
 
   private async handleOpenExternalTool(conflictPath: string): Promise<void> {
-    if (!this.repositoryPath) return;
+    // Re-entrancy + mutual exclusion: one tool session at a time, and never
+    // under a running abort/complete.
+    if (
+      !this.repositoryPath ||
+      this.launchingExternalTool !== null ||
+      this.aborting ||
+      this.continuing ||
+      this.editorToolActive
+    ) {
+      return;
+    }
 
     this.launchingExternalTool = conflictPath;
     try {

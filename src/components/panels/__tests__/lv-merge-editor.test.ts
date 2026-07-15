@@ -782,6 +782,55 @@ describe('lv-merge-editor', () => {
       expect(resolvedEvents).to.equal(1);
     });
 
+    it('a file switch releases the resolving lock for the new file', async () => {
+      setupDefaultMocks();
+      let releaseResolve: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'resolve_conflict') {
+          return new Promise((res) => {
+            releaseResolve = () => res({ success: true });
+          });
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/a.ts');
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      const internal = el as unknown as EditorInternal & {
+        resolving: boolean;
+        handleMarkResolved: () => Promise<void>;
+      };
+      const pending = internal.handleMarkResolved.call(el);
+      await el.updateComplete;
+      expect(internal.resolving).to.be.true;
+
+      // Switching files must not leave the NEW file's buttons locked by the
+      // old file's in-flight call.
+      internal.conflictFile = makeConflictFile('src/b.ts');
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.segments.length > 0) break;
+      }
+      await el.updateComplete;
+      expect(internal.resolving).to.be.false;
+
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled).to.be.false;
+
+      // The stale call settling must not re-lock the new file either.
+      releaseResolve!();
+      await pending;
+      await el.updateComplete;
+      expect(internal.resolving).to.be.false;
+    });
+
     it('writes marker-free content and dispatches conflict-resolved once resolved', async () => {
       const el = await renderLoadedEditor();
       findConflictButton(el, 'Use Both').click();
@@ -1212,6 +1261,58 @@ describe('lv-merge-editor', () => {
       await el.updateComplete;
     });
 
+    it('AI Resolve All stops when the file changes under it and releases the lock', async () => {
+      setupDefaultMocks();
+      aiAvailable = true;
+      workdirContent = [
+        '<<<<<<< HEAD', 'a-ours', '=======', 'a-theirs', '>>>>>>> other',
+        'mid',
+        '<<<<<<< HEAD', 'b-ours', '=======', 'b-theirs', '>>>>>>> other',
+      ].join('\n');
+      let aiCalls = 0;
+      let releaseFirst: (() => void) | null = null;
+      aiSuggestion = () => {
+        aiCalls++;
+        if (aiCalls === 1) {
+          return new Promise((resolve) => {
+            releaseFirst = () =>
+              resolve({ resolvedContent: 'ai-resolved', explanation: '' });
+          });
+        }
+        return Promise.resolve({ resolvedContent: 'ai-resolved', explanation: '' });
+      };
+
+      const el = await renderLoadedEditor('src/a.ts');
+      const internal = el as unknown as EditorInternal & {
+        suggestingAll: boolean;
+        handleAiResolveAll: () => Promise<void>;
+      };
+      const batch = internal.handleAiResolveAll.call(el);
+      await el.updateComplete;
+      expect(internal.suggestingAll).to.be.true;
+
+      // Switch files while the first suggestion is in flight — the batch must
+      // stop instead of grinding stale ids, and the lock must release for the
+      // new file.
+      internal.conflictFile = makeConflictFile('src/b.ts');
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.segments.length > 0) break;
+      }
+      await el.updateComplete;
+      expect(internal.suggestingAll).to.be.false;
+
+      releaseFirst!();
+      await batch;
+      await el.updateComplete;
+
+      // Only the first (pre-switch) call was made — the loop broke on the
+      // epoch change instead of iterating file A's remaining stale ids.
+      expect(aiCalls).to.equal(1);
+      expect(internal.suggestingAll).to.be.false;
+    });
+
     it('a stale AI call from a previous file does not clear the new file\'s in-flight flag', async () => {
       setupDefaultMocks();
       aiAvailable = true;
@@ -1401,6 +1502,50 @@ describe('lv-merge-editor', () => {
       await el.updateComplete;
 
       expect(events).to.deep.equal(['started', 'finished']);
+    });
+
+    it('resolve actions and the external tool are mutually exclusive', async () => {
+      setupDefaultMocks();
+      let releaseTool: (() => void) | null = null;
+      let launchCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'launch_merge_tool') {
+          launchCalls++;
+          return new Promise((res) => {
+            releaseTool = () => res({ success: true });
+          });
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor();
+      const internal = el as unknown as EditorInternal & {
+        handleOpenExternalMergeTool: () => Promise<void>;
+        handleMarkResolved: () => Promise<void>;
+      };
+
+      // A synchronous double-invocation must launch the tool exactly once.
+      const first = internal.handleOpenExternalMergeTool.call(el);
+      const second = internal.handleOpenExternalMergeTool.call(el);
+      await el.updateComplete;
+      expect(launchCalls).to.equal(1);
+
+      // While the tool session is open, resolve writes must be inert — they
+      // would race the tool's eventual save on the same file.
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled).to.be.true;
+      invokeHistory.length = 0;
+      await internal.handleMarkResolved.call(el);
+      expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
+
+      releaseTool!();
+      await Promise.all([first, second]);
     });
 
     it('the external tool button disables while the host locks it', async () => {
