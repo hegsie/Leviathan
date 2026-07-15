@@ -552,6 +552,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    * empty resolved state would let Mark Resolved write a 0-byte file.
    */
   @state() private resolvedAsDeleted = false;
+  /** Terminal state after a NON-deletion chooser resolution (binary /
+   * submodule take-side): there is no text pipeline to reload into, and
+   * re-rendering the chooser with live buttons invites a second click
+   * that errors "No conflict found" on an already-resolved file. */
+  @state() private resolvedInPlace = false;
   @state() private launchingExternalTool = false;
   @state() private hasMergeTool = false;
   @state() private aiAvailable = false;
@@ -735,6 +740,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.loading = true;
     this.loadFailed = false;
     this.resolvedAsDeleted = false;
+    this.resolvedInPlace = false;
     // Per-file UI state must not leak between files.
     this.editingSegmentId = null;
     this.aiExplanations = new Map();
@@ -1367,7 +1373,8 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       this.resolving ||
       this.launchingExternalTool ||
       this.externalToolLocked ||
-      this.resolvedAsDeleted
+      this.resolvedAsDeleted ||
+      this.resolvedInPlace
     );
   }
 
@@ -1477,16 +1484,20 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     return new RegExp(`^(<{${n},}|={${n},}|>{${n},}|\\|{${n},})( |\\r?$)`, 'm');
   }
 
-  /** CR-insensitive single-line membership in either side blob. Marker-shaped
-   * text that IS blob content (a setext underline, a quoted example) is
-   * legitimate; marker-shaped text in neither blob is a real orphaned
-   * marker a hand edit left behind. */
+  /** CR-insensitive single-line membership in any of the three version
+   * blobs. Marker-shaped text that IS blob content (a setext underline, a
+   * quoted example) is legitimate; marker-shaped text in no blob is a real
+   * orphaned marker a hand edit left behind. BASE counts too: Use Base
+   * stages ancestor content verbatim, and a `=======` divider that both
+   * sides later changed exists only there — flagging it would raise a
+   * false "conflict markers" confirm over clean ancestor content. */
   private lineIsBlobContent(line: string): boolean {
     const strip = (l: string): string => (l.endsWith('\r') ? l.slice(0, -1) : l);
     const target = strip(line);
     return (
       this.oursLines.some((l) => strip(l) === target) ||
-      this.theirsLines.some((l) => strip(l) === target)
+      this.theirsLines.some((l) => strip(l) === target) ||
+      this.baseLines.some((l) => strip(l) === target)
     );
   }
 
@@ -1905,6 +1916,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               this.segments = [];
               this.editingSegmentId = null;
               this.resolvedAsDeleted = true;
+            }
+          } else if (file.isBinary || file.isSubmodule) {
+            // A chooser resolution has no text pipeline to reload into —
+            // reloading just re-renders the same chooser with live
+            // buttons, and a second click errors "No conflict found" on
+            // the already-resolved file. Terminal state, like deletions.
+            if (token === this.resolveToken) {
+              this.resolvedInPlace = true;
             }
           } else {
             await this.loadContents();
@@ -2333,6 +2352,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         </div>
       `;
     }
+    if (this.resolvedInPlace) {
+      return html`
+        <div class="loading">
+          Resolved — the chosen version was staged. Nothing further to do here.
+        </div>
+      `;
+    }
 
     const oursDeleted = !this.conflictFile.ours;
     const theirsDeleted = !this.conflictFile.theirs;
@@ -2394,6 +2420,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       return html`
         <div class="loading">
           Resolved — this submodule was removed by the resolution. Nothing further to do here.
+        </div>
+      `;
+    }
+    if (this.resolvedInPlace) {
+      return html`
+        <div class="loading">
+          Resolved — the chosen version was staged. Nothing further to do here.
         </div>
       `;
     }

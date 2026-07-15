@@ -3657,6 +3657,45 @@ describe('lv-merge-editor', () => {
       expect(confirmCalls).to.equal(0);
       expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.true;
     });
+
+    it('Use Base does not false-confirm on a marker-shaped line that is clean ancestor content', async () => {
+      // The ancestor blob has a bare `=======` (a Markdown setext
+      // underline) that both sides changed away. Use Base stages the clean
+      // ancestor verbatim — the orphan-marker check must recognize the
+      // line as base blob content, not a real orphaned marker.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      let confirmCalls = 0;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return false;
+        }
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'Heading\n=======\nbody';
+          if (blobArgs?.oid === 'ours-oid') return 'line1\nline2-ours\nline3';
+          if (blobArgs?.oid === 'theirs-oid') return 'line1\nline2-theirs\nline3';
+          return '';
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+
+      // Use Base replaces all segments with the ancestor content.
+      (el as unknown as { acceptWholeFile: (o: string) => Promise<void> }).acceptWholeFile.call(
+        el,
+        'base',
+      );
+      await el.updateComplete;
+      invokeHistory.length = 0;
+
+      await internalOf(el).handleMarkResolved.call(el);
+      expect(confirmCalls, 'clean ancestor content must not confirm').to.equal(0);
+      const resolve = invokeHistory.find((h) => h.command === 'resolve_conflict');
+      expect(resolve, 'the base content is written').to.exist;
+      expect((resolve!.args as { content: string }).content).to.include('=======');
+    });
   });
 
   // ── Symlink conflicts ─────────────────────────────────────────────────────
@@ -3792,6 +3831,20 @@ describe('lv-merge-editor', () => {
       expect((takeSide!.args as Record<string, unknown>).side).to.equal('theirs');
       expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
       expect(resolvedFired).to.be.true;
+    });
+
+    it('a successful take lands in a terminal state — no live buttons to re-click into an error', async () => {
+      // Without the terminal state the chooser re-renders with enabled
+      // buttons and a second click errors "No conflict found" on a file
+      // that is actually resolved.
+      const el = await renderSubmoduleEditor();
+      (el.shadowRoot!.querySelector('.btn-ours') as HTMLButtonElement).click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(shadowText(el)).to.include('Resolved — the chosen version was staged');
+      expect(el.shadowRoot!.querySelector('.btn-ours'), 'no re-clickable chooser').to.be.null;
+      expect(el.shadowRoot!.querySelector('.btn-theirs')).to.be.null;
     });
 
     it('a submodule<->file type conflict labels the file side honestly, not as a commit', async () => {

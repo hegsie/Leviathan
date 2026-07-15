@@ -205,10 +205,16 @@ export class LvCherryPickDialog extends LitElement {
   @state() private isExecuting = false;
   @state() private error = '';
   @state() private isOpen = false;
+  /** Repo captured at open. This is a long-lived dialog (open → review →
+   * a separate later click to execute); the reactive `repositoryPath`
+   * prop rebinds the instant the user Ctrl+Tabs to another repo, so every
+   * internal op must use THIS pinned value, not the live prop. */
+  private pinnedRepoPath = '';
 
   public open(commit: Commit): void {
     this.reset();
     this.commit = commit;
+    this.pinnedRepoPath = this.repositoryPath;
     this.isOpen = true;
   }
 
@@ -245,9 +251,9 @@ export class LvCherryPickDialog extends LitElement {
     this.isExecuting = true;
     this.error = '';
 
-    // Captured BEFORE the await: the conflict event must carry the repo the
-    // cherry-pick actually ran on, even if the prop is rebound mid-flight.
-    const repoPath = this.repositoryPath;
+    // The repo pinned at open — NOT the live prop, which rebinds on a
+    // tab switch while this dialog sits open.
+    const repoPath = this.pinnedRepoPath;
     try {
       const result = await cherryPick({
         path: repoPath,

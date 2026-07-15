@@ -482,6 +482,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
   @state() private draggedIndex: number | null = null;
   @state() private dropTargetIndex: number | null = null;
   @state() private showPreview = true;
+  /** Repo captured at open. This dialog is long-lived (open → reorder →
+   * a separate Execute click); the reactive `repositoryPath` prop rebinds
+   * the moment the user Ctrl+Tabs to another repo, so loadCommits AND the
+   * history-rewriting execute must use THIS pinned value, never the live
+   * prop — executing an interactive rebase against the wrong repo would
+   * rewrite the wrong history. */
+  private pinnedRepoPath = '';
 
   @query('lv-modal') private modal!: LvModal;
 
@@ -507,6 +514,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
   public async open(onto: string, options?: { rewordCommitOid?: string }): Promise<void> {
     this.reset();
     this.onto = onto;
+    this.pinnedRepoPath = this.repositoryPath;
     this.modal.open = true;
     await this.loadCommits();
 
@@ -536,13 +544,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
   }
 
   private async loadCommits(): Promise<void> {
-    if (!this.repositoryPath || !this.onto) return;
+    if (!this.pinnedRepoPath || !this.onto) return;
 
     this.loading = true;
     this.error = '';
 
     try {
-      const result = await gitService.getRebaseCommits(this.repositoryPath, this.onto);
+      const result = await gitService.getRebaseCommits(this.pinnedRepoPath, this.onto);
 
       if (result.success) {
         this.commits = (result.data || []).map(c => ({
@@ -829,9 +837,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
       const todo = todoLines.join('\n');
 
-      // Captured BEFORE the await: the conflict event must carry the repo
-      // the rebase actually ran on, even if the prop is rebound mid-flight.
-      const repoPath = this.repositoryPath;
+      // The repo pinned at open — NOT the live prop, which rebinds on a
+      // tab switch while this dialog sits open. Executing against the
+      // wrong repo would rewrite the wrong history.
+      const repoPath = this.pinnedRepoPath;
       const result = await gitService.executeInteractiveRebase(repoPath, this.onto, todo);
 
       if (result.success) {

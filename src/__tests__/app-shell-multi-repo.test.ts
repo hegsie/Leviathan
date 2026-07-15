@@ -1125,6 +1125,79 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('a successful pull refreshes via the PINNED path, not the unconditional active-tab refresh', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        mockResponses['pull'] = () => null; // success (invokeCommand wraps)
+        (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+        // Spy: the fix routes the success path through refreshConflictDialogRepo
+        // with the captured repo path, not the unpinned handleRefresh().
+        const pinnedCalls: Array<string | null> = [];
+        (el as any).refreshConflictDialogRepo = (p: string | null) => pinnedCalls.push(p);
+        let plainRefreshCalled = false;
+        (el as any).handleRefresh = () => { plainRefreshCalled = true; };
+
+        await (el as any).handlePull();
+
+        expect(pinnedCalls, 'success routes through the pinned refresh').to.deep.equal(['/repo/a']);
+        expect(plainRefreshCalled, 'the unpinned handleRefresh is not used').to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a successful branch checkout refreshes via the PINNED path', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        mockResponses['checkout_with_autostash'] = () => ({ success: true });
+        (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+        const pinnedCalls: Array<string | null> = [];
+        (el as any).refreshConflictDialogRepo = (p: string | null) => pinnedCalls.push(p);
+        let plainRefreshCalled = false;
+        (el as any).handleRefresh = () => { plainRefreshCalled = true; };
+
+        await (el as any).handleCheckoutBranch(
+          new CustomEvent('checkout-branch', { detail: { branch: 'feature' } })
+        );
+
+        expect(pinnedCalls).to.deep.equal(['/repo/a']);
+        expect(plainRefreshCalled).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a rebase-complete event bubbling from a nested dialog reaches the host pinned refresh', async () => {
+      // Interactive rebase is dispatched by the branch-list's OWN embedded
+      // dialog too, not just the app-shell one — the host-level listener
+      // must catch either.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        // Dispatch from a descendant so it bubbles to the host listener.
+        const child = el.shadowRoot!.querySelector('*') ?? el;
+        child.dispatchEvent(
+          new CustomEvent('rebase-complete', {
+            detail: { repositoryPath: '/repo/b' },
+            bubbles: true,
+            composed: true,
+          })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/b')).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('rebase-complete on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
       const el = createAppShell();
       document.body.appendChild(el);

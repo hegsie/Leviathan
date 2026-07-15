@@ -149,4 +149,35 @@ describe('lv-cherry-pick-dialog', () => {
 
     expect(detail?.repositoryPath).to.equal('/test/repo');
   });
+
+  it('pins to the repo present at open(), surviving a repositoryPath rebind (tab switch)', async () => {
+    // The dialog is long-lived (open → review → later Execute click). A
+    // Ctrl+Tab while it sits open rebinds the reactive prop; the pick must
+    // still run on the repo shown when it opened.
+    const el = await fixture<LvCherryPickDialog>(
+      html`<lv-cherry-pick-dialog .repositoryPath=${'/repo/A'}></lv-cherry-pick-dialog>`,
+    );
+    el.open(makeCommit(['p1']));
+    await el.updateComplete;
+
+    // Simulate the active-repo tab switching while the dialog stays open.
+    el.repositoryPath = '/repo/B';
+    await el.updateComplete;
+
+    let detail: { repositoryPath?: string } | undefined;
+    el.addEventListener('cherry-pick-complete', (e) => {
+      detail = (e as CustomEvent).detail;
+    });
+
+    const btn = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+      /cherry-pick/i.test(b.textContent ?? ''),
+    ) as HTMLButtonElement;
+    btn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+
+    expect(lastInvokedCommand).to.equal('cherry_pick');
+    expect(lastInvokedArgs?.path, 'runs on the pinned repo, not the rebound one').to.equal('/repo/A');
+    expect(detail?.repositoryPath).to.equal('/repo/A');
+  });
 });

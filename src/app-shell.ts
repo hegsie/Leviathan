@@ -1198,6 +1198,9 @@ export class AppShell extends LitElement {
     this.addEventListener('merge-conflict', this.handleMergeConflictEvent);
     this.addEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.addEventListener('gitflow-operation', this.handleGitflowEvent);
+    // Host-level so the branch-list's own rebase dialog reaches it too, not
+    // just the app-shell dialog.
+    this.addEventListener('rebase-complete', this.handleRebaseComplete);
     this.addEventListener('show-commit', this.handleShowCommitEvent);
     window.addEventListener('settings-changed', this.handleSettingsChanged);
 
@@ -1321,6 +1324,7 @@ export class AppShell extends LitElement {
     this.removeEventListener('merge-conflict', this.handleMergeConflictEvent);
     this.removeEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.removeEventListener('gitflow-operation', this.handleGitflowEvent);
+    this.removeEventListener('rebase-complete', this.handleRebaseComplete);
     this.removeEventListener('show-commit', this.handleShowCommitEvent);
     window.removeEventListener('settings-changed', this.handleSettingsChanged);
     gitService.cleanupRemoteOperationListeners();
@@ -1700,12 +1704,15 @@ export class AppShell extends LitElement {
     this.refreshConflictDialogRepo(repositoryPath ?? null);
   }
 
-  private handleRebaseComplete(e: Event): void {
+  // Arrow + host-level listener (not an inline binding on one dialog):
+  // interactive rebase is dispatched by BOTH the app-shell dialog and the
+  // branch-list's own embedded dialog, and a bubbling host listener catches
+  // either. The pinned refresh targets the repo the rebase ran on, which
+  // may no longer be the active tab.
+  private handleRebaseComplete = (e: Event): void => {
     const detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
-    // Same pinned refresh as cherry-pick-complete: the rebase ran on the
-    // originating repo, which may no longer be the active tab.
     this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
-  }
+  };
 
   private handleCherryPickConflict(e: Event): void {
     const detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
@@ -3156,7 +3163,10 @@ export class AppShell extends LitElement {
     const result = await gitService.pull({ path: repoPath });
     if (result.success) {
       progressService.completeOperation(opId);
-      this.handleRefresh();
+      // Pinned: a ref-only pull emits no working-tree watcher event, so a
+      // pull that completed on a now-backgrounded repo must be refreshed
+      // (or marked stale) by path, not via the active tab.
+      this.refreshConflictDialogRepo(repoPath);
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       progressService.failOperation(opId);
       this.conflictOperationType = 'merge';
@@ -3244,7 +3254,9 @@ export class AppShell extends LitElement {
 
     if (result.success && result.data?.success) {
       this.handleAutoStashToast(result.data, branch, repoPath);
-      this.handleRefresh();
+      // Pinned: the checkout ran on repoPath, which may be backgrounded by
+      // the time it completes — refresh by path, not via the active tab.
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Failed to checkout branch:', result.data?.message || result.error);
       showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Failed to checkout branch');
@@ -4018,7 +4030,6 @@ export class AppShell extends LitElement {
         <lv-interactive-rebase-dialog
           id="app-rebase-dialog"
           .repositoryPath=${this.activeRepository.repository.path}
-          @rebase-complete=${this.handleRebaseComplete}
         ></lv-interactive-rebase-dialog>
       ` : ''}
 

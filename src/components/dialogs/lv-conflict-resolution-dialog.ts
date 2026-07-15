@@ -967,32 +967,38 @@ export class LvConflictResolutionDialog extends LitElement {
     ) {
       return;
     }
-    // The editor can hold visible rework that was never Mark-Resolved: a
-    // reopened block (Reset), fresh picks, or a mid-typing edit draft. All
-    // files still COUNT as resolved (their last Mark Resolved is on disk),
-    // so Complete would silently commit that older content — a mere file
-    // switch confirms in this state, and completing is far more final.
-    const editor = this.shadowRoot?.querySelector('lv-merge-editor') as LvMergeEditor | null;
-    if (editor?.hasUnsavedResolutions()) {
-      const proceed = await showConfirm(
-        'Complete without the latest changes?',
-        'This file has picks or edits that were not saved with Mark Resolved — completing uses the last saved content and discards them.',
-        'warning',
-      );
-      if (!proceed) return;
-      // Re-check the exclusion guards after the confirm's await.
-      if (
-        this.continuing ||
-        this.aborting ||
-        this.launchingExternalTool !== null ||
-        this.editorToolActive ||
-        this.editorResolveDepth > 0
-      ) {
-        return;
-      }
-    }
+    // Claim BEFORE any await so a fast double-click is swallowed by the
+    // entry guard above rather than stacking a second confirm/continue —
+    // the same claim-before-confirm pattern as the external-tool launcher.
+    // The Complete AND Abort buttons' disabled bindings both reflect
+    // `continuing`, so claiming here also inerts Abort for the confirm
+    // window.
     this.continuing = true;
     try {
+      // The editor can hold visible rework that was never Mark-Resolved: a
+      // reopened block (Reset), fresh picks, or a mid-typing edit draft. All
+      // files still COUNT as resolved (their last Mark Resolved is on disk),
+      // so Complete would silently commit that older content — a mere file
+      // switch confirms in this state, and completing is far more final.
+      const editor = this.shadowRoot?.querySelector('lv-merge-editor') as LvMergeEditor | null;
+      if (editor?.hasUnsavedResolutions()) {
+        const proceed = await showConfirm(
+          'Complete without the latest changes?',
+          'This file has picks or edits that were not saved with Mark Resolved — completing uses the last saved content and discards them.',
+          'warning',
+        );
+        if (!proceed) return;
+        // Re-check the OTHER exclusion guards after the confirm's await (a
+        // tool session or abort may have started). `continuing` is ours.
+        if (
+          this.aborting ||
+          this.launchingExternalTool !== null ||
+          this.editorToolActive ||
+          this.editorResolveDepth > 0
+        ) {
+          return;
+        }
+      }
       await this.runContinue();
     } finally {
       this.continuing = false;

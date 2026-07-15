@@ -1142,6 +1142,49 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(dropCalls).to.equal(1);
     });
 
+    it('a double-click on Complete with unsaved rework shows only ONE confirm', async () => {
+      // The Complete claim is taken BEFORE the unsaved-rework confirm await,
+      // so a fast second click is swallowed by the entry guard rather than
+      // stacking a second confirm dialog.
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      await el.updateComplete;
+
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor') as unknown as {
+        hasUnsavedResolutions: () => boolean;
+      };
+      expect(editor, 'the embedded editor is present').to.exist;
+      editor.hasUnsavedResolutions = () => true;
+
+      let confirmCalls = 0;
+      let releaseConfirm: (() => void) | null = null;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return new Promise((res) => { releaseConfirm = () => res(false); });
+        }
+        return { success: true };
+      };
+
+      const first = internal.handleContinue.call(el);
+      const second = internal.handleContinue.call(el);
+      await new Promise(r => setTimeout(r, 30));
+      expect(confirmCalls, 'only one confirm may be shown').to.equal(1);
+      releaseConfirm!();
+      await Promise.all([first, second]);
+    });
+
     it('blocks Abort while Complete is running (and vice versa)', async () => {
       const el = await renderDialog('stash');
       el.dropStashOnComplete = true;

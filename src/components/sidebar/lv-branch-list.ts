@@ -1331,7 +1331,15 @@ export class LvBranchList extends LitElement {
     this.interactiveRebaseDialog.open(branch.shorthand);
   }
 
-  private async handleRebaseComplete(): Promise<void> {
+  private async handleRebaseComplete(e: Event): Promise<void> {
+    // Reload our OWN view only when the rebase ran on the repo we're
+    // showing. After a mid-rebase tab switch the completed repo may be
+    // backgrounded (this.repositoryPath has rebound) — reloading it here
+    // would refresh the wrong repo; app-shell's host-level rebase-complete
+    // listener marks the originating repo stale for refresh on
+    // reactivation. The event still bubbles there (no stopPropagation).
+    const repoPath = (e as CustomEvent<{ repositoryPath?: string }>).detail?.repositoryPath;
+    if (repoPath && repoPath !== this.repositoryPath) return;
     await this.loadBranches();
     this.dispatchEvent(new CustomEvent('branches-changed', {
       bubbles: true,

@@ -1477,14 +1477,19 @@ pub async fn resolve_conflict_take_side(
                 // a regular file containing the target as text.
                 #[cfg(unix)]
                 {
+                    use std::os::unix::ffi::OsStrExt;
                     // remove_if_symlink only cleared a symlink; in a
                     // file↔symlink type conflict the workdir holds a REGULAR
                     // file, and symlink() refuses to replace it (EEXIST).
                     if std::fs::symlink_metadata(&full_path).is_ok() {
                         std::fs::remove_file(&full_path)?;
                     }
+                    // A symlink target is an arbitrary byte string, not
+                    // necessarily UTF-8 — from_utf8_lossy would replace odd
+                    // bytes with U+FFFD and silently break the link. Write
+                    // the exact bytes git recorded.
                     std::os::unix::fs::symlink(
-                        String::from_utf8_lossy(blob.content()).as_ref(),
+                        std::ffi::OsStr::from_bytes(blob.content()),
                         &full_path,
                     )?;
                 }
@@ -3866,6 +3871,63 @@ mod tests {
         let index = git_repo.index().unwrap();
         assert!(!index.has_conflicts());
         assert!(index.get_path(Path::new("link"), 0).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_preserves_non_utf8_symlink_targets() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // A symlink target is an arbitrary byte string — not necessarily
+        // UTF-8. from_utf8_lossy would replace the odd bytes with U+FFFD
+        // and silently break the recreated link.
+        let odd_target: &[u8] = b"target-\xff\xfe-end";
+        let link = repo.path.join("link");
+        // Base points somewhere neutral; ours and theirs both retarget it
+        // differently, so the merge genuinely conflicts.
+        symlink("base-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Add link", &[]);
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::remove_file(&link).unwrap();
+        symlink(std::ffi::OsStr::from_bytes(odd_target), &link).unwrap();
+        // Re-stage so feature's tree records the odd-target link as theirs.
+        repo.stage_file("link");
+        repo.create_commit("Feature uses odd link", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        std::fs::remove_file(&link).unwrap();
+        symlink("plain-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Main retargets link", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        resolve_conflict_take_side(repo.path_str(), "link".to_string(), "theirs".to_string())
+            .await
+            .unwrap();
+
+        // The recreated link's target is byte-identical — no U+FFFD.
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink());
+        let recreated = std::fs::read_link(&link).unwrap();
+        assert_eq!(
+            recreated.as_os_str().as_bytes(),
+            odd_target,
+            "the non-utf8 target must survive byte-for-byte"
+        );
     }
 
     #[cfg(unix)]
