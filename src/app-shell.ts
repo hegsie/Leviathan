@@ -2202,13 +2202,25 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the history await: the reword targets THIS repo's commit.
+    const repoPath = this.activeRepository.repository.path;
+
     // Check if this is HEAD commit by comparing with the first commit in history.
     // Note: This works for the common case of a branch checkout. In detached HEAD state,
     // the first commit in history is still HEAD, so this approach remains valid.
     const historyResult = await gitService.getCommitHistory({
-      path: this.activeRepository.repository.path,
+      path: repoPath,
       limit: 1,
     });
+
+    // The interactive-rebase dialog and the commit panel both bind to the LIVE
+    // active repo. If the user switched tabs during the history await, opening
+    // either would configure a reword of THIS repo's commit against another
+    // repo (rewriting the wrong history, or dead-ending on a missing commit).
+    if (this.activeRepository?.repository.path !== repoPath) {
+      showToast('Repository changed — reword cancelled', 'warning');
+      return;
+    }
 
     const isHead = historyResult.success && historyResult.data &&
       historyResult.data.length > 0 && historyResult.data[0].oid === commit.oid;

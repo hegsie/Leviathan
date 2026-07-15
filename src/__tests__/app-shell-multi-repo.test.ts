@@ -1405,6 +1405,84 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  describe('reword pinning', () => {
+    it('handleRewordCommit does not open the rebase dialog if the user switched repos during the history await', async () => {
+      // The interactive-rebase dialog pins to the LIVE active-repo prop at
+      // open(); opening it after a mid-await tab switch would configure a
+      // reword of repo A's commit against repo B. The handler must cancel.
+      repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+      repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+      (el as any).contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        commit: { oid: 'commitA', summary: 'a commit', shortId: 'commitA' },
+      };
+
+      // Shadow the @query dialog getter with a spy.
+      let opened = false;
+      Object.defineProperty(el, 'interactiveRebaseDialog', {
+        configurable: true,
+        value: {
+          open: () => {
+            opened = true;
+          },
+        },
+      });
+
+      let resolveHistory: (v: unknown) => void = () => {};
+      mockResponses['get_commit_history'] = () =>
+        new Promise((res) => {
+          resolveHistory = res;
+        });
+
+      const promise = (el as any).handleRewordCommit();
+      await new Promise((r) => setTimeout(r, 0));
+
+      // User switches to repo B while the history IPC is in flight.
+      (el as any).activeRepository = { repository: mockRepo('/repo/b', 'b') };
+      // History resolves; commit is non-HEAD (different oid) → else branch.
+      resolveHistory([{ oid: 'headOfA' }]);
+      await promise;
+
+      expect(opened, 'rebase dialog must NOT open against the switched-to repo').to.be.false;
+      const warn = uiStore.getState().toasts.find((t) => t.type === 'warning');
+      expect(warn, 'a warning toast explains the cancellation').to.not.be.undefined;
+    });
+
+    it('handleRewordCommit opens the rebase dialog when the repo did not change', async () => {
+      repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+      (el as any).contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        commit: { oid: 'commitA', summary: 'a commit', shortId: 'commitA' },
+      };
+
+      let opened = false;
+      Object.defineProperty(el, 'interactiveRebaseDialog', {
+        configurable: true,
+        value: {
+          open: () => {
+            opened = true;
+          },
+        },
+      });
+
+      mockResponses['get_commit_history'] = () => [{ oid: 'headOfA' }];
+
+      await (el as any).handleRewordCommit();
+
+      expect(opened, 'rebase dialog opens for a non-HEAD commit on the same repo').to.be.true;
+    });
+  });
+
   describe('conflict operation derivation for external operations', () => {
     for (const state of ['apply-mailbox', 'apply-mailbox-or-rebase', 'bisect'] as const) {
       it(`refuses to open the dialog for an external ${state} operation`, async () => {
