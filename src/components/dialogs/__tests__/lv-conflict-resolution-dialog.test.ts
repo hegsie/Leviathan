@@ -1851,6 +1851,42 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(warn?.message).to.include('left in the stash list');
     });
 
+    it('a FAILED drop_stash still completes the operation (the apply already succeeded)', async () => {
+      // The conflict resolution and stash APPLY succeeded; only removing the
+      // redundant stash entry failed. That must NOT dead-end the dialog —
+      // it should warn but complete, or the pinned repo never refreshes.
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes')
+          return [{ index: 0, message: 'the conflicted stash', oid: 'oid-target' }];
+        if (command === 'drop_stash')
+          return Promise.reject({ code: 'IO_ERROR', message: 'disk error' });
+        return baseMock(command, args);
+      };
+
+      const el = await renderDialog('stash');
+      el.dropStashOnComplete = true;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop = 'oid-target';
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => {
+        completedFired = true;
+      });
+      clearToasts();
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'drop_stash'), 'drop was attempted').to.be.true;
+      expect(completedFired, 'the operation still completes so the repo refreshes').to.be.true;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn?.message, 'warns the stash was left behind').to.include('left in the stash list');
+    });
+
     it('an unverifiable identity NEVER falls back to a blind index drop', async () => {
       // The open-time capture failed (get_stashes errored); meanwhile an
       // external `git stash push` put unrelated WIP at index 0. A blind

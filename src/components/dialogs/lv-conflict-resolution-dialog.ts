@@ -1152,9 +1152,18 @@ export class LvConflictResolutionDialog extends LitElement {
             if (dropIndex !== null) {
               result = await gitService.dropStash({ path: this.repositoryPath, index: dropIndex });
               if (!result.success) {
+                // The conflict resolution and the stash APPLY already
+                // succeeded — only removing the (now-redundant) stash entry
+                // failed. That entry lingering is recoverable, so this is
+                // NOT an operation failure: warn, but still complete like
+                // the unverifiable-identity branch above, or the pinned
+                // repo would never get refreshed and the dialog would
+                // dead-end on an already-applied stash.
                 console.error('Failed to drop stash:', result.error);
-                showToast(result.error?.message ?? 'Failed to drop stash', 'error');
-                return;
+                showToast(
+                  `${result.error?.message ?? 'Failed to drop stash'} — it was left in the stash list`,
+                  'warning',
+                );
               }
             }
           }
