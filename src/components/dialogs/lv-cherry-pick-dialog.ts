@@ -210,11 +210,17 @@ export class LvCherryPickDialog extends LitElement {
    * prop rebinds the instant the user Ctrl+Tabs to another repo, so every
    * internal op must use THIS pinned value, not the live prop. */
   private pinnedRepoPath = '';
+  /** Target branch captured at open — the reactive `currentBranch` prop
+   * also rebinds on a tab switch, so the "Cherry-pick onto" LABEL must show
+   * the pinned branch, or it would advertise the wrong target the operation
+   * won't actually use. */
+  @state() private pinnedCurrentBranch = '';
 
   public open(commit: Commit): void {
     this.reset();
     this.commit = commit;
     this.pinnedRepoPath = this.repositoryPath;
+    this.pinnedCurrentBranch = this.currentBranch;
     this.isOpen = true;
   }
 
@@ -367,7 +373,7 @@ export class LvCherryPickDialog extends LitElement {
           <!-- Target Info -->
           <div class="target-info">
             <span class="target-label">Cherry-pick onto:</span>
-            <span class="target-branch">${this.currentBranch || 'current branch'}</span>
+            <span class="target-branch">${this.pinnedCurrentBranch || 'current branch'}</span>
           </div>
 
           <!-- Options -->

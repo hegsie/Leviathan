@@ -664,6 +664,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         this.externalToolLocked ||
         this.resolving ||
         this.resolvedAsDeleted ||
+        this.resolvedInPlace ||
         this.conflictFile !== file
       ) {
         this.launchingExternalTool = false;
@@ -1030,7 +1031,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const hunks = this.conflictFile?.conflictHunks;
     if (hunks && hunks.length > 0) {
       const fromHunks = this.parseSegmentsFromHunks(text, hunks);
-      if (fromHunks) return fromHunks;
+      // The safety net applies to the position-based output too: its hunk
+      // positions are fetched once at open and NOT refreshed by Reload, so
+      // an externally-added marker block OUTSIDE the original hunk range
+      // would be swept into a resolved segment and rendered raw.
+      if (fromHunks) return this.enforceNoOrphanMarkers(fromHunks);
     }
     const markerSize = this.effectiveMarkerSize;
     const stripCr = (l: string): string => (l.endsWith('\r') ? l.slice(0, -1) : l);
@@ -1383,40 +1388,56 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
     flushResolved();
 
-    // Invariant-1 safety net. The region scan above only OPENS on a
-    // start-shaped line, so a hand edit that deleted the `<<<<<<<` (leaving
-    // an orphaned `=======`/`>>>>>>>`) sweeps those markers into resolved
-    // text — a raw marker in the UI. If any resolved segment carries a
-    // marker-shaped line that is in NEITHER blob (a real orphaned marker,
-    // not quoted content), the heuristic parse is unreliable: present the
-    // whole file as a single unresolved conflict (ours vs theirs from the
-    // blobs) so it is resolved cleanly and no marker is ever displayed. The
-    // user's on-disk hand edits are untouched (Reload re-reads them).
-    if (blobsAvailable) {
-      const echo = this.markerEchoPattern();
-      const hasOrphanMarker = segments.some(
-        (s) =>
-          s.type === 'resolved' &&
-          s.lines.some((l) => echo.test(l) && !this.lineIsBlobContent(l)),
-      );
-      if (hasOrphanMarker) {
-        return [
-          {
-            id: this.nextSegmentId++,
-            type: 'conflict',
-            lines: [],
-            oursLines: this.oursLines,
-            theirsLines: this.theirsLines,
-            oursLabel: 'OURS',
-            theirsLabel: 'THEIRS',
-            origin: null,
-            fromConflict: false,
-          },
-        ];
-      }
-    }
+    return this.enforceNoOrphanMarkers(segments);
+  }
 
-    return segments;
+  /**
+   * Invariant-1 safety net, applied to BOTH parser paths. A hand edit can
+   * delete a `<<<<<<<` start marker (leaving an orphaned `=======`/`>>>>>>>`
+   * the region scan sweeps into RESOLVED text), and a fallback split can
+   * push an unvalidated marker line into a CONFLICT pane — either renders a
+   * raw marker. If ANY segment carries a marker-shaped line that is in NO
+   * blob (a real orphaned marker, not quoted content), the parse is
+   * unreliable: present the whole file as one unresolved conflict (ours vs
+   * theirs from the blobs) so it is resolved cleanly and no marker is ever
+   * displayed. The user's on-disk hand edits are untouched (Reload re-reads
+   * them).
+   */
+  private enforceNoOrphanMarkers(segments: OutputSegment[]): OutputSegment[] {
+    const blobsAvailable = this.oursLines.length > 0 || this.theirsLines.length > 0;
+    if (!blobsAvailable) return segments;
+    const echo = this.markerEchoPattern();
+    // A conflict side's content is everything BETWEEN markers, so a START
+    // marker (`<<<<<<<`) inside a pane is always a swept orphan (a fallback
+    // split pulled a nested/orphaned start into content) — a leak. An
+    // end/separator SHAPE in a side can be legitimate hand-typed content
+    // the parser deliberately keeps, so only start shapes are flagged in
+    // panes. Blob content (a quoted example) is never flagged.
+    const n = Math.min(7, this.effectiveMarkerSize);
+    const startEcho = new RegExp(`^<{${n},}( |\\r?$)`);
+    const orphanResolved = (lines: string[]): boolean =>
+      lines.some((l) => echo.test(l) && !this.lineIsBlobContent(l));
+    const orphanPane = (lines: string[]): boolean =>
+      lines.some((l) => startEcho.test(l) && !this.lineIsBlobContent(l));
+    const hasOrphanMarker = segments.some((s) =>
+      s.type === 'resolved'
+        ? orphanResolved(s.lines)
+        : orphanPane(s.oursLines) || orphanPane(s.theirsLines),
+    );
+    if (!hasOrphanMarker) return segments;
+    return [
+      {
+        id: this.nextSegmentId++,
+        type: 'conflict',
+        lines: [],
+        oursLines: this.oursLines,
+        theirsLines: this.theirsLines,
+        oursLabel: 'OURS',
+        theirsLabel: 'THEIRS',
+        origin: null,
+        fromConflict: false,
+      },
+    ];
   }
 
   private makeResolvedSegment(

@@ -725,9 +725,17 @@ export class AppShell extends LitElement {
   // here, otherwise dispatching it from inside handleRefresh would re-trigger
   // handleWindowRefresh in an unbounded loop.
   private handleWindowRefresh = (e: Event): void => {
-    const detail = (e as CustomEvent).detail as { source?: string } | undefined;
+    const detail = (e as CustomEvent).detail as { source?: string; repoPath?: string } | undefined;
     if (detail?.source === 'app-shell') return;
-    this.handleRefresh();
+    // When the refresh names the repo the operation ran on (a sidebar
+    // stash/tag/branch success), pin to it — a plain handleRefresh would
+    // refresh whichever tab is active if the user switched mid-operation,
+    // leaving the originating repo stale until the file watcher notices.
+    if (detail?.repoPath) {
+      this.refreshConflictDialogRepo(detail.repoPath);
+    } else {
+      this.handleRefresh();
+    }
   };
 
   // Cycle the active repository tab by offset (wraps around both ends)

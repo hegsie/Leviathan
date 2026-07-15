@@ -550,7 +550,7 @@ export class LvTagList extends LitElement {
           showToast(data.message, 'warning');
         }
         this.dispatchEvent(new CustomEvent('tag-checkout', {
-          detail: { tag },
+          detail: { tag, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));

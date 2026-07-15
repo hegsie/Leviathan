@@ -180,4 +180,30 @@ describe('lv-cherry-pick-dialog', () => {
     expect(lastInvokedArgs?.path, 'runs on the pinned repo, not the rebound one').to.equal('/repo/A');
     expect(detail?.repositoryPath).to.equal('/repo/A');
   });
+
+  it('shows the branch captured at open, not the rebound one after a tab switch', async () => {
+    // The "Cherry-pick onto" label must match the repo the operation
+    // actually targets — the live currentBranch prop rebinds on a tab
+    // switch and would otherwise advertise the wrong target branch.
+    const el = await fixture<LvCherryPickDialog>(
+      html`<lv-cherry-pick-dialog
+        .repositoryPath=${'/repo/A'}
+        .currentBranch=${'main'}
+      ></lv-cherry-pick-dialog>`,
+    );
+    el.open(makeCommit(['p1']));
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.target-branch')?.textContent).to.contain('main');
+
+    // Tab switch rebinds both props.
+    el.repositoryPath = '/repo/B';
+    el.currentBranch = 'develop';
+    await el.updateComplete;
+
+    expect(
+      el.shadowRoot!.querySelector('.target-branch')?.textContent,
+      'label stays pinned to the branch shown at open',
+    ).to.contain('main');
+    expect(el.shadowRoot!.querySelector('.target-branch')?.textContent).to.not.contain('develop');
+  });
 });

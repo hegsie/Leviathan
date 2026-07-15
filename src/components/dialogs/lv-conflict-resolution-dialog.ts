@@ -708,6 +708,12 @@ export class LvConflictResolutionDialog extends LitElement {
     if (this.navBlockedByResolve()) return;
     if (!(await this.confirmLeaveInProgress())) return;
     if (this.editorResolveDepth > 0) return;
+    // Re-validate the index after the confirm await, like handlePrevious/
+    // handleNext: a runContinue reload (rebase --continue reporting fresh
+    // conflicts) can replace/shrink this.conflicts while the confirm is up,
+    // so a stale index would point past the new array and collapse the
+    // editor to "Select a file" with conflicts still unresolved.
+    if (index < 0 || index >= this.conflicts.length) return;
     this.selectedIndex = index;
   }
 
@@ -877,7 +883,21 @@ export class LvConflictResolutionDialog extends LitElement {
             this.aborting = false;
             return;
           }
-          const conflictPaths = refetch.data.map((c) => c.path);
+          // Restore the UNION of the still-conflicted paths AND the files
+          // that were originally conflicted when the dialog opened. A file
+          // the user already resolved in this session (Mark Resolved →
+          // staged, or take-side deletion) is no longer index-conflicted, so
+          // the refetch alone would EXCLUDE it — Abort would leave that
+          // resolution staged while claiming everything was reverted. The
+          // refetch remains the safety net for an empty/in-flight client
+          // list; the union re-adds the resolved files (their stash changes
+          // stay safe in the retained stash entry).
+          const conflictPaths = Array.from(
+            new Set([
+              ...refetch.data.map((c) => c.path),
+              ...this.conflicts.map((c) => c.path),
+            ]),
+          );
           if (conflictPaths.length === 0) {
             result = { success: true } as CommandResult<void>;
           } else {
@@ -919,6 +939,20 @@ export class LvConflictResolutionDialog extends LitElement {
           })
         );
         this.close();
+      } else if (this.abortFailedBecauseNoOperation(result.error?.message)) {
+        // The user concluded the operation outside the app (`git merge
+        // --abort` / `git commit` in a terminal), so there's nothing left
+        // to abort. Escape is suppressed and Complete may be disabled, so
+        // without this the full-screen dialog is inescapable. Treat it as
+        // concluded and close.
+        showToast(
+          `This ${this.getOperationTitle().toLowerCase()} was already concluded outside the app`,
+          'warning',
+        );
+        this.dispatchEvent(
+          new CustomEvent('operation-aborted', { bubbles: true, composed: true })
+        );
+        this.close();
       } else {
         console.error('Failed to abort:', result.error);
         showToast(result.error?.message ?? `Failed to abort ${this.getOperationTitle()}`, 'error');
@@ -929,6 +963,24 @@ export class LvConflictResolutionDialog extends LitElement {
       showToast(`Failed to abort ${this.getOperationTitle()}`, 'error');
       this.aborting = false; // Allow retry
     }
+  }
+
+  /** True when an abort failed because the operation no longer exists in the
+   * repo — the user concluded it outside the app. Detected from the
+   * backend/git2 "no ... to abort / not in progress" wording. */
+  private abortFailedBecauseNoOperation(message?: string): boolean {
+    const m = (message ?? '').toLowerCase();
+    return (
+      m.includes('no merge to abort') ||
+      m.includes('merge_head') ||
+      m.includes('no rebase') ||
+      m.includes('no cherry') ||
+      m.includes('cherry_pick_head') ||
+      m.includes('no revert') ||
+      m.includes('revert_head') ||
+      m.includes('not in progress') ||
+      m.includes('nothing to abort')
+    );
   }
 
   /**

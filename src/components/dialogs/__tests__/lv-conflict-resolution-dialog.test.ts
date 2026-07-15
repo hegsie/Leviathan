@@ -398,6 +398,39 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(internal.selectedIndex, 'must stop at the first file').to.equal(0);
       expect(internal.selectedConflict).to.not.be.null;
     });
+
+    it('file-select re-validates the index after the confirm await against a shrunken list', async () => {
+      // A runContinue reload can replace/shrink this.conflicts while the
+      // leave confirm is up; the stacked select must not point past the new
+      // array and collapse the editor to "Select a file".
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        conflicts: ConflictFile[];
+        handleFileSelect: (i: number) => Promise<void>;
+        confirmLeaveInProgress: () => Promise<boolean>;
+        selectedConflict: ConflictFile | null;
+      };
+      internal.selectedIndex = 0;
+      let release!: (v: boolean) => void;
+      internal.confirmLeaveInProgress = () =>
+        new Promise<boolean>((res) => { release = res; });
+
+      // Select the last file (index 2 of 3); the confirm is pending.
+      const pending = internal.handleFileSelect.call(el, 2);
+      // A reload shrinks the list to one file while the confirm is up.
+      internal.conflicts = internal.conflicts.slice(0, 1);
+      release(true);
+      await pending;
+
+      expect(internal.selectedIndex, 'stale index must be rejected').to.equal(0);
+      expect(internal.selectedConflict, 'selection stays valid').to.not.be.null;
+    });
   });
 
   // ── Pinned repository visibility ─────────────────────────────────────────
@@ -1632,6 +1665,34 @@ describe('lv-conflict-resolution-dialog', () => {
       const errorToast = uiStore.getState().toasts.find(t => t.type === 'error');
       expect(errorToast, 'error toast shown').to.not.be.undefined;
     });
+
+    it('closes the dialog (not a dead-end) when the operation was concluded outside the app', async () => {
+      // The user ran `git merge --abort` in a terminal, so the backend abort
+      // reports the operation no longer exists. Escape is suppressed and
+      // Complete may be disabled, so the dialog must recognize this and
+      // close rather than trap the user.
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      mockInvoke = async (command: string) => {
+        if (command === 'abort_merge')
+          throw { code: 'COMMAND_ERROR', message: 'There is no merge to abort (MERGE_HEAD missing).' };
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        return null;
+      };
+
+      let abortedFired = false;
+      el.addEventListener('operation-aborted', () => { abortedFired = true; });
+
+      await (el as unknown as { handleAbortConfirm: () => Promise<void> }).handleAbortConfirm.bind(el)();
+
+      expect(abortedFired, 'operation-aborted dispatched so the host cleans up').to.be.true;
+      expect(el.open, 'dialog closed instead of trapping the user').to.be.false;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn?.message).to.contain('concluded outside the app');
+    });
   });
 
   // ── External merge tool verification ───────────────────────────────────────
@@ -1984,6 +2045,42 @@ describe('lv-conflict-resolution-dialog', () => {
         TEST_CONFLICTS.map(c => c.path),
       );
       expect(invokeHistory.some(h => h.command === 'discard_changes'), 'files restored').to.be.true;
+    });
+
+    it('stash abort restores files ALREADY resolved this session, not just still-conflicted ones', async () => {
+      // A file resolved in-session (Mark Resolved → staged, or take-side
+      // deletion) is no longer index-conflicted, so the refetch alone would
+      // EXCLUDE it. Abort must restore the UNION so it doesn't leave that
+      // resolution staged while claiming everything was reverted.
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      const internal = el as unknown as { conflicts: ConflictFile[] };
+      // Two files were originally conflicted...
+      const originalPaths = internal.conflicts.map((c) => c.path);
+      expect(originalPaths.length).to.be.greaterThan(1);
+
+      // ...but the refetch reports only ONE still conflicted (the other was
+      // resolved in-session and is now staged).
+      const stillConflicted = originalPaths[0];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_conflicts') return [{ path: stillConflicted }];
+        return baseMock(command, args);
+      };
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleAbortConfirm: () => Promise<void> }).handleAbortConfirm.bind(el)();
+
+      const unstageCall = invokeHistory.find((h) => h.command === 'unstage_files');
+      expect(unstageCall, 'unstage called').to.exist;
+      const paths = (unstageCall!.args as { paths: string[] }).paths;
+      // The UNION: every originally-conflicted path, including the resolved one.
+      for (const p of originalPaths) {
+        expect(paths, `resolved file ${p} must be restored`).to.include(p);
+      }
     });
   });
 

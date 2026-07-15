@@ -1103,6 +1103,34 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('a window repository-refresh carrying repoPath pins to that repo (sidebar success paths)', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        const pinnedCalls: Array<string | null> = [];
+        (el as any).refreshConflictDialogRepo = (p: string | null) => pinnedCalls.push(p);
+        let plainRefreshCalled = false;
+        (el as any).handleRefresh = () => { plainRefreshCalled = true; };
+
+        // A stash/tag/branch success on backgrounded repo A forwards its
+        // repo path through the window refresh.
+        window.dispatchEvent(
+          new CustomEvent('repository-refresh', { detail: { repoPath: '/repo/a' } })
+        );
+        await el.updateComplete;
+
+        expect(pinnedCalls, 'pinned to the originating repo').to.deep.equal(['/repo/a']);
+        expect(plainRefreshCalled, 'not the unpinned active-tab refresh').to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('gitflow-operation on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
       const el = createAppShell();
       document.body.appendChild(el);

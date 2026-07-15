@@ -1112,7 +1112,7 @@ export class LvBranchList extends LitElement {
         }
         await this.loadBranches();
         this.dispatchEvent(new CustomEvent('branch-checkout', {
-          detail: { branch },
+          detail: { branch, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -2164,16 +2164,23 @@ export class LvBranchList extends LitElement {
       ></lv-branch-cleanup-dialog>
     `;
 
-    if (this.loading) {
-      return html`${dialogs}<div class="loading">Loading branches...</div>`;
-    }
-
-    if (this.error) {
-      return html`${dialogs}<div class="error">${this.error}</div>`;
-    }
-
+    // ONE stable outer template: the dialogs sit at a FIXED position and the
+    // loading/error/content choice is a nested conditional slot. Returning
+    // three DIFFERENT top-level templates (as before) made lit-html re-clone
+    // the whole subtree on every loading toggle — recreating the dialogs in
+    // their closed state and discarding an in-progress rebase plan.
     return html`
       ${dialogs}
+      ${this.loading
+        ? html`<div class="loading">Loading branches...</div>`
+        : this.error
+          ? html`<div class="error">${this.error}</div>`
+          : this.renderBody()}
+    `;
+  }
+
+  private renderBody(): ReturnType<typeof html> {
+    return html`
       ${this.renderControls()}
 
       <!-- Local branches -->

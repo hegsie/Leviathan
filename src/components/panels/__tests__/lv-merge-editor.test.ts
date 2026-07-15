@@ -3655,6 +3655,73 @@ describe('lv-merge-editor', () => {
       expectNoMarkers(el);
     });
 
+    it('a nested START marker swept into a conflict pane never renders raw', async () => {
+      // ours blob = ['line2-ours'], theirs blob = ['line2-theirs']. A nested
+      // <<<<<<< inside the body makes the split fall back and pull the start
+      // marker into a pane. The safety net must present the whole file as
+      // one clean conflict, never a pane containing '<<<<<<<'.
+      setupDefaultMocks();
+      workdirContent = [
+        'line1',
+        '<<<<<<< HEAD',
+        'line2-ours',
+        '=======',
+        'line2-theirs',
+        '<<<<<<< HEAD',
+        'extraline',
+        '>>>>>>> feature',
+        'line3',
+      ].join('\n');
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+
+      const conflicts = internal.segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      // No pane contains a raw start marker.
+      for (const c of conflicts) {
+        expect(c.oursLines.some((l) => l.startsWith('<<<<<<<'))).to.be.false;
+        expect(c.theirsLines.some((l) => l.startsWith('<<<<<<<'))).to.be.false;
+      }
+      expectNoMarkers(el);
+    });
+
+    it('markers added OUTSIDE a hunk-parsed range (after Reload) never render raw', async () => {
+      // The backend hunk positions are fetched once at open and not
+      // refreshed by Reload. An externally-added marker block outside the
+      // original hunk range would be swept into a resolved segment — the
+      // safety net now covers the position-based path too.
+      setupDefaultMocks();
+      workdirContent = [
+        'line1',
+        '<<<<<<< HEAD',
+        'line2-ours',
+        '=======',
+        'line2-theirs',
+        '>>>>>>> feature',
+        'line3',
+        // Externally pasted leftover markers, OUTSIDE the reported hunk.
+        '<<<<<<< OTHER',
+        'stray',
+        '>>>>>>> OTHER',
+      ].join('\n');
+      const el = await renderEditor();
+      const internal = internalOf(el);
+      // Authoritative hunk positions for the ORIGINAL conflict only (lines
+      // 1/3/5, 0-based), as fetched at open — they still validate.
+      internal.conflictFile = {
+        ...makeConflictFile('src/test.ts'),
+        conflictHunks: [{ start: 1, separator: 3, end: 5 }],
+      };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+
+      expectNoMarkers(el);
+    });
+
     it('a deleted separator PLUS an edited body line still keeps the orphan marker out of the panes', async () => {
       // The hand edit removed the separator AND changed a line, so no
       // blob-validated split exists. The orphan end marker must still act

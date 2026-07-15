@@ -269,9 +269,18 @@ export class LvLeftPanel extends LitElement {
     `;
   }
 
-  private handleStashApplied(): void {
+  /** Forward the originating repo path (captured pre-await by the sidebar
+   * handler) so the host pins the refresh to the repo the operation ran on,
+   * not whichever tab is active if the user switched mid-operation. */
+  private forwardRefresh(e?: Event): void {
+    const repoPath = (e as CustomEvent<{ repositoryPath?: string }> | undefined)?.detail
+      ?.repositoryPath;
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
+    window.dispatchEvent(new CustomEvent('repository-refresh', { detail: { repoPath } }));
+  }
+
+  private handleStashApplied(e?: Event): void {
+    this.forwardRefresh(e);
   }
 
   private handleStashCreated(): void {
@@ -284,21 +293,16 @@ export class LvLeftPanel extends LitElement {
     window.dispatchEvent(new CustomEvent('repository-refresh'));
   }
 
-  private handleTagCheckout(): void {
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
+  private handleTagCheckout(e?: Event): void {
+    this.forwardRefresh(e);
   }
 
-  private handleBranchCheckout(): void {
-    // Refresh repository state after branch checkout
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
+  private handleBranchCheckout(e?: Event): void {
+    this.forwardRefresh(e);
   }
 
-  private handleBranchesChanged(): void {
-    // Refresh repository state after branches changed
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
+  private handleBranchesChanged(e?: Event): void {
+    this.forwardRefresh(e);
   }
 
   private handleTagsChanged(): void {

@@ -1430,9 +1430,13 @@ pub async fn resolve_conflict(
         // symlink_metadata, not exists(): exists() FOLLOWS symlinks, so a
         // dangling link reports false and would be left on disk while the
         // index stages its deletion — an untracked leftover that blocks
-        // later checkouts.
-        if std::fs::symlink_metadata(&full_path).is_ok() {
-            std::fs::remove_file(&full_path)?;
+        // later checkouts. A DIRECTORY here is a submodule worktree — git
+        // leaves it behind on `git rm` of a submodule, so never delete the
+        // tree (and remove_file would error on it anyway).
+        if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+            if !meta.file_type().is_dir() {
+                std::fs::remove_file(&full_path)?;
+            }
         }
         index.remove_path(Path::new(&file_path))?;
     } else {
@@ -1531,15 +1535,17 @@ pub async fn resolve_conflict_take_side(
             // the OTHER side's regular file (or a symlink) on disk while the
             // index holds the gitlink, so `git status` reports the
             // just-"resolved" path as dirty.
+            // create_dir_all, not create_dir: a NESTED gitlink (e.g.
+            // `vendor/sub`) may have no parent directory on disk yet.
             if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
                 if !meta.file_type().is_dir() {
                     std::fs::remove_file(&full_path)?;
-                    std::fs::create_dir(&full_path)?;
+                    std::fs::create_dir_all(&full_path)?;
                 }
                 // An existing directory is left as-is (it may already be the
                 // submodule's populated worktree).
             } else {
-                std::fs::create_dir(&full_path)?;
+                std::fs::create_dir_all(&full_path)?;
             }
             let resolved = git2::IndexEntry {
                 // Clear the stage bits — this is the resolution entry.
@@ -1571,6 +1577,12 @@ pub async fn resolve_conflict_take_side(
                         file_path
                     )));
                 }
+            }
+            // A NESTED conflicted path (e.g. `vendor/pkg/file`) may have no
+            // parent directory on disk — create it so the write/symlink
+            // below gives a sensible result instead of a raw NotFound.
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent)?;
             }
             if e.mode == 0o120000 {
                 // The chosen side IS a symlink — its blob content is the
@@ -2834,6 +2846,106 @@ mod tests {
             .find(|s| s.path().ok() == Some("doomed.txt"))
             .expect("deletion should be staged");
         assert!(entry.status().contains(git2::Status::INDEX_DELETED));
+    }
+
+    #[tokio::test]
+    async fn test_take_side_gitlink_materializes_a_nested_missing_parent_dir() {
+        // A NESTED gitlink (`vendor/sub`) whose parent directory does not
+        // exist on disk. create_dir (non-recursive) would fail; the
+        // resolution must create the parent chain and succeed.
+        let repo = TestRepo::with_initial_commit();
+        let git_repo = repo.repo();
+        let ptr_ours = repo.create_commit("ptr ours", &[("a.txt", "2")]);
+        let ptr_theirs = repo.create_commit("ptr theirs", &[("a.txt", "3")]);
+
+        // Directly stage a 3-stage conflict for the nested gitlink path so
+        // the worktree genuinely has no `vendor/` directory.
+        let mut index = git_repo.index().unwrap();
+        for (stage, oid) in [(1u16, ptr_ours), (2u16, ptr_ours), (3u16, ptr_theirs)] {
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: 0o160000,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: oid,
+                flags: stage << 12,
+                flags_extended: 0,
+                path: b"vendor/sub".to_vec(),
+            };
+            index.add(&entry).unwrap();
+        }
+        index.write().unwrap();
+        assert!(!repo.path.join("vendor").exists());
+
+        resolve_conflict_take_side(
+            repo.path_str(),
+            "vendor/sub".to_string(),
+            "ours".to_string(),
+        )
+        .await
+        .expect("nested gitlink resolution must create the parent dir");
+
+        let meta = std::fs::symlink_metadata(repo.path.join("vendor/sub")).unwrap();
+        assert!(meta.file_type().is_dir(), "gitlink materialized as a dir");
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        assert_eq!(
+            index.get_path(Path::new("vendor/sub"), 0).unwrap().mode,
+            0o160000
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_conflict_delete_leaves_a_submodule_directory_in_place() {
+        // resolve_conflict with delete_file on a path that is a DIRECTORY on
+        // disk (a submodule worktree) must stage the removal without erroring
+        // on remove_file, and must NOT delete the directory tree.
+        let repo = TestRepo::with_initial_commit();
+        let git_repo = repo.repo();
+        let ptr = repo.create_commit("ptr", &[("a.txt", "1")]);
+        let mut index = git_repo.index().unwrap();
+        let entry = git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: 0o160000,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id: ptr,
+            flags: 0,
+            flags_extended: 0,
+            path: b"sub".to_vec(),
+        };
+        index.add(&entry).unwrap();
+        index.write().unwrap();
+        // A populated submodule worktree directory sits on disk.
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        std::fs::write(repo.path.join("sub/work.txt"), "wip\n").unwrap();
+
+        resolve_conflict(
+            repo.path_str(),
+            "sub".to_string(),
+            String::new(),
+            Some(true),
+        )
+        .await
+        .expect("delete on a submodule dir must not error on remove_file");
+
+        // The directory (and its uncommitted work) is left on disk.
+        assert!(repo.path.join("sub/work.txt").exists());
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .index()
+            .unwrap()
+            .get_path(Path::new("sub"), 0)
+            .is_none());
     }
 
     #[tokio::test]

@@ -324,6 +324,7 @@ export class LvStashList extends LitElement {
       if (result.success) {
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-applied', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -384,6 +385,7 @@ export class LvStashList extends LitElement {
       if (result.success) {
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-applied', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
