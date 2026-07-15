@@ -340,6 +340,144 @@ describe('lv-conflict-resolution-dialog', () => {
       internal.handlePrevious();
       expect(internal.selectedIndex).to.equal(0);
     });
+
+    it('stacked Next calls behind one confirm cannot push the selection out of bounds', async () => {
+      // Alt+ArrowDown auto-repeat stacks several handleNext calls behind a
+      // single unsaved-work confirm; each read the same stale index. Without
+      // the post-await bound re-check they drive selectedIndex past the last
+      // file and Prev/Next go permanently inert.
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        handleNext: () => Promise<void>;
+        confirmLeaveInProgress: () => Promise<boolean>;
+        selectedConflict: ConflictFile | null;
+      };
+      internal.selectedIndex = 1; // one below the last file (index 2 of 3)
+      const release: Array<(v: boolean) => void> = [];
+      internal.confirmLeaveInProgress = () =>
+        new Promise<boolean>((res) => release.push(res));
+
+      const p1 = internal.handleNext.call(el);
+      const p2 = internal.handleNext.call(el);
+      release.forEach((r) => r(true));
+      await Promise.all([p1, p2]);
+
+      expect(internal.selectedIndex, 'must stop at the last file').to.equal(2);
+      expect(internal.selectedConflict, 'selection must stay valid').to.not.be.null;
+    });
+
+    it('stacked Previous calls behind one confirm cannot go below index 0', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        handlePrevious: () => Promise<void>;
+        confirmLeaveInProgress: () => Promise<boolean>;
+        selectedConflict: ConflictFile | null;
+      };
+      internal.selectedIndex = 1;
+      const release: Array<(v: boolean) => void> = [];
+      internal.confirmLeaveInProgress = () =>
+        new Promise<boolean>((res) => release.push(res));
+
+      const p1 = internal.handlePrevious.call(el);
+      const p2 = internal.handlePrevious.call(el);
+      release.forEach((r) => r(true));
+      await Promise.all([p1, p2]);
+
+      expect(internal.selectedIndex, 'must stop at the first file').to.equal(0);
+      expect(internal.selectedConflict).to.not.be.null;
+    });
+  });
+
+  // ── Pinned repository visibility ─────────────────────────────────────────
+  describe('pinned repository visibility', () => {
+    it('names the repository it operates on in the header subtitle', async () => {
+      // The dialog stays pinned to the repo the operation started on even
+      // when another tab is active — without naming it, the user cannot
+      // tell whose merge Complete/Abort will hit.
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const subtitle = el.shadowRoot!.querySelector('.header-subtitle');
+      expect(subtitle?.textContent).to.include('· repo');
+    });
+  });
+
+  // ── Fresh conflict metadata adoption ─────────────────────────────────────
+  describe('fresh conflict metadata adoption', () => {
+    it('adopts the fresh ConflictFile when the editor tool session ends', async () => {
+      // The external tool can change what get_conflicts reports for the
+      // file (markerSize, hunks); keeping the stale object would misparse
+      // the tool's output on the next load.
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      const fresh = { ...makeConflict('src/main.ts'), markerSize: 12 };
+      editor.dispatchEvent(
+        new CustomEvent('external-tool-finished', {
+          detail: { filePath: 'src/main.ts', freshConflicts: [fresh] },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        conflicts: ConflictFile[];
+        editorToolActive: boolean;
+      };
+      expect(internal.editorToolActive).to.be.false;
+      expect(internal.conflicts[0].markerSize).to.equal(12);
+    });
+
+    it('the dialog launcher adopts the re-fetched ConflictFile for a still-conflicted file', async () => {
+      setupDefaultMocks();
+      const freshEntry = { ...makeConflict('src/main.ts'), markerSize: 9 };
+      let conflictsCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'launch_merge_tool') return { success: true, message: null };
+        if (command === 'get_conflicts') {
+          conflictsCalls++;
+          // First call: dialog open. Later calls: post-tool re-check.
+          return conflictsCalls === 1 ? TEST_CONFLICTS : [freshEntry];
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        conflicts: ConflictFile[];
+        handleOpenExternalTool: (path: string) => Promise<void>;
+      };
+      await internal.handleOpenExternalTool.call(el, 'src/main.ts');
+      await el.updateComplete;
+
+      expect(internal.conflicts[0].markerSize, 'fresh metadata adopted').to.equal(9);
+      clearToasts();
+    });
   });
 
   // ── Conflict resolution tracking ───────────────────────────────────────

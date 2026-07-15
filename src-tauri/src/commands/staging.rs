@@ -450,11 +450,14 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
         repo.checkout_index(Some(&mut fresh_index), Some(&mut checkout_opts))?;
     }
 
-    // Delete untracked files
+    // Delete untracked files. symlink_metadata, not exists()/is_dir(): both
+    // FOLLOW symlinks, so a dangling link would be skipped (left on disk)
+    // and a link to a directory would be reported as a directory. The
+    // symlink itself is what must go — never its target.
     for file_path in untracked_paths {
         let full_path = repo_path.join(file_path);
-        if full_path.exists() {
-            if full_path.is_dir() {
+        if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+            if meta.file_type().is_dir() {
                 std::fs::remove_dir_all(&full_path)?;
             } else {
                 std::fs::remove_file(&full_path)?;

@@ -19,6 +19,12 @@ pub struct ConflictFile {
     /// whole blobs (see resolve_conflict_take_side).
     #[serde(default)]
     pub is_binary: bool,
+    /// Whether any side is a submodule (gitlink) pointer. Submodule
+    /// conflicts have no blobs at all — their entry OIDs are COMMITS — so
+    /// neither the text editor nor the binary chooser's blob reads apply;
+    /// resolving one stages the chosen commit pointer directly.
+    #[serde(default)]
+    pub is_submodule: bool,
     /// Marker size the conflict hunks in this file were actually written
     /// with (git's default is 7; the conflict-marker-size gitattribute
     /// raises it). The backend verifies the attribute against the file's

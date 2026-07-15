@@ -124,4 +124,29 @@ describe('lv-cherry-pick-dialog', () => {
     expect(lastInvokedCommand).to.equal('cherry_pick');
     expect(lastInvokedArgs?.mainline).to.equal(undefined);
   });
+
+  it('cherry-pick-complete carries the repo the pick ran on (pinned pre-await)', async () => {
+    // The success refresh must target the ORIGINATING repo — after a
+    // mid-operation tab switch, refreshing the active tab would leave the
+    // picked-onto repo's graph and state stale.
+    const el = await fixture<LvCherryPickDialog>(
+      html`<lv-cherry-pick-dialog .repositoryPath=${'/test/repo'}></lv-cherry-pick-dialog>`,
+    );
+    el.open(makeCommit(['p1']));
+    await el.updateComplete;
+
+    let detail: { repositoryPath?: string } | undefined;
+    el.addEventListener('cherry-pick-complete', (e) => {
+      detail = (e as CustomEvent).detail;
+    });
+
+    const btn = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+      /cherry-pick/i.test(b.textContent ?? ''),
+    ) as HTMLButtonElement;
+    btn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+
+    expect(detail?.repositoryPath).to.equal('/test/repo');
+  });
 });

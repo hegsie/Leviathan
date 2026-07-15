@@ -384,6 +384,12 @@ export interface ConflictFile {
   /** True when any side of the conflict is binary — must not be edited as text */
   isBinary: boolean;
   /**
+   * True when any side is a submodule (gitlink) pointer. Its entry OIDs
+   * are COMMITS, not blobs — no side content can be read, and resolving
+   * stages the chosen commit pointer directly.
+   */
+  isSubmodule?: boolean;
+  /**
    * Marker size the conflict hunks in this file were written with (git's
    * default is 7; the conflict-marker-size gitattribute raises it). The
    * backend verifies the attribute against the file's actual emission, so

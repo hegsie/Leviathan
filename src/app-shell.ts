@@ -1684,14 +1684,23 @@ export class AppShell extends LitElement {
   }
 
   private handleCherryPickComplete(e: CustomEvent): void {
-    const { sourceCommit, noCommit } = e.detail;
-    this.graphCanvas?.refresh?.();
+    const { sourceCommit, noCommit, repositoryPath } = e.detail;
     if (noCommit) {
       showToast(`Staged changes from ${sourceCommit.oid.substring(0, 7)}`, 'success');
     } else {
       showToast(`Cherry-picked ${sourceCommit.oid.substring(0, 7)}`, 'success');
     }
-    this.handleRefresh();
+    // Pinned refresh: after a mid-operation tab switch the cherry-pick
+    // completed on the ORIGINATING repo — refreshing the active tab would
+    // leave that repo's graph and state stale until the file watcher fires.
+    this.refreshConflictDialogRepo(repositoryPath ?? null);
+  }
+
+  private handleRebaseComplete(e: Event): void {
+    const detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    // Same pinned refresh as cherry-pick-complete: the rebase ran on the
+    // originating repo, which may no longer be the active tab.
+    this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
   }
 
   private handleCherryPickConflict(e: Event): void {
@@ -4005,7 +4014,7 @@ export class AppShell extends LitElement {
         <lv-interactive-rebase-dialog
           id="app-rebase-dialog"
           .repositoryPath=${this.activeRepository.repository.path}
-          @rebase-complete=${() => this.handleRefresh()}
+          @rebase-complete=${this.handleRebaseComplete}
         ></lv-interactive-rebase-dialog>
       ` : ''}
 

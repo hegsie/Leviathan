@@ -836,6 +836,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
       if (result.success) {
         this.dispatchEvent(new CustomEvent('rebase-complete', {
+          // Same pinning as the conflict sibling below: the refresh must
+          // target the repo the rebase ran on, not whichever tab is active
+          // by the time it completes.
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));

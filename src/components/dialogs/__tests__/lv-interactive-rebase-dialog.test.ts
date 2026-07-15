@@ -530,6 +530,26 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       expect(eventFired).to.be.true;
     });
 
+    it('rebase-complete carries the repo the rebase ran on (pinned pre-await)', async () => {
+      // The success refresh must target the ORIGINATING repo — after a
+      // mid-operation tab switch, refreshing the active tab would leave
+      // the rebased repo's graph and state stale.
+      const el = await createDialog();
+      await openAndWait(el);
+
+      let detail: { repositoryPath?: string } | undefined;
+      el.addEventListener('rebase-complete', (e) => {
+        detail = (e as CustomEvent).detail;
+      });
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      executeBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(detail?.repositoryPath).to.equal(REPO_PATH);
+    });
+
     it('error message shown when execute fails', async () => {
       mockInvoke = async (command: string) => {
         switch (command) {

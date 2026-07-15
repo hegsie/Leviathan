@@ -628,10 +628,14 @@ export class LvConflictResolutionDialog extends LitElement {
         // The embedded editor is bound to this file's ConflictFile object and
         // only reloads on identity change — refresh it so it shows the tool's
         // output instead of a stale parse that Mark Resolved would write back
-        // OVER the merge the user just crafted in the tool.
+        // OVER the merge the user just crafted in the tool. Adopt the FRESH
+        // entry when the file is still conflicted: the tool may have changed
+        // what get_conflicts reports (markerSize, conflictStyle, hunks), and
+        // re-parsing with the stale metadata would misread its output.
         const wasSelected = this.selectedConflict?.path === conflictPath;
+        const fresh = conflictsResult.data?.find((c) => c.path === conflictPath);
         this.conflicts = this.conflicts.map((c) =>
-          c.path === conflictPath ? { ...c } : c
+          c.path === conflictPath ? (fresh ?? { ...c }) : c
         );
         if (stillConflicted) {
           showToast('File still has conflicts', 'warning');
@@ -682,6 +686,23 @@ export class LvConflictResolutionDialog extends LitElement {
     return true;
   }
 
+  /** The editor's own external-tool session ended. Adopt the fresh
+   * ConflictFile the editor re-fetched: the tool may have changed what
+   * get_conflicts reports (markerSize, conflictStyle, hunks), and keeping
+   * the stale object would misparse the tool's output on the next load. */
+  private handleEditorToolFinished(e: Event): void {
+    this.editorToolActive = false;
+    const detail = (e as CustomEvent<{
+      filePath?: string;
+      freshConflicts?: ConflictFile[] | null;
+    }>).detail;
+    const filePath = detail?.filePath;
+    const fresh = detail?.freshConflicts?.find((c) => c.path === filePath);
+    if (filePath && fresh) {
+      this.conflicts = this.conflicts.map((c) => (c.path === filePath ? fresh : c));
+    }
+  }
+
   private async handleFileSelect(index: number): Promise<void> {
     if (index === this.selectedIndex) return;
     if (this.navBlockedByResolve()) return;
@@ -695,6 +716,11 @@ export class LvConflictResolutionDialog extends LitElement {
       if (this.navBlockedByResolve()) return;
       if (!(await this.confirmLeaveInProgress())) return;
       if (this.editorResolveDepth > 0) return;
+      // Re-check the bound after the await: Alt+ArrowUp auto-repeat stacks
+      // several of these behind one confirm, and each read the same stale
+      // index — decrementing twice would drive the selection to -1 and
+      // leave Prev/Next permanently inert.
+      if (this.selectedIndex <= 0) return;
       this.selectedIndex--;
     }
   }
@@ -704,6 +730,9 @@ export class LvConflictResolutionDialog extends LitElement {
       if (this.navBlockedByResolve()) return;
       if (!(await this.confirmLeaveInProgress())) return;
       if (this.editorResolveDepth > 0) return;
+      // Same post-await bound re-check as handlePrevious — stacked calls
+      // must not push the index past the last file.
+      if (this.selectedIndex >= this.conflicts.length - 1) return;
       this.selectedIndex++;
     }
   }
@@ -1255,6 +1284,15 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   }
 
+  /** The pinned repo's name. The dialog stays bound to the repo the
+   * operation started on even when another tab is active — without naming
+   * it, a user who switched tabs mid-operation has no way to tell whose
+   * merge Complete/Abort will hit. */
+  private get repositoryName(): string {
+    const path = this.repositoryPath ?? '';
+    return path.split(/[\\/]/).filter(Boolean).pop() ?? '';
+  }
+
   render() {
     if (!this.open) return nothing;
 
@@ -1267,7 +1305,7 @@ export class LvConflictResolutionDialog extends LitElement {
               Resolve ${this.getOperationTitle()} Conflicts
             </div>
             <div class="header-subtitle">
-              ${this.resolvedCount} of ${this.totalCount} file${this.totalCount === 1 ? '' : 's'} resolved
+              ${this.resolvedCount} of ${this.totalCount} file${this.totalCount === 1 ? '' : 's'} resolved${this.repositoryName ? ` · ${this.repositoryName}` : ''}
             </div>
           </div>
           <div class="header-actions">
@@ -1354,7 +1392,7 @@ export class LvConflictResolutionDialog extends LitElement {
                     this.launchingExternalTool !== null}
                     @conflict-resolved=${this.handleConflictResolved}
                     @external-tool-started=${() => { this.editorToolActive = true; }}
-                    @external-tool-finished=${() => { this.editorToolActive = false; }}
+                    @external-tool-finished=${this.handleEditorToolFinished}
                     @resolve-started=${() => {
                       this.editorResolveDepth++;
                     }}

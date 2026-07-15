@@ -264,6 +264,10 @@ export class LvCherryPickDialog extends LitElement {
             commit: result.data,
             sourceCommit: this.commit,
             noCommit: this.noCommit,
+            // Same pinning as the conflict sibling: the refresh must target
+            // the repo the cherry-pick ran on, not whichever tab is active
+            // by the time it completes.
+            repositoryPath: repoPath,
           },
           bubbles: true,
           composed: true,

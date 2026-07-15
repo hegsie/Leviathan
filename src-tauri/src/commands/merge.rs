@@ -894,17 +894,28 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             .map(|e| String::from_utf8_lossy(&e.path).to_string())
             .unwrap_or_default();
 
+        // Submodule (gitlink) conflicts have COMMIT OIDs, not blobs — every
+        // blob-based affordance (text editor, side panes, verbatim buttons)
+        // would dead-end on them. Flag them so the frontend routes to a
+        // commit-pointer chooser instead.
+        let is_submodule = [&conflict.our, &conflict.their, &conflict.ancestor]
+            .iter()
+            .filter_map(|e| e.as_ref())
+            .any(|e| e.mode == 0o160000);
+
         // Binary conflicts must not be routed through the text merge editor.
         // SYMLINK conflicts must not either: their blobs are text (the link
         // target path), but resolving them means recreating a LINK, not
         // writing text — the whole-blob chooser (take-side, which is
         // symlink-aware) is the only correct affordance.
-        let is_binary = [&conflict.our, &conflict.their, &conflict.ancestor]
-            .iter()
-            .filter_map(|e| e.as_ref())
-            .any(|e| {
-                e.mode == 0o120000 || repo.find_blob(e.id).map(|b| b.is_binary()).unwrap_or(false)
-            });
+        let is_binary = !is_submodule
+            && [&conflict.our, &conflict.their, &conflict.ancestor]
+                .iter()
+                .filter_map(|e| e.as_ref())
+                .any(|e| {
+                    e.mode == 0o120000
+                        || repo.find_blob(e.id).map(|b| b.is_binary()).unwrap_or(false)
+                });
 
         // How this file's conflict hunks were actually written. The
         // conflict-marker-size attribute and merge.conflictStyle config only
@@ -914,7 +925,9 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
         // Binary conflicts have no marker hunks to detect (and libgit2's
         // binary merge result has no content to replay against) — report
         // the defaults; the text merge editor never parses them anyway.
-        let (marker_size, conflict_style, conflict_hunks) = if is_binary {
+        // Submodule conflicts have no text either (the workdir path is a
+        // directory).
+        let (marker_size, conflict_style, conflict_hunks) = if is_binary || is_submodule {
             (
                 crate::models::conflict::default_marker_size(),
                 crate::models::conflict::default_conflict_style(),
@@ -937,6 +950,7 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             ours: get_entry(conflict.our),
             theirs: get_entry(conflict.their),
             is_binary,
+            is_submodule,
             marker_size,
             conflict_style,
             conflict_hunks,
@@ -993,22 +1007,61 @@ fn has_complete_conflict(content: &str, size: usize) -> bool {
     false
 }
 
+/// A crafted file can demonstrate thousands of distinct sizes (escalating
+/// marker runs); each one downstream becomes up to three merge replays, so
+/// an uncapped list would let a hostile repo stall get_conflicts for
+/// minutes. Real emissions demonstrate one or two sizes; the earliest-seen
+/// ones are kept because the first complete conflict is git's own.
+const MAX_DETECTED_SIZES: usize = 16;
+
 /// Marker sizes the file's content DEMONSTRATES: distinct start-run lengths
-/// (7+, space/EOL-terminated) that form a complete conflict at their own
-/// size. Used when the conflict-marker-size attribute no longer matches
-/// what git wrote (it can change mid-operation via .gitattributes' own
-/// resolution). The 7+ floor avoids false positives on `< quoted` lines.
+/// (space/EOL-terminated) that form a complete conflict (start, then
+/// separator, then end) at their own size. Used when the
+/// conflict-marker-size attribute no longer matches what git wrote (it can
+/// change mid-operation via .gitattributes' own resolution). Callers pass
+/// `min_size` 7 for structural use (avoiding false positives on `< quoted`
+/// lines) or 1 for replay candidates (replay rejects wrong sizes safely).
+///
+/// Single pass: every marker-shaped line advances a per-size completeness
+/// state machine. Rescanning the file per distinct size would be
+/// O(sizes × lines) — a hostile file with escalating run lengths turns
+/// that into a multi-minute hang of get_conflicts.
 fn detected_marker_sizes(content: &str, min_size: usize) -> Vec<u32> {
+    use std::collections::HashMap;
+    // 0 = want start, 1 = want separator, 2 = want end, 3 = complete.
+    let mut stage: HashMap<usize, u8> = HashMap::new();
     let mut sizes: Vec<u32> = Vec::new();
     for line in content.lines() {
-        let n = line.chars().take_while(|&c| c == '<').count();
-        if n >= min_size
-            && n <= u16::MAX as usize
-            && matches!(line.chars().nth(n), None | Some(' '))
-            && !sizes.contains(&(n as u32))
-            && has_complete_conflict(content, n)
-        {
-            sizes.push(n as u32);
+        let (ch, exact) = match line.chars().next() {
+            Some('<') => ('<', false),
+            Some('=') => ('=', true),
+            Some('>') => ('>', false),
+            _ => continue,
+        };
+        let n = line.chars().take_while(|&c| c == ch).count();
+        if n < min_size || n > u16::MAX as usize {
+            continue;
+        }
+        // Start/end markers allow a trailing label; the separator is the
+        // bare run only (same shape has_complete_conflict matches).
+        if exact {
+            if line.chars().nth(n).is_some() {
+                continue;
+            }
+        } else if !matches!(line.chars().nth(n), None | Some(' ')) {
+            continue;
+        }
+        let s = stage.entry(n).or_insert(0);
+        match (ch, *s) {
+            ('<', 0) => *s = 1,
+            ('=', 1) => *s = 2,
+            ('>', 2) => {
+                *s = 3;
+                if sizes.len() < MAX_DETECTED_SIZES {
+                    sizes.push(n as u32);
+                }
+            }
+            _ => {}
         }
     }
     sizes.sort_unstable();
@@ -1298,7 +1351,11 @@ pub async fn resolve_conflict(
     let mut index = repo.index()?;
 
     if delete_file.unwrap_or(false) {
-        if full_path.exists() {
+        // symlink_metadata, not exists(): exists() FOLLOWS symlinks, so a
+        // dangling link reports false and would be left on disk while the
+        // index stages its deletion — an untracked leftover that blocks
+        // later checkouts.
+        if std::fs::symlink_metadata(&full_path).is_ok() {
             std::fs::remove_file(&full_path)?;
         }
         index.remove_path(Path::new(&file_path))?;
@@ -1366,6 +1423,20 @@ pub async fn resolve_conflict_take_side(
     };
 
     match entry {
+        Some(e) if e.mode == 0o160000 => {
+            // Submodule (gitlink) pointer — there is no blob to write and
+            // the path is a directory in the worktree. Stage the chosen
+            // COMMIT pointer directly (like `git checkout --ours -- path`
+            // followed by `git add`); the submodule's own worktree is left
+            // for `git submodule update` to move.
+            let resolved = git2::IndexEntry {
+                // Clear the stage bits — this is the resolution entry.
+                flags: e.flags & !0x3000,
+                ..e
+            };
+            index.remove_path(Path::new(&file_path))?;
+            index.add(&resolved)?;
+        }
         Some(e) => {
             let blob = repo.find_blob(e.id)?;
             // NEVER write through an existing symlink: fs::write follows
@@ -1377,10 +1448,18 @@ pub async fn resolve_conflict_take_side(
                 // link target path; recreate the link rather than writing
                 // a regular file containing the target as text.
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(
-                    String::from_utf8_lossy(blob.content()).as_ref(),
-                    &full_path,
-                )?;
+                {
+                    // remove_if_symlink only cleared a symlink; in a
+                    // file↔symlink type conflict the workdir holds a REGULAR
+                    // file, and symlink() refuses to replace it (EEXIST).
+                    if std::fs::symlink_metadata(&full_path).is_ok() {
+                        std::fs::remove_file(&full_path)?;
+                    }
+                    std::os::unix::fs::symlink(
+                        String::from_utf8_lossy(blob.content()).as_ref(),
+                        &full_path,
+                    )?;
+                }
                 #[cfg(not(unix))]
                 std::fs::write(&full_path, blob.content())?;
             } else {
@@ -1403,9 +1482,19 @@ pub async fn resolve_conflict_take_side(
             index.add_path(Path::new(&file_path))?;
         }
         None => {
-            // The chosen side deleted the file — the resolution is removal
-            if full_path.exists() {
-                std::fs::remove_file(&full_path)?;
+            // The chosen side deleted the file — the resolution is removal.
+            // symlink_metadata, not exists(): a DANGLING symlink (common for
+            // links into ignored/generated trees) reports exists()==false
+            // and would survive on disk as an untracked leftover while the
+            // UI says the file was deleted.
+            if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+                // A DIRECTORY here is a submodule worktree (gitlink
+                // deletion) — git itself leaves it behind on `git rm`
+                // of a submodule; never delete a whole tree from a
+                // conflict resolution.
+                if !meta.file_type().is_dir() {
+                    std::fs::remove_file(&full_path)?;
+                }
             }
             index.remove_path(Path::new(&file_path))?;
         }
@@ -3187,6 +3276,38 @@ mod tests {
         let tiny = "<<<< HEAD\nours\n====\ntheirs\n>>>> f\n";
         assert_eq!(detected_marker_sizes(tiny, 1), vec![4]);
         assert!(detected_marker_sizes(tiny, 7).is_empty());
+
+        // The separator must be the bare run — a trailing label makes it
+        // content, exactly like has_complete_conflict treats it.
+        let labeled_sep = "<<<<<<< HEAD\nours\n======= label\ntheirs\n>>>>>>> f\n";
+        assert!(detected_marker_sizes(labeled_sep, 7).is_empty());
+
+        // Out-of-order marker lines (end before separator) demonstrate
+        // nothing at that size.
+        let out_of_order = "<<<<<<< HEAD\nours\n>>>>>>> f\n=======\n";
+        assert!(detected_marker_sizes(out_of_order, 7).is_empty());
+    }
+
+    #[test]
+    fn test_detected_marker_sizes_caps_hostile_escalating_runs() {
+        // A crafted file demonstrating thousands of distinct sizes must
+        // neither hang the scan (it is single-pass) nor hand thousands of
+        // replay candidates downstream — each candidate costs up to three
+        // merge replays in detect_conflict_emission.
+        let mut content = String::new();
+        for n in 1..=2000usize {
+            content.push_str(&"<".repeat(n));
+            content.push('\n');
+            content.push_str(&"=".repeat(n));
+            content.push('\n');
+            content.push_str(&">".repeat(n));
+            content.push('\n');
+        }
+        let sizes = detected_marker_sizes(&content, 1);
+        assert_eq!(sizes.len(), MAX_DETECTED_SIZES);
+        // The earliest-completed sizes are the ones kept — the first
+        // complete conflict in a real file is git's own emission.
+        assert_eq!(sizes, (1..=MAX_DETECTED_SIZES as u32).collect::<Vec<u32>>());
     }
 
     #[tokio::test]
@@ -3320,6 +3441,224 @@ mod tests {
         assert_eq!(staged.mode, 0o120000, "staged as a symlink");
         let staged_blob = git_repo.find_blob(staged.id).unwrap();
         assert_eq!(staged_blob.content(), b"target-b");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_replaces_a_regular_file_with_the_chosen_symlink() {
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_commit(
+            "Add target and thing",
+            &[("target-a", "A CONTENT\n"), ("thing", "base thing\n")],
+        );
+
+        // Feature turns `thing` into a symlink; main keeps editing it as a
+        // regular file — a file<->symlink TYPE conflict.
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let thing = repo.path.join("thing");
+        std::fs::remove_file(&thing).unwrap();
+        symlink("target-a", &thing).unwrap();
+        repo.stage_file("thing");
+        repo.create_commit("Feature turns thing into a link", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main edits thing", &[("thing", "ours thing\n")]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let entry = conflicts
+            .iter()
+            .find(|c| c.path == "thing")
+            .expect("type conflict should be listed");
+        assert!(entry.is_binary, "file<->symlink conflicts use the chooser");
+        // The workdir holds ours' REGULAR file — exactly the shape a bare
+        // symlink() call refuses to overwrite (EEXIST).
+        let meta = std::fs::symlink_metadata(&thing).unwrap();
+        assert!(
+            meta.file_type().is_file(),
+            "precondition: a regular file is on disk"
+        );
+
+        resolve_conflict_take_side(repo.path_str(), "thing".to_string(), "theirs".to_string())
+            .await
+            .expect("taking the symlink side over a regular file must succeed");
+
+        let meta = std::fs::symlink_metadata(&thing).unwrap();
+        assert!(meta.file_type().is_symlink(), "resolved as a real symlink");
+        assert_eq!(
+            std::fs::read_link(&thing).unwrap().to_string_lossy(),
+            "target-a"
+        );
+        // The link's tracked target file is untouched.
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("target-a")).unwrap(),
+            "A CONTENT\n"
+        );
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index
+            .get_path(Path::new("thing"), 0)
+            .expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o120000, "staged as a symlink");
+    }
+
+    /// Stage a gitlink (submodule pointer) entry at `path` pointing at
+    /// `commit_oid`. Gitlink OIDs reference the SUBMODULE's history, so
+    /// libgit2 does not require them in this repo's object database.
+    fn stage_gitlink(repo: &git2::Repository, path: &str, commit_oid: git2::Oid) {
+        let mut index = repo.index().unwrap();
+        let entry = git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: 0o160000,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id: commit_oid,
+            flags: 0,
+            flags_extended: 0,
+            path: path.as_bytes().to_vec(),
+        };
+        index.add(&entry).unwrap();
+        index.write().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_submodule_conflicts_are_flagged_and_take_side_stages_the_pointer() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Three distinct commit OIDs to use as submodule pointers.
+        let ptr_base = repo.create_commit("ptr base", &[("a.txt", "1")]);
+        let ptr_ours = repo.create_commit("ptr ours", &[("a.txt", "2")]);
+        let ptr_theirs = repo.create_commit("ptr theirs", &[("a.txt", "3")]);
+
+        let git_repo = repo.repo();
+        // The worktree presence of a gitlink is just a directory.
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        stage_gitlink(&git_repo, "sub", ptr_base);
+        repo.create_commit("Add submodule", &[]);
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        stage_gitlink(&git_repo, "sub", ptr_theirs);
+        repo.create_commit("Feature moves submodule", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        stage_gitlink(&git_repo, "sub", ptr_ours);
+        repo.create_commit("Main moves submodule", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let entry = conflicts
+            .iter()
+            .find(|c| c.path == "sub")
+            .expect("submodule conflict should be listed");
+        // Routed to the submodule chooser: NOT binary (its OIDs are
+        // commits, not blobs) and never the text editor.
+        assert!(entry.is_submodule, "gitlink conflicts must be flagged");
+        assert!(!entry.is_binary);
+        assert!(entry.conflict_hunks.is_empty());
+
+        resolve_conflict_take_side(repo.path_str(), "sub".to_string(), "theirs".to_string())
+            .await
+            .expect("taking a side of a submodule conflict must not dead-end");
+
+        // Fresh handle: the earlier Repository caches its in-memory index
+        // and would not see the command's on-disk write.
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index.get_path(Path::new("sub"), 0).expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o160000, "still a gitlink");
+        assert_eq!(staged.id, ptr_theirs, "the CHOSEN side's commit pointer");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_delete_removes_a_dangling_symlink_from_disk() {
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Base: a DANGLING symlink (its target is not tracked and does not
+        // exist — common for links into ignored/generated trees).
+        let link = repo.path.join("link");
+        symlink("missing-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Add dangling link", &[]);
+
+        // Feature deletes the link; main retargets it — modify/delete.
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::remove_file(&link).unwrap();
+        let git_repo = repo.repo();
+        let mut index = git_repo.index().unwrap();
+        index.remove_path(Path::new("link")).unwrap();
+        index.write().unwrap();
+        repo.create_commit("Feature deletes link", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        std::fs::remove_file(&link).unwrap();
+        symlink("missing-target-2", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Main retargets link", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        assert!(
+            conflicts.iter().any(|c| c.path == "link"),
+            "modify/delete on the link should conflict"
+        );
+        // Precondition: the dangling link IS on disk — the exact shape
+        // Path::exists() lies about (it follows the link).
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "precondition: the dangling link is in the worktree"
+        );
+        assert!(!link.exists(), "precondition: exists() follows the link");
+
+        resolve_conflict_take_side(repo.path_str(), "link".to_string(), "theirs".to_string())
+            .await
+            .unwrap();
+
+        // The deletion is real: gone from BOTH the index and the disk — a
+        // leftover link would resurface as untracked and block checkouts.
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "the dangling link must be removed from disk"
+        );
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        assert!(index.get_path(Path::new("link"), 0).is_none());
     }
 
     #[cfg(unix)]

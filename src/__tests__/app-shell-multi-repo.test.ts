@@ -1076,6 +1076,55 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('cherry-pick-complete on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        // The pick ran on B; the user has tabbed back to A by completion.
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).handleCherryPickComplete(
+          new CustomEvent('cherry-pick-complete', {
+            detail: {
+              sourceCommit: { oid: 'abcdef1234567890' },
+              noCommit: false,
+              repositoryPath: '/repo/b',
+            },
+          })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/b'), 'pinned repo marked stale').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('rebase-complete on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).handleRebaseComplete(
+          new CustomEvent('rebase-complete', {
+            detail: { repositoryPath: '/repo/b' },
+          })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/b'), 'pinned repo marked stale').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('re-pins to the repo active at the NEXT open', async () => {
       const el = createAppShell();
       document.body.appendChild(el);

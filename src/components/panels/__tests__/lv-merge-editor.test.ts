@@ -3427,4 +3427,306 @@ describe('lv-merge-editor', () => {
       expect(invokeHistory.some((h) => h.command === 'read_file_content')).to.be.true;
     });
   });
+
+  // ── Hand-deleted separator recovery ──────────────────────────────────────
+  describe('hand-deleted separator recovery', () => {
+    it('a conflict whose ======= was hand-deleted never shows its orphan end marker', async () => {
+      // The user hand-merged and deleted the separator line but left the
+      // end marker. Shape-only parsing would sweep the marker into the
+      // ours pane — visible AND writable to disk via Accept Ours.
+      setupDefaultMocks();
+      workdirContent = [
+        'line1',
+        '<<<<<<< HEAD',
+        'line2-ours',
+        'line2-theirs',
+        '>>>>>>> feature',
+        'line3',
+      ].join('\n');
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+
+      expect(internal.segments.map((s) => s.type)).to.deep.equal([
+        'resolved',
+        'conflict',
+        'resolved',
+      ]);
+      // The blob-validated split recovers both sides; the orphan marker is
+      // the region's terminator, not content.
+      expect(internal.segments[1].oursLines).to.deep.equal(['line2-ours']);
+      expect(internal.segments[1].theirsLines).to.deep.equal(['line2-theirs']);
+      expectNoMarkers(el);
+    });
+
+    it('a separator-less conflict at EOF (no trailing content) still recovers', async () => {
+      setupDefaultMocks();
+      workdirContent = [
+        'line1',
+        '<<<<<<< HEAD',
+        'line2-ours',
+        'line2-theirs',
+        '>>>>>>> feature',
+      ].join('\n');
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+
+      const conflicts = internal.segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['line2-ours']);
+      expect(conflicts[0].theirsLines).to.deep.equal(['line2-theirs']);
+      expectNoMarkers(el);
+    });
+
+    it('a hand-typed end-shaped line before the separator does not close the region early', async () => {
+      // Mid-region junk: an end-shaped line typed BEFORE the real
+      // separator, with the real separator+end below. Closing at the junk
+      // would strand the real markers in "resolved" text.
+      setupDefaultMocks();
+      workdirContent = [
+        'line1',
+        '<<<<<<< HEAD',
+        'line2-ours',
+        '>>>>>>> junk',
+        '=======',
+        'line2-theirs',
+        '>>>>>>> feature',
+        'line3',
+      ].join('\n');
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+
+      const conflicts = internal.segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      // Closes at the REAL end marker: theirs is intact and line3 resolved.
+      expect(conflicts[0].theirsLines).to.deep.equal(['line2-theirs']);
+      expect(internal.segments[internal.segments.length - 1].lines).to.deep.equal(['line3']);
+    });
+  });
+
+  // ── Orphan-marker write confirmation ─────────────────────────────────────
+  describe('orphan-marker write confirmation', () => {
+    /** Load the junk-marker file and accept the conflict block with ours —
+     * the accepted side then contains a marker-shaped line that is in
+     * NEITHER blob (a real orphaned marker). */
+    async function editorWithOrphanMarkerAccepted(
+      confirmAnswers: { calls: number; answer: unknown },
+    ): Promise<LvMergeEditor> {
+      setupDefaultMocks();
+      workdirContent = [
+        'line1',
+        '<<<<<<< HEAD',
+        'line2-ours',
+        '>>>>>>> junk',
+        '=======',
+        'line2-theirs',
+        '>>>>>>> feature',
+        'line3',
+      ].join('\n');
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmAnswers.calls++;
+          return confirmAnswers.answer;
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      return el;
+    }
+
+    it('marking resolved with an orphaned real marker in an accepted side confirms first', async () => {
+      const confirms = { calls: 0, answer: false as unknown };
+      const el = await editorWithOrphanMarkerAccepted(confirms);
+      invokeHistory.length = 0;
+
+      await internalOf(el).handleMarkResolved.call(el);
+      expect(confirms.calls, 'must confirm before writing an orphan marker').to.equal(1);
+      // Declined: nothing is written.
+      expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
+    });
+
+    it('confirming writes the content as-is', async () => {
+      const confirms = { calls: 0, answer: 'Ok' as unknown };
+      const el = await editorWithOrphanMarkerAccepted(confirms);
+      invokeHistory.length = 0;
+
+      await internalOf(el).handleMarkResolved.call(el);
+      expect(confirms.calls).to.equal(1);
+      const resolve = invokeHistory.find((h) => h.command === 'resolve_conflict');
+      expect(resolve, 'confirmed write proceeds').to.exist;
+      expect((resolve!.args as { content: string }).content).to.include('>>>>>>> junk');
+    });
+
+    it('a clean resolution never raises the orphan-marker confirm', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return false;
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      invokeHistory.length = 0;
+
+      await internalOf(el).handleMarkResolved.call(el);
+      expect(confirmCalls).to.equal(0);
+      expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.true;
+    });
+  });
+
+  // ── Symlink conflicts ─────────────────────────────────────────────────────
+  describe('symlink conflicts', () => {
+    it('names the conflict a symbolic link conflict and shows both targets', async () => {
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'ours-oid') return 'target-a';
+          if (blobArgs?.oid === 'theirs-oid') return 'target-b';
+          return '';
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean };
+      internal.conflictFile = {
+        ...makeConflictFile('link'),
+        isBinary: true,
+        ours: { oid: 'ours-oid', path: 'link', mode: 0o120000 },
+        theirs: { oid: 'theirs-oid', path: 'link', mode: 0o120000 },
+      };
+      await el.updateComplete;
+      for (let i = 0; i < 50; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading) break;
+      }
+      await el.updateComplete;
+
+      const text = shadowText(el);
+      expect(text).to.include('Symbolic link conflict');
+      expect(text).to.not.include('Binary file conflict');
+      // The choice is between TARGETS — show them.
+      expect(text).to.include('target-a');
+      expect(text).to.include('target-b');
+      expect(el.shadowRoot!.querySelector('.btn-ours')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.btn-theirs')).to.not.be.null;
+    });
+
+    it('a file<->symlink type conflict labels the regular-file side honestly', async () => {
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'theirs-oid') return 'target-a';
+          return 'file contents';
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean };
+      internal.conflictFile = {
+        ...makeConflictFile('thing'),
+        isBinary: true,
+        ours: { oid: 'ours-oid', path: 'thing', mode: 0o100644 },
+        theirs: { oid: 'theirs-oid', path: 'thing', mode: 0o120000 },
+      };
+      await el.updateComplete;
+      for (let i = 0; i < 50; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading) break;
+      }
+      await el.updateComplete;
+
+      const text = shadowText(el);
+      expect(text).to.include('Symbolic link conflict');
+      expect(text).to.include('a regular file');
+      expect(text).to.include('target-a');
+    });
+  });
+
+  // ── Submodule conflicts ───────────────────────────────────────────────────
+  describe('submodule conflicts', () => {
+    function makeSubmoduleConflict(): ConflictFile {
+      return {
+        path: 'sub',
+        ancestor: { oid: 'a'.repeat(40), path: 'sub', mode: 0o160000 },
+        ours: { oid: 'b'.repeat(40), path: 'sub', mode: 0o160000 },
+        theirs: { oid: 'c'.repeat(40), path: 'sub', mode: 0o160000 },
+        isBinary: false,
+        isSubmodule: true,
+      };
+    }
+
+    async function renderSubmoduleEditor(
+      file: ConflictFile = makeSubmoduleConflict(),
+    ): Promise<LvMergeEditor> {
+      setupDefaultMocks();
+      const el = await renderEditor();
+      const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean };
+      internal.conflictFile = file;
+      await el.updateComplete;
+      for (let i = 0; i < 50; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading) break;
+      }
+      await el.updateComplete;
+      return el;
+    }
+
+    it('renders the commit-pointer chooser, never the text editor or blob reads', async () => {
+      invokeHistory.length = 0;
+      const el = await renderSubmoduleEditor();
+
+      const text = shadowText(el);
+      expect(text).to.include('Submodule conflict');
+      // The choice is between COMMITS — show the short OIDs.
+      expect(text).to.include('b'.repeat(7));
+      expect(text).to.include('c'.repeat(7));
+      expect(el.shadowRoot!.querySelector('.output-panel')).to.be.null;
+      // Nothing is readable for a gitlink: no blob/workdir fetches at all.
+      expect(invokeHistory.some((h) => h.command === 'get_blob_content')).to.be.false;
+      expect(invokeHistory.some((h) => h.command === 'read_file_content')).to.be.false;
+      expectNoMarkers(el);
+    });
+
+    it('resolves via take-side and reports success', async () => {
+      const el = await renderSubmoduleEditor();
+      let resolvedFired = false;
+      el.addEventListener('conflict-resolved', () => {
+        resolvedFired = true;
+      });
+
+      invokeHistory.length = 0;
+      (el.shadowRoot!.querySelector('.btn-theirs') as HTMLButtonElement).click();
+      await new Promise((r) => setTimeout(r, 50));
+
+      const takeSide = invokeHistory.find((h) => h.command === 'resolve_conflict_take_side');
+      expect(takeSide, 'take-side called').to.exist;
+      expect((takeSide!.args as Record<string, unknown>).side).to.equal('theirs');
+      expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
+      expect(resolvedFired).to.be.true;
+    });
+
+    it('a deleted side offers removing the submodule and lands in the terminal state', async () => {
+      const file = { ...makeSubmoduleConflict(), theirs: null };
+      const el = await renderSubmoduleEditor(file);
+
+      const theirsBtn = el.shadowRoot!.querySelector('.btn-theirs') as HTMLButtonElement;
+      expect(theirsBtn.textContent).to.include('remove submodule');
+      theirsBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(shadowText(el)).to.include('this submodule was removed');
+    });
+  });
 });

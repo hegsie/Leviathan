@@ -650,6 +650,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.dispatchEvent(
       new CustomEvent('external-tool-started', { bubbles: true, composed: true })
     );
+    // Handed to the host with the finished event: the tool may have changed
+    // what get_conflicts reports for this file (markerSize, hunks), and the
+    // host's stale ConflictFile object would misparse its output.
+    let freshConflicts: ConflictFile[] | null = null;
     try {
       const result = await gitService.launchMergeTool(this.repositoryPath, file.path);
       if (result.success && result.data?.success) {
@@ -658,6 +662,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         // like the dialog's own external tool instead of leaving the file
         // listed unresolved until an extra Mark Resolved click.
         const conflictsResult = await gitService.getConflicts(this.repositoryPath);
+        if (conflictsResult.success) {
+          freshConflicts = conflictsResult.data ?? [];
+        }
         const stillConflicted =
           !conflictsResult.success ||
           (conflictsResult.data ?? []).some((c) => c.path === file.path);
@@ -690,7 +697,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     } finally {
       this.launchingExternalTool = false;
       this.dispatchEvent(
-        new CustomEvent('external-tool-finished', { bubbles: true, composed: true })
+        new CustomEvent('external-tool-finished', {
+          detail: { filePath: file.path, freshConflicts },
+          bubbles: true,
+          composed: true,
+        })
       );
     }
   }
@@ -724,6 +735,23 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.sideReadErrors = { base: false, ours: false, theirs: false };
 
     try {
+      // Submodule (gitlink) conflicts have nothing to read: the entry OIDs
+      // are COMMITS (not blobs) and the workdir path is a directory. Every
+      // fetch below would fail and land the editor in a loadFailed state
+      // it never renders — the submodule chooser draws from the entry
+      // metadata alone.
+      if (file.isSubmodule) {
+        this.segments = [];
+        this.baseContent = '';
+        this.oursContent = '';
+        this.theirsContent = '';
+        this.baseLines = [];
+        this.oursLines = [];
+        this.theirsLines = [];
+        this.alignmentRows = [];
+        return;
+      }
+
       // Initialize Shiki highlighter and detect language. Inside the try so
       // a highlighter failure cannot wedge the editor in a permanent
       // loading state (the finally below always clears it).
@@ -1050,6 +1078,23 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       return splitAt(b, cs[0]);
     };
     /**
+     * Exhaustive blob-validated split for a body WITHOUT a separator line
+     * (a hand edit can delete the `=======` itself): the first index where
+     * the prefix is a contiguous ours run AND the suffix a contiguous
+     * theirs run. Bodies are conflict-hunk sized, so the quadratic scan is
+     * cheap.
+     */
+    const validAnySplitOf = (b: string[]): { ours: string[]; theirs: string[] } | null => {
+      for (let s = 0; s <= b.length; s++) {
+        const ours = b.slice(0, s);
+        const theirs = b.slice(s);
+        if (isContiguousRun(ours, this.oursLines) && isContiguousRun(theirs, this.theirsLines)) {
+          return { ours, theirs };
+        }
+      }
+      return null;
+    };
+    /**
      * The text after a candidate close, up to the next REAL start-shaped
      * line. A start-shaped line that is blob content (a quoted example)
      * does not end the window — stopping there would hide an orphaned real
@@ -1176,6 +1221,27 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             weakCandidate = { end: j, split };
           }
           // This end-shaped line may be content; keep scanning.
+          body.push(l);
+          continue;
+        }
+        if (!seenSep && isConflictEnd(l) && blobsAvailable && !lineInBlobs(l)) {
+          // An end-shaped line BEFORE any separator that exists in NEITHER
+          // blob is a real orphaned end marker — a hand edit deleted the
+          // `=======` line (git always emits it before `>>>>>>>`). Close
+          // here when the body blob-justifies a split; the marker line is
+          // the region's terminator and must never surface as pane content
+          // (or round-trip to disk via an accepted side). Without
+          // justification the line may still be typed content — it stays
+          // in the body and scanning continues, so a real separator+end
+          // below still wins (no early close on mid-region junk).
+          const split = validAnySplitOf(body);
+          if (split && trailingIsBlobRun(j)) {
+            closed = { end: j, split };
+            break;
+          }
+          if (split && !weakCandidate && !orphanMarkerAfter(j)) {
+            weakCandidate = { end: j, split };
+          }
           body.push(l);
           continue;
         }
@@ -1371,6 +1437,19 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   private markerEchoPattern(): RegExp {
     const n = Math.min(7, this.effectiveMarkerSize);
     return new RegExp(`^(<{${n},}|={${n},}|>{${n},}|\\|{${n},})( |\\r?$)`, 'm');
+  }
+
+  /** CR-insensitive single-line membership in either side blob. Marker-shaped
+   * text that IS blob content (a setext underline, a quoted example) is
+   * legitimate; marker-shaped text in neither blob is a real orphaned
+   * marker a hand edit left behind. */
+  private lineIsBlobContent(line: string): boolean {
+    const strip = (l: string): string => (l.endsWith('\r') ? l.slice(0, -1) : l);
+    const target = strip(line);
+    return (
+      this.oursLines.some((l) => strip(l) === target) ||
+      this.theirsLines.some((l) => strip(l) === target)
+    );
   }
 
   private async applyEditSegment(): Promise<void> {
@@ -1639,6 +1718,34 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       return;
     }
 
+    // Belt-and-braces for hand-edited files: parser fallbacks can leave a
+    // REAL orphaned marker line inside an accepted side (e.g. a hand edit
+    // deleted the separator and nothing blob-justified a close). Writing it
+    // back SILENTLY would re-serialize a marker as resolved content — the
+    // exact failure this editor exists to prevent — so confirm, like the
+    // inline-edit path does. Manual segments confirmed at apply time, and
+    // marker-shaped lines that are blob content are legitimate; both stay
+    // silent.
+    const echo = this.markerEchoPattern();
+    const hasOrphanMarker = this.segments.some(
+      (s) =>
+        s.type === 'resolved' &&
+        s.origin !== 'manual' &&
+        s.lines.some((l) => echo.test(l) && !this.lineIsBlobContent(l)),
+    );
+    if (hasOrphanMarker) {
+      const proceed = await showConfirm(
+        'Write conflict-marker-like text?',
+        'The resolved content contains lines shaped like git conflict markers that are not part of either version. If a hand edit left real markers behind, cancel and remove them; if the text is intentional it will be written as-is.',
+        'warning',
+      );
+      if (!proceed) return;
+      // Re-check after the await — same re-validation as every other
+      // confirm in this component.
+      if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
+      if (this.loadFailed || this.conflictCount > 0 || this.editingSegmentId !== null) return;
+    }
+
     // Capture the file BEFORE the await: the user may select another file in
     // the dialog while the backend call runs, and dispatching that one would
     // mark the wrong file resolved (and let a stash Complete drop the stash
@@ -1692,6 +1799,20 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   private get isBinaryConflict(): boolean {
     return this.conflictFile?.isBinary === true;
+  }
+
+  private get isSubmoduleConflict(): boolean {
+    return this.conflictFile?.isSubmodule === true;
+  }
+
+  /** Any side being a symlink (mode 120000) makes this a link conflict —
+   * the "binary" chooser resolves it, but the copy must say what the
+   * choice actually is (link targets), not call a link a binary file. */
+  private get isSymlinkConflict(): boolean {
+    const f = this.conflictFile;
+    return (
+      !!f && [f.ancestor, f.ours, f.theirs].some((e) => e?.mode === 0o120000)
+    );
   }
 
   /**
@@ -2177,6 +2298,22 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
     const oursDeleted = !this.conflictFile.ours;
     const theirsDeleted = !this.conflictFile.theirs;
+    const isLink = this.isSymlinkConflict;
+    const labels = SIDE_LABELS[this.operationType] ?? SIDE_LABELS.merge;
+
+    // For a link side the blob IS its target path (tiny text) — showing it
+    // turns a blind "Use Ours/Theirs" guess into an informed choice.
+    const sideDetail = (
+      entry: ConflictFile['ours'],
+      content: string,
+      readFailed: boolean,
+    ): string => {
+      if (!entry) return 'deleted';
+      if (entry.mode === 0o120000) {
+        return readFailed ? 'a symbolic link (target unreadable)' : `a link → ${content.trim()}`;
+      }
+      return 'a regular file';
+    };
 
     return html`
       <div class="toolbar">
@@ -2184,17 +2321,73 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       </div>
       <div class="empty" style="flex-direction: column; gap: var(--spacing-md);">
         <div>
-          <strong>Binary file conflict</strong>
+          <strong>${isLink ? 'Symbolic link conflict' : 'Binary file conflict'}</strong>
         </div>
         <div style="font-style: normal; text-align: center; max-width: 420px;">
-          This file is binary and cannot be merged as text. Choose which version to keep.
+          ${isLink
+            ? 'The sides disagree about this symbolic link. Choose which version to keep.'
+            : 'This file is binary and cannot be merged as text. Choose which version to keep.'}
         </div>
+        ${isLink
+          ? html`<div style="font-style: normal; text-align: center; max-width: 420px;">
+              ${labels.ours}: ${sideDetail(this.conflictFile.ours, this.oursContent, this.sideReadErrors.ours)}<br />
+              ${labels.theirs}: ${sideDetail(this.conflictFile.theirs, this.theirsContent, this.sideReadErrors.theirs)}
+            </div>`
+          : nothing}
         <div class="toolbar-actions">
           <button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} ?disabled=${this.actionsBlocked}>
             ${oursDeleted ? 'Use Ours (delete file)' : 'Use Ours'}
           </button>
           <button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} ?disabled=${this.actionsBlocked}>
             ${theirsDeleted ? 'Use Theirs (delete file)' : 'Use Theirs'}
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderSubmoduleConflict(): ReturnType<typeof html> {
+    if (!this.conflictFile) {
+      return html`<div class="empty">Select a file to resolve</div>`;
+    }
+    // Same terminal notice as the binary path — a pointer-removal take on
+    // the last file must not leave dead chooser buttons on screen.
+    if (this.resolvedAsDeleted) {
+      return html`
+        <div class="loading">
+          Resolved — this submodule was removed by the resolution. Nothing further to do here.
+        </div>
+      `;
+    }
+
+    const ours = this.conflictFile.ours;
+    const theirs = this.conflictFile.theirs;
+    const labels = SIDE_LABELS[this.operationType] ?? SIDE_LABELS.merge;
+    const short = (oid?: string): string => (oid ? oid.slice(0, 7) : '');
+
+    return html`
+      <div class="toolbar">
+        <span class="toolbar-title">${this.conflictFile.path}</span>
+      </div>
+      <div class="empty" style="flex-direction: column; gap: var(--spacing-md);">
+        <div>
+          <strong>Submodule conflict</strong>
+        </div>
+        <div style="font-style: normal; text-align: center; max-width: 420px;">
+          Each side records a different commit for this submodule. Choose which commit to
+          keep — the submodule's own files are not changed here (update the submodule
+          afterwards to check the chosen commit out).
+        </div>
+        <div style="font-style: normal; text-align: center; max-width: 420px;">
+          ${labels.ours}: ${ours ? html`<code>${short(ours.oid)}</code>` : 'submodule removed'}<br />
+          ${labels.theirs}: ${theirs ? html`<code>${short(theirs.oid)}</code>` : 'submodule removed'}
+        </div>
+        <div class="toolbar-actions">
+          <button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} ?disabled=${this.actionsBlocked}>
+            ${ours ? `Use Ours (${short(ours.oid)})` : 'Use Ours (remove submodule)'}
+          </button>
+          <button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} ?disabled=${this.actionsBlocked}>
+            ${theirs ? `Use Theirs (${short(theirs.oid)})` : 'Use Theirs (remove submodule)'}
           </button>
         </div>
       </div>
@@ -2208,6 +2401,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
     if (this.loading) {
       return html`<div class="loading">Loading file contents...</div>`;
+    }
+
+    // Submodule conflicts have no content at all (commit pointers, not
+    // blobs) — offer the commit-pointer chooser.
+    if (this.isSubmoduleConflict) {
+      return this.renderSubmoduleConflict();
     }
 
     // Binary conflicts cannot be edited as text — editing would truncate the
