@@ -860,23 +860,24 @@ export class LvConflictResolutionDialog extends LitElement {
           // them (clears the conflict index entries, resetting to HEAD) then discard
           // their working-tree changes (restores HEAD content). The stash entry is
           // never touched, so the stashed changes remain recoverable.
-          // When the conflict LOAD failed, the local list is empty but the index
-          // is genuinely conflicted — re-fetch so Abort restores the real paths
-          // instead of no-opping with a false success message.
+          // ALWAYS re-fetch the authoritative conflict list from the index
+          // rather than trusting the client-side `this.conflicts`. That list
+          // is empty both when the load FAILED and while it is still
+          // IN FLIGHT (per-file replay detection can take seconds) — in
+          // either case restoring from it would no-op and report a false
+          // "nothing needed restoring" success while the tree stays fully
+          // conflicted.
           let restoredCount = 0;
-          let conflictPaths = this.conflicts.map((c) => c.path);
-          if (this.loadFailed) {
-            const refetch = await gitService.getConflicts(this.repositoryPath);
-            if (!refetch.success || !refetch.data) {
-              showToast(
-                refetch.error?.message ?? 'Could not read conflicts — nothing was restored',
-                'error',
-              );
-              this.aborting = false;
-              return;
-            }
-            conflictPaths = refetch.data.map((c) => c.path);
+          const refetch = await gitService.getConflicts(this.repositoryPath);
+          if (!refetch.success || !refetch.data) {
+            showToast(
+              refetch.error?.message ?? 'Could not read conflicts — nothing was restored',
+              'error',
+            );
+            this.aborting = false;
+            return;
           }
+          const conflictPaths = refetch.data.map((c) => c.path);
           if (conflictPaths.length === 0) {
             result = { success: true } as CommandResult<void>;
           } else {

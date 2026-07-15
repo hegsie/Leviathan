@@ -1075,6 +1075,24 @@ export class AppShell extends LitElement {
         );
       }
 
+      // Same for the cherry-pick / interactive-rebase dialogs: they pin to
+      // their repo at open() and stay open across tab switches, so closing
+      // the pinned tab must dismiss them too — otherwise they float over
+      // another repo and their next click would run against a repository
+      // that is no longer in the tab bar.
+      const repoOpen = (path: string | null): boolean =>
+        !!path && state.openRepositories.some((r) => r.repository.path === path);
+      const cpPinned = this.cherryPickDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (cpPinned && !repoOpen(cpPinned)) {
+        this.cherryPickDialog?.close();
+        showToast('The repository tab was closed — cherry-pick cancelled', 'warning');
+      }
+      const rbPinned = this.interactiveRebaseDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (rbPinned && !repoOpen(rbPinned)) {
+        this.interactiveRebaseDialog?.close();
+        showToast('The repository tab was closed — interactive rebase cancelled', 'warning');
+      }
+
       // The open diff binds a click-time StatusEntry snapshot. Re-derive it
       // from every status refresh so a file that became conflicted since the
       // click (e.g. a merge run in an external terminal) hits the diff view's
@@ -1527,7 +1545,9 @@ export class AppShell extends LitElement {
 
     if (result.success && result.data?.success) {
       this.handleAutoStashToast(result.data, refName, repoPath);
-      this.handleRefresh();
+      // Pinned refresh, matching the sibling command-palette checkout: the
+      // checkout ran on repoPath, which may be backgrounded by completion.
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Checkout failed:', result.data?.message || result.error);
       showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Checkout failed');
@@ -2262,7 +2282,8 @@ export class AppShell extends LitElement {
 
     if (result.success && result.data?.success) {
       this.handleAutoStashToast(result.data, branchName, repoPath);
-      this.handleRefresh();
+      // Pinned refresh, matching the sibling checkout handlers.
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Failed to checkout branch:', result.data?.message || result.error);
       showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Failed to checkout branch');

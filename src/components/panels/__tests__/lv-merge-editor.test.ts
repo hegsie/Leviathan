@@ -105,6 +105,19 @@ function setupDefaultMocks(): void {
         return { resolvedContent: 'ai-resolved', explanation: 'merged by ai' };
       case 'resolve_conflict':
         return { success: true };
+      case 'get_conflicts':
+        // Binary/submodule loads re-check the index to detect an
+        // already-resolved re-selection. By default the loaded file IS
+        // still conflicted (first load), so echo back the standard paths;
+        // re-selection tests override this to [] to exercise the terminal
+        // state.
+        return [
+          { path: 'src/test.ts' },
+          { path: 'image.png' },
+          { path: 'link' },
+          { path: 'thing' },
+          { path: 'sub' },
+        ];
       default:
         return null;
     }
@@ -1247,6 +1260,35 @@ describe('lv-merge-editor', () => {
       expect(call, 'take-side resolves blob-verbatim').to.not.be.undefined;
       expect((call!.args as { side: string }).side).to.equal('ours');
       expect(resolvedFired).to.be.true;
+    });
+
+    it('a verbatim take from the read-failure state lands terminal, not forever-Retry', async () => {
+      // The verbatim buttons appear only in the load-failure state. On the
+      // last file, taking a side succeeds but a reload would re-fail the
+      // same undecodable blob — the editor must show a terminal notice, not
+      // re-render the error with a Retry that loops and buttons that error.
+      setupDefaultMocks();
+      workdirContent = () => Promise.reject(new Error('invalid utf-8'));
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'resolve_conflict_take_side') return { success: true };
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      expect(internalOf(el).loadFailed).to.be.true;
+
+      const takeOurs = Array.from(el.shadowRoot!.querySelectorAll('.output-error button')).find(
+        (b) => b.textContent?.includes('verbatim') && b.classList.contains('btn-ours'),
+      ) as HTMLButtonElement;
+      takeOurs.click();
+      await new Promise((r) => setTimeout(r, 40));
+      await el.updateComplete;
+
+      expect(shadowText(el)).to.include('Resolved — the chosen version was staged');
+      expect(
+        el.shadowRoot!.querySelector('.output-error'),
+        'no forever-Retry error state',
+      ).to.be.null;
     });
 
     it('verbatim take-side is offered PER SIDE — a failed ours blob hides only ours', async () => {
@@ -2943,6 +2985,33 @@ describe('lv-merge-editor', () => {
       expect(invokeHistory.some(h => h.command === 'resolve_conflict')).to.be.false;
       expect(resolvedFired).to.be.true;
     });
+
+    it('re-selecting an already-resolved binary file shows a terminal state, not a live chooser', async () => {
+      // After resolution the file is no longer in the index conflict list;
+      // re-rendering the chooser with live buttons would let a second click
+      // error "No conflict found".
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        // The file is NOT in the conflict list anymore (already resolved).
+        if (command === 'get_conflicts') return [];
+        if (command === 'get_blob_content') throw { code: 'IO_ERROR', message: 'binary' };
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = el as unknown as { conflictFile: ConflictFile; loading: boolean };
+      internal.conflictFile = { ...makeConflictFile('image.png'), isBinary: true };
+      await el.updateComplete;
+      for (let i = 0; i < 50; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading) break;
+      }
+      await el.updateComplete;
+
+      expect(shadowText(el)).to.include('Resolved — the chosen version was staged');
+      expect(el.shadowRoot!.querySelector('.btn-ours'), 'no live chooser buttons').to.be.null;
+      expect(el.shadowRoot!.querySelector('.btn-theirs')).to.be.null;
+    });
   });
 
   // ── Deleted-side (modify/delete) conflicts ────────────────────────────────
@@ -3842,7 +3911,8 @@ describe('lv-merge-editor', () => {
       await new Promise((r) => setTimeout(r, 50));
       await el.updateComplete;
 
-      expect(shadowText(el)).to.include('Resolved — the chosen version was staged');
+      // Submodule-specific terminal message (staged commit + submodule update).
+      expect(shadowText(el)).to.include('Resolved — the chosen commit is staged');
       expect(el.shadowRoot!.querySelector('.btn-ours'), 'no re-clickable chooser').to.be.null;
       expect(el.shadowRoot!.querySelector('.btn-theirs')).to.be.null;
     });

@@ -531,6 +531,12 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.modal.open = false;
   }
 
+  /** The repo this dialog is pinned to while open, or null when closed.
+   * The host uses it to close the dialog if that repo's tab is closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.modal?.open ? this.pinnedRepoPath : null;
+  }
+
   private reset(): void {
     this.onto = '';
     this.commits = [];

@@ -1011,7 +1011,9 @@ fn has_complete_conflict(content: &str, size: usize) -> bool {
 /// marker runs); each one downstream becomes up to three merge replays, so
 /// an uncapped list would let a hostile repo stall get_conflicts for
 /// minutes. Real emissions demonstrate one or two sizes; the earliest-seen
-/// ones are kept because the first complete conflict is git's own.
+/// ones are kept because the first complete conflict is git's own. The
+/// SMALLEST demonstrated size is always retained on top of the cap (see
+/// below) — dropping a small real size is the one dangerous direction.
 const MAX_DETECTED_SIZES: usize = 16;
 
 /// Marker sizes the file's content DEMONSTRATES: distinct start-run lengths
@@ -1031,6 +1033,7 @@ fn detected_marker_sizes(content: &str, min_size: usize) -> Vec<u32> {
     // 0 = want start, 1 = want separator, 2 = want end, 3 = complete.
     let mut stage: HashMap<usize, u8> = HashMap::new();
     let mut sizes: Vec<u32> = Vec::new();
+    let mut min_complete: Option<u32> = None;
     for line in content.lines() {
         let (ch, exact) = match line.chars().next() {
             Some('<') => ('<', false),
@@ -1057,11 +1060,24 @@ fn detected_marker_sizes(content: &str, min_size: usize) -> Vec<u32> {
             ('=', 1) => *s = 2,
             ('>', 2) => {
                 *s = 3;
+                let sz = n as u32;
+                min_complete = Some(min_complete.map_or(sz, |m| m.min(sz)));
                 if sizes.len() < MAX_DETECTED_SIZES {
-                    sizes.push(n as u32);
+                    sizes.push(sz);
                 }
             }
             _ => {}
+        }
+    }
+    // Always retain the smallest demonstrated complete size, even if the
+    // cap already filled with larger (possibly hostile/quoted) ones. A
+    // small real conflict size (git honors conflict-marker-size as low as
+    // 1) evicted from the list would make the structural fallback floor to
+    // 7, and the frontend would then parse the real sub-7 markers as plain
+    // content and stage them silently.
+    if let Some(m) = min_complete {
+        if !sizes.contains(&m) {
+            sizes.push(m);
         }
     }
     sizes.sort_unstable();
@@ -1198,26 +1214,33 @@ fn detect_conflict_emission(
                     // unambiguous, and hand the frontend AUTHORITATIVE
                     // hunk positions instead of shape heuristics.
                     let replay_line_count = replay.lines().count();
-                    let star =
-                        collision_free_size(&[&anc_bytes, &our_bytes, &their_bytes], size as usize);
-                    let mut star_opts = git2::MergeFileOptions::new();
-                    star_opts.marker_size(star);
-                    star_opts.style_diff3(style == "diff3");
-                    star_opts.style_zdiff3(style == "zdiff3");
-                    let hunks = git2::merge_file(&anc_in, &our_in, &their_in, Some(&mut star_opts))
-                        .ok()
-                        .and_then(|star_result| {
-                            let star_replay =
-                                String::from_utf8_lossy(star_result.content()).to_string();
-                            // Marker lines are one line each at any
-                            // size, so the line counts must agree —
-                            // bail to heuristics if they somehow don't.
-                            if star_replay.lines().count() != replay_line_count {
-                                return None;
-                            }
-                            replay_hunks(&star_replay, star as usize, style != "merge")
-                        })
-                        .unwrap_or_default();
+                    // None when no collision-free size fits in u16 (a
+                    // pathological ~65k-char marker-char run) — fall back to
+                    // the frontend's blob-validated heuristics rather than
+                    // hand it a size that might itself collide.
+                    let hunks =
+                        collision_free_size(&[&anc_bytes, &our_bytes, &their_bytes], size as usize)
+                            .and_then(|star| {
+                                let mut star_opts = git2::MergeFileOptions::new();
+                                star_opts.marker_size(star);
+                                star_opts.style_diff3(style == "diff3");
+                                star_opts.style_zdiff3(style == "zdiff3");
+                                git2::merge_file(&anc_in, &our_in, &their_in, Some(&mut star_opts))
+                                    .ok()
+                                    .and_then(|star_result| {
+                                        let star_replay =
+                                            String::from_utf8_lossy(star_result.content())
+                                                .to_string();
+                                        // Marker lines are one line each at any
+                                        // size, so the line counts must agree —
+                                        // bail to heuristics if they somehow don't.
+                                        if star_replay.lines().count() != replay_line_count {
+                                            return None;
+                                        }
+                                        replay_hunks(&star_replay, star as usize, style != "merge")
+                                    })
+                            })
+                            .unwrap_or_default();
                     return (size, reported.to_string(), hunks);
                 }
             }
@@ -1265,8 +1288,11 @@ fn detect_conflict_emission(
 }
 
 /// A marker size that cannot collide with any content line: strictly longer
-/// than every leading `<`/`=`/`>`/`|` run in any input blob.
-fn collision_free_size(blobs: &[&[u8]], at_least: usize) -> u16 {
+/// than every leading `<`/`=`/`>`/`|` run in any input blob. None when no
+/// such size fits in u16 (merge_file's marker_size is a u16) — the caller
+/// then falls back to heuristics rather than using a size that could itself
+/// collide with content.
+fn collision_free_size(blobs: &[&[u8]], at_least: usize) -> Option<u16> {
     let mut max_run = at_least;
     for bytes in blobs {
         // Byte-level scan: merge_file works on raw bytes, so the run count
@@ -1280,7 +1306,12 @@ fn collision_free_size(blobs: &[&[u8]], at_least: usize) -> u16 {
             }
         }
     }
-    (max_run + 3).min(u16::MAX as usize) as u16
+    let size = max_run + 3;
+    if size > u16::MAX as usize {
+        None
+    } else {
+        Some(size as u16)
+    }
 }
 
 /// Extract hunk marker positions from a replay generated at a
@@ -1438,11 +1469,25 @@ pub async fn resolve_conflict_take_side(
 
     match entry {
         Some(e) if e.mode == 0o160000 => {
-            // Submodule (gitlink) pointer — there is no blob to write and
-            // the path is a directory in the worktree. Stage the chosen
-            // COMMIT pointer directly (like `git checkout --ours -- path`
-            // followed by `git add`); the submodule's own worktree is left
-            // for `git submodule update` to move.
+            // Submodule (gitlink) pointer — there is no blob to write. Stage
+            // the chosen COMMIT pointer directly (like `git checkout --ours`
+            // + `git add`). The submodule's own files come from a later
+            // `git submodule update`; here we only make the WORKTREE match
+            // what git does for a gitlink checkout — an empty directory at
+            // the path. Without this, a submodule↔file type conflict leaves
+            // the OTHER side's regular file (or a symlink) on disk while the
+            // index holds the gitlink, so `git status` reports the
+            // just-"resolved" path as dirty.
+            if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+                if !meta.file_type().is_dir() {
+                    std::fs::remove_file(&full_path)?;
+                    std::fs::create_dir(&full_path)?;
+                }
+                // An existing directory is left as-is (it may already be the
+                // submodule's populated worktree).
+            } else {
+                std::fs::create_dir(&full_path)?;
+            }
             let resolved = git2::IndexEntry {
                 // Clear the stage bits — this is the resolution entry.
                 flags: e.flags & !0x3000,
@@ -1464,9 +1509,12 @@ pub async fn resolve_conflict_take_side(
             // refused with an actionable message — never delete a tree
             // that may hold uncommitted submodule work.
             if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+                // The same branch is reached by a file↔directory (D/F)
+                // conflict with no submodule involved, so the message must
+                // not assume one.
                 if meta.file_type().is_dir() && std::fs::remove_dir(&full_path).is_err() {
                     return Err(LeviathanError::OperationFailed(format!(
-                        "'{}' is a submodule directory with files in it — move or remove it, then take this side again",
+                        "'{}' is a directory with files in it (the other side made this path a directory) — move or remove it, then take this side again",
                         file_path
                     )));
                 }
@@ -3288,8 +3336,13 @@ mod tests {
 
         // Collision-free size must exceed every marker-shaped run in blobs.
         let blob = b"content\n<<<<<<<<<<<<<<< quoted long run\n" as &[u8];
-        let star = collision_free_size(&[blob], 7);
+        let star = collision_free_size(&[blob], 7).expect("fits in u16");
         assert!(star as usize > 15);
+
+        // A run near u16::MAX has no collision-free size that fits in u16 —
+        // bail to None rather than clamp to a colliding size.
+        let huge = vec![b'<'; u16::MAX as usize];
+        assert!(collision_free_size(&[&huge], 7).is_none());
     }
 
     #[test]
@@ -3319,6 +3372,30 @@ mod tests {
         // nothing at that size.
         let out_of_order = "<<<<<<< HEAD\nours\n>>>>>>> f\n=======\n";
         assert!(detected_marker_sizes(out_of_order, 7).is_empty());
+    }
+
+    #[test]
+    fn test_detected_marker_sizes_always_retains_the_smallest_size() {
+        // 16 distinct LARGE complete conflicts fill the cap, then a real
+        // sub-7 conflict appears. The smallest (sub-7) size must survive
+        // the cap — dropping it would floor the structural fallback to 7
+        // and hide the real markers as content.
+        let mut content = String::new();
+        for n in 20..36usize {
+            content.push_str(&"<".repeat(n));
+            content.push('\n');
+            content.push_str(&"=".repeat(n));
+            content.push('\n');
+            content.push_str(&">".repeat(n));
+            content.push('\n');
+        }
+        // The real, small conflict, demonstrated LAST (after the cap filled).
+        content.push_str("<<<< HEAD\nours\n====\ntheirs\n>>>> f\n");
+        let sizes = detected_marker_sizes(&content, 1);
+        assert!(
+            sizes.contains(&4),
+            "the smallest demonstrated size must be retained past the cap; got {sizes:?}"
+        );
     }
 
     #[test]
@@ -3521,6 +3598,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_take_side_gitlink_materializes_dir_and_leaves_clean_worktree() {
+        // Taking the SUBMODULE side of a submodule↔file type conflict must
+        // leave the worktree consistent with the staged gitlink (git checks
+        // a gitlink out as an empty directory). Without materializing it,
+        // the OTHER side's regular file stays on disk and `git status`
+        // reports the just-"resolved" path as dirty.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        let ptr = repo.create_commit("ptr", &[("a.txt", "1")]);
+        let git_repo = repo.repo();
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        stage_gitlink(&git_repo, "sub", ptr);
+        repo.create_commit("Add submodule", &[]);
+
+        // Feature replaces the submodule with a regular file.
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        {
+            let mut index = git_repo.index().unwrap();
+            index.remove_path(Path::new("sub")).unwrap();
+            index.write().unwrap();
+        }
+        std::fs::remove_dir_all(repo.path.join("sub")).ok();
+        std::fs::write(repo.path.join("sub"), "vendored\n").unwrap();
+        repo.stage_file("sub");
+        repo.create_commit("Feature vendors sub", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        let ptr2 = repo.create_commit("ptr2", &[("a.txt", "2")]);
+        stage_gitlink(&git_repo, "sub", ptr2);
+        repo.create_commit("Main moves submodule", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Force the workdir to hold the OTHER side's regular FILE (the exact
+        // shape that would be left behind if the gitlink arm ignored the
+        // worktree).
+        if std::fs::symlink_metadata(repo.path.join("sub"))
+            .map(|m| !m.file_type().is_file())
+            .unwrap_or(true)
+        {
+            let _ = std::fs::remove_dir_all(repo.path.join("sub"));
+            let _ = std::fs::remove_file(repo.path.join("sub"));
+            std::fs::write(repo.path.join("sub"), "vendored\n").unwrap();
+        }
+
+        resolve_conflict_take_side(repo.path_str(), "sub".to_string(), "ours".to_string())
+            .await
+            .expect("taking the gitlink side must succeed");
+
+        // The worktree path is now an (empty) directory, matching a gitlink
+        // checkout — not the leftover regular file.
+        let meta = std::fs::symlink_metadata(repo.path.join("sub")).unwrap();
+        assert!(meta.file_type().is_dir(), "gitlink materialized as a dir");
+
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index.get_path(Path::new("sub"), 0).expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o160000, "staged as a gitlink");
+        assert_eq!(staged.id, ptr2, "ours' commit pointer");
+        // The path is no longer reported as a conflict/dirty typechange.
+        assert!(get_conflicts(repo.path_str())
+            .await
+            .unwrap()
+            .iter()
+            .all(|c| c.path != "sub"));
+    }
+
+    #[tokio::test]
     async fn test_take_side_refuses_to_delete_a_populated_submodule_worktree() {
         let repo = TestRepo::with_initial_commit();
         let initial_branch = repo.current_branch();
@@ -3568,7 +3723,7 @@ mod tests {
                 .await
                 .expect_err("must refuse rather than delete a populated tree");
         assert!(
-            err.to_string().contains("submodule directory"),
+            err.to_string().contains("is a directory with files in it"),
             "actionable message, not a raw OS error; got: {err}"
         );
         // The tree is untouched.

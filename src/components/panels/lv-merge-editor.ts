@@ -695,7 +695,18 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         // but after a mid-session switch a reload would wipe the picks of
         // the file the user is now working on.
         if (this.conflictFile?.path === file.path) {
-          await this.loadContents();
+          const fresh = freshConflicts?.find((c) => c.path === file.path);
+          if (fresh && fresh !== this.conflictFile) {
+            // The tool may have changed the file's markerSize/style/hunks;
+            // adopt the fresh metadata BEFORE parsing (the reactive updated()
+            // reloads with it) instead of re-parsing with the stale object
+            // and only correcting once the host echoes it back. The host
+            // adopts the SAME object via external-tool-finished, so it will
+            // not trigger a second reload.
+            this.conflictFile = fresh;
+          } else {
+            await this.loadContents();
+          }
         }
         // Mirror the dialog's launcher: success only when the index confirms
         // the resolution — a green toast over "N conflicts remaining" would
@@ -757,6 +768,21 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.sideReadErrors = { base: false, ours: false, theirs: false };
 
     try {
+      // Re-SELECTING an already-resolved chooser file (binary/submodule):
+      // its buttons would call take-side on a path the index no longer
+      // lists as conflicted, erroring "No conflict found". The blob reads
+      // for a binary file also fail (undecodable) and would render the live
+      // chooser regardless of loadFailed. Land in the terminal resolved
+      // state instead — the resolution is already staged.
+      if (file.isBinary || file.isSubmodule) {
+        if (await this.isNoLongerConflicted(file.path)) {
+          if (epoch !== this.loadEpoch) return;
+          this.segments = [];
+          this.resolvedInPlace = true;
+          return;
+        }
+      }
+
       // Submodule (gitlink) conflicts have nothing to read: the entry OIDs
       // are COMMITS (not blobs) and the workdir path is a directory. Every
       // fetch below would fail and land the editor in a loadFailed state
@@ -846,7 +872,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         // in the error/Retry/verbatim state, not a false "was deleted".
         workdirResult.error?.code === 'FILE_NOT_FOUND' &&
         (!file.ours || !file.theirs) &&
-        (await this.isResolvedDeletion(file.path))
+        (await this.isNoLongerConflicted(file.path))
       ) {
         // RE-SELECTING a file already resolved as a deletion: the workdir
         // read fails because the file is correctly GONE. The generic error
@@ -875,12 +901,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   }
 
   /**
-   * True when `path`'s deletion is already STAGED: the file has a missing
-   * side, the workdir copy is gone, and the index no longer lists it as
-   * conflicted. Distinguishes a resolved deletion from a genuine read
-   * failure.
+   * True when the index no longer lists `path` as conflicted — i.e. the
+   * file has already been resolved (deleted, or a chooser take-side that
+   * staged a side). Distinguishes an ALREADY-RESOLVED re-selection from a
+   * genuine read failure, so the editor can show a terminal notice instead
+   * of a live chooser / forever-Retry whose buttons error "No conflict
+   * found". A failed getConflicts returns false (treat as still
+   * conflicted) so a transient error never fabricates a "resolved" state.
    */
-  private async isResolvedDeletion(path: string): Promise<boolean> {
+  private async isNoLongerConflicted(path: string): Promise<boolean> {
     if (!this.repositoryPath) return false;
     const conflicts = await gitService.getConflicts(this.repositoryPath);
     return conflicts.success && !(conflicts.data ?? []).some((c) => c.path === path);
@@ -1747,6 +1776,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   private async handleMarkResolved(): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
+    // Identity of the file when the button was clicked. The orphan-marker
+    // confirm below yields to the event loop (native confirms do NOT block
+    // it), and nav is not yet locked (resolve-started fires later), so a
+    // file switch could retarget conflictFile mid-confirm — marking the
+    // WRONG file resolved. Re-checked after the await.
+    const startFile = this.conflictFile;
 
     // The button is disabled in these states; the guards keep the invariant
     // even if invoked directly. A file with open conflict blocks must never
@@ -1790,8 +1825,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       );
       if (!proceed) return;
       // Re-check after the await — same re-validation as every other
-      // confirm in this component.
+      // confirm in this component, plus file identity: a switch during the
+      // confirm must not let this call mark a different file resolved.
       if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
+      if (this.conflictFile !== startFile) return;
       if (this.loadFailed || this.conflictCount > 0 || this.editingSegmentId !== null) return;
     }
 
@@ -1871,13 +1908,17 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    */
   private async handleTakeSide(side: 'ours' | 'theirs'): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
+    const startFile = this.conflictFile;
     // Taking a side writes the whole file — an open typed-but-unapplied
     // draft would vanish silently. (The acceptWholeFile delegation already
     // confirmed and cleared the edit, so this only fires for the direct
     // deleted-side buttons.)
     if (this.editingSegmentId !== null) {
       if (!(await this.confirmDiscardOpenEdit())) return;
+      // Re-check identity too: a file switch during the discard confirm
+      // must not let this call take a side on a different file.
       if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
+      if (this.conflictFile !== startFile) return;
       this.editingSegmentId = null;
       this.editDraft = '';
     }
@@ -1885,6 +1926,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     // Same capture-before-await as handleMarkResolved: the dispatched file
     // must be the one the call actually resolved.
     const file = this.conflictFile;
+    // The verbatim take-side buttons only appear in the side-read-failure
+    // (loadFailed) state — a reload afterwards would re-read the same
+    // undecodable side blob and loop forever on Retry, presenting a
+    // successful resolution as a failure. Remember it to land terminal.
+    const wasLoadFailed = this.loadFailed;
     const token = ++this.resolveToken;
     this.resolving = true;
     this.dispatchEvent(new CustomEvent('resolve-started', { bubbles: true, composed: true }));
@@ -1917,11 +1963,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               this.editingSegmentId = null;
               this.resolvedAsDeleted = true;
             }
-          } else if (file.isBinary || file.isSubmodule) {
-            // A chooser resolution has no text pipeline to reload into —
-            // reloading just re-renders the same chooser with live
-            // buttons, and a second click errors "No conflict found" on
-            // the already-resolved file. Terminal state, like deletions.
+          } else if (file.isBinary || file.isSubmodule || wasLoadFailed) {
+            // A chooser resolution (binary/submodule) has no text pipeline
+            // to reload into, and a verbatim take from the side-read-failure
+            // state would just re-fail the same undecodable blob — reloading
+            // either re-renders live chooser/verbatim buttons whose second
+            // click errors "No conflict found", or loops on Retry. Terminal
+            // state, like deletions.
             if (token === this.resolveToken) {
               this.resolvedInPlace = true;
             }
@@ -2268,6 +2316,17 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         </div>
       `;
     }
+    if (this.resolvedInPlace) {
+      // A verbatim take from the side-read-failure state succeeded — show
+      // the terminal notice, NOT the error state, whose Retry would loop on
+      // the same undecodable blob and whose verbatim buttons would error
+      // "No conflict found" on the already-resolved file.
+      return html`
+        <div class="loading">
+          Resolved — the chosen version was staged. Nothing further to do here.
+        </div>
+      `;
+    }
     if (this.loadFailed) {
       // Say what actually failed — blaming the working-directory file when
       // only a side blob was unreadable would be wrong and alarming.
@@ -2281,7 +2340,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               ? 'Could not read all of this file’s versions.'
               : 'Could not read the merged file from the working directory.'}
           </div>
-          <button class="btn btn-primary" @click=${this.handleReload}>Retry</button>
+          <button class="btn btn-primary" @click=${this.handleReload} ?disabled=${this.actionsBlocked}>Retry</button>
           ${
             // Take-side writes one side's blob verbatim — it never touches the
             // BASE blob or the workdir text, so each side is offerable
@@ -2424,9 +2483,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       `;
     }
     if (this.resolvedInPlace) {
+      // A submodule pointer is staged, but its worktree files are NOT
+      // checked out here — telling the user "nothing further to do" would
+      // contradict the pre-resolution guidance and leave them confused by a
+      // still-changed submodule path in the status pane.
       return html`
         <div class="loading">
-          Resolved — the chosen version was staged. Nothing further to do here.
+          Resolved — the chosen commit is staged. Run <code>git submodule update</code> to
+          check out its files.
         </div>
       `;
     }

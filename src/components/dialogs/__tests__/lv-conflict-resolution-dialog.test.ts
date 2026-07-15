@@ -1920,6 +1920,35 @@ describe('lv-conflict-resolution-dialog', () => {
       const infoToast = uiStore.getState().toasts.find(t => t.type === 'info');
       expect(infoToast, 'info toast shown').to.not.be.undefined;
     });
+
+    it('stash abort re-fetches the real conflict paths even when the client list is empty (load in flight)', async () => {
+      // The conflict load can still be in flight (empty this.conflicts,
+      // loadFailed false) when the user hits Abort. Trusting the empty
+      // client list would no-op and falsely report success while the tree
+      // stays conflicted — the abort must re-fetch the authoritative list.
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      // Simulate an in-flight load: the index IS conflicted but the client
+      // list has not populated yet.
+      const internal = el as unknown as { conflicts: ConflictFile[]; loadFailed: boolean };
+      internal.conflicts = [];
+      internal.loadFailed = false;
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleAbortConfirm: () => Promise<void> }).handleAbortConfirm.bind(el)();
+
+      // The abort re-fetched and restored the REAL paths, not no-opped.
+      const unstageCall = invokeHistory.find(h => h.command === 'unstage_files');
+      expect(unstageCall, 'unstage_files called for the re-fetched paths').to.exist;
+      expect((unstageCall!.args as Record<string, unknown>).paths).to.deep.equal(
+        TEST_CONFLICTS.map(c => c.path),
+      );
+      expect(invokeHistory.some(h => h.command === 'discard_changes'), 'files restored').to.be.true;
+    });
   });
 
   // ── Stash: empty conflict list must NOT drop (never-applied changes) ────────

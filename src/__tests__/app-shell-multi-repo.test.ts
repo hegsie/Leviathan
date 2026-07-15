@@ -1169,6 +1169,70 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('ref-menu Checkout and graph Checkout both refresh via the PINNED path (sibling consistency)', async () => {
+      for (const handler of ['handleRefCheckout', 'handleCheckoutBranchFromGraph'] as const) {
+        const el = createAppShell();
+        document.body.appendChild(el);
+        try {
+          mockResponses['checkout_with_autostash'] = () => ({ success: true });
+          (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+          (el as any).refContextMenu = { visible: true, refName: 'feature' };
+          const pinnedCalls: Array<string | null> = [];
+          (el as any).refreshConflictDialogRepo = (p: string | null) => pinnedCalls.push(p);
+          let plainRefreshCalled = false;
+          (el as any).handleRefresh = () => { plainRefreshCalled = true; };
+
+          await (el as any)[handler](
+            new CustomEvent('x', { detail: { branchName: 'feature' } })
+          );
+
+          expect(pinnedCalls, `${handler} routes through the pinned refresh`).to.deep.equal(['/repo/a']);
+          expect(plainRefreshCalled, `${handler} avoids the unpinned refresh`).to.be.false;
+        } finally {
+          el.remove();
+        }
+      }
+    });
+
+    it('closing the pinned tab cancels an open cherry-pick or interactive-rebase dialog', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        // Fake the two dialogs as open and pinned to repo A. The @query
+        // fields are read-only getters, so shadow them on the instance.
+        let cpClosed = false;
+        let rbClosed = false;
+        Object.defineProperty(el, 'cherryPickDialog', {
+          configurable: true,
+          value: {
+            pinnedRepositoryPathIfOpen: '/repo/a',
+            close: () => { cpClosed = true; },
+          },
+        });
+        Object.defineProperty(el, 'interactiveRebaseDialog', {
+          configurable: true,
+          value: {
+            pinnedRepositoryPathIfOpen: '/repo/a',
+            close: () => { rbClosed = true; },
+          },
+        });
+
+        // Close repo A's tab — the store subscription must dismiss both.
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect(cpClosed, 'cherry-pick dialog closed').to.be.true;
+        expect(rbClosed, 'rebase dialog closed').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('a rebase-complete event bubbling from a nested dialog reaches the host pinned refresh', async () => {
       // Interactive rebase is dispatched by the branch-list's OWN embedded
       // dialog too, not just the app-shell one — the host-level listener
