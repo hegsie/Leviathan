@@ -760,8 +760,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (this.sideReadErrors.base) this.baseLines = [];
       if (this.sideReadErrors.ours) this.oursLines = [];
       if (this.sideReadErrors.theirs) this.theirsLines = [];
-      const sideReadFailed =
-        this.sideReadErrors.base || this.sideReadErrors.ours || this.sideReadErrors.theirs;
+      // The BASE blob is never needed for parsing or block resolution
+      // (parseSegments validates only against ours/theirs, and diff3 base
+      // sections are identified by the backend-reported style) — a missing
+      // ancestor object (shallow/partial clone) must not disable the whole
+      // structured editor, only the Use Base button and its pane content.
+      const sideReadFailed = this.sideReadErrors.ours || this.sideReadErrors.theirs;
 
       // Align AFTER dropping failed sides, or the rows would reference lines
       // that no longer exist and pane rendering would crash on them.
@@ -916,19 +920,40 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (cs.length === 0) return splitAt(b, b.length);
       return splitAt(b, cs[0]);
     };
+    /** The text after a candidate close, up to the next start-shaped line. */
+    const trailingAfter = (endIdx: number): string[] => {
+      const out: string[] = [];
+      for (let k = endIdx + 1; k < lines.length; k++) {
+        if (isConflictStart(lines[k])) break;
+        out.push(lines[k]);
+      }
+      return out;
+    };
     /**
-     * True when the text after a candidate close (up to the next
-     * start-shaped line) contains a marker-shaped line that is NOT content
-     * from either blob — i.e. a real, orphaned git marker. Closing early
-     * (at a QUOTED end marker inside the theirs section) strands the real
-     * separator/end below as "resolved" text; this detects exactly that.
-     * A validated split alone cannot: a PREFIX of the theirs hunk also
+     * STRONG close justification: everything after the close (up to the
+     * next region) is a contiguous run of some blob — genuinely merged
+     * content. This distinguishes even a quoted marker line that is
+     * TEXTUALLY IDENTICAL to the real end marker (a tutorial quoting
+     * `>>>>>>> feature-branch` while that very branch merges in): closing
+     * at the quoted copy leaves the real marker stranded in the trailing
+     * text, which then matches no blob run.
+     */
+    const trailingIsBlobRun = (endIdx: number): boolean => {
+      const trailing = trailingAfter(endIdx);
+      return (
+        isContiguousRun(trailing, this.oursLines) || isContiguousRun(trailing, this.theirsLines)
+      );
+    };
+    /**
+     * WEAK close justification: the trailing text contains no marker-shaped
+     * line that is absent from both blobs (i.e. no orphaned real marker).
+     * Needed because auto-merged trailing text can mix one-sided insertions
+     * from both blobs and so fail the strong contiguity check. A validated
+     * split alone justifies nothing: a PREFIX of the theirs hunk also
      * validates as contiguous.
      */
     const orphanMarkerAfter = (endIdx: number): boolean => {
-      for (let k = endIdx + 1; k < lines.length; k++) {
-        const l = lines[k];
-        if (isConflictStart(l)) return false;
+      for (const l of trailingAfter(endIdx)) {
         if ((isConflictEnd(l) || isSeparator(l)) && !lineInBlobs(l)) return true;
       }
       return false;
@@ -981,6 +1006,8 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       const body: string[] = [];
       let seenSep = false;
       let firstCandidate: { end: number; body: string[] } | null = null;
+      let weakCandidate: { end: number; split: { ours: string[]; theirs: string[] } } | null =
+        null;
       let closed: { end: number; split: { ours: string[]; theirs: string[] } | null } | null =
         null;
 
@@ -1002,16 +1029,27 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             break;
           }
           const split = validSplitOf(body);
-          if (split && !orphanMarkerAfter(j)) {
+          // STRONG close — decisive even against quoted marker lines that
+          // are textually identical to the real markers, which defeat the
+          // weak (line-membership) orphan test.
+          if (split && trailingIsBlobRun(j)) {
             closed = { end: j, split };
             break;
           }
-          // Rejected — this end-shaped line is content; keep scanning.
+          // WEAK close — remembered, but scanning continues in case a
+          // later candidate closes strongly.
+          if (split && !weakCandidate && !orphanMarkerAfter(j)) {
+            weakCandidate = { end: j, split };
+          }
+          // This end-shaped line may be content; keep scanning.
           body.push(l);
           continue;
         }
         if (isSeparator(l)) seenSep = true;
         body.push(l);
+      }
+      if (!closed && weakCandidate) {
+        closed = weakCandidate;
       }
 
       if (closed && closed.split === null) {
@@ -1254,8 +1292,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     // With a failed load the side contents are not trustworthy — accepting
     // one would replace the segments with fabricated (possibly empty) text.
     // Blocked during resolve writes / tool sessions like every other
-    // in-memory mutation.
+    // in-memory mutation. A base-only read failure keeps the editor alive,
+    // so Use Base must check its own side too.
     if (this.loadFailed || this.actionsBlocked) return;
+    if (origin === 'base' && this.sideReadErrors.base) return;
     if (this.editingSegmentId !== null) {
       if (!(await this.confirmDiscardOpenEdit())) return;
       // Re-check after the confirm's await — a resolve/tool session may
@@ -1525,6 +1565,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       );
 
       if (result.success) {
+        // The whole-side write supersedes any in-memory picks made before
+        // it — without this, a resolved LAST file (no auto-advance target)
+        // would flag its stale picks as "unsaved rework" and make Complete
+        // raise a false confirm.
+        if (token === this.resolveToken) {
+          this.userTouched = false;
+        }
         this.dispatchEvent(new CustomEvent('conflict-resolved', {
           detail: { file },
           bubbles: true,
@@ -1994,7 +2041,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             Reload
           </button>
           ${this.conflictFile.ancestor
-            ? html`<button class="btn" @click=${this.handleAcceptBase} ?disabled=${this.loadFailed || this.actionsBlocked} title="Reset to common ancestor">
+            ? html`<button
+                class="btn"
+                @click=${this.handleAcceptBase}
+                ?disabled=${this.loadFailed || this.actionsBlocked || this.sideReadErrors.base}
+                title=${this.sideReadErrors.base
+                  ? 'The base version could not be read'
+                  : 'Reset to common ancestor'}
+              >
                 Use Base
               </button>`
             : nothing}

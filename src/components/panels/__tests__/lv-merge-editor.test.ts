@@ -724,6 +724,98 @@ describe('lv-merge-editor', () => {
       ]);
     });
 
+    it('a quoted end marker IDENTICAL to the real one cannot close the block early', async () => {
+      // The theirs hunk quotes an end marker whose text exactly matches
+      // git's real end marker (a tutorial quoting `>>>>>>> feature` while
+      // that very branch merges in). Line-membership orphan checks are
+      // blind here — only the strong trailing-is-blob-run justification
+      // can pick the real close.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'ctx\ntail';
+          if (blobArgs?.oid === 'ours-oid') return 'ctx\nours-real\ntail';
+          if (blobArgs?.oid === 'theirs-oid')
+            return 'ctx\ntheirs section unique 1\n>>>>>>> feature\ntheirs section unique 2\ntail';
+          return '';
+        }
+        if (command === 'read_file_content') {
+          return [
+            'ctx',
+            '<<<<<<< HEAD',
+            'ours-real',
+            '=======',
+            'theirs section unique 1',
+            '>>>>>>> feature',
+            'theirs section unique 2',
+            '>>>>>>> feature',
+            'tail',
+          ].join('\n');
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('docs/tutorial.md');
+      const segments = internalOf(el).segments;
+      const conflicts = segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['ours-real']);
+      expect(conflicts[0].theirsLines).to.deep.equal([
+        'theirs section unique 1',
+        '>>>>>>> feature',
+        'theirs section unique 2',
+      ]);
+      const resolvedText = segments
+        .filter((s) => s.type === 'resolved')
+        .flatMap((s) => s.lines);
+      expect(resolvedText, 'the real end marker must be consumed, never resolved text').to.deep.equal(
+        ['ctx', 'tail']
+      );
+    });
+
+    it('a quoted marker just AFTER the real end stays trailing content (symmetric case)', async () => {
+      // The mirror image: common content directly after the hunk quotes a
+      // line identical to the real end marker. The close must happen at
+      // the REAL end, keeping the quoted copy as resolved content.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'ctx\n>>>>>>> feature\ntail';
+          if (blobArgs?.oid === 'ours-oid') return 'ctx\nours1\n>>>>>>> feature\ntail';
+          if (blobArgs?.oid === 'theirs-oid') return 'ctx\ntheirs1\n>>>>>>> feature\ntail';
+          return '';
+        }
+        if (command === 'read_file_content') {
+          return [
+            'ctx',
+            '<<<<<<< HEAD',
+            'ours1',
+            '=======',
+            'theirs1',
+            '>>>>>>> feature',
+            '>>>>>>> feature',
+            'tail',
+          ].join('\n');
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('docs/notes.md');
+      const segments = internalOf(el).segments;
+      const conflicts = segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['ours1']);
+      expect(conflicts[0].theirsLines).to.deep.equal(['theirs1']);
+      const resolvedText = segments
+        .filter((s) => s.type === 'resolved')
+        .flatMap((s) => s.lines);
+      expect(resolvedText).to.deep.equal(['ctx', '>>>>>>> feature', 'tail']);
+    });
+
     it('keeps an unterminated conflict as a conflict block', async () => {
       const el = await renderEditor();
       const segments = internalOf(el).parseSegments(
@@ -879,10 +971,10 @@ describe('lv-merge-editor', () => {
       expect(verbatimBtns[0].classList.contains('btn-theirs')).to.be.true;
     });
 
-    it('a failed BASE blob does not hide the verbatim escape hatch (take-side never reads base)', async () => {
-      // Missing base object (shallow/partial clone) — ours and theirs are
-      // fully readable, so both verbatim options must stay available or the
-      // user's only way out is aborting the whole operation.
+    it('a failed BASE blob keeps the structured editor fully working', async () => {
+      // Missing base object (shallow/partial clone) — parsing and block
+      // resolution never need base content, so the editor must stay alive
+      // with only Use Base disabled, not degrade to whole-file-only.
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
@@ -893,11 +985,24 @@ describe('lv-merge-editor', () => {
         return baseMock(command, args);
       };
       const el = await renderLoadedEditor();
-      expect(internalOf(el).loadFailed).to.be.true;
-      const verbatimBtns = Array.from(
-        el.shadowRoot!.querySelectorAll('.output-error button')
-      ).filter((b) => b.textContent?.includes('verbatim'));
-      expect(verbatimBtns.length).to.equal(2);
+      const internal = internalOf(el);
+      expect(internal.loadFailed).to.be.false;
+      expect(internal.segments.filter((s) => s.type === 'conflict').length).to.equal(1);
+
+      // Per-block resolution still works.
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(internal.segments.filter((s) => s.type === 'conflict').length).to.equal(0);
+
+      // Only Use Base is disabled — its content is not trustworthy.
+      const useBase = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn')).find(
+        (b) => b.textContent?.trim() === 'Use Base'
+      ) as HTMLButtonElement;
+      expect(useBase.disabled).to.be.true;
+      const useOurs = Array.from(
+        el.shadowRoot!.querySelectorAll('.toolbar-actions .btn-ours')
+      ).find((b) => b.textContent?.trim() === 'Use Ours') as HTMLButtonElement;
+      expect(useOurs.disabled).to.be.false;
     });
   });
 
@@ -2812,6 +2917,31 @@ describe('lv-merge-editor', () => {
       await el.updateComplete;
       expect(el.hasUnsavedResolutions(), 'accepting reloads from disk').to.be.false;
       expect(internal.segments.some((s) => s.type === 'conflict')).to.be.true;
+    });
+
+    it('a successful take-side supersedes stale in-memory picks', async () => {
+      // Picks made before a whole-side take are moot once the side is on
+      // disk and staged — leaving userTouched set would make Complete raise
+      // a false "unsaved rework" confirm on the LAST file (no auto-advance).
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'resolve_conflict_take_side') return { success: true };
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor('src/test.ts');
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(el.hasUnsavedResolutions()).to.be.true;
+
+      await (
+        el as unknown as { handleTakeSide: (s: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      await el.updateComplete;
+      expect(
+        el.hasUnsavedResolutions(),
+        'the write supersedes the in-memory picks'
+      ).to.be.false;
     });
 
     it('reload without unsaved picks does not ask', async () => {
