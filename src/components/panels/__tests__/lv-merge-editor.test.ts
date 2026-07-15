@@ -1075,6 +1075,30 @@ describe('lv-merge-editor', () => {
       ]);
     });
 
+    it('authoritative hunk positions work for CRLF files (indices align with backend lines())', async () => {
+      // The backend derives indices via Rust lines() (strips \r\n); the
+      // frontend splits on '\n' (keeps '\r' per line, plus a trailing '').
+      // For every index < length the two agree — and the sanity checks
+      // strip CR — so CRLF files parse by positions too.
+      const el = await renderEditor();
+      const internal = el as unknown as EditorInternal;
+      internal.conflictFile = {
+        ...makeConflictFile('src/win.ts'),
+        conflictHunks: [{ start: 1, separator: 3, end: 5 }],
+      };
+      const segments = internal.parseSegments(
+        'ctx\r\n<<<<<<< HEAD\r\nours\r\n=======\r\ntheirs\r\n>>>>>>> feature\r\ntail\r\n'
+      );
+      expect(segments.map((s) => s.type)).to.deep.equal(['resolved', 'conflict', 'resolved']);
+      expect(segments[1].oursLines).to.deep.equal(['ours\r']);
+      expect(segments[1].theirsLines).to.deep.equal(['theirs\r']);
+      expect(segments[1].oursLabel).to.equal('HEAD');
+      expect(segments[1].theirsLabel).to.equal('feature');
+      // Content line endings round-trip verbatim.
+      expect(segments[0].lines).to.deep.equal(['ctx\r']);
+      expect(segments[2].lines).to.deep.equal(['tail\r', '']);
+    });
+
     it('malformed hunk positions fall back to the shape heuristics', async () => {
       const el = await renderEditor();
       const internal = el as unknown as EditorInternal;

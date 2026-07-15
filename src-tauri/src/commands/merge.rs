@@ -1190,9 +1190,11 @@ fn detect_conflict_emission(
 fn collision_free_size(blobs: &[&[u8]], at_least: usize) -> u16 {
     let mut max_run = at_least;
     for bytes in blobs {
-        for line in String::from_utf8_lossy(bytes).lines() {
-            for ch in ['<', '=', '>', '|'] {
-                let n = line.chars().take_while(|&c| c == ch).count();
+        // Byte-level scan: merge_file works on raw bytes, so the run count
+        // must too (a lossy string decode could in principle diverge).
+        for line in bytes.split(|&b| b == b'\n') {
+            for ch in *b"<=>|" {
+                let n = line.iter().take_while(|&&b| b == ch).count();
                 if n > max_run {
                     max_run = n;
                 }
