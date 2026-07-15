@@ -611,6 +611,13 @@ export class LvBranchList extends LitElement {
         this.createBranchDialog.close();
         showToast('The repository tab was closed — branch creation cancelled', 'warning');
       }
+      // And the branch-cleanup dialog: its Delete force-deletes branches +
+      // prunes remotes on the pinned repo, so a closed tab must dismiss it.
+      const clPinned = this.branchCleanupDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (gone(clPinned)) {
+        this.branchCleanupDialog.close();
+        showToast('The repository tab was closed — branch cleanup cancelled', 'warning');
+      }
     });
   }
 
@@ -1015,12 +1022,15 @@ export class LvBranchList extends LitElement {
   /**
    * Handle cleanup completion by refreshing branches
    */
-  private async handleCleanupComplete(): Promise<void> {
-    // Captured BEFORE the loadBranches await: the refresh must pin to the repo
-    // the cleanup ran on, not whichever tab is active if the user switches
-    // during the reload (which rebinds this.repositoryPath).
-    const repoPath = this.repositoryPath;
-    await this.loadBranches();
+  private async handleCleanupComplete(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
+    // The cleanup dialog pins to the repo it ran on and reports it here. The
+    // user may have switched tabs while it was open (rebinding our live
+    // repositoryPath), so trust the event's repo and only reload OUR view when
+    // it matches. Mirrors handleBranchCreated / handleRebaseComplete.
+    const repoPath = e?.detail?.repositoryPath ?? this.repositoryPath;
+    if (repoPath === this.repositoryPath) {
+      await this.loadBranches();
+    }
     this.dispatchBranchesChanged(repoPath);
   }
 

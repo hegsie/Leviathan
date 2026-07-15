@@ -320,6 +320,38 @@ describe('lv-branch-list operationInProgress guards', () => {
     repositoryStore.getState().reset();
   });
 
+  it('closes its embedded branch-cleanup dialog when the pinned repo tab is removed', async () => {
+    // Branch cleanup force-deletes branches + prunes remotes on the pinned repo;
+    // a closed tab must dismiss it, or Delete would mutate a repo not in the tab
+    // bar. app-shell's guard can't reach this sidebar-embedded instance.
+    repositoryStore.getState().reset();
+    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+    const el = await createComponent();
+    for (let i = 0; i < 50; i++) {
+      if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    let closed = false;
+    Object.defineProperty(el, 'branchCleanupDialog', {
+      configurable: true,
+      value: {
+        pinnedRepositoryPathIfOpen: '/repo/a',
+        close: () => {
+          closed = true;
+        },
+      },
+    });
+
+    repositoryStore.getState().removeRepository('/repo/a');
+    await el.updateComplete;
+
+    expect(closed, 'branch-cleanup dialog closed when its pinned tab was removed').to.be.true;
+    repositoryStore.getState().reset();
+  });
+
   it('leaves the dialog open when a DIFFERENT repo tab is removed', async () => {
     // Only the pinned repo's removal cancels the rebase; unrelated tab churn
     // must not disrupt an in-progress plan.
