@@ -1339,6 +1339,72 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  describe('context-menu operation pinning', () => {
+    it('handleResetToCommit hard-resets the origin repo, not the tab switched to during the confirm', async () => {
+      // A hard reset discards uncommitted work — it must never run against a
+      // repo the user did not confirm. The confirm await yields; a mid-confirm
+      // tab switch rebinds activeRepository.
+      // No appendChild: the handler operates on @state + gitService (mocked)
+      // and does not need rendering; a full render cascade only adds noise.
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+      (el as any).contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        commit: { oid: 'deadbeef', summary: 'a commit', shortId: 'deadbee' },
+      };
+
+      let resolveConfirm: (v: unknown) => void = () => {};
+      mockResponses['plugin:dialog|message'] = () =>
+        new Promise((res) => {
+          resolveConfirm = res;
+        });
+
+      const promise = (el as any).handleResetToCommit('hard');
+      await new Promise((r) => setTimeout(r, 0));
+
+      // User switches to repo B while the confirm is up.
+      (el as any).activeRepository = { repository: mockRepo('/repo/b', 'b') };
+      resolveConfirm('Ok');
+      await promise;
+
+      const resetCall = invokeCallArgs.find((c) => c.command === 'reset');
+      expect(resetCall, 'reset was called').to.not.be.undefined;
+      expect(resetCall!.args.path).to.equal('/repo/a');
+    });
+
+    it('handleFixupCommit creates the fixup in the origin repo, not the tab switched to during the status check', async () => {
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+      (el as any).contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        commit: { oid: 'deadbeef', summary: 'a commit', shortId: 'deadbee' },
+      };
+
+      let resolveStatus: (v: unknown) => void = () => {};
+      mockResponses['get_status'] = () =>
+        new Promise((res) => {
+          resolveStatus = res;
+        });
+
+      const promise = (el as any).handleFixupCommit();
+      await new Promise((r) => setTimeout(r, 0));
+
+      // User switches tabs while the status check is in flight.
+      (el as any).activeRepository = { repository: mockRepo('/repo/b', 'b') };
+      resolveStatus([{ path: 'f.ts', isStaged: true }]);
+      await promise;
+
+      const commitCall = invokeCallArgs.find((c) => c.command === 'create_commit');
+      expect(commitCall, 'create_commit was called').to.not.be.undefined;
+      expect(commitCall!.args.path).to.equal('/repo/a');
+      expect((commitCall!.args.message as string)).to.contain('fixup!');
+    });
+  });
+
   describe('conflict operation derivation for external operations', () => {
     for (const state of ['apply-mailbox', 'apply-mailbox-or-rebase', 'bisect'] as const) {
       it(`refuses to open the dialog for an external ${state} operation`, async () => {

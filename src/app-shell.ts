@@ -1599,7 +1599,7 @@ export class AppShell extends LitElement {
     });
 
     if (result.success) {
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Merged ${refName}`, 'success');
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       this.conflictOperationType = 'merge';
@@ -1630,7 +1630,7 @@ export class AppShell extends LitElement {
     });
 
     if (result.success) {
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Rebased onto ${refName}`, 'success');
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       this.conflictOperationType = 'rebase';
@@ -1652,16 +1652,19 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const branchName = this.refContextMenu.refName;
+    // Captured before the delete await: the delete and its refresh must target
+    // the repo it was invoked on, even if the user switches tabs mid-operation.
+    const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     const result = await gitService.deleteBranch(
-      this.activeRepository.repository.path,
+      repoPath,
       branchName,
       false
     );
 
     if (result.success) {
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Deleted branch ${branchName}`, 'success');
     } else {
       log.error('Delete branch failed:', result.error);
@@ -1673,15 +1676,18 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const tagName = this.refContextMenu.refName;
+    // Captured before the delete await: the delete and its refresh must target
+    // the repo it was invoked on, even if the user switches tabs mid-operation.
+    const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     const result = await gitService.deleteTag({
-      path: this.activeRepository.repository.path,
+      path: repoPath,
       name: tagName,
     });
 
     if (result.success) {
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Deleted tag ${tagName}`, 'success');
     } else {
       log.error('Delete tag failed:', result.error);
@@ -1693,15 +1699,18 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const tagName = this.refContextMenu.refName;
+    // Captured before the (slow, network) push await: the push and its refresh
+    // must target the repo it was invoked on, even if the user switches tabs.
+    const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     const result = await gitService.pushTag({
-      path: this.activeRepository.repository.path,
+      path: repoPath,
       name: tagName,
     });
 
     if (result.success) {
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Pushed tag ${tagName}`, 'success');
     } else {
       log.error('Push tag failed:', result.error);
@@ -1831,6 +1840,11 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: the revert commit must be created in
+    // the repo it was invoked on, even if the user switches tabs (rebinding
+    // activeRepository) while the confirm is up.
+    const repoPath = this.activeRepository.repository.path;
+
     // A merge commit has no single "the change" to undo; git requires an
     // explicit mainline parent (`git revert -m`). Default to the first parent
     // (the branch the merge landed on), which is what reverting a merge almost
@@ -1845,7 +1859,6 @@ export class AppShell extends LitElement {
     );
     if (!confirmed) return;
 
-    const repoPath = this.activeRepository!.repository.path;
     const result = await import('./services/git.service.ts').then((m) =>
       m.revert({
         path: repoPath,
@@ -1855,7 +1868,7 @@ export class AppShell extends LitElement {
     );
 
     if (result.success) {
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Reverted ${commit.oid.substring(0, 7)}`, 'success');
     } else if (result.error?.code === 'REVERT_CONFLICT') {
       // Show conflict resolution dialog
@@ -1903,7 +1916,9 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       showToast(`Aborted ${state}`, 'success');
-      this.handleRefresh();
+      // `path` was captured before the abort await — pin the refresh to it so a
+      // mid-abort tab switch doesn't refresh the wrong repo.
+      this.refreshConflictDialogRepo(path);
     } else {
       log.error('Abort failed:', result.error);
       showToast(result.error?.message || 'Abort failed', 'error');
@@ -1919,9 +1934,12 @@ export class AppShell extends LitElement {
     const branchName = e.detail?.branchName;
     if (!branchName || !this.activeRepository) return;
 
-    gitService.deleteBranch(this.activeRepository.repository.path, branchName, true).then(async (result) => {
+    // Captured before the delete: the force-delete and its refresh must target
+    // the repo it was invoked on, even if the user switches tabs mid-operation.
+    const repoPath = this.activeRepository.repository.path;
+    gitService.deleteBranch(repoPath, branchName, true).then(async (result) => {
       if (result.success) {
-        await this.handleRefresh();
+        this.refreshConflictDialogRepo(repoPath);
         showToast(`Force deleted branch ${branchName}`, 'success');
       } else {
         showToast(result.error?.message || 'Force delete failed', 'error');
@@ -2028,6 +2046,11 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: a hard reset discards uncommitted work
+    // and must target the repo it was invoked on, even if the user switches
+    // tabs (rebinding activeRepository) while the confirm is up.
+    const repoPath = this.activeRepository.repository.path;
+
     // Confirm reset based on mode
     if (mode === 'hard') {
       const confirmed = await showConfirm(
@@ -2053,14 +2076,14 @@ export class AppShell extends LitElement {
 
     const result = await import('./services/git.service.ts').then((m) =>
       m.reset({
-        path: this.activeRepository!.repository.path,
+        path: repoPath,
         targetRef: commit.oid,
         mode,
       })
     );
 
     if (result.success) {
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Reset failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Reset failed');
@@ -2094,8 +2117,13 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured once, before the status await: the fixup commit must be created
+    // in the repo it was invoked on, not whichever tab is active if the user
+    // switches during the (yielding) status check.
+    const repoPath = this.activeRepository.repository.path;
+
     // Check if there are staged changes
-    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    const statusResult = await gitService.getStatus(repoPath);
     if (!statusResult.success || !statusResult.data) {
       showToast('Failed to check status', 'error');
       return;
@@ -2108,13 +2136,13 @@ export class AppShell extends LitElement {
     }
 
     // Create fixup commit
-    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+    const result = await gitService.createCommit(repoPath, {
       message: `fixup! ${commit.summary}`,
     });
 
     if (result.success) {
       showToast(`Created fixup commit for ${commit.shortId}`, 'success');
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
       showErrorWithSuggestion(result.error?.message || '', 'Failed to create fixup commit');
@@ -2131,8 +2159,13 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured once, before the status await: the squash commit must be created
+    // in the repo it was invoked on, not whichever tab is active if the user
+    // switches during the (yielding) status check.
+    const repoPath = this.activeRepository.repository.path;
+
     // Check if there are staged changes
-    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    const statusResult = await gitService.getStatus(repoPath);
     if (!statusResult.success || !statusResult.data) {
       showToast('Failed to check status', 'error');
       return;
@@ -2145,13 +2178,13 @@ export class AppShell extends LitElement {
     }
 
     // Create squash commit
-    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+    const result = await gitService.createCommit(repoPath, {
       message: `squash! ${commit.summary}`,
     });
 
     if (result.success) {
       showToast(`Created squash commit for ${commit.shortId}`, 'success');
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
       showErrorWithSuggestion(result.error?.message || '', 'Failed to create squash commit');
@@ -2695,11 +2728,15 @@ export class AppShell extends LitElement {
         category: 'action',
         icon: 'undo',
         action: this.requiresRepository(async () => {
+          // Captured BEFORE the prompt/AI/confirm awaits (all yield): the
+          // reflog reset must run on the repo it was invoked on, even if the
+          // user switches tabs while any of those dialogs/calls are pending.
+          const repoPath = this.activeRepository!.repository.path;
           const query = await showPrompt('Smart Undo (AI)', 'Describe what you want to undo (e.g., "before the rebase", "undo last 3 commits"):');
           if (!query) return;
 
           const result = await import('./services/ai.service.ts').then(m =>
-            m.findReflogEntry(this.activeRepository!.repository.path, query)
+            m.findReflogEntry(repoPath, query)
           );
 
           if (result.success && result.data) {
@@ -2707,11 +2744,11 @@ export class AppShell extends LitElement {
             const confirmed = await showConfirm('Smart Undo', `${match.description}\n\nReset to HEAD@{${match.index}}? (soft reset — changes preserved as staged)`);
             if (confirmed) {
               const resetResult = await import('./services/git.service.ts').then(m =>
-                m.resetToReflog(this.activeRepository!.repository.path, match.index, 'soft')
+                m.resetToReflog(repoPath, match.index, 'soft')
               );
               if (resetResult.success) {
                 showToast('Undo successful', 'success');
-                await this.handleRefresh();
+                this.refreshConflictDialogRepo(repoPath);
               } else {
                 showToast(resetResult.error?.message ?? 'Undo failed', 'error');
               }
@@ -3173,10 +3210,13 @@ export class AppShell extends LitElement {
     // must inspect result.success — a catch-only path always reported success and
     // the backend emits remote-operation-completed only on success, so failures
     // were fully silent.
-    const result = await gitService.fetch({ path: this.activeRepository.repository.path });
+    // Pinned: fetch is a slow network op; if the user switches tabs while it
+    // runs, the refresh must target the repo that fetched, not the active tab.
+    const repoPath = this.activeRepository.repository.path;
+    const result = await gitService.fetch({ path: repoPath });
     if (result.success) {
       progressService.completeOperation(opId);
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
       showToast(result.error?.message ?? 'Fetch failed', 'error');
@@ -3221,10 +3261,13 @@ export class AppShell extends LitElement {
     // must inspect result.success — a catch-only path always reported success and
     // the backend emits remote-operation-completed only on success, so failures
     // were fully silent.
-    const result = await gitService.push({ path: this.activeRepository.repository.path });
+    // Pinned: push is a slow network op; if the user switches tabs while it
+    // runs, the refresh must target the repo that pushed, not the active tab.
+    const repoPath = this.activeRepository.repository.path;
+    const result = await gitService.push({ path: repoPath });
     if (result.success) {
       progressService.completeOperation(opId);
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
       showToast(result.error?.message ?? 'Push failed', 'error');
@@ -3237,7 +3280,10 @@ export class AppShell extends LitElement {
 
   private async handleCreateStash(): Promise<void> {
     if (!this.activeRepository) return;
-    const result = await gitService.createStash({ path: this.activeRepository.repository.path });
+    // Pinned: if the user switches tabs while the stash is being created, the
+    // refresh must target the repo that was stashed, not the active tab.
+    const repoPath = this.activeRepository.repository.path;
+    const result = await gitService.createStash({ path: repoPath });
     if (result.success) {
       if (result.data === null) {
         // Clean working tree: nothing to stash — informational, not an error.
@@ -3245,7 +3291,7 @@ export class AppShell extends LitElement {
         return;
       }
       showToast('Stash created', 'success');
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       showToast(result.error?.message ?? 'Failed to create stash', 'error');
     }
