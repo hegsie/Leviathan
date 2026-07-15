@@ -96,12 +96,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # llama-cpp-sys-2 builds a native library via CMake and caches its CMake
+      # build directory inside target/. That directory hard-codes the runner's
+      # CMake module paths (…/share/cmake-X.Y/…), so when GitHub bumps CMake in
+      # place on a runner image, a restored cache points at the old version's
+      # modules and the incremental reconfigure fails ("… cmake-4.3/Modules/…
+      # does not exist"). Fold the CMake version into the rust-cache key so any
+      # CMake bump invalidates the cache instead of poisoning the build.
+      - name: Capture CMake version for cache key
+        shell: bash
+        run: echo "CMAKE_VERSION=$(cmake --version | head -n1)" >> "$GITHUB_ENV"
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
           cache-on-failure: true
-          env-vars: ImageOS
+          env-vars: ImageOS CMAKE_VERSION
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
