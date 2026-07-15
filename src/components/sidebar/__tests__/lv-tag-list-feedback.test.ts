@@ -96,4 +96,83 @@ describe('lv-tag-list feedback', () => {
     expect(successToast, 'a success toast should be shown').to.not.be.undefined;
     expect(successToast!.message).to.equal('Pushed tag v2.0.0 to remote');
   });
+
+  it('handlePushTag pins push + tags-changed to the origin repo after a mid-push tab switch', async () => {
+    // Pushing is a slow network op; a tab switch during it rebinds
+    // this.repositoryPath. Both the push and the tags-changed refresh must pin
+    // to the origin repo so the host refreshes the right (backgrounded) tab.
+    const el = await createComponent();
+
+    let resolvePush!: (v: unknown) => void;
+    let pushArgs: { path?: string } | null = null;
+    mockInvoke = (command: string, args?: unknown) => {
+      if (command === 'push_tag') {
+        pushArgs = args as { path?: string };
+        return new Promise((resolve) => {
+          resolvePush = resolve;
+        });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    let detail: { repositoryPath?: string } | null = null;
+    el.addEventListener('tags-changed', (e) => {
+      detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    });
+
+    const tag = makeTag('v4.0.0');
+    (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null } }).contextMenu = {
+      visible: true, x: 0, y: 0, tag,
+    };
+
+    const promise = (el as unknown as { handlePushTag: () => Promise<void> }).handlePushTag();
+    await new Promise((r) => setTimeout(r, 10));
+    (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
+
+    resolvePush(null);
+    await promise;
+
+    expect(pushArgs, 'push_tag called').to.not.be.null;
+    expect(pushArgs!.path).to.equal(REPO_PATH);
+    expect(detail, 'tags-changed dispatched').to.not.be.null;
+    expect(detail!.repositoryPath).to.equal(REPO_PATH);
+  });
+
+  it('tag-checkout carries the repo the checkout ran on, even after a mid-op tab switch', async () => {
+    // repoPath is captured BEFORE the checkout await; if .repositoryPath
+    // rebinds mid-flight (tab switch), the event must still name the origin
+    // repo so the host pins its refresh there, not to the newly-active tab.
+    const el = await createComponent();
+
+    let resolveCheckout!: (v: unknown) => void;
+    mockInvoke = (command: string) => {
+      if (command === 'checkout_with_autostash') {
+        return new Promise((resolve) => {
+          resolveCheckout = resolve;
+        });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    let detail: { repositoryPath?: string } | null = null;
+    el.addEventListener('tag-checkout', (e) => {
+      detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    });
+
+    const tag = makeTag('v3.0.0');
+    (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null } }).contextMenu = {
+      visible: true, x: 0, y: 0, tag,
+    };
+
+    const promise = (el as unknown as { handleCheckoutTag: () => Promise<void> }).handleCheckoutTag();
+    // Let the confirm resolve and the checkout await begin, then switch tabs.
+    await new Promise((r) => setTimeout(r, 10));
+    (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
+
+    resolveCheckout({ success: true, data: { success: true, message: 'ok', stashed: false, stashApplied: false, stashConflict: false } });
+    await promise;
+
+    expect(detail, 'tag-checkout dispatched').to.not.be.null;
+    expect(detail!.repositoryPath).to.equal(REPO_PATH);
+  });
 });

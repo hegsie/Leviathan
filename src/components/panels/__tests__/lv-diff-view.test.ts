@@ -463,9 +463,9 @@ describe('lv-diff-view', () => {
     });
   });
 
-  // ── Conflict markers ──────────────────────────────────────────────────
-  describe('conflict markers', () => {
-    it('shows conflict banner for conflicted files', async () => {
+  // ── Conflicted files ──────────────────────────────────────────────────
+  describe('conflicted files', () => {
+    it('shows the merge-editor redirect instead of a diff', async () => {
       const diff = makeDiffFile({ status: 'conflicted' });
       setupDefaultMocks({ diff, fileContent: CONFLICT_CONTENT });
 
@@ -473,11 +473,15 @@ describe('lv-diff-view', () => {
         file: makeStatusEntry({ isConflicted: true, status: 'conflicted' }),
       });
 
-      const conflictBanner = el.shadowRoot!.querySelector('.conflict-banner');
-      expect(conflictBanner).to.not.be.null;
+      const redirect = el.shadowRoot!.querySelector('.conflict-redirect');
+      expect(redirect).to.not.be.null;
+      expect(redirect!.textContent).to.include('merge conflicts');
+      // No diff body and no edit affordance for conflicted files.
+      expect(el.shadowRoot!.querySelector('.diff-content')).to.be.null;
+      expect(el.shadowRoot!.querySelector('.edit-btn')).to.be.null;
     });
 
-    it('shows correct conflict count in banner', async () => {
+    it('never renders raw conflict markers', async () => {
       const diff = makeDiffFile({ status: 'conflicted' });
       setupDefaultMocks({ diff, fileContent: CONFLICT_CONTENT });
 
@@ -485,93 +489,49 @@ describe('lv-diff-view', () => {
         file: makeStatusEntry({ isConflicted: true, status: 'conflicted' }),
       });
 
-      const conflictInfo = el.shadowRoot!.querySelector('.conflict-info');
-      expect(conflictInfo).to.not.be.null;
-      expect(conflictInfo!.textContent).to.include('1 conflict');
+      const text = el.shadowRoot!.textContent ?? '';
+      for (const marker of ['<<<<<<<', '=======', '>>>>>>>']) {
+        expect(text, `UI must never contain "${marker}"`).to.not.include(marker);
+      }
     });
 
-    it('does not show conflict banner for non-conflicted files', async () => {
+    it('does not load the marker-laden diff at all', async () => {
+      const diff = makeDiffFile({ status: 'conflicted' });
+      setupDefaultMocks({ diff, fileContent: CONFLICT_CONTENT });
+
+      clearHistory();
+      await renderDiffView({
+        file: makeStatusEntry({ isConflicted: true, status: 'conflicted' }),
+      });
+
+      expect(findCommands('get_file_diff').length).to.equal(0);
+    });
+
+    it('dispatches open-conflict-dialog when Open Merge Editor is clicked', async () => {
+      const diff = makeDiffFile({ status: 'conflicted' });
+      setupDefaultMocks({ diff, fileContent: CONFLICT_CONTENT });
+
+      const el = await renderDiffView({
+        file: makeStatusEntry({ isConflicted: true, status: 'conflicted' }),
+      });
+
+      let dispatched = false;
+      el.addEventListener('open-conflict-dialog', () => {
+        dispatched = true;
+      });
+
+      const btn = el.shadowRoot!.querySelector('.conflict-redirect-btn') as HTMLElement;
+      expect(btn).to.not.be.null;
+      btn.click();
+
+      expect(dispatched).to.be.true;
+    });
+
+    it('does not show the redirect for non-conflicted files', async () => {
       setupDefaultMocks();
       const el = await renderDiffView();
 
-      const conflictBanner = el.shadowRoot!.querySelector('.conflict-banner');
-      expect(conflictBanner).to.be.null;
-    });
-  });
-
-  // ── Conflict resolution ──────────────────────────────────────────────
-  describe('conflict resolution', () => {
-    it('shows Accept All Ours and Accept All Theirs buttons in conflict banner', async () => {
-      const diff = makeDiffFile({ status: 'conflicted' });
-      setupDefaultMocks({ diff, fileContent: CONFLICT_CONTENT });
-
-      const el = await renderDiffView({
-        file: makeStatusEntry({ isConflicted: true, status: 'conflicted' }),
-      });
-
-      const conflictActions = el.shadowRoot!.querySelector('.conflict-actions');
-      expect(conflictActions).to.not.be.null;
-
-      const buttons = conflictActions!.querySelectorAll('.conflict-btn');
-      expect(buttons.length).to.equal(2);
-
-      const btnTexts = Array.from(buttons).map((b) => b.textContent?.trim());
-      expect(btnTexts).to.include('Accept All Ours');
-      expect(btnTexts).to.include('Accept All Theirs');
-    });
-
-    it('calls write_file_content when Accept All Ours is clicked', async () => {
-      const diff = makeDiffFile({ status: 'conflicted' });
-      setupDefaultMocks({ diff, fileContent: CONFLICT_CONTENT });
-
-      const el = await renderDiffView({
-        file: makeStatusEntry({ isConflicted: true, status: 'conflicted' }),
-      });
-
-      clearHistory();
-
-      // Click Accept All Ours
-      const buttons = el.shadowRoot!.querySelectorAll('.conflict-btn');
-      const oursBtn = Array.from(buttons).find(
-        (btn) => btn.textContent?.trim() === 'Accept All Ours'
-      ) as HTMLElement;
-      expect(oursBtn).to.not.be.undefined;
-      oursBtn.click();
-
-      await new Promise((r) => setTimeout(r, 200));
-      await el.updateComplete;
-
-      // Should have called read_file_content then write_file_content
-      const readCalls = findCommands('read_file_content');
-      expect(readCalls.length).to.be.greaterThan(0);
-
-      const writeCalls = findCommands('write_file_content');
-      expect(writeCalls.length).to.be.greaterThan(0);
-    });
-
-    it('calls write_file_content when Accept All Theirs is clicked', async () => {
-      const diff = makeDiffFile({ status: 'conflicted' });
-      setupDefaultMocks({ diff, fileContent: CONFLICT_CONTENT });
-
-      const el = await renderDiffView({
-        file: makeStatusEntry({ isConflicted: true, status: 'conflicted' }),
-      });
-
-      clearHistory();
-
-      // Click Accept All Theirs
-      const buttons = el.shadowRoot!.querySelectorAll('.conflict-btn');
-      const theirsBtn = Array.from(buttons).find(
-        (btn) => btn.textContent?.trim() === 'Accept All Theirs'
-      ) as HTMLElement;
-      expect(theirsBtn).to.not.be.undefined;
-      theirsBtn.click();
-
-      await new Promise((r) => setTimeout(r, 200));
-      await el.updateComplete;
-
-      const writeCalls = findCommands('write_file_content');
-      expect(writeCalls.length).to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelector('.conflict-redirect')).to.be.null;
     });
   });
 

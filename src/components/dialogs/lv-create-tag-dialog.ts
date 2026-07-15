@@ -182,6 +182,19 @@ export class LvCreateTagDialog extends LitElement {
 
   @property({ type: String }) repositoryPath = '';
 
+  /** The repo this dialog was opened for, captured at open(). The
+   * `repositoryPath` property is bound live to the active tab, so a tab switch
+   * while the modal is open would otherwise make Create target the wrong repo. */
+  private pinnedRepoPath = '';
+  private isOpen = false;
+
+  /** The pinned repo while the dialog is open, else null — lets the host
+   * self-close the dialog when that repo's tab is closed (a successful create
+   * on a closed repo would otherwise be a silent, invisible mutation). */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.isOpen ? this.pinnedRepoPath : null;
+  }
+
   @state() private name = '';
   @state() private targetRef = '';
   @state() private message = '';
@@ -194,6 +207,8 @@ export class LvCreateTagDialog extends LitElement {
 
   public open(targetRef?: string): void {
     this.reset();
+    this.pinnedRepoPath = this.repositoryPath;
+    this.isOpen = true;
     if (targetRef) {
       this.targetRef = targetRef;
     }
@@ -203,6 +218,7 @@ export class LvCreateTagDialog extends LitElement {
   }
 
   public close(): void {
+    this.isOpen = false;
     this.modal.open = false;
   }
 
@@ -264,8 +280,9 @@ export class LvCreateTagDialog extends LitElement {
     this.error = '';
 
     try {
+      const repoPath = this.pinnedRepoPath;
       const result = await createTag({
-        path: this.repositoryPath,
+        path: repoPath,
         name: tagName,
         target: this.targetRef || undefined,
         message: this.isAnnotated ? this.message.trim() : undefined,
@@ -273,7 +290,7 @@ export class LvCreateTagDialog extends LitElement {
 
       if (result.success) {
         this.dispatchEvent(new CustomEvent('tag-created', {
-          detail: { tag: result.data },
+          detail: { tag: result.data, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -296,6 +313,7 @@ export class LvCreateTagDialog extends LitElement {
   }
 
   private handleModalClose(): void {
+    this.isOpen = false;
     if (!this.isCreating) {
       this.reset();
     }

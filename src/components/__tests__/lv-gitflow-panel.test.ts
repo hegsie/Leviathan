@@ -351,8 +351,10 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      let eventFired = false;
-      el.addEventListener('gitflow-initialized', () => { eventFired = true; });
+      let eventDetail: unknown = null;
+      el.addEventListener('gitflow-initialized', ((e: CustomEvent) => {
+        eventDetail = e.detail;
+      }) as EventListener);
 
       const initBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
       initBtn.click();
@@ -360,11 +362,57 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      expect(eventFired).to.be.true;
+      // Carries the pre-await repo capture so the host's refresh pins to
+      // the repo the init ran on.
+      expect(eventDetail).to.deep.equal({ repositoryPath: REPO_PATH });
     });
   });
 
   // ── Start operations ───────────────────────────────────────────────────
+  describe('load race safety', () => {
+    it('a slow load for the previous repo cannot overwrite the current repo panel', async () => {
+      // The Finish buttons bind directly to the active items; a stale load
+      // for repo A landing after the user switched to repo B would show A's
+      // branches under B's tab and could finish/delete the wrong branch.
+      let releaseA: ((v: unknown) => void) | null = null;
+      mockInvoke = async (command: string, args?: unknown) => {
+        const path = (args as { path?: string })?.path;
+        if (command === 'get_gitflow_config') {
+          if (path === '/repo/A') return new Promise((res) => { releaseA = res; });
+          return DEFAULT_CONFIG;
+        }
+        if (command === 'get_branches') {
+          return path === '/repo/A'
+            ? [makeBranch({ name: 'feature/A-only', shorthand: 'feature/A-only', isHead: false })]
+            : [makeBranch({ name: 'feature/B-only', shorthand: 'feature/B-only', isHead: false })];
+        }
+        return null;
+      };
+
+      const el = await fixture<LvGitflowPanel>(
+        html`<lv-gitflow-panel .repositoryPath=${'/repo/A'}></lv-gitflow-panel>`
+      );
+      // A's config load is deferred (in flight). Switch to B, which resolves.
+      el.repositoryPath = '/repo/B';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 60));
+      await el.updateComplete;
+
+      const internal = el as unknown as { activeFeatures: Array<{ name: string }> };
+      expect(internal.activeFeatures.map((f) => f.name)).to.deep.equal(['B-only']);
+
+      // A's slow response finally lands — it must be discarded, not applied.
+      releaseA!(DEFAULT_CONFIG);
+      await new Promise((r) => setTimeout(r, 60));
+      await el.updateComplete;
+
+      expect(
+        internal.activeFeatures.map((f) => f.name),
+        "the stale repo's items must not overwrite the current panel",
+      ).to.deep.equal(['B-only']);
+    });
+  });
+
   describe('start operations', () => {
     it('calls gitflow_start_feature when New Feature action button is clicked', async () => {
       setupMocks({ branches: emptyBranches });
@@ -473,7 +521,13 @@ describe('lv-gitflow-panel', () => {
         await new Promise((r) => setTimeout(r, 150));
         await el.updateComplete;
 
-        expect(eventDetail).to.deep.equal({ type: 'start-feature', name: 'new-feat' });
+        // repositoryPath is the PRE-AWAIT capture — the host's refresh must
+        // target the repo the start ran on, not the tab active at completion.
+        expect(eventDetail).to.deep.equal({
+          type: 'start-feature',
+          name: 'new-feat',
+          repositoryPath: REPO_PATH,
+        });
       } finally {
         cleanupMockPrompt();
       }
@@ -571,7 +625,13 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      expect(eventDetail).to.deep.equal({ type: 'finish-feature', name: 'login' });
+      // repositoryPath is the PRE-AWAIT capture — same pinning as the
+      // conflict-path events.
+      expect(eventDetail).to.deep.equal({
+        type: 'finish-feature',
+        name: 'login',
+        repositoryPath: REPO_PATH,
+      });
     });
 
     it('does NOT call finish release when prompt is cancelled', async () => {

@@ -205,15 +205,33 @@ export class LvCherryPickDialog extends LitElement {
   @state() private isExecuting = false;
   @state() private error = '';
   @state() private isOpen = false;
+  /** Repo captured at open. This is a long-lived dialog (open → review →
+   * a separate later click to execute); the reactive `repositoryPath`
+   * prop rebinds the instant the user Ctrl+Tabs to another repo, so every
+   * internal op must use THIS pinned value, not the live prop. */
+  private pinnedRepoPath = '';
+  /** Target branch captured at open — the reactive `currentBranch` prop
+   * also rebinds on a tab switch, so the "Cherry-pick onto" LABEL must show
+   * the pinned branch, or it would advertise the wrong target the operation
+   * won't actually use. */
+  @state() private pinnedCurrentBranch = '';
 
   public open(commit: Commit): void {
     this.reset();
     this.commit = commit;
+    this.pinnedRepoPath = this.repositoryPath;
+    this.pinnedCurrentBranch = this.currentBranch;
     this.isOpen = true;
   }
 
   public close(): void {
     this.isOpen = false;
+  }
+
+  /** The repo this dialog is pinned to while open, or null when closed.
+   * The host uses it to close the dialog if that repo's tab is closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.isOpen ? this.pinnedRepoPath : null;
   }
 
   private reset(): void {
@@ -245,9 +263,12 @@ export class LvCherryPickDialog extends LitElement {
     this.isExecuting = true;
     this.error = '';
 
+    // The repo pinned at open — NOT the live prop, which rebinds on a
+    // tab switch while this dialog sits open.
+    const repoPath = this.pinnedRepoPath;
     try {
       const result = await cherryPick({
-        path: this.repositoryPath,
+        path: repoPath,
         commitOid: this.commit.oid,
         noCommit: this.noCommit || undefined,
         // A merge commit needs an explicit mainline parent (like
@@ -261,18 +282,27 @@ export class LvCherryPickDialog extends LitElement {
             commit: result.data,
             sourceCommit: this.commit,
             noCommit: this.noCommit,
+            // Same pinning as the conflict sibling: the refresh must target
+            // the repo the cherry-pick ran on, not whichever tab is active
+            // by the time it completes.
+            repositoryPath: repoPath,
           },
           bubbles: true,
           composed: true,
         }));
         this.close();
       } else {
-        // Check if it's a conflict
-        if (result.error?.message?.includes('conflict')) {
+        // Check if it's a conflict — match the structured code like every
+        // other entry point, with the message match as a fallback.
+        if (
+          result.error?.code === 'CHERRY_PICK_CONFLICT' ||
+          result.error?.message?.toLowerCase().includes('conflict')
+        ) {
           this.dispatchEvent(new CustomEvent('cherry-pick-conflict', {
             detail: {
               sourceCommit: this.commit,
               error: result.error,
+              repositoryPath: repoPath,
             },
             bubbles: true,
             composed: true,
@@ -343,7 +373,7 @@ export class LvCherryPickDialog extends LitElement {
           <!-- Target Info -->
           <div class="target-info">
             <span class="target-label">Cherry-pick onto:</span>
-            <span class="target-branch">${this.currentBranch || 'current branch'}</span>
+            <span class="target-branch">${this.pinnedCurrentBranch || 'current branch'}</span>
           </div>
 
           <!-- Options -->

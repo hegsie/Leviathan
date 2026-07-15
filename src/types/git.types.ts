@@ -383,6 +383,43 @@ export interface ConflictFile {
   theirs: ConflictEntry | null;
   /** True when any side of the conflict is binary — must not be edited as text */
   isBinary: boolean;
+  /**
+   * True when any side is a submodule (gitlink) pointer. Its entry OIDs
+   * are COMMITS, not blobs — no side content can be read, and resolving
+   * stages the chosen commit pointer directly.
+   */
+  isSubmodule?: boolean;
+  /**
+   * Marker size the conflict hunks in this file were written with (git's
+   * default is 7; the conflict-marker-size gitattribute raises it). The
+   * backend verifies the attribute against the file's actual emission, so
+   * the parser must use this exact size — never guess from content.
+   */
+  markerSize?: number;
+  /**
+   * Conflict style the hunks were written with. Only when this is 'diff3'
+   * may a `|||||||` run be treated as a base-section marker — in the
+   * default 'merge' style it is ours CONTENT, and discarding it would
+   * silently lose lines.
+   */
+  conflictStyle?: 'merge' | 'diff3';
+  /**
+   * AUTHORITATIVE marker positions (0-based working-file line indices)
+   * from the backend's collision-free replay. When present the parser
+   * uses them directly — content quoting marker lines (even byte-identical
+   * to the real ones) can never confuse position-based parsing. Empty for
+   * hand-edited files (no replay match), where validated shape heuristics
+   * take over.
+   */
+  conflictHunks?: ConflictHunk[];
+}
+
+/** One conflict hunk's marker line positions in the working file. */
+export interface ConflictHunk {
+  start: number;
+  separator: number;
+  end: number;
+  base?: number | null;
 }
 
 export interface ConflictEntry {

@@ -879,4 +879,650 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
   });
+
+  describe('conflict dialog repo pinning', () => {
+    it('keeps operating on the repo it was opened for after a tab switch', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        // Stash-apply conflicts on repo A (clean state) open the dialog.
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        const dialog = () =>
+          el.shadowRoot!.querySelector('lv-conflict-resolution-dialog') as HTMLElement & {
+            repositoryPath: string;
+          };
+        expect(dialog(), 'dialog should open').to.exist;
+        expect(dialog().repositoryPath).to.equal('/repo/a');
+
+        // Ctrl+Tab still works behind the full-screen dialog — the dialog
+        // must NOT retarget to repo B, or its abort/resolve commands would
+        // destroy repo B's unrelated work.
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+        expect(dialog(), 'dialog stays open').to.exist;
+        expect(dialog().repositoryPath).to.equal('/repo/a');
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('refuses to open for a repo whose tab was closed mid-operation', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        await el.updateComplete;
+
+        // The merge ran on repo A; the user closed A's tab during the
+        // await. A dialog pinned to a closed repo would float over the
+        // wrong screen with dead completion plumbing.
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+        (el as any).handleMergeConflictEvent(
+          new CustomEvent('merge-conflict', { detail: { repositoryPath: '/repo/a' } })
+        );
+        await el.updateComplete;
+
+        expect((el as any).showConflictDialog).to.be.false;
+        expect(el.shadowRoot!.querySelector('lv-conflict-resolution-dialog')).to.be.null;
+        const toasts = uiStore.getState().toasts;
+        expect(toasts.some((t) => t.type === 'warning' && t.message.includes('tab was closed')))
+          .to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('closing the pinned repo tab while the dialog is OPEN closes it with a warning', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        expect((el as any).showConflictDialog).to.be.true;
+
+        // The user clicks the × on repo A's tab with the dialog up. The
+        // dialog must not stay floating over whatever renders next.
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect((el as any).showConflictDialog).to.be.false;
+        expect(el.shadowRoot!.querySelector('lv-conflict-resolution-dialog')).to.be.null;
+        const toasts = uiStore.getState().toasts;
+        expect(
+          toasts.some((t) => t.type === 'warning' && t.message.includes('reopen it'))
+        ).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('closing an UNRELATED tab leaves the dialog alone', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        repositoryStore.getState().removeRepository('/repo/b');
+        await el.updateComplete;
+
+        expect((el as any).showConflictDialog).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a second conflict event cannot hijack an open dialog', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+
+        // User Ctrl+Tabs to repo B behind the dialog, then a NEW merge
+        // conflict fires there. It must not retarget the open dialog's
+        // repo or operation — that would aim repo A's picks at repo B.
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+        (el as any).handleMergeConflictEvent(new CustomEvent('merge-conflict'));
+        await el.updateComplete;
+
+        const dialog = el.shadowRoot!.querySelector(
+          'lv-conflict-resolution-dialog'
+        ) as HTMLElement & { repositoryPath: string; operationType: string };
+        expect(dialog.repositoryPath).to.equal('/repo/a');
+        expect(dialog.operationType).to.equal('stash');
+        // The refusal is not silent.
+        const toasts = uiStore.getState().toasts;
+        expect(toasts.some((t) => t.message.includes('already in progress'))).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a conflict OPENING on a background-tabbed repo refreshes the pinned repo too', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        // The merge ran on repo A, but the user switched to B during its
+        // await — the conflict event still carries A's path, and A (not B)
+        // must be the repo that gets refreshed.
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        (el as any).handleMergeConflictEvent(
+          new CustomEvent('merge-conflict', { detail: { repositoryPath: '/repo/a' } })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/a')).to.be.true;
+        const dialog = el.shadowRoot!.querySelector(
+          'lv-conflict-resolution-dialog'
+        ) as HTMLElement & { repositoryPath: string };
+        expect(dialog.repositoryPath).to.equal('/repo/a');
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('completing on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+
+        // User tabs to B, then completes the operation on pinned repo A.
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+        (el as any).handleConflictResolved();
+        await el.updateComplete;
+
+        // A is backgrounded — it must be marked stale (refreshed when
+        // re-activated) so its tab doesn't keep showing merge state.
+        expect((el as any).staleRepoPaths.has('/repo/a')).to.be.true;
+        expect((el as any).showConflictDialog).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('cherry-pick-complete on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        // The pick ran on B; the user has tabbed back to A by completion.
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).handleCherryPickComplete(
+          new CustomEvent('cherry-pick-complete', {
+            detail: {
+              sourceCommit: { oid: 'abcdef1234567890' },
+              noCommit: false,
+              repositoryPath: '/repo/b',
+            },
+          })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/b'), 'pinned repo marked stale').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a window repository-refresh carrying repoPath pins to that repo (sidebar success paths)', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        const pinnedCalls: Array<string | null> = [];
+        (el as any).refreshConflictDialogRepo = (p: string | null) => pinnedCalls.push(p);
+        let plainRefreshCalled = false;
+        (el as any).handleRefresh = () => { plainRefreshCalled = true; };
+
+        // A stash/tag/branch success on backgrounded repo A forwards its
+        // repo path through the window refresh.
+        window.dispatchEvent(
+          new CustomEvent('repository-refresh', { detail: { repoPath: '/repo/a' } })
+        );
+        await el.updateComplete;
+
+        expect(pinnedCalls, 'pinned to the originating repo').to.deep.equal(['/repo/a']);
+        expect(plainRefreshCalled, 'not the unpinned active-tab refresh').to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('gitflow-operation on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).handleGitflowEvent(
+          new CustomEvent('gitflow-operation', {
+            detail: { type: 'finish-feature', name: 'login', repositoryPath: '/repo/b' },
+          })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/b'), 'pinned repo marked stale').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a successful pull refreshes via the PINNED path, not the unconditional active-tab refresh', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        mockResponses['pull'] = () => null; // success (invokeCommand wraps)
+        (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+        // Spy: the fix routes the success path through refreshConflictDialogRepo
+        // with the captured repo path, not the unpinned handleRefresh().
+        const pinnedCalls: Array<string | null> = [];
+        (el as any).refreshConflictDialogRepo = (p: string | null) => pinnedCalls.push(p);
+        let plainRefreshCalled = false;
+        (el as any).handleRefresh = () => { plainRefreshCalled = true; };
+
+        await (el as any).handlePull();
+
+        expect(pinnedCalls, 'success routes through the pinned refresh').to.deep.equal(['/repo/a']);
+        expect(plainRefreshCalled, 'the unpinned handleRefresh is not used').to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a successful branch checkout refreshes via the PINNED path', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        mockResponses['checkout_with_autostash'] = () => ({ success: true });
+        (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+        const pinnedCalls: Array<string | null> = [];
+        (el as any).refreshConflictDialogRepo = (p: string | null) => pinnedCalls.push(p);
+        let plainRefreshCalled = false;
+        (el as any).handleRefresh = () => { plainRefreshCalled = true; };
+
+        await (el as any).handleCheckoutBranch(
+          new CustomEvent('checkout-branch', { detail: { branch: 'feature' } })
+        );
+
+        expect(pinnedCalls).to.deep.equal(['/repo/a']);
+        expect(plainRefreshCalled).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('ref-menu Checkout and graph Checkout both refresh via the PINNED path (sibling consistency)', async () => {
+      for (const handler of ['handleRefCheckout', 'handleCheckoutBranchFromGraph'] as const) {
+        const el = createAppShell();
+        document.body.appendChild(el);
+        try {
+          mockResponses['checkout_with_autostash'] = () => ({ success: true });
+          (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+          (el as any).refContextMenu = { visible: true, refName: 'feature' };
+          const pinnedCalls: Array<string | null> = [];
+          (el as any).refreshConflictDialogRepo = (p: string | null) => pinnedCalls.push(p);
+          let plainRefreshCalled = false;
+          (el as any).handleRefresh = () => { plainRefreshCalled = true; };
+
+          await (el as any)[handler](
+            new CustomEvent('x', { detail: { branchName: 'feature' } })
+          );
+
+          expect(pinnedCalls, `${handler} routes through the pinned refresh`).to.deep.equal(['/repo/a']);
+          expect(plainRefreshCalled, `${handler} avoids the unpinned refresh`).to.be.false;
+        } finally {
+          el.remove();
+        }
+      }
+    });
+
+    it('closing the pinned tab cancels an open cherry-pick or interactive-rebase dialog', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        // Fake the two dialogs as open and pinned to repo A. The @query
+        // fields are read-only getters, so shadow them on the instance.
+        let cpClosed = false;
+        let rbClosed = false;
+        Object.defineProperty(el, 'cherryPickDialog', {
+          configurable: true,
+          value: {
+            pinnedRepositoryPathIfOpen: '/repo/a',
+            close: () => { cpClosed = true; },
+          },
+        });
+        Object.defineProperty(el, 'interactiveRebaseDialog', {
+          configurable: true,
+          value: {
+            pinnedRepositoryPathIfOpen: '/repo/a',
+            close: () => { rbClosed = true; },
+          },
+        });
+
+        // Close repo A's tab — the store subscription must dismiss both.
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect(cpClosed, 'cherry-pick dialog closed').to.be.true;
+        expect(rbClosed, 'rebase dialog closed').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a rebase-complete event bubbling from a nested dialog reaches the host pinned refresh', async () => {
+      // Interactive rebase is dispatched by the branch-list's OWN embedded
+      // dialog too, not just the app-shell one — the host-level listener
+      // must catch either.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        // Dispatch from a descendant so it bubbles to the host listener.
+        const child = el.shadowRoot!.querySelector('*') ?? el;
+        child.dispatchEvent(
+          new CustomEvent('rebase-complete', {
+            detail: { repositoryPath: '/repo/b' },
+            bubbles: true,
+            composed: true,
+          })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/b')).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('rebase-complete on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).handleRebaseComplete(
+          new CustomEvent('rebase-complete', {
+            detail: { repositoryPath: '/repo/b' },
+          })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/b'), 'pinned repo marked stale').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('re-pins to the repo active at the NEXT open', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        (el as any).closeConflictDialog();
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        const dialog = el.shadowRoot!.querySelector(
+          'lv-conflict-resolution-dialog'
+        ) as HTMLElement & { repositoryPath: string };
+        expect(dialog.repositoryPath).to.equal('/repo/b');
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
+  describe('context-menu operation pinning', () => {
+    it('handleResetToCommit hard-resets the origin repo, not the tab switched to during the confirm', async () => {
+      // A hard reset discards uncommitted work — it must never run against a
+      // repo the user did not confirm. The confirm await yields; a mid-confirm
+      // tab switch rebinds activeRepository.
+      // No appendChild: the handler operates on @state + gitService (mocked)
+      // and does not need rendering; a full render cascade only adds noise.
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+      (el as any).contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        commit: { oid: 'deadbeef', summary: 'a commit', shortId: 'deadbee' },
+      };
+
+      let resolveConfirm: (v: unknown) => void = () => {};
+      mockResponses['plugin:dialog|message'] = () =>
+        new Promise((res) => {
+          resolveConfirm = res;
+        });
+
+      const promise = (el as any).handleResetToCommit('hard');
+      await new Promise((r) => setTimeout(r, 0));
+
+      // User switches to repo B while the confirm is up.
+      (el as any).activeRepository = { repository: mockRepo('/repo/b', 'b') };
+      resolveConfirm('Ok');
+      await promise;
+
+      const resetCall = invokeCallArgs.find((c) => c.command === 'reset');
+      expect(resetCall, 'reset was called').to.not.be.undefined;
+      expect(resetCall!.args.path).to.equal('/repo/a');
+    });
+
+    it('handleFixupCommit creates the fixup in the origin repo, not the tab switched to during the status check', async () => {
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+      (el as any).contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        commit: { oid: 'deadbeef', summary: 'a commit', shortId: 'deadbee' },
+      };
+
+      let resolveStatus: (v: unknown) => void = () => {};
+      mockResponses['get_status'] = () =>
+        new Promise((res) => {
+          resolveStatus = res;
+        });
+
+      const promise = (el as any).handleFixupCommit();
+      await new Promise((r) => setTimeout(r, 0));
+
+      // User switches tabs while the status check is in flight.
+      (el as any).activeRepository = { repository: mockRepo('/repo/b', 'b') };
+      resolveStatus([{ path: 'f.ts', isStaged: true }]);
+      await promise;
+
+      const commitCall = invokeCallArgs.find((c) => c.command === 'create_commit');
+      expect(commitCall, 'create_commit was called').to.not.be.undefined;
+      expect(commitCall!.args.path).to.equal('/repo/a');
+      expect((commitCall!.args.message as string)).to.contain('fixup!');
+    });
+  });
+
+  describe('reword pinning', () => {
+    it('handleRewordCommit does not open the rebase dialog if the user switched repos during the history await', async () => {
+      // The interactive-rebase dialog pins to the LIVE active-repo prop at
+      // open(); opening it after a mid-await tab switch would configure a
+      // reword of repo A's commit against repo B. The handler must cancel.
+      repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+      repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+      (el as any).contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        commit: { oid: 'commitA', summary: 'a commit', shortId: 'commitA' },
+      };
+
+      // Shadow the @query dialog getter with a spy.
+      let opened = false;
+      Object.defineProperty(el, 'interactiveRebaseDialog', {
+        configurable: true,
+        value: {
+          open: () => {
+            opened = true;
+          },
+        },
+      });
+
+      let resolveHistory: (v: unknown) => void = () => {};
+      mockResponses['get_commit_history'] = () =>
+        new Promise((res) => {
+          resolveHistory = res;
+        });
+
+      const promise = (el as any).handleRewordCommit();
+      await new Promise((r) => setTimeout(r, 0));
+
+      // User switches to repo B while the history IPC is in flight.
+      (el as any).activeRepository = { repository: mockRepo('/repo/b', 'b') };
+      // History resolves; commit is non-HEAD (different oid) → else branch.
+      resolveHistory([{ oid: 'headOfA' }]);
+      await promise;
+
+      expect(opened, 'rebase dialog must NOT open against the switched-to repo').to.be.false;
+      const warn = uiStore.getState().toasts.find((t) => t.type === 'warning');
+      expect(warn, 'a warning toast explains the cancellation').to.not.be.undefined;
+    });
+
+    it('handleRewordCommit opens the rebase dialog when the repo did not change', async () => {
+      repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+
+      const el = createAppShell();
+      (el as any).activeRepository = { repository: mockRepo('/repo/a', 'a') };
+      (el as any).contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        commit: { oid: 'commitA', summary: 'a commit', shortId: 'commitA' },
+      };
+
+      let opened = false;
+      Object.defineProperty(el, 'interactiveRebaseDialog', {
+        configurable: true,
+        value: {
+          open: () => {
+            opened = true;
+          },
+        },
+      });
+
+      mockResponses['get_commit_history'] = () => [{ oid: 'headOfA' }];
+
+      await (el as any).handleRewordCommit();
+
+      expect(opened, 'rebase dialog opens for a non-HEAD commit on the same repo').to.be.true;
+    });
+  });
+
+  describe('conflict operation derivation for external operations', () => {
+    for (const state of ['apply-mailbox', 'apply-mailbox-or-rebase', 'bisect'] as const) {
+      it(`refuses to open the dialog for an external ${state} operation`, async () => {
+        const el = createAppShell();
+        document.body.appendChild(el);
+        try {
+          const repo = { ...mockRepo('/repo/a', 'a'), state };
+          repositoryStore.getState().addRepository(repo, { activate: true });
+          await el.updateComplete;
+
+          // The dialog cannot drive am/bisect: Complete would not run their
+          // --continue and the inferred-stash Abort would discard the
+          // conflicted files while the operation stays wedged.
+          (el as any).openConflictDialogFromState();
+          await el.updateComplete;
+
+          expect((el as any).showConflictDialog).to.be.false;
+          expect(el.shadowRoot!.querySelector('lv-conflict-resolution-dialog')).to.be.null;
+          const toasts = uiStore.getState().toasts;
+          expect(toasts.some((t) => t.type === 'warning' && t.message.includes(state))).to.be
+            .true;
+        } finally {
+          el.remove();
+        }
+      });
+    }
+
+    it('still infers a stash conflict for a clean state', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        await el.updateComplete;
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        expect((el as any).showConflictDialog).to.be.true;
+        expect((el as any).conflictOperationType).to.equal('stash');
+      } finally {
+        el.remove();
+      }
+    });
+  });
 });

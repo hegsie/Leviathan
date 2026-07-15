@@ -127,7 +127,12 @@ describe('lv-branch-list conflict dispatch', () => {
     await (el as unknown as { handleRebaseBranch: () => Promise<void> }).handleRebaseBranch();
 
     expect(conflictEvent, 'open-conflict-dialog should be dispatched').to.not.be.null;
-    expect(conflictEvent!.detail).to.deep.equal({ operationType: 'rebase' });
+    // The event carries the repo the rebase ran on so the dialog pins to it
+    // even if the active tab changed while the rebase was in flight.
+    expect(conflictEvent!.detail).to.deep.equal({
+      operationType: 'rebase',
+      repositoryPath: '/test/repo',
+    });
     expect(conflictEvent!.bubbles).to.be.true;
     expect(conflictEvent!.composed).to.be.true;
     expect(invokeCalls.filter(c => c.command === 'abort_rebase')).to.have.length(0);

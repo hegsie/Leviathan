@@ -6,7 +6,7 @@ use tauri::command;
 use super::path_utils::validate_path_within_repo;
 use crate::error::{LeviathanError, Result};
 use crate::models::{
-    ConflictDetails, ConflictEntry, ConflictFile, ConflictMarker, ConflictMarkerFile,
+    ConflictDetails, ConflictEntry, ConflictFile, ConflictHunk, ConflictMarker, ConflictMarkerFile,
 };
 use crate::utils::create_command;
 
@@ -894,11 +894,55 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             .map(|e| String::from_utf8_lossy(&e.path).to_string())
             .unwrap_or_default();
 
-        // Binary conflicts must not be routed through the text merge editor
-        let is_binary = [&conflict.our, &conflict.their, &conflict.ancestor]
+        // Submodule (gitlink) conflicts have COMMIT OIDs, not blobs — every
+        // blob-based affordance (text editor, side panes, verbatim buttons)
+        // would dead-end on them. Flag them so the frontend routes to a
+        // commit-pointer chooser instead.
+        let is_submodule = [&conflict.our, &conflict.their, &conflict.ancestor]
             .iter()
             .filter_map(|e| e.as_ref())
-            .any(|e| repo.find_blob(e.id).map(|b| b.is_binary()).unwrap_or(false));
+            .any(|e| e.mode == 0o160000);
+
+        // Binary conflicts must not be routed through the text merge editor.
+        // SYMLINK conflicts must not either: their blobs are text (the link
+        // target path), but resolving them means recreating a LINK, not
+        // writing text — the whole-blob chooser (take-side, which is
+        // symlink-aware) is the only correct affordance.
+        let is_binary = !is_submodule
+            && [&conflict.our, &conflict.their, &conflict.ancestor]
+                .iter()
+                .filter_map(|e| e.as_ref())
+                .any(|e| {
+                    e.mode == 0o120000
+                        || repo.find_blob(e.id).map(|b| b.is_binary()).unwrap_or(false)
+                });
+
+        // How this file's conflict hunks were actually written. The
+        // conflict-marker-size attribute and merge.conflictStyle config only
+        // describe what git's CLI writes — libgit2's own merge/checkout
+        // ignores both and always emits 7-char merge-style markers — so the
+        // emission must be verified against the working file, not assumed.
+        // Binary conflicts have no marker hunks to detect (and libgit2's
+        // binary merge result has no content to replay against) — report
+        // the defaults; the text merge editor never parses them anyway.
+        // Submodule conflicts have no text either (the workdir path is a
+        // directory).
+        let (marker_size, conflict_style, conflict_hunks) = if is_binary || is_submodule {
+            (
+                crate::models::conflict::default_marker_size(),
+                crate::models::conflict::default_conflict_style(),
+                Vec::new(),
+            )
+        } else {
+            detect_conflict_emission(
+                &repo,
+                Path::new(&path),
+                &file_path,
+                conflict.ancestor.as_ref(),
+                conflict.our.as_ref(),
+                conflict.their.as_ref(),
+            )
+        };
 
         conflicts.push(ConflictFile {
             path: file_path,
@@ -906,11 +950,438 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             ours: get_entry(conflict.our),
             theirs: get_entry(conflict.their),
             is_binary,
+            is_submodule,
+            marker_size,
+            conflict_style,
+            conflict_hunks,
         });
     }
 
     tracing::debug!("get_conflicts: returning {} conflicts", conflicts.len());
     Ok(conflicts)
+}
+
+/// True when `line` is a marker run of `ch`: EXACTLY `size` characters
+/// followed by a space or end-of-line.
+fn is_marker_run(line: &str, ch: char, size: usize) -> bool {
+    let n = line.chars().take_while(|&c| c == ch).count();
+    n == size && matches!(line.chars().nth(n), None | Some(' '))
+}
+
+/// The `conflict-marker-size` gitattribute for a path, defaulting to 7.
+/// Parsed as u16: real sizes are tiny, and the cap also bounds the
+/// separator-string allocations downstream — a hostile
+/// `conflict-marker-size=4000000000` in a cloned repo's .gitattributes must
+/// not make the backend try to allocate gigabytes.
+fn attr_marker_size(repo: &git2::Repository, file_path: &str) -> u32 {
+    repo.get_attr(
+        Path::new(file_path),
+        "conflict-marker-size",
+        git2::AttrCheckFlags::default(),
+    )
+    .ok()
+    .flatten()
+    .and_then(|v| v.parse::<u16>().ok())
+    .map(u32::from)
+    .filter(|&n| n >= 1)
+    .unwrap_or_else(crate::models::conflict::default_marker_size)
+}
+
+/// True when `content` holds a complete conflict written at `size`: a start
+/// run, then a separator, then an end run — each exactly `size` marker
+/// characters followed by a space or end-of-line, in git's emission order.
+/// Fallback signal only — content that QUOTES a complete conflict (docs,
+/// fixtures) fools it, which is why detect_conflict_emission replays the
+/// merge first. Test oracle for the single-size completion semantics that
+/// `detected_marker_sizes` (the production path) computes across all sizes.
+#[cfg(test)]
+fn has_complete_conflict(content: &str, size: usize) -> bool {
+    let sep: String = "=".repeat(size);
+    let mut stage = 0u8; // 0 = want start, 1 = want separator, 2 = want end
+    for line in content.lines() {
+        match stage {
+            0 if is_marker_run(line, '<', size) => stage = 1,
+            1 if line == sep => stage = 2,
+            2 if is_marker_run(line, '>', size) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// A crafted file can demonstrate thousands of distinct sizes (escalating
+/// marker runs); each one downstream becomes up to three merge replays, so
+/// an uncapped list would let a hostile repo stall get_conflicts for
+/// minutes. Real emissions demonstrate one or two sizes; the earliest-seen
+/// ones are kept because the first complete conflict is git's own. The
+/// SMALLEST demonstrated size is always retained on top of the cap (see
+/// below) — dropping a small real size is the one dangerous direction.
+const MAX_DETECTED_SIZES: usize = 16;
+
+/// Marker sizes the file's content DEMONSTRATES: distinct start-run lengths
+/// (space/EOL-terminated) that form a complete conflict (start, then
+/// separator, then end) at their own size. Used when the
+/// conflict-marker-size attribute no longer matches what git wrote (it can
+/// change mid-operation via .gitattributes' own resolution). Callers pass
+/// `min_size` 7 for structural use (avoiding false positives on `< quoted`
+/// lines) or 1 for replay candidates (replay rejects wrong sizes safely).
+///
+/// Single pass: every marker-shaped line advances a per-size completeness
+/// state machine. Rescanning the file per distinct size would be
+/// O(sizes × lines) — a hostile file with escalating run lengths turns
+/// that into a multi-minute hang of get_conflicts.
+fn detected_marker_sizes(content: &str, min_size: usize) -> Vec<u32> {
+    use std::collections::HashMap;
+    // 0 = want start, 1 = want separator, 2 = want end, 3 = complete.
+    let mut stage: HashMap<usize, u8> = HashMap::new();
+    let mut sizes: Vec<u32> = Vec::new();
+    let mut min_complete: Option<u32> = None;
+    let mut min_complete_ge3: Option<u32> = None;
+    for line in content.lines() {
+        let (ch, exact) = match line.chars().next() {
+            Some('<') => ('<', false),
+            Some('=') => ('=', true),
+            Some('>') => ('>', false),
+            _ => continue,
+        };
+        let n = line.chars().take_while(|&c| c == ch).count();
+        if n < min_size || n > u16::MAX as usize {
+            continue;
+        }
+        // Start/end markers allow a trailing label; the separator is the
+        // bare run only (same shape has_complete_conflict matches).
+        if exact {
+            if line.chars().nth(n).is_some() {
+                continue;
+            }
+        } else if !matches!(line.chars().nth(n), None | Some(' ')) {
+            continue;
+        }
+        let s = stage.entry(n).or_insert(0);
+        match (ch, *s) {
+            ('<', 0) => *s = 1,
+            ('=', 1) => *s = 2,
+            ('>', 2) => {
+                *s = 3;
+                let sz = n as u32;
+                min_complete = Some(min_complete.map_or(sz, |m| m.min(sz)));
+                if sz >= 3 {
+                    min_complete_ge3 = Some(min_complete_ge3.map_or(sz, |m| m.min(sz)));
+                }
+                if sizes.len() < MAX_DETECTED_SIZES {
+                    sizes.push(sz);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Always retain the smallest demonstrated complete size, even if the cap
+    // already filled with larger (possibly hostile/quoted) ones. A small real
+    // conflict size (git honors conflict-marker-size as low as 1) evicted from
+    // the list would make the structural fallback floor to 7, and the frontend
+    // would then parse the real sub-7 markers as plain content and stage them
+    // silently. Retain the smallest complete size >= 3 SEPARATELY: the
+    // structural fallback filters to >= 3, so a sub-3 decoy occupying the
+    // global-min slot would be dropped there while a cap-evicted real size in
+    // [3,6] is not retained — floating the reported size above the real markers
+    // and leaking them. Retaining both closes that hole for at most one extra
+    // entry.
+    for m in [min_complete, min_complete_ge3].into_iter().flatten() {
+        if !sizes.contains(&m) {
+            sizes.push(m);
+        }
+    }
+    sizes.sort_unstable();
+    sizes
+}
+
+/// True when the FIRST complete conflict at `size` contains a base marker
+/// (`|||||||` run of the same size) between its start and separator —
+/// the structural signature of diff3 emission. Fallback signal only.
+fn diff3_within_first_conflict(content: &str, size: usize) -> bool {
+    let sep: String = "=".repeat(size);
+    let mut in_ours = false;
+    let mut saw_base = false;
+    for line in content.lines() {
+        if !in_ours {
+            if is_marker_run(line, '<', size) {
+                in_ours = true;
+            }
+        } else if line == sep {
+            return saw_base;
+        } else if is_marker_run(line, '|', size) {
+            saw_base = true;
+        }
+    }
+    false
+}
+
+/// Line-based comparison of the working file against a replayed merge,
+/// tolerant of the two things that legitimately differ between engines:
+/// marker LABELS (git's CLI writes branch names/commit subjects, libgit2
+/// writes index-entry paths) and CR line endings (checkout filters).
+/// Content lines must match exactly.
+fn matches_replay(workdir: &str, replay: &str, size: usize) -> bool {
+    let marker_kind = |line: &str| -> Option<char> {
+        ['<', '>', '|']
+            .into_iter()
+            .find(|&ch| is_marker_run(line, ch, size))
+    };
+    let a: Vec<&str> = workdir.lines().collect();
+    let b: Vec<&str> = replay.lines().collect();
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| {
+            x == y || matches!((marker_kind(x), marker_kind(y)), (Some(p), Some(q)) if p == q)
+        })
+}
+
+/// Determine the marker size and conflict style this file's hunks were
+/// ACTUALLY written with. The gitattribute/config only describe what git's
+/// CLI writes; libgit2 (the in-app merge engine) ignores both and always
+/// emits 7-char merge-style markers, and the same bytes can be a real
+/// conflict at one size and quoted content at another. So: replay the merge
+/// from the index blobs at each candidate size × style and accept a
+/// (label/CR tolerant) match as definitive; fall back to structural scans
+/// only when replay cannot decide (user-edited file, missing side).
+fn detect_conflict_emission(
+    repo: &git2::Repository,
+    repo_root: &Path,
+    file_path: &str,
+    ancestor: Option<&git2::IndexEntry>,
+    ours: Option<&git2::IndexEntry>,
+    theirs: Option<&git2::IndexEntry>,
+) -> (u32, String, Vec<ConflictHunk>) {
+    let attr_size = attr_marker_size(repo, file_path);
+    let content = match std::fs::read_to_string(repo_root.join(file_path)) {
+        Ok(c) => c,
+        // Unreadable working file (deleted side, binary) — size and style
+        // are moot for parsing; report the attribute value.
+        Err(_) => {
+            return (
+                attr_size,
+                crate::models::conflict::default_conflict_style(),
+                Vec::new(),
+            )
+        }
+    };
+
+    // Sizes actually WRITTEN in the file. The attribute reflects the repo's
+    // configuration NOW, not when git wrote the markers — resolving
+    // .gitattributes' own conflict mid-operation can change it under the
+    // markers' feet, and trusting only the attribute would then report a
+    // size the file does not use (the frontend would find zero conflicts
+    // and let Mark Resolved stage the raw markers as resolved content).
+    // Git emits runs as small as 1, so the REPLAY candidates take every
+    // demonstrated size — a wrong size simply fails the replay match, so
+    // sub-7 candidates cannot cause false positives there. The structural
+    // fallback below (when no replay matches) also uses these demonstrated
+    // sizes: a quoted `< text` / `= text` block that coincidentally forms a
+    // complete structure only makes the fallback prefer a size at which the
+    // frontend renders a spurious-but-blob-validated conflict block — the
+    // SAFE direction — whereas ignoring a real sub-7 size would leak its raw
+    // markers.
+    let detected_all = detected_marker_sizes(&content, 1);
+    let mut candidates: Vec<u32> = vec![attr_size];
+    if attr_size != 7 {
+        candidates.push(7);
+    }
+    for &d in &detected_all {
+        if !candidates.contains(&d) {
+            candidates.push(d);
+        }
+    }
+
+    // Replay from blob CONTENTS (not index entries): a missing ancestor —
+    // an add/add conflict — is merged against an empty base, exactly as git
+    // does, so those files still get replay verification instead of falling
+    // through to the ambiguous structural scan.
+    let blob = |e: Option<&git2::IndexEntry>| -> Option<Vec<u8>> {
+        e.and_then(|e| repo.find_blob(e.id).ok().map(|b| b.content().to_vec()))
+    };
+    let anc_bytes = blob(ancestor).unwrap_or_default();
+    if let (Some(our_bytes), Some(their_bytes)) = (blob(ours), blob(theirs)) {
+        let mut anc_in = git2::MergeFileInput::new();
+        anc_in.content(&anc_bytes);
+        let mut our_in = git2::MergeFileInput::new();
+        our_in.content(&our_bytes);
+        let mut their_in = git2::MergeFileInput::new();
+        their_in.content(&their_bytes);
+        for &size in &candidates {
+            for style in ["merge", "diff3", "zdiff3"] {
+                let mut opts = git2::MergeFileOptions::new();
+                opts.marker_size(size as u16);
+                opts.style_diff3(style == "diff3");
+                opts.style_zdiff3(style == "zdiff3");
+                let Ok(result) = git2::merge_file(&anc_in, &our_in, &their_in, Some(&mut opts))
+                else {
+                    continue;
+                };
+                let replay = String::from_utf8_lossy(result.content());
+                if matches_replay(&content, &replay, size as usize) {
+                    // zdiff3 emits the same structure as diff3 to a parser.
+                    let reported = if style == "merge" { "merge" } else { "diff3" };
+                    // The replay matched line-for-line, so marker positions
+                    // in the replay ARE positions in the working file. But
+                    // the replay's own content can quote marker-shaped
+                    // lines just like the file — re-replay at a size no
+                    // blob line collides with, where marker detection is
+                    // unambiguous, and hand the frontend AUTHORITATIVE
+                    // hunk positions instead of shape heuristics.
+                    let replay_line_count = replay.lines().count();
+                    // None when no collision-free size fits in u16 (a
+                    // pathological ~65k-char marker-char run) — fall back to
+                    // the frontend's blob-validated heuristics rather than
+                    // hand it a size that might itself collide.
+                    let hunks =
+                        collision_free_size(&[&anc_bytes, &our_bytes, &their_bytes], size as usize)
+                            .and_then(|star| {
+                                let mut star_opts = git2::MergeFileOptions::new();
+                                star_opts.marker_size(star);
+                                star_opts.style_diff3(style == "diff3");
+                                star_opts.style_zdiff3(style == "zdiff3");
+                                git2::merge_file(&anc_in, &our_in, &their_in, Some(&mut star_opts))
+                                    .ok()
+                                    .and_then(|star_result| {
+                                        let star_replay =
+                                            String::from_utf8_lossy(star_result.content())
+                                                .to_string();
+                                        // Marker lines are one line each at any
+                                        // size, so the line counts must agree —
+                                        // bail to heuristics if they somehow don't.
+                                        if star_replay.lines().count() != replay_line_count {
+                                            return None;
+                                        }
+                                        replay_hunks(&star_replay, star as usize, style != "merge")
+                                    })
+                            })
+                            .unwrap_or_default();
+                    return (size, reported.to_string(), hunks);
+                }
+            }
+        }
+    }
+
+    // Structural fallback (hand-edited files, missing sides). Choose the
+    // reported size. The frontend parses markers of EXACTLY this size, and its
+    // orphan safety-net matches runs of `>=` this size. Reporting a size LARGER
+    // than a real marker makes BOTH miss it — raw markers leak into the pane and
+    // round-trip to disk; reporting SMALLER is safe, because a real LARGER
+    // marker is still caught by the `>=` net (which collapses to a clean
+    // whole-file conflict). So take the SMALLEST candidate:
+    //  - every DEMONSTRATED complete size (`detected_all`) — this recovers a
+    //    real sub-7 size even when the current attribute has drifted back to the
+    //    default 7 (.gitattributes' own conflict resolved after git wrote the
+    //    markers), which a two-candidate attr-vs-7 check blind-spots; and
+    //  - the EXPLICIT attribute size (`attr_size != 7`) — because this fallback
+    //    runs only for HAND-EDITED files, and a hand edit that breaks the real
+    //    conflict's structure (e.g. deletes its separator) removes its size from
+    //    `detected_all`, so without the attribute a real sub-7 size would be
+    //    floored UP to a larger quoted-but-complete block and leak. `attr_size`
+    //    is only a real signal when it names a non-default size; a bare 7 is
+    //    indistinguishable from "no attribute", so folding it would wrongly cap
+    //    a genuine raised size (e.g. 12) down to 7.
+    // Exclude runs of 1-2 chars: git's practical minimum conflict-marker-size is
+    // 3, and a lone `<`/`=`/`>` content line forming a "complete" size-1
+    // structure would otherwise make the whole file parse as markers. A quoted
+    // LARGER conflict block only yields a spurious, blob-validated conflict block
+    // the frontend already contains. When nothing >=3 remains, fall back to the
+    // attribute size (default 7).
+    // Residual (accepted): if the attribute ALSO drifted to the default 7 AND
+    // the real markers are sub-7 AND a hand edit broke their structure, no
+    // signal of the real size survives; the min still floors >=7 and sub-7
+    // markers leak. Closing it would need the frontend echo-net floor below 7,
+    // which the design avoids (3-6-char `===`/`>>>` content dividers would then
+    // false-positive).
+    let size = detected_all
+        .iter()
+        .copied()
+        .chain((attr_size != 7).then_some(attr_size))
+        .filter(|&n| n >= 3)
+        .min()
+        // Nothing >=3 survived. attr_size is only reached here when it is 7 or
+        // sub-3 (a 3-6 attr would have passed the filter above); reporting a
+        // sub-3 attr would make the frontend parse `<<`/`==`/`>>` in ordinary
+        // prose as markers. Fall back to the safe default (7).
+        .unwrap_or_else(crate::models::conflict::default_marker_size);
+    let style = if diff3_within_first_conflict(&content, size as usize) {
+        "diff3"
+    } else {
+        "merge"
+    };
+    // No replay match — the file was hand-edited; positions would be
+    // guesses, so the frontend's validated heuristics take over.
+    (size, style.to_string(), Vec::new())
+}
+
+/// A marker size that cannot collide with any content line: strictly longer
+/// than every leading `<`/`=`/`>`/`|` run in any input blob. None when no
+/// such size fits in u16 (merge_file's marker_size is a u16) — the caller
+/// then falls back to heuristics rather than using a size that could itself
+/// collide with content.
+fn collision_free_size(blobs: &[&[u8]], at_least: usize) -> Option<u16> {
+    let mut max_run = at_least;
+    for bytes in blobs {
+        // Byte-level scan: merge_file works on raw bytes, so the run count
+        // must too (a lossy string decode could in principle diverge).
+        for line in bytes.split(|&b| b == b'\n') {
+            for ch in *b"<=>|" {
+                let n = line.iter().take_while(|&&b| b == ch).count();
+                if n > max_run {
+                    max_run = n;
+                }
+            }
+        }
+    }
+    let size = max_run + 3;
+    if size > u16::MAX as usize {
+        None
+    } else {
+        Some(size as u16)
+    }
+}
+
+/// Extract hunk marker positions from a replay generated at a
+/// collision-free size — every marker-shaped line is a REAL marker there.
+/// Returns None on any malformed structure (never expected).
+fn replay_hunks(replay: &str, size: usize, has_base: bool) -> Option<Vec<ConflictHunk>> {
+    let sep: String = "=".repeat(size);
+    let mut hunks: Vec<ConflictHunk> = Vec::new();
+    let mut cur: Option<(u32, Option<u32>, Option<u32>)> = None; // (start, base, separator)
+    for (i, line) in replay.lines().enumerate() {
+        let i = i as u32;
+        match cur {
+            None => {
+                if is_marker_run(line, '<', size) {
+                    cur = Some((i, None, None));
+                }
+            }
+            Some((start, base, separator)) => {
+                if separator.is_none()
+                    && has_base
+                    && base.is_none()
+                    && is_marker_run(line, '|', size)
+                {
+                    cur = Some((start, Some(i), None));
+                } else if separator.is_none() && line == sep {
+                    cur = Some((start, base, Some(i)));
+                } else if let Some(sep_idx) = separator {
+                    if is_marker_run(line, '>', size) {
+                        hunks.push(ConflictHunk {
+                            start,
+                            separator: sep_idx,
+                            end: i,
+                            base,
+                        });
+                        cur = None;
+                    }
+                }
+            }
+        }
+    }
+    if cur.is_some() {
+        return None;
+    }
+    Some(hunks)
 }
 
 /// Get content of a blob by OID
@@ -926,7 +1397,13 @@ pub async fn get_blob_content(path: String, oid: String) -> Result<String> {
         ));
     }
 
-    Ok(String::from_utf8_lossy(blob.content()).to_string())
+    // STRICT decoding, matching read_file_content: a lossy read would put
+    // U+FFFD substitutions on screen, and resolving from such a pane (Use
+    // Base on a legacy-encoded ancestor) would silently bake the corrupted
+    // text into the resolved file. The caller treats the error like any
+    // other unreadable side and offers verbatim (raw-bytes) resolution.
+    String::from_utf8(blob.content().to_vec())
+        .map_err(|_| LeviathanError::OperationFailed("File content is not valid UTF-8".to_string()))
 }
 
 /// Mark a file as resolved with the given content.
@@ -944,18 +1421,77 @@ pub async fn resolve_conflict(
     let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
     let mut index = repo.index()?;
 
+    // Inspect this file's conflict entries once. Two invariants are enforced
+    // server-side rather than trusting the frontend's routing:
+    //  - a NON-UTF-8 filename cannot round-trip through the String API
+    //    (get_conflicts already lossy-encoded it), so building a path from
+    //    file_path here would target a DIFFERENT (U+FFFD-mangled) file —
+    //    silently creating a ghost and leaving the real file conflicted.
+    //  - a SYMLINK/SUBMODULE conflict must be resolved by choosing a side
+    //    (take-side), never by writing text content over it.
+    let mut special_mode = false;
+    for c in index.conflicts()?.filter_map(|r| r.ok()) {
+        for entry in [&c.our, &c.their, &c.ancestor].into_iter().flatten() {
+            if String::from_utf8_lossy(&entry.path) == file_path.as_str() {
+                if std::str::from_utf8(&entry.path).is_err() {
+                    return Err(LeviathanError::OperationFailed(format!(
+                        "'{}' has a non-UTF-8 name and can't be resolved in the app — resolve it with git in a terminal",
+                        file_path
+                    )));
+                }
+                if entry.mode == 0o120000 || entry.mode == 0o160000 {
+                    special_mode = true;
+                }
+            }
+        }
+    }
+    if special_mode && !delete_file.unwrap_or(false) {
+        return Err(LeviathanError::OperationFailed(format!(
+            "'{}' is a symlink or submodule conflict — choose a side instead of writing text",
+            file_path
+        )));
+    }
+
     if delete_file.unwrap_or(false) {
-        if full_path.exists() {
-            std::fs::remove_file(&full_path)?;
+        // symlink_metadata, not exists(): exists() FOLLOWS symlinks, so a
+        // dangling link reports false and would be left on disk while the
+        // index stages its deletion — an untracked leftover that blocks
+        // later checkouts. A DIRECTORY here is a submodule worktree — git
+        // leaves it behind on `git rm` of a submodule, so never delete the
+        // tree (and remove_file would error on it anyway).
+        if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+            if !meta.file_type().is_dir() {
+                std::fs::remove_file(&full_path)?;
+            }
         }
         index.remove_path(Path::new(&file_path))?;
     } else {
-        // Write the resolved content to the working directory
+        // Write the resolved content to the working directory. NEVER write
+        // THROUGH an existing symlink — fs::write follows it and would
+        // corrupt the link's target file (and stage the wrong blob).
+        remove_if_symlink(&full_path)?;
+        // The parent directory can be missing (deleted out-of-band, or a
+        // file↔directory resolution) — create it so the write gives a
+        // sensible result instead of a raw NotFound.
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::write(&full_path, &content)?;
         index.add_path(Path::new(&file_path))?;
     }
     index.write()?;
 
+    Ok(())
+}
+
+/// Remove `path` when it is a symlink, so a subsequent write creates a new
+/// file instead of following the link into its target.
+fn remove_if_symlink(path: &Path) -> Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            std::fs::remove_file(path)?;
+        }
+    }
     Ok(())
 }
 
@@ -987,6 +1523,22 @@ pub async fn resolve_conflict_take_side(
             LeviathanError::OperationFailed(format!("No conflict found for '{}'", file_path))
         })?;
 
+    // A NON-UTF-8 filename cannot round-trip through the String API — the
+    // matched-by-lossy path here differs from the entry's real bytes, so
+    // every fs/index op below would target a DIFFERENT (mangled) path,
+    // silently creating a ghost file and leaving the real one conflicted.
+    // Refuse honestly instead.
+    if [&conflict.our, &conflict.their, &conflict.ancestor]
+        .into_iter()
+        .flatten()
+        .any(|e| std::str::from_utf8(&e.path).is_err())
+    {
+        return Err(LeviathanError::OperationFailed(format!(
+            "'{}' has a non-UTF-8 name and can't be resolved in the app — resolve it with git in a terminal",
+            file_path
+        )));
+    }
+
     let entry = match side.as_str() {
         "ours" => conflict.our,
         "theirs" => conflict.their,
@@ -999,24 +1551,122 @@ pub async fn resolve_conflict_take_side(
     };
 
     match entry {
+        Some(e) if e.mode == 0o160000 => {
+            // Submodule (gitlink) pointer — there is no blob to write. Stage
+            // the chosen COMMIT pointer directly (like `git checkout --ours`
+            // + `git add`). The submodule's own files come from a later
+            // `git submodule update`; here we only make the WORKTREE match
+            // what git does for a gitlink checkout — an empty directory at
+            // the path. Without this, a submodule↔file type conflict leaves
+            // the OTHER side's regular file (or a symlink) on disk while the
+            // index holds the gitlink, so `git status` reports the
+            // just-"resolved" path as dirty.
+            // create_dir_all, not create_dir: a NESTED gitlink (e.g.
+            // `vendor/sub`) may have no parent directory on disk yet.
+            if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+                if !meta.file_type().is_dir() {
+                    std::fs::remove_file(&full_path)?;
+                    std::fs::create_dir_all(&full_path)?;
+                }
+                // An existing directory is left as-is (it may already be the
+                // submodule's populated worktree).
+            } else {
+                std::fs::create_dir_all(&full_path)?;
+            }
+            let resolved = git2::IndexEntry {
+                // Clear the stage bits — this is the resolution entry.
+                flags: e.flags & !0x3000,
+                ..e
+            };
+            index.remove_path(Path::new(&file_path))?;
+            index.add(&resolved)?;
+        }
         Some(e) => {
-            // Write the chosen side's raw blob bytes (works for binary files)
             let blob = repo.find_blob(e.id)?;
-            std::fs::write(&full_path, blob.content())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                // Preserve the executable bit recorded in the index entry
-                if e.mode == 0o100755 {
-                    std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(0o755))?;
+            // NEVER write through an existing symlink: fs::write follows
+            // it, which would corrupt the link's TARGET file and stage the
+            // pre-existing (wrong) link blob instead of the chosen side.
+            remove_if_symlink(&full_path)?;
+            // A DIRECTORY here is the other side's submodule worktree
+            // (gitlink↔file/symlink type conflict) — fs::write/symlink on
+            // it fails with a raw EISDIR/EEXIST. An empty placeholder dir
+            // (uninitialized submodule) is removed; a populated one is
+            // refused with an actionable message — never delete a tree
+            // that may hold uncommitted submodule work.
+            if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+                // The same branch is reached by a file↔directory (D/F)
+                // conflict with no submodule involved, so the message must
+                // not assume one.
+                if meta.file_type().is_dir() && std::fs::remove_dir(&full_path).is_err() {
+                    return Err(LeviathanError::OperationFailed(format!(
+                        "'{}' is a directory with files in it (the other side made this path a directory) — move or remove it, then take this side again",
+                        file_path
+                    )));
+                }
+            }
+            // A NESTED conflicted path (e.g. `vendor/pkg/file`) may have no
+            // parent directory on disk — create it so the write/symlink
+            // below gives a sensible result instead of a raw NotFound.
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if e.mode == 0o120000 {
+                // The chosen side IS a symlink — its blob content is the
+                // link target path; recreate the link rather than writing
+                // a regular file containing the target as text.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStrExt;
+                    // remove_if_symlink only cleared a symlink; in a
+                    // file↔symlink type conflict the workdir holds a REGULAR
+                    // file, and symlink() refuses to replace it (EEXIST).
+                    if std::fs::symlink_metadata(&full_path).is_ok() {
+                        std::fs::remove_file(&full_path)?;
+                    }
+                    // A symlink target is an arbitrary byte string, not
+                    // necessarily UTF-8 — from_utf8_lossy would replace odd
+                    // bytes with U+FFFD and silently break the link. Write
+                    // the exact bytes git recorded.
+                    std::os::unix::fs::symlink(
+                        std::ffi::OsStr::from_bytes(blob.content()),
+                        &full_path,
+                    )?;
+                }
+                #[cfg(not(unix))]
+                std::fs::write(&full_path, blob.content())?;
+            } else {
+                // Write the chosen side's raw blob bytes (works for binary
+                // files).
+                std::fs::write(&full_path, blob.content())?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    // Apply the chosen side's mode in BOTH directions:
+                    // fs::write keeps the existing file's permissions, so
+                    // taking a non-executable side over an executable
+                    // on-disk file must chmod DOWN too, or the resolved
+                    // file is staged with the mode of the side the user
+                    // rejected.
+                    let mode = if e.mode == 0o100755 { 0o755 } else { 0o644 };
+                    std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(mode))?;
                 }
             }
             index.add_path(Path::new(&file_path))?;
         }
         None => {
-            // The chosen side deleted the file — the resolution is removal
-            if full_path.exists() {
-                std::fs::remove_file(&full_path)?;
+            // The chosen side deleted the file — the resolution is removal.
+            // symlink_metadata, not exists(): a DANGLING symlink (common for
+            // links into ignored/generated trees) reports exists()==false
+            // and would survive on disk as an untracked leftover while the
+            // UI says the file was deleted.
+            if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+                // A DIRECTORY here is a submodule worktree (gitlink
+                // deletion) — git itself leaves it behind on `git rm`
+                // of a submodule; never delete a whole tree from a
+                // conflict resolution.
+                if !meta.file_type().is_dir() {
+                    std::fs::remove_file(&full_path)?;
+                }
             }
             index.remove_path(Path::new(&file_path))?;
         }
@@ -2225,6 +2875,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_take_side_gitlink_materializes_a_nested_missing_parent_dir() {
+        // A NESTED gitlink (`vendor/sub`) whose parent directory does not
+        // exist on disk. create_dir (non-recursive) would fail; the
+        // resolution must create the parent chain and succeed.
+        let repo = TestRepo::with_initial_commit();
+        let git_repo = repo.repo();
+        let ptr_ours = repo.create_commit("ptr ours", &[("a.txt", "2")]);
+        let ptr_theirs = repo.create_commit("ptr theirs", &[("a.txt", "3")]);
+
+        // Directly stage a 3-stage conflict for the nested gitlink path so
+        // the worktree genuinely has no `vendor/` directory.
+        let mut index = git_repo.index().unwrap();
+        for (stage, oid) in [(1u16, ptr_ours), (2u16, ptr_ours), (3u16, ptr_theirs)] {
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: 0o160000,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: oid,
+                flags: stage << 12,
+                flags_extended: 0,
+                path: b"vendor/sub".to_vec(),
+            };
+            index.add(&entry).unwrap();
+        }
+        index.write().unwrap();
+        assert!(!repo.path.join("vendor").exists());
+
+        resolve_conflict_take_side(
+            repo.path_str(),
+            "vendor/sub".to_string(),
+            "ours".to_string(),
+        )
+        .await
+        .expect("nested gitlink resolution must create the parent dir");
+
+        let meta = std::fs::symlink_metadata(repo.path.join("vendor/sub")).unwrap();
+        assert!(meta.file_type().is_dir(), "gitlink materialized as a dir");
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        assert_eq!(
+            index.get_path(Path::new("vendor/sub"), 0).unwrap().mode,
+            0o160000
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_conflict_delete_leaves_a_submodule_directory_in_place() {
+        // resolve_conflict with delete_file on a path that is a DIRECTORY on
+        // disk (a submodule worktree) must stage the removal without erroring
+        // on remove_file, and must NOT delete the directory tree.
+        let repo = TestRepo::with_initial_commit();
+        let git_repo = repo.repo();
+        let ptr = repo.create_commit("ptr", &[("a.txt", "1")]);
+        let mut index = git_repo.index().unwrap();
+        let entry = git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: 0o160000,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id: ptr,
+            flags: 0,
+            flags_extended: 0,
+            path: b"sub".to_vec(),
+        };
+        index.add(&entry).unwrap();
+        index.write().unwrap();
+        // A populated submodule worktree directory sits on disk.
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        std::fs::write(repo.path.join("sub/work.txt"), "wip\n").unwrap();
+
+        resolve_conflict(
+            repo.path_str(),
+            "sub".to_string(),
+            String::new(),
+            Some(true),
+        )
+        .await
+        .expect("delete on a submodule dir must not error on remove_file");
+
+        // The directory (and its uncommitted work) is left on disk.
+        assert!(repo.path.join("sub/work.txt").exists());
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .index()
+            .unwrap()
+            .get_path(Path::new("sub"), 0)
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn test_resolve_conflict_take_side_theirs() {
         let repo = TestRepo::with_initial_commit();
         setup_conflicting_branches(&repo);
@@ -2302,6 +3052,100 @@ mod tests {
         assert!(!repo.repo().index().unwrap().has_conflicts());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_resolve_conflict_rejects_writing_text_over_a_symlink() {
+        // resolve_conflict (the text pipeline) must refuse a symlink
+        // conflict server-side — writing text content would corrupt the
+        // link. The UI routes these to take-side; this enforces it.
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        let link = repo.path.join("link");
+        symlink("base-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Add link", &[]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::remove_file(&link).unwrap();
+        symlink("theirs-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Feature retargets", &[]);
+        repo.checkout_branch(&initial_branch);
+        std::fs::remove_file(&link).unwrap();
+        symlink("ours-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Main retargets", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let err = resolve_conflict(
+            repo.path_str(),
+            "link".to_string(),
+            "arbitrary text".to_string(),
+            None,
+        )
+        .await
+        .expect_err("must refuse to write text over a symlink conflict");
+        assert!(err.to_string().contains("symlink or submodule conflict"));
+        // The link is untouched and still conflicted.
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert!(repo.repo().index().unwrap().has_conflicts());
+    }
+
+    #[tokio::test]
+    async fn test_take_side_refuses_a_non_utf8_filename() {
+        // A non-UTF-8 filename cannot round-trip through the String API —
+        // the frontend already has a lossy name — so resolving would target
+        // a DIFFERENT (mangled) path. Refuse honestly instead of silently
+        // creating a ghost and leaving the real file conflicted.
+        let repo = TestRepo::with_initial_commit();
+        let git_repo = repo.repo();
+        let ours_oid = git_repo.blob(b"ours\n").unwrap();
+        let theirs_oid = git_repo.blob(b"theirs\n").unwrap();
+        // café.txt where é is the raw Latin-1 byte 0xE9 (not valid UTF-8).
+        let raw_path: &[u8] = b"caf\xe9.txt";
+
+        let mut index = git_repo.index().unwrap();
+        for (stage, oid) in [(2u16, ours_oid), (3u16, theirs_oid)] {
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: oid,
+                flags: stage << 12,
+                flags_extended: 0,
+                path: raw_path.to_vec(),
+            };
+            index.add(&entry).unwrap();
+        }
+        index.write().unwrap();
+        assert!(git_repo.index().unwrap().has_conflicts());
+
+        // The frontend would send the LOSSY name (get_conflicts lossy-
+        // encoded it). take-side finds the entry by lossy match, then
+        // refuses because the entry's real bytes aren't UTF-8.
+        let lossy = String::from_utf8_lossy(raw_path).to_string();
+        let err = resolve_conflict_take_side(repo.path_str(), lossy, "ours".to_string())
+            .await
+            .expect_err("must refuse a non-UTF-8 filename rather than corrupt");
+        assert!(err.to_string().contains("non-UTF-8 name"));
+    }
+
     #[tokio::test]
     async fn test_get_conflicts_flags_binary() {
         let repo = TestRepo::with_initial_commit();
@@ -2336,6 +3180,1630 @@ mod tests {
             .find(|c| c.path == "blob.bin")
             .expect("binary conflict should be listed");
         assert!(bin.is_binary, "binary conflict must be flagged");
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_reports_marker_size() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Raise the marker size for .txt files via gitattributes, committed
+        // on all branches so it is in effect during the merge.
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=12\n"),
+                ("shared.txt", "base"),
+                ("other.md", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit(
+            "Feature change",
+            &[("shared.txt", "feature content"), ("other.md", "feature")],
+        );
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit(
+            "Main change",
+            &[("shared.txt", "main content"), ("other.md", "main")],
+        );
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // libgit2's merge ignores conflict-marker-size and writes 7-char
+        // markers, so the raised attribute must NOT be reported for this
+        // file — the frontend would parse the real markers as content.
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(
+            written.lines().any(|l| l.starts_with("<<<<<<<")),
+            "precondition: libgit2 wrote default-size markers; got:\n{written}"
+        );
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 7,
+            "raised attribute must fall back to 7 when the file was written with 7-char markers"
+        );
+        assert_eq!(txt.conflict_style, "merge");
+        let md = conflicts
+            .iter()
+            .find(|c| c.path == "other.md")
+            .expect("md conflict should be listed");
+        assert_eq!(md.marker_size, 7, "unset attribute must default to 7");
+
+        // Git's CLI (rebase/cherry-pick shell-outs, external git) DOES honor
+        // the attribute. Simulate its emission: with real 12-char markers on
+        // disk the raised size must be reported. (The extra content line is
+        // not in the blobs, so this exercises the structural fallback.)
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<<<<<<< HEAD\nmain content\n<<<<<<< a 7-char sample in content\n============\nfeature content\n>>>>>>>>>>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 12,
+            "raised attribute must be reported when the file really uses raised markers"
+        );
+    }
+
+    /// Replays a merge of the conflicted index entries for `path` with the
+    /// given options and writes the result to the working directory —
+    /// simulating what a different engine (git's CLI) would have written.
+    fn replay_conflict_to_workdir(repo: &TestRepo, path: &str, opts: &mut git2::MergeFileOptions) {
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        let conflict = index
+            .conflicts()
+            .unwrap()
+            .flatten()
+            .find(|c| {
+                c.our
+                    .as_ref()
+                    .map(|e| String::from_utf8_lossy(&e.path) == path)
+                    .unwrap_or(false)
+            })
+            .expect("conflict should exist");
+        let result = git_repo
+            .merge_file_from_index(
+                conflict.ancestor.as_ref().unwrap(),
+                conflict.our.as_ref().unwrap(),
+                conflict.their.as_ref().unwrap(),
+                Some(opts),
+            )
+            .unwrap();
+        std::fs::write(repo.path.join(path), result.content()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_replay_detects_cli_written_raised_markers() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=12\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Rewrite the conflict exactly as git's CLI would: raised size, with
+        // labels DIFFERENT from libgit2's index-entry paths — the replay
+        // comparison must tolerate label differences.
+        let mut opts = git2::MergeFileOptions::new();
+        opts.marker_size(12);
+        opts.our_label("HEAD");
+        opts.their_label("feature");
+        replay_conflict_to_workdir(&repo, "shared.txt", &mut opts);
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(txt.marker_size, 12);
+        assert_eq!(txt.conflict_style, "merge");
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_quoted_raised_sample_does_not_fool_size_detection() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // The OURS side's CONTENT quotes a complete 12-char conflict — the
+        // very kind of file conflict-marker-size gets raised for. A purely
+        // structural scan reports 12 here; only the merge replay can tell
+        // that libgit2 actually wrote the real markers at 7.
+        let quoted = "docs:\n<<<<<<<<<<<< sample\none\n============\ntwo\n>>>>>>>>>>>> sample\n";
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=12\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", quoted)]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(
+            written.contains("<<<<<<<<<<<< sample") && written.contains("<<<<<<< "),
+            "precondition: quoted 12-sample AND real 7-char markers coexist; got:\n{written}"
+        );
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 7,
+            "the quoted sample must not defeat the replay verification"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_add_add_conflict_replays_against_empty_base() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // An add/add conflict has NO ancestor entry, so index-based replay
+        // is impossible — the empty-base replay must still certify the size.
+        // One side quotes a complete 12-char conflict (the docs case the
+        // attribute was raised for); the real markers are libgit2's 7.
+        let quoted = "docs:\n<<<<<<<<<<<< sample\none\n============\ntwo\n>>>>>>>>>>>> sample\n";
+        repo.create_commit(
+            "Add attrs",
+            &[(".gitattributes", "*.md conflict-marker-size=12\n")],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature adds doc", &[("new.md", quoted)]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main adds doc", &[("new.md", "unrelated text\n")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let written = std::fs::read_to_string(repo.path.join("new.md")).unwrap();
+        assert!(
+            written.contains("<<<<<<< ") && written.contains("<<<<<<<<<<<< sample"),
+            "precondition: real 7-char markers AND the quoted 12-sample coexist; got:\n{written}"
+        );
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let md = conflicts
+            .iter()
+            .find(|c| c.path == "new.md")
+            .expect("add/add conflict should be listed");
+        assert!(md.ancestor.is_none(), "precondition: no ancestor entry");
+        assert_eq!(
+            md.marker_size, 7,
+            "empty-base replay must certify the real size for add/add conflicts"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_add_add_pipe_content_is_not_diff3() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // Ours content contains a 7-pipe run (Markdown table art). With no
+        // ancestor entry the replay must still run (empty base) and report
+        // merge style — a diff3 misreport would make the frontend discard
+        // every ours line after the pipe run as a "base section".
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature adds", &[("new.txt", "THEIRS\n")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main adds", &[("new.txt", "a\n|||||||\nz\n")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "new.txt")
+            .expect("add/add conflict should be listed");
+        assert!(txt.ancestor.is_none(), "precondition: no ancestor entry");
+        assert_eq!(txt.marker_size, 7);
+        assert_eq!(
+            txt.conflict_style, "merge",
+            "pipe-run content must not misreport diff3 for add/add conflicts"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_undecidable_fallback_prefers_default_size() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=12\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Hand-edit the file so no replay matches, with COMPLETE conflict
+        // structures at BOTH sizes. Undecidable from bytes — the fallback
+        // must prefer 7 (this app's own engine) so the real markers written
+        // by libgit2 stay parseable rather than leaking as resolved text.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<<<<<<< quoted\nq1\n============\nq2\n>>>>>>>>>>>> quoted\nedited by hand\n<<<<<<< HEAD\nmain content\n=======\nfeature content\n>>>>>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 7);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_undecidable_fallback_prefers_smaller_real_sub7_size() {
+        // Mirror of the prefers-default-size case, in the DANGEROUS direction:
+        // the real markers are a SUB-7 size (conflict-marker-size=3, honored by
+        // the git CLI) and the file ALSO quotes a standard 7-char conflict (a
+        // README/fixture showing markers). Both sizes look complete, so the
+        // structural fallback is undecidable — it must prefer the SMALLER (3).
+        // Reporting 7 would make the frontend's exact-match parser miss the
+        // real size-3 markers AND its `>=7` orphan safety-net miss them too,
+        // leaking raw markers into the pane and letting Mark Resolved stage
+        // them to disk as "resolved".
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=3\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Hand-edit: a QUOTED standard 7-char conflict block (plain content)
+        // plus the REAL size-3 conflict, with a stray edit so no replay matches
+        // and the structural fallback must decide.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<< quoted\nq1\n=======\nq2\n>>>>>>> quoted\nedited by hand\n<<< HEAD\nmain content\n===\nfeature content\n>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_fallback_prefers_smallest_demonstrated_size() {
+        // NEITHER the attribute size nor 7 shows a complete conflict, but the
+        // content demonstrates two SUB-7 sizes: the REAL size-3 markers and a
+        // quoted size-5 block. The fallback must prefer the SMALLEST (3) —
+        // reporting 5 would make the exact-match parser miss the real size-3
+        // markers and the `>=min(7,5)=5` orphan net miss them too.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Real size-3 conflict + a quoted size-5 conflict, hand-edited so no
+        // replay matches. No conflict-marker-size attribute (attr defaults to
+        // 7); neither 7 nor any attribute size is complete.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "context\n<<< ours\nmain content\n===\nfeature content\n>>> theirs\nhand edit\n<<<<< example\nfoo\n=====\nbar\n>>>>> example\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_fallback_never_reports_a_sub3_attribute_size() {
+        // conflict-marker-size=2 is legal (git honors sizes as low as 1), but
+        // reporting 2 would make the frontend parse ordinary `<<`/`==`/`>>`
+        // prose as markers. When nothing >=3 is demonstrated (here the file was
+        // hand-resolved to plain content with no markers left, yet the index is
+        // still conflicted), the fallback must report the safe default 7, never
+        // the sub-3 attribute size.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=2\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Hand-resolved to plain content — no conflict markers remain, so no
+        // size is demonstrated and replay cannot match.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "just ordinary prose\n<< not a marker, only two\nmore text\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 7);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_fallback_uses_explicit_attr_when_real_conflict_hand_broken() {
+        // The structural fallback runs only for HAND-EDITED files, and a hand
+        // edit can break the real conflict's structure (delete its separator) so
+        // its size is NOT demonstrated-complete in the content. Here the real
+        // markers are size 5 (explicit conflict-marker-size=5) but hand-broken,
+        // and the file quotes a COMPLETE size-10 block. Without folding the
+        // explicit attribute, the fallback would floor UP to 10 and leak the real
+        // size-5 markers; folding attr_size (5) caps the reported size at 5.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=5\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // A quoted COMPLETE size-10 block + the REAL size-5 conflict with its
+        // separator hand-DELETED (so size 5 is not demonstrated-complete), plus a
+        // stray edit so no replay matches.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<<<<< ex\nx\n==========\ny\n>>>>>>>>>> ex\nhand edit\n<<<<< HEAD\nmain content\nfeature content\n>>>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 5);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_recovers_sub7_size_when_attribute_reverted_to_default() {
+        // The attribute was conflict-marker-size=3 when git wrote the markers,
+        // then REVERTED to the default 7 (e.g. resolving .gitattributes' own
+        // conflict). attr_marker_size now returns 7, so a two-candidate
+        // attr-vs-7 check would be blind to the real size-3 markers — and a
+        // quoted 7-char block makes 7 look complete, so it would report 7 and
+        // leak the real size-3 markers. Taking the smallest DEMONSTRATED size
+        // recovers 3.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=3\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Revert the attribute to default (remove the rule) and stage it, as
+        // resolving .gitattributes' own conflict via `git add` would — the
+        // lookup now falls through to the index and returns the default 7.
+        std::fs::write(repo.path.join(".gitattributes"), "").unwrap();
+        {
+            let repo_stage = git2::Repository::open(&repo.path).unwrap();
+            let mut idx = repo_stage.index().unwrap();
+            idx.add_path(Path::new(".gitattributes")).unwrap();
+            idx.write().unwrap();
+        }
+
+        // Quoted standard 7-char conflict block + stray edit (breaks replay),
+        // plus the REAL size-3 markers git actually wrote.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<< quoted\nq1\n=======\nq2\n>>>>>>> quoted\nedited by hand\n<<< HEAD\nmain content\n===\nfeature content\n>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_detects_size_when_attribute_went_stale() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // NO conflict-marker-size attribute — but the file's markers were
+        // written at 12 (the attribute was dropped mid-operation, e.g. by
+        // resolving .gitattributes' own conflict). The size must be
+        // detected from the content, or the frontend would find zero
+        // conflicts and Mark Resolved would stage the raw markers.
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Simulate CLI-written raised markers (with a hand edit so replay
+        // cannot match and the structural fallback must decide).
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<<<<<<< HEAD\nmain content\nhand edit\n============\nfeature content\n>>>>>>>>>>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 12,
+            "the written size must be detected from content when no size matches the attribute"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_reports_authoritative_hunk_positions() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        // Workdir: <<<<<<< ours / main content / ======= / feature content
+        // / >>>>>>> theirs — the replay matched, so positions are exact.
+        assert_eq!(txt.conflict_hunks.len(), 1);
+        let h = &txt.conflict_hunks[0];
+        assert_eq!((h.start, h.separator, h.end, h.base), (0, 2, 4, None));
+
+        // The positions must actually point at the marker lines on disk.
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        assert!(lines[h.start as usize].starts_with("<<<<<<<"));
+        assert!(lines[h.separator as usize].starts_with("======="));
+        assert!(lines[h.end as usize].starts_with(">>>>>>>"));
+    }
+
+    #[tokio::test]
+    async fn test_hand_edited_file_reports_no_hunk_positions() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        // A hand edit breaks the replay match — positions would be guesses,
+        // so none may be reported (the frontend heuristics take over).
+        let mut content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        content.push_str("hand edit\n");
+        std::fs::write(repo.path.join("shared.txt"), content).unwrap();
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert!(txt.conflict_hunks.is_empty());
+    }
+
+    #[test]
+    fn test_replay_hunks_and_collision_free_size() {
+        let replay = "ctx\n<<<<<<<<<< ours\na\n==========\nb\n>>>>>>>>>> theirs\ntail\n";
+        let hunks = replay_hunks(replay, 10, false).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(
+            (
+                hunks[0].start,
+                hunks[0].separator,
+                hunks[0].end,
+                hunks[0].base
+            ),
+            (1, 3, 5, None)
+        );
+
+        let diff3 = "<<<<<<<<<< o\na\n||||||||||\nbase\n==========\nb\n>>>>>>>>>> t\n";
+        let hunks = replay_hunks(diff3, 10, true).unwrap();
+        assert_eq!(hunks[0].base, Some(2));
+
+        // Collision-free size must exceed every marker-shaped run in blobs.
+        let blob = b"content\n<<<<<<<<<<<<<<< quoted long run\n" as &[u8];
+        let star = collision_free_size(&[blob], 7).expect("fits in u16");
+        assert!(star as usize > 15);
+
+        // A run near u16::MAX has no collision-free size that fits in u16 —
+        // bail to None rather than clamp to a colliding size.
+        let huge = vec![b'<'; u16::MAX as usize];
+        assert!(collision_free_size(&[&huge], 7).is_none());
+    }
+
+    #[test]
+    fn test_detected_marker_sizes() {
+        let raised = "ctx\n<<<<<<<<<<<< HEAD\nours\n============\ntheirs\n>>>>>>>>>>>> f\n";
+        assert_eq!(detected_marker_sizes(raised, 7), vec![12]);
+
+        let none = "just\nplain\ntext\n< quoted line\n";
+        assert!(detected_marker_sizes(none, 7).is_empty());
+
+        // An incomplete start-shaped line demonstrates nothing.
+        let incomplete = "<<<<<<< HEAD\nno separator or end\n";
+        assert!(detected_marker_sizes(incomplete, 7).is_empty());
+
+        // Git emits runs as small as 1 — sub-7 sizes are demonstrable when
+        // the floor allows them (used for replay candidates only).
+        let tiny = "<<<< HEAD\nours\n====\ntheirs\n>>>> f\n";
+        assert_eq!(detected_marker_sizes(tiny, 1), vec![4]);
+        assert!(detected_marker_sizes(tiny, 7).is_empty());
+
+        // The separator must be the bare run — a trailing label makes it
+        // content, exactly like has_complete_conflict treats it.
+        let labeled_sep = "<<<<<<< HEAD\nours\n======= label\ntheirs\n>>>>>>> f\n";
+        assert!(detected_marker_sizes(labeled_sep, 7).is_empty());
+
+        // Out-of-order marker lines (end before separator) demonstrate
+        // nothing at that size.
+        let out_of_order = "<<<<<<< HEAD\nours\n>>>>>>> f\n=======\n";
+        assert!(detected_marker_sizes(out_of_order, 7).is_empty());
+    }
+
+    #[test]
+    fn test_detected_marker_sizes_always_retains_the_smallest_size() {
+        // 16 distinct LARGE complete conflicts fill the cap, then a real
+        // sub-7 conflict appears. The smallest (sub-7) size must survive
+        // the cap — dropping it would floor the structural fallback to 7
+        // and hide the real markers as content.
+        let mut content = String::new();
+        for n in 20..36usize {
+            content.push_str(&"<".repeat(n));
+            content.push('\n');
+            content.push_str(&"=".repeat(n));
+            content.push('\n');
+            content.push_str(&">".repeat(n));
+            content.push('\n');
+        }
+        // The real, small conflict, demonstrated LAST (after the cap filled).
+        content.push_str("<<<< HEAD\nours\n====\ntheirs\n>>>> f\n");
+        let sizes = detected_marker_sizes(&content, 1);
+        assert!(
+            sizes.contains(&4),
+            "the smallest demonstrated size must be retained past the cap; got {sizes:?}"
+        );
+    }
+
+    #[test]
+    fn test_detected_marker_sizes_retains_smallest_ge3_when_global_min_is_sub3() {
+        // A sub-3 decoy (size 2) is the GLOBAL smallest, so it occupies the
+        // "retain smallest" slot — but the structural fallback filters to >= 3,
+        // dropping it. Meanwhile a real size-5 conflict is cap-evicted. Without
+        // separately retaining the smallest complete size >= 3, the fallback
+        // would floor to 6 and leak the real size-5 markers.
+        let mut content = String::new();
+        // Sub-3 complete conflict → sets the global min to 2.
+        content.push_str("<<\na\n==\nb\n>>\n");
+        // 20 distinct decoys at sizes 6..=25 fill the 16-slot cap first.
+        for n in 6..=25usize {
+            content.push_str(&"<".repeat(n));
+            content.push('\n');
+            content.push_str("a\n");
+            content.push_str(&"=".repeat(n));
+            content.push('\n');
+            content.push_str("b\n");
+            content.push_str(&">".repeat(n));
+            content.push('\n');
+        }
+        // The REAL size-5 conflict, LAST — its slot push is cap-blocked.
+        content.push_str("<<<<<\nours\n=====\ntheirs\n>>>>>\n");
+
+        let sizes = detected_marker_sizes(&content, 1);
+        assert!(
+            sizes.contains(&5),
+            "the smallest complete size >=3 must be retained past the cap; got {sizes:?}"
+        );
+        let min_ge3 = sizes.iter().copied().filter(|&n| n >= 3).min().unwrap();
+        assert_eq!(
+            min_ge3, 5,
+            "the >=3 structural fallback would floor to {min_ge3}, leaking size-5 markers"
+        );
+    }
+
+    #[test]
+    fn test_detected_marker_sizes_caps_hostile_escalating_runs() {
+        // A crafted file demonstrating thousands of distinct sizes must
+        // neither hang the scan (it is single-pass) nor hand thousands of
+        // replay candidates downstream — each candidate costs up to three
+        // merge replays in detect_conflict_emission.
+        let mut content = String::new();
+        for n in 1..=2000usize {
+            content.push_str(&"<".repeat(n));
+            content.push('\n');
+            content.push_str(&"=".repeat(n));
+            content.push('\n');
+            content.push_str(&">".repeat(n));
+            content.push('\n');
+        }
+        let sizes = detected_marker_sizes(&content, 1);
+        assert_eq!(sizes.len(), MAX_DETECTED_SIZES);
+        // The earliest-completed sizes are the ones kept — the first
+        // complete conflict in a real file is git's own emission.
+        assert_eq!(sizes, (1..=MAX_DETECTED_SIZES as u32).collect::<Vec<u32>>());
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_recovers_sub7_size_when_attribute_went_stale() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // The file's markers were written at size 4 (git honors sub-7
+        // attribute values), but the attribute has since changed to 8 —
+        // e.g. by resolving .gitattributes' own conflict mid-operation.
+        // The replay must still certify the true size via the
+        // content-demonstrated candidates.
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=8\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Rewrite the conflict as size-4 emission (what git wrote before
+        // the attribute changed).
+        let mut opts = git2::MergeFileOptions::new();
+        opts.marker_size(4);
+        replay_conflict_to_workdir(&repo, "shared.txt", &mut opts);
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(
+            written.lines().any(|l| l.starts_with("<<<< ")),
+            "precondition: size-4 markers on disk; got:\n{written}"
+        );
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 4,
+            "the replay must certify the sub-7 size the content demonstrates"
+        );
+        assert!(
+            !txt.conflict_hunks.is_empty(),
+            "replay-certified files get authoritative hunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_structural_fallback_recovers_sub7_size_on_hand_edited_files() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // Markers were written at size 4 (git honors sub-7 attribute
+        // values) but the attribute has since gone back to the default,
+        // AND the user hand-edited the file so no replay can match. The
+        // structural fallback must still report the demonstrated size —
+        // flooring to 7 would parse the surviving size-4 hunk as ZERO
+        // conflicts and let Mark Resolved stage the raw markers silently.
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // What git's CLI wrote at conflict-marker-size=4 before the
+        // attribute was resolved away, then hand-edited (an extra line),
+        // so every replay candidate fails the exact-content match.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "hand-added line\n<<<< HEAD\nmain content\n====\nfeature content\n>>>> feature\n",
+        )
+        .unwrap();
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 4,
+            "the structural fallback must keep the content-demonstrated sub-7 size"
+        );
+        assert!(
+            txt.conflict_hunks.is_empty(),
+            "hand-edited files get heuristics, not authoritative hunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_take_side_writes_the_file_side_of_a_submodule_type_conflict() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        let ptr = repo.create_commit("ptr", &[("a.txt", "1")]);
+        let git_repo = repo.repo();
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        stage_gitlink(&git_repo, "sub", ptr);
+        repo.create_commit("Add submodule", &[]);
+
+        // Feature replaces the submodule with a vendored regular FILE.
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        {
+            let mut index = git_repo.index().unwrap();
+            index.remove_path(Path::new("sub")).unwrap();
+            index.write().unwrap();
+        }
+        std::fs::remove_dir_all(repo.path.join("sub")).ok();
+        std::fs::write(repo.path.join("sub"), "vendored contents\n").unwrap();
+        repo.stage_file("sub");
+        repo.create_commit("Feature vendors sub", &[]);
+
+        // Main moves the submodule pointer.
+        repo.checkout_branch(&initial_branch);
+        let ptr2 = repo.create_commit("ptr2", &[("a.txt", "2")]);
+        stage_gitlink(&git_repo, "sub", ptr2);
+        repo.create_commit("Main moves submodule", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        assert!(
+            conflicts.iter().any(|c| c.path == "sub" && c.is_submodule),
+            "gitlink<->file type conflict should be listed as a submodule conflict"
+        );
+        // Model an initialized submodule: its worktree DIRECTORY sits at
+        // the conflicted path (empty placeholder here). fs::write on it
+        // would fail with EISDIR.
+        if std::fs::symlink_metadata(repo.path.join("sub")).is_err() {
+            std::fs::create_dir(repo.path.join("sub")).unwrap();
+        } else if std::fs::symlink_metadata(repo.path.join("sub"))
+            .unwrap()
+            .file_type()
+            .is_file()
+        {
+            std::fs::remove_file(repo.path.join("sub")).unwrap();
+            std::fs::create_dir(repo.path.join("sub")).unwrap();
+        }
+
+        resolve_conflict_take_side(repo.path_str(), "sub".to_string(), "theirs".to_string())
+            .await
+            .expect("taking the FILE side over an empty submodule dir must succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("sub")).unwrap(),
+            "vendored contents\n"
+        );
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index.get_path(Path::new("sub"), 0).expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o100644, "staged as a regular file");
+    }
+
+    #[tokio::test]
+    async fn test_take_side_gitlink_materializes_dir_and_leaves_clean_worktree() {
+        // Taking the SUBMODULE side of a submodule↔file type conflict must
+        // leave the worktree consistent with the staged gitlink (git checks
+        // a gitlink out as an empty directory). Without materializing it,
+        // the OTHER side's regular file stays on disk and `git status`
+        // reports the just-"resolved" path as dirty.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        let ptr = repo.create_commit("ptr", &[("a.txt", "1")]);
+        let git_repo = repo.repo();
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        stage_gitlink(&git_repo, "sub", ptr);
+        repo.create_commit("Add submodule", &[]);
+
+        // Feature replaces the submodule with a regular file.
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        {
+            let mut index = git_repo.index().unwrap();
+            index.remove_path(Path::new("sub")).unwrap();
+            index.write().unwrap();
+        }
+        std::fs::remove_dir_all(repo.path.join("sub")).ok();
+        std::fs::write(repo.path.join("sub"), "vendored\n").unwrap();
+        repo.stage_file("sub");
+        repo.create_commit("Feature vendors sub", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        let ptr2 = repo.create_commit("ptr2", &[("a.txt", "2")]);
+        stage_gitlink(&git_repo, "sub", ptr2);
+        repo.create_commit("Main moves submodule", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Force the workdir to hold the OTHER side's regular FILE (the exact
+        // shape that would be left behind if the gitlink arm ignored the
+        // worktree).
+        if std::fs::symlink_metadata(repo.path.join("sub"))
+            .map(|m| !m.file_type().is_file())
+            .unwrap_or(true)
+        {
+            let _ = std::fs::remove_dir_all(repo.path.join("sub"));
+            let _ = std::fs::remove_file(repo.path.join("sub"));
+            std::fs::write(repo.path.join("sub"), "vendored\n").unwrap();
+        }
+
+        resolve_conflict_take_side(repo.path_str(), "sub".to_string(), "ours".to_string())
+            .await
+            .expect("taking the gitlink side must succeed");
+
+        // The worktree path is now an (empty) directory, matching a gitlink
+        // checkout — not the leftover regular file.
+        let meta = std::fs::symlink_metadata(repo.path.join("sub")).unwrap();
+        assert!(meta.file_type().is_dir(), "gitlink materialized as a dir");
+
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index.get_path(Path::new("sub"), 0).expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o160000, "staged as a gitlink");
+        assert_eq!(staged.id, ptr2, "ours' commit pointer");
+        // The path is no longer reported as a conflict/dirty typechange.
+        assert!(get_conflicts(repo.path_str())
+            .await
+            .unwrap()
+            .iter()
+            .all(|c| c.path != "sub"));
+    }
+
+    #[tokio::test]
+    async fn test_take_side_refuses_to_delete_a_populated_submodule_worktree() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        let ptr = repo.create_commit("ptr", &[("a.txt", "1")]);
+        let git_repo = repo.repo();
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        stage_gitlink(&git_repo, "sub", ptr);
+        repo.create_commit("Add submodule", &[]);
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        {
+            let mut index = git_repo.index().unwrap();
+            index.remove_path(Path::new("sub")).unwrap();
+            index.write().unwrap();
+        }
+        std::fs::remove_dir_all(repo.path.join("sub")).ok();
+        std::fs::write(repo.path.join("sub"), "vendored contents\n").unwrap();
+        repo.stage_file("sub");
+        repo.create_commit("Feature vendors sub", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        let ptr2 = repo.create_commit("ptr2", &[("a.txt", "2")]);
+        stage_gitlink(&git_repo, "sub", ptr2);
+        repo.create_commit("Main moves submodule", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // A POPULATED submodule worktree — possibly uncommitted work.
+        std::fs::remove_file(repo.path.join("sub")).ok();
+        std::fs::remove_dir_all(repo.path.join("sub")).ok();
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        std::fs::write(repo.path.join("sub/work.txt"), "uncommitted\n").unwrap();
+
+        let err =
+            resolve_conflict_take_side(repo.path_str(), "sub".to_string(), "theirs".to_string())
+                .await
+                .expect_err("must refuse rather than delete a populated tree");
+        assert!(
+            err.to_string().contains("is a directory with files in it"),
+            "actionable message, not a raw OS error; got: {err}"
+        );
+        // The tree is untouched.
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("sub/work.txt")).unwrap(),
+            "uncommitted\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_recreates_symlinks_without_corrupting_targets() {
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Tracked target files the link may point at.
+        repo.create_commit(
+            "Add targets",
+            &[("target-a", "A CONTENT\n"), ("target-b", "B CONTENT\n")],
+        );
+        // Base: link -> target-a
+        let link = repo.path.join("link");
+        symlink("target-a", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Add link", &[]);
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::remove_file(&link).unwrap();
+        symlink("target-b", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Feature retargets link", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        std::fs::remove_file(&link).unwrap();
+        symlink("target-a-changed", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Main retargets link", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let entry = conflicts
+            .iter()
+            .find(|c| c.path == "link")
+            .expect("symlink conflict should be listed");
+        // Routed to the whole-blob chooser, never the text editor.
+        assert!(entry.is_binary, "symlink conflicts must use the chooser");
+
+        resolve_conflict_take_side(repo.path_str(), "link".to_string(), "theirs".to_string())
+            .await
+            .unwrap();
+
+        // The resolution is a real symlink to theirs' target...
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink(), "a LINK, not a text file");
+        assert_eq!(
+            std::fs::read_link(&link).unwrap().to_string_lossy(),
+            "target-b"
+        );
+        // ...the tracked target files are untouched...
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("target-a")).unwrap(),
+            "A CONTENT\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("target-b")).unwrap(),
+            "B CONTENT\n"
+        );
+        // ...and the index stages the CHOSEN side's blob at link mode.
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index.get_path(Path::new("link"), 0).expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o120000, "staged as a symlink");
+        let staged_blob = git_repo.find_blob(staged.id).unwrap();
+        assert_eq!(staged_blob.content(), b"target-b");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_replaces_a_regular_file_with_the_chosen_symlink() {
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_commit(
+            "Add target and thing",
+            &[("target-a", "A CONTENT\n"), ("thing", "base thing\n")],
+        );
+
+        // Feature turns `thing` into a symlink; main keeps editing it as a
+        // regular file — a file<->symlink TYPE conflict.
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let thing = repo.path.join("thing");
+        std::fs::remove_file(&thing).unwrap();
+        symlink("target-a", &thing).unwrap();
+        repo.stage_file("thing");
+        repo.create_commit("Feature turns thing into a link", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main edits thing", &[("thing", "ours thing\n")]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let entry = conflicts
+            .iter()
+            .find(|c| c.path == "thing")
+            .expect("type conflict should be listed");
+        assert!(entry.is_binary, "file<->symlink conflicts use the chooser");
+        // The workdir holds ours' REGULAR file — exactly the shape a bare
+        // symlink() call refuses to overwrite (EEXIST).
+        let meta = std::fs::symlink_metadata(&thing).unwrap();
+        assert!(
+            meta.file_type().is_file(),
+            "precondition: a regular file is on disk"
+        );
+
+        resolve_conflict_take_side(repo.path_str(), "thing".to_string(), "theirs".to_string())
+            .await
+            .expect("taking the symlink side over a regular file must succeed");
+
+        let meta = std::fs::symlink_metadata(&thing).unwrap();
+        assert!(meta.file_type().is_symlink(), "resolved as a real symlink");
+        assert_eq!(
+            std::fs::read_link(&thing).unwrap().to_string_lossy(),
+            "target-a"
+        );
+        // The link's tracked target file is untouched.
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("target-a")).unwrap(),
+            "A CONTENT\n"
+        );
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index
+            .get_path(Path::new("thing"), 0)
+            .expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o120000, "staged as a symlink");
+    }
+
+    /// Stage a gitlink (submodule pointer) entry at `path` pointing at
+    /// `commit_oid`. Gitlink OIDs reference the SUBMODULE's history, so
+    /// libgit2 does not require them in this repo's object database.
+    fn stage_gitlink(repo: &git2::Repository, path: &str, commit_oid: git2::Oid) {
+        let mut index = repo.index().unwrap();
+        let entry = git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: 0o160000,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id: commit_oid,
+            flags: 0,
+            flags_extended: 0,
+            path: path.as_bytes().to_vec(),
+        };
+        index.add(&entry).unwrap();
+        index.write().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_submodule_conflicts_are_flagged_and_take_side_stages_the_pointer() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Three distinct commit OIDs to use as submodule pointers.
+        let ptr_base = repo.create_commit("ptr base", &[("a.txt", "1")]);
+        let ptr_ours = repo.create_commit("ptr ours", &[("a.txt", "2")]);
+        let ptr_theirs = repo.create_commit("ptr theirs", &[("a.txt", "3")]);
+
+        let git_repo = repo.repo();
+        // The worktree presence of a gitlink is just a directory.
+        std::fs::create_dir(repo.path.join("sub")).unwrap();
+        stage_gitlink(&git_repo, "sub", ptr_base);
+        repo.create_commit("Add submodule", &[]);
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        stage_gitlink(&git_repo, "sub", ptr_theirs);
+        repo.create_commit("Feature moves submodule", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        stage_gitlink(&git_repo, "sub", ptr_ours);
+        repo.create_commit("Main moves submodule", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let entry = conflicts
+            .iter()
+            .find(|c| c.path == "sub")
+            .expect("submodule conflict should be listed");
+        // Routed to the submodule chooser: NOT binary (its OIDs are
+        // commits, not blobs) and never the text editor.
+        assert!(entry.is_submodule, "gitlink conflicts must be flagged");
+        assert!(!entry.is_binary);
+        assert!(entry.conflict_hunks.is_empty());
+
+        resolve_conflict_take_side(repo.path_str(), "sub".to_string(), "theirs".to_string())
+            .await
+            .expect("taking a side of a submodule conflict must not dead-end");
+
+        // Fresh handle: the earlier Repository caches its in-memory index
+        // and would not see the command's on-disk write.
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index.get_path(Path::new("sub"), 0).expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o160000, "still a gitlink");
+        assert_eq!(staged.id, ptr_theirs, "the CHOSEN side's commit pointer");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_delete_removes_a_dangling_symlink_from_disk() {
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Base: a DANGLING symlink (its target is not tracked and does not
+        // exist — common for links into ignored/generated trees).
+        let link = repo.path.join("link");
+        symlink("missing-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Add dangling link", &[]);
+
+        // Feature deletes the link; main retargets it — modify/delete.
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::remove_file(&link).unwrap();
+        let git_repo = repo.repo();
+        let mut index = git_repo.index().unwrap();
+        index.remove_path(Path::new("link")).unwrap();
+        index.write().unwrap();
+        repo.create_commit("Feature deletes link", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        std::fs::remove_file(&link).unwrap();
+        symlink("missing-target-2", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Main retargets link", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        assert!(
+            conflicts.iter().any(|c| c.path == "link"),
+            "modify/delete on the link should conflict"
+        );
+        // Precondition: the dangling link IS on disk — the exact shape
+        // Path::exists() lies about (it follows the link).
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "precondition: the dangling link is in the worktree"
+        );
+        assert!(!link.exists(), "precondition: exists() follows the link");
+
+        resolve_conflict_take_side(repo.path_str(), "link".to_string(), "theirs".to_string())
+            .await
+            .unwrap();
+
+        // The deletion is real: gone from BOTH the index and the disk — a
+        // leftover link would resurface as untracked and block checkouts.
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "the dangling link must be removed from disk"
+        );
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        assert!(index.get_path(Path::new("link"), 0).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_preserves_non_utf8_symlink_targets() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // A symlink target is an arbitrary byte string — not necessarily
+        // UTF-8. from_utf8_lossy would replace the odd bytes with U+FFFD
+        // and silently break the recreated link.
+        let odd_target: &[u8] = b"target-\xff\xfe-end";
+        let link = repo.path.join("link");
+        // Base points somewhere neutral; ours and theirs both retarget it
+        // differently, so the merge genuinely conflicts.
+        symlink("base-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Add link", &[]);
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::remove_file(&link).unwrap();
+        symlink(std::ffi::OsStr::from_bytes(odd_target), &link).unwrap();
+        // Re-stage so feature's tree records the odd-target link as theirs.
+        repo.stage_file("link");
+        repo.create_commit("Feature uses odd link", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        std::fs::remove_file(&link).unwrap();
+        symlink("plain-target", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Main retargets link", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        resolve_conflict_take_side(repo.path_str(), "link".to_string(), "theirs".to_string())
+            .await
+            .unwrap();
+
+        // The recreated link's target is byte-identical — no U+FFFD.
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink());
+        let recreated = std::fs::read_link(&link).unwrap();
+        assert_eq!(
+            recreated.as_os_str().as_bytes(),
+            odd_target,
+            "the non-utf8 target must survive byte-for-byte"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_applies_the_chosen_sides_mode_downward() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Base + theirs: non-executable. Ours: executable.
+        repo.create_commit("Add script", &[("script.sh", "#!/bin/sh\nbase\n")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("script.sh", "#!/bin/sh\ntheirs\n")]);
+        repo.checkout_branch(&initial_branch);
+        let script = repo.path.join("script.sh");
+        std::fs::write(&script, "#!/bin/sh\nours\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        repo.stage_file("script.sh");
+        repo.create_commit("Main change makes executable", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        // The conflicted on-disk file carries ours' executable bit.
+        assert_ne!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o111,
+            0,
+            "precondition: conflicted file is executable"
+        );
+
+        // Taking THEIRS (non-executable) must chmod DOWN, not keep ours' bit.
+        resolve_conflict_take_side(
+            repo.path_str(),
+            "script.sh".to_string(),
+            "theirs".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o111,
+            0,
+            "the resolved file must carry the CHOSEN side's mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_hostile_marker_size_attribute_is_rejected() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // A hostile/typo attribute value must not force a multi-gigabyte
+        // allocation — it is rejected at parse time and falls back to 7.
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=4000000000\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(txt.marker_size, 7);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_reports_diff3_style() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Rewrite the conflict as diff3 emission (merge.conflictStyle=diff3
+        // via git's CLI) — the style must be detected and reported so the
+        // frontend knows a ||||||| line is a base section, not ours content.
+        let mut opts = git2::MergeFileOptions::new();
+        opts.style_diff3(true);
+        replay_conflict_to_workdir(&repo, "shared.txt", &mut opts);
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(
+            written.contains("|||||||"),
+            "precondition: diff3 emission has a base marker; got:\n{written}"
+        );
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 7);
+        assert_eq!(txt.conflict_style, "diff3");
+    }
+
+    #[test]
+    fn test_diff3_within_first_conflict() {
+        let diff3 = "<<<<<<< HEAD\nours\n||||||| base\nbase\n=======\ntheirs\n>>>>>>> f\n";
+        assert!(diff3_within_first_conflict(diff3, 7));
+
+        let merge_style = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> f\n";
+        assert!(!diff3_within_first_conflict(merge_style, 7));
+
+        // A pipe run in the THEIRS section is content, not a diff3 signal.
+        let pipes_in_theirs = "<<<<<<< HEAD\nours\n=======\n||||||| x\ntheirs\n>>>>>>> f\n";
+        assert!(!diff3_within_first_conflict(pipes_in_theirs, 7));
+    }
+
+    #[test]
+    fn test_has_complete_conflict() {
+        let raised = "<<<<<<<<<<<< HEAD\nours\n============\ntheirs\n>>>>>>>>>>>> feature\n";
+        assert!(has_complete_conflict(raised, 12));
+        assert!(
+            !has_complete_conflict(raised, 7),
+            "runs longer than the size must not match"
+        );
+
+        let default = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\n";
+        assert!(!has_complete_conflict(default, 12));
+
+        // Emission order is required: an end marker before the separator
+        // (quoted docs) does not complete a conflict.
+        let out_of_order = "<<<<<<<<<<<< HEAD\n>>>>>>>>>>>> nope\n============\n";
+        assert!(!has_complete_conflict(out_of_order, 12));
+
+        // CRLF-terminated lines still match.
+        let crlf =
+            "<<<<<<<<<<<< HEAD\r\nours\r\n============\r\ntheirs\r\n>>>>>>>>>>>> feature\r\n";
+        assert!(has_complete_conflict(crlf, 12));
+
+        // A separator with trailing label text is not git's separator.
+        let labeled_sep = "<<<<<<<<<<<< HEAD\n============ x\n>>>>>>>>>>>> f\n";
+        assert!(!has_complete_conflict(labeled_sep, 12));
     }
 
     #[tokio::test]

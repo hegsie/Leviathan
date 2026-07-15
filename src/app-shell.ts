@@ -529,6 +529,25 @@ export class AppShell extends LitElement {
 
   // Conflict resolution dialog
   @state() private showConflictDialog = false;
+  /**
+   * The open dialog's inputs, SNAPSHOTTED at open time. The dialog must
+   * keep operating on the repository and operation it was opened for even
+   * if the user switches repo tabs (Ctrl+Tab still works behind the
+   * full-screen dialog) or another conflicting operation fires while it is
+   * up — live-binding the loose fields below would let a second conflict
+   * source retarget an in-flight resolution's repo/operation, aiming its
+   * abort/resolve/stage commands at the wrong repository.
+   */
+  @state() private conflictDialogConfig: {
+    repoPath: string;
+    operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash';
+    initialFilePath: string | null;
+    stashSourceCertain: boolean;
+    stashIndex: number;
+    dropStashOnComplete: boolean;
+    squashMerge: boolean;
+    gitflowFinish: GitflowFinishContext | null;
+  } | null = null;
   @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
   // Stash-completion semantics for the conflict dialog (which entry to drop and
   // whether to drop it at all — pop drops, plain apply keeps).
@@ -539,6 +558,12 @@ export class AppShell extends LitElement {
   // When a git-flow finish conflicts, the finish context so the dialog can COMPLETE
   // the finish (tag / merge develop / delete branch) after the conflict is resolved.
   @state() private conflictGitflowFinish: GitflowFinishContext | null = null;
+  // The file the user clicked to enter the conflict flow — the dialog opens
+  // preselected on it instead of always starting at the first conflict.
+  @state() private conflictInitialFilePath: string | null = null;
+  // False when 'stash' was only inferred from a clean repo state — the dialog
+  // must not promise the changes are safe in a stash that may not exist.
+  @state() private conflictStashSourceCertain = true;
 
   // Command palette
   @state() private showCommandPalette = false;
@@ -700,9 +725,17 @@ export class AppShell extends LitElement {
   // here, otherwise dispatching it from inside handleRefresh would re-trigger
   // handleWindowRefresh in an unbounded loop.
   private handleWindowRefresh = (e: Event): void => {
-    const detail = (e as CustomEvent).detail as { source?: string } | undefined;
+    const detail = (e as CustomEvent).detail as { source?: string; repoPath?: string } | undefined;
     if (detail?.source === 'app-shell') return;
-    this.handleRefresh();
+    // When the refresh names the repo the operation ran on (a sidebar
+    // stash/tag/branch success), pin to it — a plain handleRefresh would
+    // refresh whichever tab is active if the user switched mid-operation,
+    // leaving the originating repo stale until the file watcher notices.
+    if (detail?.repoPath) {
+      this.refreshConflictDialogRepo(detail.repoPath);
+    } else {
+      this.handleRefresh();
+    }
   };
 
   // Cycle the active repository tab by offset (wraps around both ends)
@@ -898,29 +931,95 @@ export class AppShell extends LitElement {
       dropStashOnComplete?: boolean;
       squash?: boolean;
       gitflowFinish?: GitflowFinishContext;
+      filePath?: string;
+      repositoryPath?: string;
     }>;
     if (customEvent.detail?.operationType) {
       this.conflictOperationType = customEvent.detail.operationType;
+      // Thread stash-completion semantics so the dialog drops the correct entry
+      // (and only when the failed operation had pop semantics).
+      this.conflictStashIndex = customEvent.detail?.stashIndex ?? 0;
+      this.conflictDropStashOnComplete = customEvent.detail?.dropStashOnComplete ?? true;
+      // A squash finish that conflicted must complete as a squash, not a merge commit.
+      this.conflictSquashMerge = customEvent.detail?.squash ?? false;
+      // A conflicted git-flow finish carries the context to complete the finish.
+      this.conflictGitflowFinish = customEvent.detail?.gitflowFinish ?? null;
+      this.conflictInitialFilePath = customEvent.detail?.filePath ?? null;
+      // An explicit operation always knows its source — clear any uncertainty
+      // left over from a previous state-inferred stash flow.
+      this.conflictStashSourceCertain = true;
+      this.openConflictDialogPinned(customEvent.detail?.repositoryPath);
+    } else {
+      // No operation context (the diff view's "Open Merge Editor" button, a
+      // conflicted-file stage click): derive the operation from repository
+      // state, keeping the clicked file preselected when one was given.
+      this.openConflictDialogFromState(customEvent.detail?.filePath);
     }
-    // Thread stash-completion semantics so the dialog drops the correct entry
-    // (and only when the failed operation had pop semantics).
-    this.conflictStashIndex = customEvent.detail?.stashIndex ?? 0;
-    this.conflictDropStashOnComplete = customEvent.detail?.dropStashOnComplete ?? true;
-    // A squash finish that conflicted must complete as a squash, not a merge commit.
-    this.conflictSquashMerge = customEvent.detail?.squash ?? false;
-    // A conflicted git-flow finish carries the context to complete the finish.
-    this.conflictGitflowFinish = customEvent.detail?.gitflowFinish ?? null;
-    this.showConflictDialog = true;
-    this.handleRefresh();
+    this.refreshConflictDialogRepo(customEvent.detail?.repositoryPath ?? null);
   };
 
   // Handle merge-conflict events from branch list (e.g., sidebar merge resulting in conflicts)
-  private handleMergeConflictEvent = (): void => {
+  private handleMergeConflictEvent = (e?: Event): void => {
+    const detail = (e as CustomEvent<{ repositoryPath?: string }> | undefined)?.detail;
     this.conflictOperationType = 'merge';
     this.resetConflictDetailState();
-    this.showConflictDialog = true;
-    this.handleRefresh();
+    this.openConflictDialogPinned(detail?.repositoryPath);
+    this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
   };
+
+  /**
+   * Open the conflict dialog with the staged conflict* fields snapshotted
+   * and pinned to the repository that is active NOW. Refuses to retarget an
+   * ALREADY-OPEN dialog: a new conflicting operation on another repo (or
+   * even this one) must not hijack an in-flight resolution's repo,
+   * operation type, or completion semantics.
+   */
+  private openConflictDialogPinned(repoPathOverride?: string): void {
+    // The conflicting operation ran on a repo path captured BEFORE its
+    // await — pass that path in. Falling back to the active repo is only
+    // safe for synchronous open paths; after an await the user may have
+    // switched tabs, and pinning the now-active repo would trap them in a
+    // dialog whose Complete/Abort target a repo with no operation at all.
+    const repoPath = repoPathOverride ?? this.activeRepository?.repository.path;
+    if (!repoPath) return;
+    // The tab may have been CLOSED during the operation's await — a dialog
+    // pinned to a closed repo would float over the empty screen with a
+    // post-close refresh that no-ops. The repo on disk still holds the
+    // in-progress operation; re-opening the tab surfaces it again.
+    if (
+      repoPath !== this.activeRepository?.repository.path &&
+      !repositoryStore.getState().openRepositories.some((r) => r.repository.path === repoPath)
+    ) {
+      showToast(
+        'Conflicts were detected in a repository whose tab was closed — reopen it to resolve them',
+        'warning',
+      );
+      return;
+    }
+    if (this.showConflictDialog) {
+      showToast(
+        'A conflict resolution is already in progress — finish or close it first',
+        'warning',
+      );
+      return;
+    }
+    this.conflictDialogConfig = {
+      repoPath,
+      operationType: this.conflictOperationType,
+      initialFilePath: this.conflictInitialFilePath,
+      stashSourceCertain: this.conflictStashSourceCertain,
+      stashIndex: this.conflictStashIndex,
+      dropStashOnComplete: this.conflictDropStashOnComplete,
+      squashMerge: this.conflictSquashMerge,
+      gitflowFinish: this.conflictGitflowFinish,
+    };
+    this.showConflictDialog = true;
+  }
+
+  private closeConflictDialog(): void {
+    this.showConflictDialog = false;
+    this.conflictDialogConfig = null;
+  }
 
   // Reset the conflict-dialog completion semantics to defaults so a value set by a
   // prior operation (e.g. squash=true from a git-flow squash finish, or a non-zero
@@ -930,11 +1029,17 @@ export class AppShell extends LitElement {
     this.conflictDropStashOnComplete = true;
     this.conflictSquashMerge = false;
     this.conflictGitflowFinish = null;
+    this.conflictInitialFilePath = null;
+    this.conflictStashSourceCertain = true;
   }
 
   // Handle gitflow events (init, feature/release/hotfix operations) to trigger refresh
-  private handleGitflowEvent = (): void => {
-    this.handleRefresh();
+  private handleGitflowEvent = (e: Event): void => {
+    // Pinned refresh, like every other operation completion: the gitflow
+    // command ran on the repo the panel showed at click time, which may be
+    // backgrounded by the time it finishes.
+    const detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
   };
 
   // Handle show-commit events (e.g., from reflog dialog "Show in graph")
@@ -957,6 +1062,86 @@ export class AppShell extends LitElement {
       const newActiveRepo = state.getActiveRepository();
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
+
+      // Closing the pinned repo's TAB while its conflict dialog is up
+      // would leave the dialog floating over whatever renders next, with
+      // dead completion plumbing (the open-time guard only covers closes
+      // during the triggering operation's await). Close it with an
+      // explanation — the operation itself persists on disk and resurfaces
+      // when the repo is reopened.
+      if (
+        this.showConflictDialog &&
+        this.conflictDialogConfig &&
+        !state.openRepositories.some(
+          (r) => r.repository.path === this.conflictDialogConfig!.repoPath,
+        )
+      ) {
+        this.closeConflictDialog();
+        showToast(
+          'The repository tab was closed — reopen it to continue resolving its conflicts',
+          'warning',
+        );
+      }
+
+      // Same for the cherry-pick / interactive-rebase dialogs: they pin to
+      // their repo at open() and stay open across tab switches, so closing
+      // the pinned tab must dismiss them too — otherwise they float over
+      // another repo and their next click would run against a repository
+      // that is no longer in the tab bar.
+      const repoOpen = (path: string | null): boolean =>
+        !!path && state.openRepositories.some((r) => r.repository.path === path);
+      const cpPinned = this.cherryPickDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (cpPinned && !repoOpen(cpPinned)) {
+        this.cherryPickDialog?.close();
+        showToast('The repository tab was closed — cherry-pick cancelled', 'warning');
+      }
+      const rbPinned = this.interactiveRebaseDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (rbPinned && !repoOpen(rbPinned)) {
+        this.interactiveRebaseDialog?.close();
+        showToast('The repository tab was closed — interactive rebase cancelled', 'warning');
+      }
+      // Same for the create-tag / create-branch dialogs: they pin to their repo
+      // at open() and stay open across tab switches, so closing the pinned tab
+      // must dismiss them — otherwise a successful create (create-branch even
+      // moves HEAD via checkout) would silently mutate a repo no longer in the
+      // tab bar, invisible in the visible one.
+      const ctPinned = this.createTagDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (ctPinned && !repoOpen(ctPinned)) {
+        this.createTagDialog?.close();
+        showToast('The repository tab was closed — tag creation cancelled', 'warning');
+      }
+      const cbPinned = this.createBranchDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (cbPinned && !repoOpen(cbPinned)) {
+        this.createBranchDialog?.close();
+        showToast('The repository tab was closed — branch creation cancelled', 'warning');
+      }
+
+      // The open diff binds a click-time StatusEntry snapshot. Re-derive it
+      // from every status refresh so a file that became conflicted since the
+      // click (e.g. a merge run in an external terminal) hits the diff view's
+      // isConflicted guards instead of rendering raw marker text — and stays
+      // in sync in the other direction once it's resolved.
+      if (this.diffFile && !repoChanged && newActiveRepo) {
+        const fresh =
+          newActiveRepo.status.find(
+            (f) => f.path === this.diffFile!.path && f.isStaged === this.diffFile!.isStaged
+          ) ?? newActiveRepo.status.find((f) => f.path === this.diffFile!.path);
+        // Only swap on a real transition — reassigning every refresh would
+        // needlessly reload the visible diff.
+        if (
+          fresh &&
+          (fresh.isConflicted !== this.diffFile.isConflicted ||
+            fresh.status !== this.diffFile.status)
+        ) {
+          this.diffFile = fresh;
+        } else if (!fresh && this.diffFile.isConflicted) {
+          // A conflicted file that left the status entirely was resolved and
+          // committed (e.g. Complete Merge) — close the diff rather than
+          // showing a permanently stale "has merge conflicts" interstitial.
+          this.diffFile = null;
+          this.showDiff = false;
+        }
+      }
 
       // Start/stop per-repo services as tabs open and close. Every OPEN repo
       // gets a watcher (not just the active one) so background repos don't go
@@ -1054,6 +1239,9 @@ export class AppShell extends LitElement {
     this.addEventListener('merge-conflict', this.handleMergeConflictEvent);
     this.addEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.addEventListener('gitflow-operation', this.handleGitflowEvent);
+    // Host-level so the branch-list's own rebase dialog reaches it too, not
+    // just the app-shell dialog.
+    this.addEventListener('rebase-complete', this.handleRebaseComplete);
     this.addEventListener('show-commit', this.handleShowCommitEvent);
     window.addEventListener('settings-changed', this.handleSettingsChanged);
 
@@ -1177,6 +1365,7 @@ export class AppShell extends LitElement {
     this.removeEventListener('merge-conflict', this.handleMergeConflictEvent);
     this.removeEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.removeEventListener('gitflow-operation', this.handleGitflowEvent);
+    this.removeEventListener('rebase-complete', this.handleRebaseComplete);
     this.removeEventListener('show-commit', this.handleShowCommitEvent);
     window.removeEventListener('settings-changed', this.handleSettingsChanged);
     gitService.cleanupRemoteOperationListeners();
@@ -1372,34 +1561,37 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const refName = this.refContextMenu.refName;
+    const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
-    const result = await gitService.checkoutWithAutoStash(
-      this.activeRepository.repository.path,
-      refName
-    );
+    const result = await gitService.checkoutWithAutoStash(repoPath, refName);
 
     if (result.success && result.data?.success) {
-      this.handleAutoStashToast(result.data, refName);
-      this.handleRefresh();
+      this.handleAutoStashToast(result.data, refName, repoPath);
+      // Pinned refresh, matching the sibling command-palette checkout: the
+      // checkout ran on repoPath, which may be backgrounded by completion.
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Checkout failed:', result.data?.message || result.error);
       showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Checkout failed');
     }
   }
 
-  private handleAutoStashToast(data: gitService.CheckoutWithStashResult, refName: string): void {
+  private handleAutoStashToast(
+    data: gitService.CheckoutWithStashResult,
+    refName: string,
+    repoPath: string,
+  ): void {
     if (data.stashed && data.stashConflict) {
       showToast(`Switched to ${refName} — stash conflicts need resolution`, 'warning');
       // Open the conflict dialog so the user can resolve the failed stash pop.
       // Auto-stash is pop semantics: the conflicted auto-stash sits at index 0 and
       // must be dropped once its changes are applied and resolved.
       this.conflictOperationType = 'stash';
-      this.conflictStashIndex = 0;
+      this.resetConflictDetailState();
       this.conflictDropStashOnComplete = true;
-      this.conflictSquashMerge = false;
-      this.showConflictDialog = true;
-      this.handleRefresh();
+      this.openConflictDialogPinned(repoPath);
+      this.refreshConflictDialogRepo(repoPath);
     } else if (data.stashed && data.stashApplied) {
       showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
     } else if (data.stashed && !data.stashApplied) {
@@ -1411,20 +1603,24 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const refName = this.refContextMenu.refName;
+    // The user can switch repo tabs while the operation runs — the dialog
+    // must pin to the repo the operation ran ON, not the one active later.
+    const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     const result = await gitService.merge({
-      path: this.activeRepository.repository.path,
+      path: repoPath,
       sourceRef: refName,
     });
 
     if (result.success) {
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Merged ${refName}`, 'success');
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       this.conflictOperationType = 'merge';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned(repoPath);
+      this.refreshConflictDialogRepo(repoPath);
       notifyWarning(
         'Merge Conflict',
         `Conflicts detected while merging ${refName}. Please resolve conflicts to continue.`,
@@ -1440,20 +1636,22 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const refName = this.refContextMenu.refName;
+    const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     const result = await gitService.rebase({
-      path: this.activeRepository.repository.path,
+      path: repoPath,
       onto: refName,
     });
 
     if (result.success) {
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Rebased onto ${refName}`, 'success');
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned(repoPath);
+      this.refreshConflictDialogRepo(repoPath);
       notifyWarning(
         'Rebase Conflict',
         `Conflicts detected while rebasing onto ${refName}. Please resolve conflicts to continue.`,
@@ -1469,16 +1667,19 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const branchName = this.refContextMenu.refName;
+    // Captured before the delete await: the delete and its refresh must target
+    // the repo it was invoked on, even if the user switches tabs mid-operation.
+    const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     const result = await gitService.deleteBranch(
-      this.activeRepository.repository.path,
+      repoPath,
       branchName,
       false
     );
 
     if (result.success) {
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Deleted branch ${branchName}`, 'success');
     } else {
       log.error('Delete branch failed:', result.error);
@@ -1490,15 +1691,18 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const tagName = this.refContextMenu.refName;
+    // Captured before the delete await: the delete and its refresh must target
+    // the repo it was invoked on, even if the user switches tabs mid-operation.
+    const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     const result = await gitService.deleteTag({
-      path: this.activeRepository.repository.path,
+      path: repoPath,
       name: tagName,
     });
 
     if (result.success) {
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Deleted tag ${tagName}`, 'success');
     } else {
       log.error('Delete tag failed:', result.error);
@@ -1510,15 +1714,18 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const tagName = this.refContextMenu.refName;
+    // Captured before the (slow, network) push await: the push and its refresh
+    // must target the repo it was invoked on, even if the user switches tabs.
+    const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     const result = await gitService.pushTag({
-      path: this.activeRepository.repository.path,
+      path: repoPath,
       name: tagName,
     });
 
     if (result.success) {
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Pushed tag ${tagName}`, 'success');
     } else {
       log.error('Push tag failed:', result.error);
@@ -1537,27 +1744,40 @@ export class AppShell extends LitElement {
   }
 
   private handleCherryPickComplete(e: CustomEvent): void {
-    const { sourceCommit, noCommit } = e.detail;
-    this.graphCanvas?.refresh?.();
+    const { sourceCommit, noCommit, repositoryPath } = e.detail;
     if (noCommit) {
       showToast(`Staged changes from ${sourceCommit.oid.substring(0, 7)}`, 'success');
     } else {
       showToast(`Cherry-picked ${sourceCommit.oid.substring(0, 7)}`, 'success');
     }
-    this.handleRefresh();
+    // Pinned refresh: after a mid-operation tab switch the cherry-pick
+    // completed on the ORIGINATING repo — refreshing the active tab would
+    // leave that repo's graph and state stale until the file watcher fires.
+    this.refreshConflictDialogRepo(repositoryPath ?? null);
   }
 
-  private handleCherryPickConflict(): void {
+  // Arrow + host-level listener (not an inline binding on one dialog):
+  // interactive rebase is dispatched by BOTH the app-shell dialog and the
+  // branch-list's own embedded dialog, and a bubbling host listener catches
+  // either. The pinned refresh targets the repo the rebase ran on, which
+  // may no longer be the active tab.
+  private handleRebaseComplete = (e: Event): void => {
+    const detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
+  };
+
+  private handleCherryPickConflict(e: Event): void {
+    const detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
     // Show conflict resolution dialog
     this.conflictOperationType = 'cherry-pick';
     this.resetConflictDetailState();
-    this.showConflictDialog = true;
+    this.openConflictDialogPinned(detail?.repositoryPath);
     notifyWarning(
       'Cherry-pick Conflict',
       'Conflicts detected during cherry-pick. Please resolve conflicts to continue.',
       !settingsStore.getState().showNativeNotifications
     );
-    this.handleRefresh();
+    this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
   }
 
   private canResolveConflicts(state: string): boolean {
@@ -1565,22 +1785,68 @@ export class AppShell extends LitElement {
     return ['cherrypick', 'merge', 'rebase', 'rebase-interactive', 'rebase-merge', 'revert'].includes(state);
   }
 
-  private handleOpenConflictDialog(): void {
+  /** True when the working tree has unmerged (conflicted) files. */
+  private get hasConflictedFiles(): boolean {
+    return (this.activeRepository?.status ?? []).some((f) => f.isConflicted);
+  }
+
+  /**
+   * Derive which operation the current index conflicts belong to from the
+   * repository state. A CLEAN state with conflicted files means a stash
+   * apply conflicted — the only conflict source that leaves no in-progress
+   * state. Returns null for states this dialog cannot drive (an external
+   * `git am` / `git bisect`): its Complete does not run their --continue
+   * and its stash-flavored Abort would discard the conflicted files while
+   * leaving the operation wedged mid-flight.
+   */
+  private deriveConflictOperationType():
+    | 'merge'
+    | 'rebase'
+    | 'cherry-pick'
+    | 'revert'
+    | 'stash'
+    | null {
+    const state = this.activeRepository?.repository.state ?? 'clean';
+    if (state === 'cherrypick') return 'cherry-pick';
+    if (state === 'rebase' || state === 'rebase-interactive' || state === 'rebase-merge') return 'rebase';
+    if (state === 'revert') return 'revert';
+    if (state === 'merge') return 'merge';
+    if (state === 'clean') return 'stash';
+    return null;
+  }
+
+  /**
+   * Open the conflict dialog with the operation derived from repository state.
+   * Used when the trigger carries no operation context (banner button, diff
+   * view redirect, conflicted-file click).
+   */
+  private openConflictDialogFromState(initialFilePath?: string): void {
     if (!this.activeRepository) return;
 
-    const state = this.activeRepository.repository.state;
-    if (state === 'cherrypick') {
-      this.conflictOperationType = 'cherry-pick';
-    } else if (state === 'merge') {
-      this.conflictOperationType = 'merge';
-    } else if (state === 'rebase' || state === 'rebase-interactive' || state === 'rebase-merge') {
-      this.conflictOperationType = 'rebase';
-    } else if (state === 'revert') {
-      this.conflictOperationType = 'revert';
+    const operationType = this.deriveConflictOperationType();
+    if (operationType === null) {
+      showToast(
+        `Conflicts from an external ${this.activeRepository.repository.state} operation — resolve them with git in a terminal`,
+        'warning',
+      );
+      return;
     }
-
+    this.conflictOperationType = operationType;
     this.resetConflictDetailState();
-    this.showConflictDialog = true;
+    // A state-derived stash conflict has unknown pop semantics — never drop a
+    // stash entry we can't identify (completing keeps the stash), and the
+    // source is only inferred (checkout -m / apply -3 look identical), so the
+    // dialog must not promise the changes are safe in a stash.
+    if (this.conflictOperationType === 'stash') {
+      this.conflictDropStashOnComplete = false;
+      this.conflictStashSourceCertain = false;
+    }
+    this.conflictInitialFilePath = initialFilePath ?? null;
+    this.openConflictDialogPinned();
+  }
+
+  private handleOpenConflictDialog(): void {
+    this.openConflictDialogFromState();
   }
 
   private async handleRevertCommit(): Promise<void> {
@@ -1588,6 +1854,11 @@ export class AppShell extends LitElement {
     if (!commit || !this.activeRepository) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // Captured BEFORE the confirm await: the revert commit must be created in
+    // the repo it was invoked on, even if the user switches tabs (rebinding
+    // activeRepository) while the confirm is up.
+    const repoPath = this.activeRepository.repository.path;
 
     // A merge commit has no single "the change" to undo; git requires an
     // explicit mainline parent (`git revert -m`). Default to the first parent
@@ -1605,20 +1876,21 @@ export class AppShell extends LitElement {
 
     const result = await import('./services/git.service.ts').then((m) =>
       m.revert({
-        path: this.activeRepository!.repository.path,
+        path: repoPath,
         commitOid: commit.oid,
         mainline: isMergeCommit ? 1 : undefined,
       })
     );
 
     if (result.success) {
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       showToast(`Reverted ${commit.oid.substring(0, 7)}`, 'success');
     } else if (result.error?.code === 'REVERT_CONFLICT') {
       // Show conflict resolution dialog
       this.conflictOperationType = 'revert';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned(repoPath);
+      this.refreshConflictDialogRepo(repoPath);
       notifyWarning(
         'Revert Conflict',
         `Conflicts detected while reverting ${commit.oid.substring(0, 7)}. Please resolve conflicts to continue.`,
@@ -1659,7 +1931,9 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       showToast(`Aborted ${state}`, 'success');
-      this.handleRefresh();
+      // `path` was captured before the abort await — pin the refresh to it so a
+      // mid-abort tab switch doesn't refresh the wrong repo.
+      this.refreshConflictDialogRepo(path);
     } else {
       log.error('Abort failed:', result.error);
       showToast(result.error?.message || 'Abort failed', 'error');
@@ -1675,9 +1949,12 @@ export class AppShell extends LitElement {
     const branchName = e.detail?.branchName;
     if (!branchName || !this.activeRepository) return;
 
-    gitService.deleteBranch(this.activeRepository.repository.path, branchName, true).then(async (result) => {
+    // Captured before the delete: the force-delete and its refresh must target
+    // the repo it was invoked on, even if the user switches tabs mid-operation.
+    const repoPath = this.activeRepository.repository.path;
+    gitService.deleteBranch(repoPath, branchName, true).then(async (result) => {
       if (result.success) {
-        await this.handleRefresh();
+        this.refreshConflictDialogRepo(repoPath);
         showToast(`Force deleted branch ${branchName}`, 'success');
       } else {
         showToast(result.error?.message || 'Force delete failed', 'error');
@@ -1784,6 +2061,11 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: a hard reset discards uncommitted work
+    // and must target the repo it was invoked on, even if the user switches
+    // tabs (rebinding activeRepository) while the confirm is up.
+    const repoPath = this.activeRepository.repository.path;
+
     // Confirm reset based on mode
     if (mode === 'hard') {
       const confirmed = await showConfirm(
@@ -1809,14 +2091,14 @@ export class AppShell extends LitElement {
 
     const result = await import('./services/git.service.ts').then((m) =>
       m.reset({
-        path: this.activeRepository!.repository.path,
+        path: repoPath,
         targetRef: commit.oid,
         mode,
       })
     );
 
     if (result.success) {
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Reset failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Reset failed');
@@ -1850,8 +2132,13 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured once, before the status await: the fixup commit must be created
+    // in the repo it was invoked on, not whichever tab is active if the user
+    // switches during the (yielding) status check.
+    const repoPath = this.activeRepository.repository.path;
+
     // Check if there are staged changes
-    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    const statusResult = await gitService.getStatus(repoPath);
     if (!statusResult.success || !statusResult.data) {
       showToast('Failed to check status', 'error');
       return;
@@ -1864,13 +2151,13 @@ export class AppShell extends LitElement {
     }
 
     // Create fixup commit
-    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+    const result = await gitService.createCommit(repoPath, {
       message: `fixup! ${commit.summary}`,
     });
 
     if (result.success) {
       showToast(`Created fixup commit for ${commit.shortId}`, 'success');
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
       showErrorWithSuggestion(result.error?.message || '', 'Failed to create fixup commit');
@@ -1887,8 +2174,13 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured once, before the status await: the squash commit must be created
+    // in the repo it was invoked on, not whichever tab is active if the user
+    // switches during the (yielding) status check.
+    const repoPath = this.activeRepository.repository.path;
+
     // Check if there are staged changes
-    const statusResult = await gitService.getStatus(this.activeRepository.repository.path);
+    const statusResult = await gitService.getStatus(repoPath);
     if (!statusResult.success || !statusResult.data) {
       showToast('Failed to check status', 'error');
       return;
@@ -1901,13 +2193,13 @@ export class AppShell extends LitElement {
     }
 
     // Create squash commit
-    const result = await gitService.createCommit(this.activeRepository.repository.path, {
+    const result = await gitService.createCommit(repoPath, {
       message: `squash! ${commit.summary}`,
     });
 
     if (result.success) {
       showToast(`Created squash commit for ${commit.shortId}`, 'success');
-      await this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
       window.dispatchEvent(new CustomEvent('status-refresh'));
     } else {
       showErrorWithSuggestion(result.error?.message || '', 'Failed to create squash commit');
@@ -1925,13 +2217,25 @@ export class AppShell extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the history await: the reword targets THIS repo's commit.
+    const repoPath = this.activeRepository.repository.path;
+
     // Check if this is HEAD commit by comparing with the first commit in history.
     // Note: This works for the common case of a branch checkout. In detached HEAD state,
     // the first commit in history is still HEAD, so this approach remains valid.
     const historyResult = await gitService.getCommitHistory({
-      path: this.activeRepository.repository.path,
+      path: repoPath,
       limit: 1,
     });
+
+    // The interactive-rebase dialog and the commit panel both bind to the LIVE
+    // active repo. If the user switched tabs during the history await, opening
+    // either would configure a reword of THIS repo's commit against another
+    // repo (rewriting the wrong history, or dead-ending on a missing commit).
+    if (this.activeRepository?.repository.path !== repoPath) {
+      showToast('Repository changed — reword cancelled', 'warning');
+      return;
+    }
 
     const isHead = historyResult.success && historyResult.data &&
       historyResult.data.length > 0 && historyResult.data[0].oid === commit.oid;
@@ -1966,13 +2270,35 @@ export class AppShell extends LitElement {
   }
 
   private handleConflictResolved(): void {
-    this.showConflictDialog = false;
-    this.handleRefresh();
+    const pinnedPath = this.conflictDialogConfig?.repoPath ?? null;
+    this.closeConflictDialog();
+    this.refreshConflictDialogRepo(pinnedPath);
   }
 
   private handleConflictAborted(): void {
-    this.showConflictDialog = false;
-    this.handleRefresh();
+    const pinnedPath = this.conflictDialogConfig?.repoPath ?? null;
+    this.closeConflictDialog();
+    this.refreshConflictDialogRepo(pinnedPath);
+  }
+
+  /**
+   * Refresh the repo a conflict dialog operates/operated ON — used both
+   * when a conflict opens the dialog and when Complete/Abort closes it.
+   * The user can switch tabs during the triggering operation's await (and
+   * behind the open dialog), so refreshing the ACTIVE repo could leave the
+   * operated-on repo showing a stale merge state (state/status/graph)
+   * until some unrelated event refreshed it. Refresh the pinned repo
+   * instead: live when it is still active, via the stale-on-activate path
+   * (plus a badge hydration so its tab updates promptly) when it is
+   * backgrounded.
+   */
+  private refreshConflictDialogRepo(pinnedPath: string | null): void {
+    if (!pinnedPath || pinnedPath === this.activeRepository?.repository.path) {
+      this.handleRefresh();
+      return;
+    }
+    this.staleRepoPaths.add(pinnedPath);
+    this.scheduleBadgeHydration(pinnedPath);
   }
 
   private handleResizeStart(e: MouseEvent, type: 'left' | 'right'): void {
@@ -2019,11 +2345,13 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const branchName = e.detail.branchName;
-    const result = await gitService.checkoutWithAutoStash(this.activeRepository.repository.path, branchName);
+    const repoPath = this.activeRepository.repository.path;
+    const result = await gitService.checkoutWithAutoStash(repoPath, branchName);
 
     if (result.success && result.data?.success) {
-      this.handleAutoStashToast(result.data, branchName);
-      this.handleRefresh();
+      this.handleAutoStashToast(result.data, branchName, repoPath);
+      // Pinned refresh, matching the sibling checkout handlers.
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Failed to checkout branch:', result.data?.message || result.error);
       showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Failed to checkout branch');
@@ -2041,6 +2369,13 @@ export class AppShell extends LitElement {
   }
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry; isPartiallyStaged?: boolean }>): void {
+    // A conflicted file is resolved in the merge editor, never shown as a raw
+    // diff — its working-tree content is git's conflict-marker text. Open the
+    // dialog on the file that was actually clicked.
+    if (e.detail.file.isConflicted) {
+      this.openConflictDialogFromState(e.detail.file.path);
+      return;
+    }
     // Close blame if open
     this.showBlame = false;
     this.blameFile = null;
@@ -2420,11 +2755,15 @@ export class AppShell extends LitElement {
         category: 'action',
         icon: 'undo',
         action: this.requiresRepository(async () => {
+          // Captured BEFORE the prompt/AI/confirm awaits (all yield): the
+          // reflog reset must run on the repo it was invoked on, even if the
+          // user switches tabs while any of those dialogs/calls are pending.
+          const repoPath = this.activeRepository!.repository.path;
           const query = await showPrompt('Smart Undo (AI)', 'Describe what you want to undo (e.g., "before the rebase", "undo last 3 commits"):');
           if (!query) return;
 
           const result = await import('./services/ai.service.ts').then(m =>
-            m.findReflogEntry(this.activeRepository!.repository.path, query)
+            m.findReflogEntry(repoPath, query)
           );
 
           if (result.success && result.data) {
@@ -2432,11 +2771,11 @@ export class AppShell extends LitElement {
             const confirmed = await showConfirm('Smart Undo', `${match.description}\n\nReset to HEAD@{${match.index}}? (soft reset — changes preserved as staged)`);
             if (confirmed) {
               const resetResult = await import('./services/git.service.ts').then(m =>
-                m.resetToReflog(this.activeRepository!.repository.path, match.index, 'soft')
+                m.resetToReflog(repoPath, match.index, 'soft')
               );
               if (resetResult.success) {
                 showToast('Undo successful', 'success');
-                await this.handleRefresh();
+                this.refreshConflictDialogRepo(repoPath);
               } else {
                 showToast(resetResult.error?.message ?? 'Undo failed', 'error');
               }
@@ -2898,10 +3237,13 @@ export class AppShell extends LitElement {
     // must inspect result.success — a catch-only path always reported success and
     // the backend emits remote-operation-completed only on success, so failures
     // were fully silent.
-    const result = await gitService.fetch({ path: this.activeRepository.repository.path });
+    // Pinned: fetch is a slow network op; if the user switches tabs while it
+    // runs, the refresh must target the repo that fetched, not the active tab.
+    const repoPath = this.activeRepository.repository.path;
+    const result = await gitService.fetch({ path: repoPath });
     if (result.success) {
       progressService.completeOperation(opId);
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
       showToast(result.error?.message ?? 'Fetch failed', 'error');
@@ -2910,25 +3252,29 @@ export class AppShell extends LitElement {
 
   private async handlePull(): Promise<void> {
     if (!this.activeRepository) return;
+    const repoPath = this.activeRepository.repository.path;
     const opId = progressService.startOperation('pull', 'Pulling from remote...');
     // gitService.pull returns a CommandResult (invokeCommand never throws), so we
     // must inspect result.success — the old catch-only path always reported success.
-    const result = await gitService.pull({ path: this.activeRepository.repository.path });
+    const result = await gitService.pull({ path: repoPath });
     if (result.success) {
       progressService.completeOperation(opId);
-      this.handleRefresh();
+      // Pinned: a ref-only pull emits no working-tree watcher event, so a
+      // pull that completed on a now-backgrounded repo must be refreshed
+      // (or marked stale) by path, not via the active tab.
+      this.refreshConflictDialogRepo(repoPath);
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       progressService.failOperation(opId);
       this.conflictOperationType = 'merge';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
-      this.handleRefresh();
+      this.openConflictDialogPinned(repoPath);
+      this.refreshConflictDialogRepo(repoPath);
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       progressService.failOperation(opId);
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
-      this.handleRefresh();
+      this.openConflictDialogPinned(repoPath);
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
       showToast(result.error?.message ?? 'Pull failed', 'error');
@@ -2942,10 +3288,13 @@ export class AppShell extends LitElement {
     // must inspect result.success — a catch-only path always reported success and
     // the backend emits remote-operation-completed only on success, so failures
     // were fully silent.
-    const result = await gitService.push({ path: this.activeRepository.repository.path });
+    // Pinned: push is a slow network op; if the user switches tabs while it
+    // runs, the refresh must target the repo that pushed, not the active tab.
+    const repoPath = this.activeRepository.repository.path;
+    const result = await gitService.push({ path: repoPath });
     if (result.success) {
       progressService.completeOperation(opId);
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
       showToast(result.error?.message ?? 'Push failed', 'error');
@@ -2958,7 +3307,10 @@ export class AppShell extends LitElement {
 
   private async handleCreateStash(): Promise<void> {
     if (!this.activeRepository) return;
-    const result = await gitService.createStash({ path: this.activeRepository.repository.path });
+    // Pinned: if the user switches tabs while the stash is being created, the
+    // refresh must target the repo that was stashed, not the active tab.
+    const repoPath = this.activeRepository.repository.path;
+    const result = await gitService.createStash({ path: repoPath });
     if (result.success) {
       if (result.data === null) {
         // Clean working tree: nothing to stash — informational, not an error.
@@ -2966,7 +3318,7 @@ export class AppShell extends LitElement {
         return;
       }
       showToast('Stash created', 'success');
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       showToast(result.error?.message ?? 'Failed to create stash', 'error');
     }
@@ -2999,11 +3351,14 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const branch = e.detail.branch;
-    const result = await gitService.checkoutWithAutoStash(this.activeRepository.repository.path, branch);
+    const repoPath = this.activeRepository.repository.path;
+    const result = await gitService.checkoutWithAutoStash(repoPath, branch);
 
     if (result.success && result.data?.success) {
-      this.handleAutoStashToast(result.data, branch);
-      this.handleRefresh();
+      this.handleAutoStashToast(result.data, branch, repoPath);
+      // Pinned: the checkout ran on repoPath, which may be backgrounded by
+      // the time it completes — refresh by path, not via the active tab.
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Failed to checkout branch:', result.data?.message || result.error);
       showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Failed to checkout branch');
@@ -3153,7 +3508,7 @@ export class AppShell extends LitElement {
               ` : ''}
 
               <main id="main-content" class="center-panel" tabindex="-1">
-                ${this.activeRepository.repository.state !== 'clean'
+                ${this.activeRepository.repository.state !== 'clean' || this.hasConflictedFiles
                   ? html`
                       <div class="operation-banner ${this.activeRepository.repository.state}">
                         <span class="operation-icon">
@@ -3171,19 +3526,25 @@ export class AppShell extends LitElement {
                             this.activeRepository.repository.state === 'rebase-merge' ? 'Rebase in progress' :
                             this.activeRepository.repository.state === 'revert' ? 'Revert in progress' :
                             this.activeRepository.repository.state === 'bisect' ? 'Bisect in progress' :
+                            this.activeRepository.repository.state === 'clean' ? 'Conflicts need resolution' :
                             `Operation in progress: ${this.activeRepository.repository.state}`}
                         </span>
                         <div class="operation-banner-actions">
-                          ${this.canResolveConflicts(this.activeRepository.repository.state)
+                          ${this.canResolveConflicts(this.activeRepository.repository.state) ||
+                          (this.activeRepository.repository.state === 'clean' && this.hasConflictedFiles)
                             ? html`
                                 <button class="operation-btn operation-btn-primary" @click=${this.handleOpenConflictDialog}>
                                   Resolve Conflicts
                                 </button>
                               `
                             : ''}
-                          <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
-                            Abort
-                          </button>
+                          ${this.activeRepository.repository.state !== 'clean'
+                            ? html`
+                                <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
+                                  Abort
+                                </button>
+                              `
+                            : ''}
                         </div>
                       </div>
                     `
@@ -3329,16 +3690,18 @@ export class AppShell extends LitElement {
           `
         : ''}
 
-      ${this.showConflictDialog && this.activeRepository
+      ${this.showConflictDialog && this.conflictDialogConfig
         ? html`
             <lv-conflict-resolution-dialog
               open
-              repositoryPath=${this.activeRepository.repository.path}
-              operationType=${this.conflictOperationType}
-              .stashIndex=${this.conflictStashIndex}
-              .dropStashOnComplete=${this.conflictDropStashOnComplete}
-              .squashMerge=${this.conflictSquashMerge}
-              .gitflowFinish=${this.conflictGitflowFinish}
+              repositoryPath=${this.conflictDialogConfig.repoPath}
+              operationType=${this.conflictDialogConfig.operationType}
+              .initialFilePath=${this.conflictDialogConfig.initialFilePath}
+              .stashSourceCertain=${this.conflictDialogConfig.stashSourceCertain}
+              .stashIndex=${this.conflictDialogConfig.stashIndex}
+              .dropStashOnComplete=${this.conflictDialogConfig.dropStashOnComplete}
+              .squashMerge=${this.conflictDialogConfig.squashMerge}
+              .gitflowFinish=${this.conflictDialogConfig.gitflowFinish}
               @operation-completed=${this.handleConflictResolved}
               @operation-aborted=${this.handleConflictAborted}
             ></lv-conflict-resolution-dialog>
@@ -3754,11 +4117,13 @@ export class AppShell extends LitElement {
       ${this.activeRepository ? html`
         <lv-create-tag-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          @tag-created=${() => this.handleRefresh()}
+          @tag-created=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-create-tag-dialog>
         <lv-create-branch-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          @branch-created=${() => this.handleRefresh()}
+          @branch-created=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-create-branch-dialog>
         <lv-cherry-pick-dialog
           .repositoryPath=${this.activeRepository.repository.path}
@@ -3769,7 +4134,6 @@ export class AppShell extends LitElement {
         <lv-interactive-rebase-dialog
           id="app-rebase-dialog"
           .repositoryPath=${this.activeRepository.repository.path}
-          @rebase-complete=${() => this.handleRefresh()}
         ></lv-interactive-rebase-dialog>
       ` : ''}
 

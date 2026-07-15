@@ -19,6 +19,57 @@ pub struct ConflictFile {
     /// whole blobs (see resolve_conflict_take_side).
     #[serde(default)]
     pub is_binary: bool,
+    /// Whether any side is a submodule (gitlink) pointer. Submodule
+    /// conflicts have no blobs at all — their entry OIDs are COMMITS — so
+    /// neither the text editor nor the binary chooser's blob reads apply;
+    /// resolving one stages the chosen commit pointer directly.
+    #[serde(default)]
+    pub is_submodule: bool,
+    /// Marker size the conflict hunks in this file were actually written
+    /// with (git's default is 7; the conflict-marker-size gitattribute
+    /// raises it). The backend verifies the attribute against the file's
+    /// real emission — the frontend parser must use this exact size, since
+    /// the same byte pattern is a real conflict at one size and plain
+    /// content at another.
+    #[serde(default = "default_marker_size")]
+    pub marker_size: u32,
+    /// Conflict style the hunks were written with: "merge" (default) or
+    /// "diff3" (has `|||||||` base sections; zdiff3 is reported as diff3 —
+    /// the emitted structure is the same to a parser). Without this the
+    /// frontend cannot tell a base section from ours content that happens
+    /// to start with a pipe run.
+    #[serde(default = "default_conflict_style")]
+    pub conflict_style: String,
+    /// AUTHORITATIVE marker positions in the working file (0-based line
+    /// indices), derived from a collision-free re-replay when the merge
+    /// replay matched the file. When present the frontend parses by these
+    /// positions instead of shape heuristics — content that quotes marker
+    /// lines (even byte-identical to the real ones) can never confuse
+    /// them. Empty when the file was hand-edited (no replay match).
+    #[serde(default)]
+    pub conflict_hunks: Vec<ConflictHunk>,
+}
+
+/// One conflict hunk's marker line positions in the working file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictHunk {
+    /// `<<<<<<<` line index
+    pub start: u32,
+    /// `=======` line index
+    pub separator: u32,
+    /// `>>>>>>>` line index
+    pub end: u32,
+    /// `|||||||` line index for diff3-style emission
+    pub base: Option<u32>,
+}
+
+pub(crate) fn default_marker_size() -> u32 {
+    7
+}
+
+pub(crate) fn default_conflict_style() -> String {
+    "merge".to_string()
 }
 
 /// Represents one side of a conflict

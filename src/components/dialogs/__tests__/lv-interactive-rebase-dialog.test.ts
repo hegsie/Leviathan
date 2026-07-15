@@ -530,6 +530,58 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       expect(eventFired).to.be.true;
     });
 
+    it('pins to the repo present at open(), surviving a repositoryPath rebind (tab switch)', async () => {
+      // Long-lived dialog: open → reorder → later Execute. A Ctrl+Tab
+      // while it sits open rebinds the reactive prop; the HISTORY-REWRITING
+      // rebase must still run on the repo shown at open, and its todo was
+      // loaded from that repo.
+      const el = await createDialog();
+      await openAndWait(el);
+      clearHistory();
+
+      // Simulate the active-repo tab switching while the dialog stays open.
+      el.repositoryPath = '/repo/OTHER';
+      await el.updateComplete;
+
+      let detail: { repositoryPath?: string } | undefined;
+      el.addEventListener('rebase-complete', (e) => {
+        detail = (e as CustomEvent).detail;
+      });
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      executeBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const execCalls = findCommands('execute_interactive_rebase');
+      expect(execCalls.length).to.equal(1);
+      expect(
+        (execCalls[0].args as { path: string }).path,
+        'rewrites the pinned repo, not the rebound one',
+      ).to.equal(REPO_PATH);
+      expect(detail?.repositoryPath).to.equal(REPO_PATH);
+    });
+
+    it('rebase-complete carries the repo the rebase ran on (pinned pre-await)', async () => {
+      // The success refresh must target the ORIGINATING repo — after a
+      // mid-operation tab switch, refreshing the active tab would leave
+      // the rebased repo's graph and state stale.
+      const el = await createDialog();
+      await openAndWait(el);
+
+      let detail: { repositoryPath?: string } | undefined;
+      el.addEventListener('rebase-complete', (e) => {
+        detail = (e as CustomEvent).detail;
+      });
+
+      const executeBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      executeBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(detail?.repositoryPath).to.equal(REPO_PATH);
+    });
+
     it('error message shown when execute fails', async () => {
       mockInvoke = async (command: string) => {
         switch (command) {

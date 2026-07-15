@@ -281,6 +281,20 @@ export class LvBranchCleanupDialog extends LitElement {
 
   @property({ type: String }) repositoryPath = '';
 
+  /** The repo this dialog was opened for, captured at open(). repositoryPath is
+   * bound live to the active tab, so a tab switch while the modal is open would
+   * otherwise make the irreversible force-deletes / remote prune target the
+   * wrong repo. */
+  private pinnedRepoPath = '';
+  private isOpen = false;
+
+  /** The pinned repo while the dialog is open, else null — lets the host
+   * self-close the dialog when that repo's tab is closed (a Delete on a closed
+   * repo would otherwise force-delete branches in a repo not in the tab bar). */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.isOpen ? this.pinnedRepoPath : null;
+  }
+
   @state() private loading = true;
   @state() private mergedBranches: CleanupBranch[] = [];
   @state() private staleBranches: CleanupBranch[] = [];
@@ -294,11 +308,14 @@ export class LvBranchCleanupDialog extends LitElement {
 
   public async open(): Promise<void> {
     this.reset();
+    this.pinnedRepoPath = this.repositoryPath;
+    this.isOpen = true;
     this.modal.open = true;
     await this.loadCleanupData();
   }
 
   public close(): void {
+    this.isOpen = false;
     this.modal.open = false;
   }
 
@@ -319,7 +336,7 @@ export class LvBranchCleanupDialog extends LitElement {
     try {
       const { staleBranchDays } = settingsStore.getState();
       const result = await gitService.getCleanupCandidates(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         staleBranchDays,
       );
 
@@ -548,10 +565,15 @@ export class LvBranchCleanupDialog extends LitElement {
     let deleted = 0;
     let failed = 0;
 
+    // Pinned at open(): these irreversible force-deletes and the remote prune
+    // must target the repo the cleanup was invoked on, even if the user
+    // switches tabs during the confirm or across the delete loop's awaits
+    // (which rebinds the live repositoryPath prop).
+    const repoPath = this.pinnedRepoPath;
     for (const cb of toDelete) {
       // Use force delete for warning/danger branches (not fully merged)
       const force = cb.risk === 'warning' || cb.risk === 'danger';
-      const result = await gitService.deleteBranch(this.repositoryPath, cb.branch.name, force);
+      const result = await gitService.deleteBranch(repoPath, cb.branch.name, force);
       if (result.success) {
         deleted++;
       } else {
@@ -563,7 +585,7 @@ export class LvBranchCleanupDialog extends LitElement {
     // Prune remote tracking branches if requested
     if (this.pruneRemotes) {
       try {
-        await gitService.pruneRemoteTrackingBranches(this.repositoryPath);
+        await gitService.pruneRemoteTrackingBranches(repoPath);
       } catch (err) {
         console.error('Failed to prune remote tracking branches:', err);
         showToast(`Failed to prune remote branches: ${err instanceof Error ? err.message : String(err)}`, 'error');
@@ -582,6 +604,7 @@ export class LvBranchCleanupDialog extends LitElement {
 
       this.dispatchEvent(
         new CustomEvent('cleanup-complete', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }),
@@ -593,6 +616,7 @@ export class LvBranchCleanupDialog extends LitElement {
   }
 
   private handleModalClose(): void {
+    this.isOpen = false;
     if (!this.deleting) {
       this.reset();
     }

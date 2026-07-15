@@ -279,6 +279,12 @@ export class LvGitflowPanel extends LitElement {
   @state() private activeHotfixes: ActiveItem[] = [];
   @state() private expandedSections = new Set<GitFlowCategory>(['feature', 'release', 'hotfix']);
   @state() private operationInProgress = false;
+  /** Per-path load sequence: a slow load for repo A must not overwrite the
+   * panel with A's config/items after the user switched to repo B (whose
+   * load already resolved). Mirrors lv-branch-list's branchesLoadSeq. The
+   * Finish buttons bind directly to these items, so stale data here could
+   * finish/delete the wrong branch. */
+  private configLoadSeq = new Map<string, number>();
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -311,33 +317,61 @@ export class LvGitflowPanel extends LitElement {
   private async loadConfig(): Promise<void> {
     if (!this.repositoryPath) return;
 
+    // Capture the repo and bump the per-path sequence at the START — a
+    // response that lands after a newer load (for this or another repo) is
+    // discarded rather than overwriting the panel with stale data.
+    const loadedPath = this.repositoryPath;
+    const seq = (this.configLoadSeq.get(loadedPath) ?? 0) + 1;
+    this.configLoadSeq.set(loadedPath, seq);
+    const isLatest = (): boolean =>
+      this.repositoryPath === loadedPath && this.configLoadSeq.get(loadedPath) === seq;
+
     this.loading = true;
     this.error = null;
 
     try {
-      const result = await gitService.getGitFlowConfig(this.repositoryPath);
+      const result = await gitService.getGitFlowConfig(loadedPath);
+      if (!isLatest()) return;
       if (result.success && result.data) {
         this.config = result.data;
         if (this.config.initialized) {
-          await this.loadActiveItems();
+          await this.loadActiveItems(loadedPath, isLatest);
         }
       } else {
         this.config = null;
       }
     } catch (err) {
       console.error('Failed to load git flow config:', err);
-      this.error = 'Failed to load Git Flow configuration';
+      if (isLatest()) this.error = 'Failed to load Git Flow configuration';
     } finally {
-      this.loading = false;
+      if (isLatest()) this.loading = false;
     }
   }
 
-  private async loadActiveItems(): Promise<void> {
+  private async loadActiveItems(
+    loadedPath: string = this.repositoryPath,
+    isLatest?: () => boolean,
+  ): Promise<void> {
     if (!this.config || !this.config.initialized) return;
 
+    // Post-operation callers (start/finish handlers) pass no guard — they
+    // just refresh the panel for whatever repo it currently shows. Establish
+    // a fresh sequence guard so their reload is subject to the same
+    // stale-response discard as loadConfig's.
+    let latest = isLatest;
+    if (!latest) {
+      const seq = (this.configLoadSeq.get(loadedPath) ?? 0) + 1;
+      this.configLoadSeq.set(loadedPath, seq);
+      latest = (): boolean =>
+        this.repositoryPath === loadedPath && this.configLoadSeq.get(loadedPath) === seq;
+    }
+
     try {
-      const branchResult = await gitService.getBranches(this.repositoryPath);
-      if (!branchResult.success || !branchResult.data) return;
+      const branchResult = await gitService.getBranches(loadedPath);
+      // Discard a stale response — the Finish buttons bind directly to these
+      // items, so writing repo A's items under repo B's tab could
+      // finish/delete the wrong branch.
+      if (!latest() || !branchResult.success || !branchResult.data) return;
 
       const branches = branchResult.data.filter((b: Branch) => !b.isRemote);
 
@@ -363,11 +397,15 @@ export class LvGitflowPanel extends LitElement {
     this.error = null;
     this.operationInProgress = true;
 
+    // Captured BEFORE the await — the host's refresh must target the repo
+    // the init actually ran on, even if the prop is rebound mid-flight.
+    const repoPath = this.repositoryPath;
     try {
-      const result = await gitService.initGitFlow(this.repositoryPath);
+      const result = await gitService.initGitFlow(repoPath);
       if (result.success) {
         await this.loadConfig();
         this.dispatchEvent(new CustomEvent('gitflow-initialized', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -383,6 +421,10 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleStartFeature(): Promise<void> {
+    // Captured BEFORE the prompt: it is an in-app overlay, so Ctrl+Tab can
+    // switch the active repo (rebinding this prop) while it is open — the
+    // branch must be created in the repo the panel showed at click time.
+    const repoPath = this.repositoryPath;
     const name = await showPrompt('Start Feature', 'Enter feature name:');
     if (!name || !name.trim()) return;
 
@@ -390,11 +432,11 @@ export class LvGitflowPanel extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.gitFlowStartFeature(this.repositoryPath, name.trim());
+      const result = await gitService.gitFlowStartFeature(repoPath, name.trim());
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'start-feature', name: name.trim() },
+          detail: { type: 'start-feature', name: name.trim(), repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -413,17 +455,15 @@ export class LvGitflowPanel extends LitElement {
     this.error = null;
     this.operationInProgress = true;
 
+    // Captured BEFORE the awaits: the conflict dialog must pin to the repo
+    // the finish actually ran on, even if the prop is rebound mid-flight.
+    const repoPath = this.repositoryPath;
     try {
-      const result = await gitService.gitFlowFinishFeature(
-        this.repositoryPath,
-        item.name,
-        true,
-        squash,
-      );
+      const result = await gitService.gitFlowFinishFeature(repoPath, item.name, true, squash);
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'finish-feature', name: item.name },
+          detail: { type: 'finish-feature', name: item.name, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -433,12 +473,16 @@ export class LvGitflowPanel extends LitElement {
         // a single-parent squash commit, not a two-parent merge commit. The finish
         // context lets the dialog complete the finish (delete branch / re-invoke)
         // once the conflict is resolved.
-        this.openConflictDialog(squash, {
-          kind: 'feature',
-          name: item.name,
-          branchName: item.branch,
-          deleteBranch: true,
-        });
+        this.openConflictDialog(
+          squash,
+          {
+            kind: 'feature',
+            name: item.name,
+            branchName: item.branch,
+            deleteBranch: true,
+          },
+          repoPath,
+        );
       } else {
         this.error = result.error?.message || 'Failed to finish feature';
       }
@@ -451,6 +495,7 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleStartRelease(): Promise<void> {
+    const repoPath = this.repositoryPath;
     const version = await showPrompt('Start Release', 'Enter release version:');
     if (!version || !version.trim()) return;
 
@@ -458,11 +503,11 @@ export class LvGitflowPanel extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.gitFlowStartRelease(this.repositoryPath, version.trim());
+      const result = await gitService.gitFlowStartRelease(repoPath, version.trim());
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'start-release', name: version.trim() },
+          detail: { type: 'start-release', name: version.trim(), repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -478,6 +523,13 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishRelease(item: ActiveItem): Promise<void> {
+    // Captured BEFORE the prompt (an in-app overlay — Ctrl+Tab can rebind
+    // this prop while it is open): the finish must run on the repo whose
+    // release the user clicked, and the conflict dialog must pin to it.
+    // The develop-branch NAME is per-repo config that reloads on switch —
+    // capture it with the path.
+    const repoPath = this.repositoryPath;
+    const developBranch = this.config?.developBranch ?? 'develop';
     const tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
     if (tagMessage === null) return;
 
@@ -486,7 +538,7 @@ export class LvGitflowPanel extends LitElement {
 
     try {
       const result = await gitService.gitFlowFinishRelease(
-        this.repositoryPath,
+        repoPath,
         item.name,
         tagMessage || undefined,
         true,
@@ -494,22 +546,26 @@ export class LvGitflowPanel extends LitElement {
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'finish-release', name: item.name },
+          detail: { type: 'finish-release', name: item.name, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
       } else if (result.error?.code === 'MERGE_CONFLICT') {
         await this.loadActiveItems();
-        this.openConflictDialog(false, {
-          kind: 'release',
-          name: item.name,
-          branchName: item.branch,
-          deleteBranch: true,
-          tagMessage: tagMessage || undefined,
-          // The backend merges+tags master BEFORE the develop merge; a conflict
-          // while HEAD is on develop means that master merge + tag already landed.
-          priorFinishCommitLanded: await this.isOnDevelopBranch(),
-        });
+        this.openConflictDialog(
+          false,
+          {
+            kind: 'release',
+            name: item.name,
+            branchName: item.branch,
+            deleteBranch: true,
+            tagMessage: tagMessage || undefined,
+            // The backend merges+tags master BEFORE the develop merge; a conflict
+            // while HEAD is on develop means that master merge + tag already landed.
+            priorFinishCommitLanded: await this.isOnDevelopBranch(repoPath, developBranch),
+          },
+          repoPath,
+        );
       } else {
         this.error = result.error?.message || 'Failed to finish release';
       }
@@ -522,6 +578,7 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleStartHotfix(): Promise<void> {
+    const repoPath = this.repositoryPath;
     const version = await showPrompt('Start Hotfix', 'Enter hotfix version:');
     if (!version || !version.trim()) return;
 
@@ -529,11 +586,11 @@ export class LvGitflowPanel extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.gitFlowStartHotfix(this.repositoryPath, version.trim());
+      const result = await gitService.gitFlowStartHotfix(repoPath, version.trim());
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'start-hotfix', name: version.trim() },
+          detail: { type: 'start-hotfix', name: version.trim(), repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -549,6 +606,8 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishHotfix(item: ActiveItem): Promise<void> {
+    const repoPath = this.repositoryPath;
+    const developBranch = this.config?.developBranch ?? 'develop';
     const tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
     if (tagMessage === null) return;
 
@@ -557,7 +616,7 @@ export class LvGitflowPanel extends LitElement {
 
     try {
       const result = await gitService.gitFlowFinishHotfix(
-        this.repositoryPath,
+        repoPath,
         item.name,
         tagMessage || undefined,
         true,
@@ -565,22 +624,26 @@ export class LvGitflowPanel extends LitElement {
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'finish-hotfix', name: item.name },
+          detail: { type: 'finish-hotfix', name: item.name, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
       } else if (result.error?.code === 'MERGE_CONFLICT') {
         await this.loadActiveItems();
-        this.openConflictDialog(false, {
-          kind: 'hotfix',
-          name: item.name,
-          branchName: item.branch,
-          deleteBranch: true,
-          tagMessage: tagMessage || undefined,
-          // The backend merges+tags master BEFORE the develop merge; a conflict
-          // while HEAD is on develop means that master merge + tag already landed.
-          priorFinishCommitLanded: await this.isOnDevelopBranch(),
-        });
+        this.openConflictDialog(
+          false,
+          {
+            kind: 'hotfix',
+            name: item.name,
+            branchName: item.branch,
+            deleteBranch: true,
+            tagMessage: tagMessage || undefined,
+            // The backend merges+tags master BEFORE the develop merge; a conflict
+            // while HEAD is on develop means that master merge + tag already landed.
+            priorFinishCommitLanded: await this.isOnDevelopBranch(repoPath, developBranch),
+          },
+          repoPath,
+        );
       } else {
         this.error = result.error?.message || 'Failed to finish hotfix';
       }
@@ -607,18 +670,34 @@ export class LvGitflowPanel extends LitElement {
    * conflict this means the backend already merged into master and created the
    * version tag (both happen before the develop merge), so those survive an abort.
    */
-  private async isOnDevelopBranch(): Promise<boolean> {
-    const develop = this.config?.developBranch ?? 'develop';
-    const result = await gitService.getBranches(this.repositoryPath);
+  private async isOnDevelopBranch(repoPath: string, developBranch: string): Promise<boolean> {
+    // BOTH parameters are the caller's PRE-AWAIT captures — this runs after
+    // the finish's awaits, when this.repositoryPath (and with it
+    // this.config, which reloads on repo switch) may already describe
+    // another repo. Reading the live config here would compare repo A's
+    // HEAD against repo B's develop-branch NAME and seed a dishonest
+    // priorFinishCommitLanded into the abort wording.
+    const result = await gitService.getBranches(repoPath);
     if (!result.success || !result.data) return false;
-    return result.data.some((b) => b.isHead && b.name === develop);
+    return result.data.some((b) => b.isHead && b.name === developBranch);
   }
 
-  private openConflictDialog(squash: boolean, gitflowFinish: GitflowFinishContext): void {
+  private openConflictDialog(
+    squash: boolean,
+    gitflowFinish: GitflowFinishContext,
+    repositoryPath: string,
+  ): void {
     this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
       bubbles: true,
       composed: true,
-      detail: { operationType: 'merge', squash, gitflowFinish },
+      detail: {
+        operationType: 'merge',
+        squash,
+        gitflowFinish,
+        // The caller's PRE-AWAIT capture — this.repositoryPath may have been
+        // rebound to another repo while the finish ran.
+        repositoryPath,
+      },
     }));
   }
 

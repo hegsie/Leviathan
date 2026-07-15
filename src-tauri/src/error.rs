@@ -27,6 +27,12 @@ pub enum LeviathanError {
     #[error("Invalid path: {0}")]
     InvalidPath(String),
 
+    /// The requested file does not exist on disk. Distinct from other read
+    /// failures (permissions, invalid encoding) so callers can tell "the
+    /// file is GONE" from "the file exists but could not be decoded".
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
     #[error("Branch not found: {0}")]
     BranchNotFound(String),
 
@@ -100,6 +106,7 @@ impl From<LeviathanError> for ErrorResponse {
             LeviathanError::RepositoryNotFound(_) => "REPO_NOT_FOUND",
             LeviathanError::RepositoryNotOpen => "REPO_NOT_OPEN",
             LeviathanError::InvalidPath(_) => "INVALID_PATH",
+            LeviathanError::FileNotFound(_) => "FILE_NOT_FOUND",
             LeviathanError::BranchNotFound(_) => "BRANCH_NOT_FOUND",
             LeviathanError::CommitNotFound(_) => "COMMIT_NOT_FOUND",
             LeviathanError::TagNotFound(_) => "TAG_NOT_FOUND",
@@ -143,6 +150,7 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::RepositoryNotFound(_) => "REPO_NOT_FOUND",
                 LeviathanError::RepositoryNotOpen => "REPO_NOT_OPEN",
                 LeviathanError::InvalidPath(_) => "INVALID_PATH",
+                LeviathanError::FileNotFound(_) => "FILE_NOT_FOUND",
                 LeviathanError::BranchNotFound(_) => "BRANCH_NOT_FOUND",
                 LeviathanError::CommitNotFound(_) => "COMMIT_NOT_FOUND",
                 LeviathanError::TagNotFound(_) => "TAG_NOT_FOUND",

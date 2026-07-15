@@ -482,6 +482,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
   @state() private draggedIndex: number | null = null;
   @state() private dropTargetIndex: number | null = null;
   @state() private showPreview = true;
+  /** Repo captured at open. This dialog is long-lived (open → reorder →
+   * a separate Execute click); the reactive `repositoryPath` prop rebinds
+   * the moment the user Ctrl+Tabs to another repo, so loadCommits AND the
+   * history-rewriting execute must use THIS pinned value, never the live
+   * prop — executing an interactive rebase against the wrong repo would
+   * rewrite the wrong history. */
+  private pinnedRepoPath = '';
 
   @query('lv-modal') private modal!: LvModal;
 
@@ -507,6 +514,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
   public async open(onto: string, options?: { rewordCommitOid?: string }): Promise<void> {
     this.reset();
     this.onto = onto;
+    this.pinnedRepoPath = this.repositoryPath;
     this.modal.open = true;
     await this.loadCommits();
 
@@ -523,6 +531,12 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.modal.open = false;
   }
 
+  /** The repo this dialog is pinned to while open, or null when closed.
+   * The host uses it to close the dialog if that repo's tab is closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.modal?.open ? this.pinnedRepoPath : null;
+  }
+
   private reset(): void {
     this.onto = '';
     this.commits = [];
@@ -536,13 +550,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
   }
 
   private async loadCommits(): Promise<void> {
-    if (!this.repositoryPath || !this.onto) return;
+    if (!this.pinnedRepoPath || !this.onto) return;
 
     this.loading = true;
     this.error = '';
 
     try {
-      const result = await gitService.getRebaseCommits(this.repositoryPath, this.onto);
+      const result = await gitService.getRebaseCommits(this.pinnedRepoPath, this.onto);
 
       if (result.success) {
         this.commits = (result.data || []).map(c => ({
@@ -829,14 +843,18 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
       const todo = todoLines.join('\n');
 
-      const result = await gitService.executeInteractiveRebase(
-        this.repositoryPath,
-        this.onto,
-        todo
-      );
+      // The repo pinned at open — NOT the live prop, which rebinds on a
+      // tab switch while this dialog sits open. Executing against the
+      // wrong repo would rewrite the wrong history.
+      const repoPath = this.pinnedRepoPath;
+      const result = await gitService.executeInteractiveRebase(repoPath, this.onto, todo);
 
       if (result.success) {
         this.dispatchEvent(new CustomEvent('rebase-complete', {
+          // Same pinning as the conflict sibling below: the refresh must
+          // target the repo the rebase ran on, not whichever tab is active
+          // by the time it completes.
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -847,7 +865,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
-            detail: { operationType: 'rebase' },
+            detail: { operationType: 'rebase', repositoryPath: repoPath },
           }));
           showToast('Rebase paused — resolve conflicts to continue', 'warning');
         } else {

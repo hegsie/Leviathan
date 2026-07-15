@@ -82,37 +82,6 @@ export const codeStyles = css`
     border-radius: 2px;
   }
 
-  /* Conflict buttons */
-  .code-conflict-btn-ours {
-    background: rgba(var(--color-success-rgb, 34, 197, 94), 0.15);
-    border: 1px solid var(--color-success);
-    color: var(--color-success);
-  }
-
-  .code-conflict-btn-ours:hover {
-    background: rgba(var(--color-success-rgb, 34, 197, 94), 0.25);
-  }
-
-  .code-conflict-btn-theirs {
-    background: rgba(var(--color-info-rgb, 59, 130, 246), 0.15);
-    border: 1px solid var(--color-info);
-    color: var(--color-info);
-  }
-
-  .code-conflict-btn-theirs:hover {
-    background: rgba(var(--color-info-rgb, 59, 130, 246), 0.25);
-  }
-
-  .code-conflict-btn-both {
-    background: rgba(168, 85, 247, 0.15);
-    border: 1px solid #a855f7;
-    color: #a855f7;
-  }
-
-  .code-conflict-btn-both:hover {
-    background: rgba(168, 85, 247, 0.25);
-  }
-
   /* Conflict block container */
   .code-conflict-block {
     border: 1px solid var(--color-warning);

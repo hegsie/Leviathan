@@ -4,13 +4,14 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state, query } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
+import type { LvMergeEditor } from '../panels/lv-merge-editor.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
 import type { CommandResult } from '../../types/api.types.ts';
-import type { LvMergeEditor } from '../panels/lv-merge-editor.ts';
 import '../panels/lv-merge-editor.ts';
 
 /**
@@ -175,6 +176,15 @@ export class LvConflictResolutionDialog extends LitElement {
         white-space: nowrap;
       }
 
+      /* Directory hint so same-named files in different folders are distinguishable */
+      .file-dir {
+        display: block;
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
       .editor-container {
         flex: 1;
         overflow: hidden;
@@ -329,6 +339,15 @@ export class LvConflictResolutionDialog extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
   @property({ type: String }) repositoryPath = '';
   @property({ type: String }) operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
+  /** The file the user clicked to get here — preselected over the first conflict. */
+  @property({ attribute: false }) initialFilePath: string | null = null;
+  /**
+   * False when 'stash' was merely INFERRED from a clean repository state
+   * (external `git stash apply`/`checkout -m`/`apply -3` — indistinguishable).
+   * Messaging must then not promise the changes are safe in a stash entry
+   * that may not exist.
+   */
+  @property({ type: Boolean }) stashSourceCertain = true;
   /** For 'stash' completion: which stash entry to drop once conflicts are resolved. */
   @property({ type: Number }) stashIndex = 0;
   /**
@@ -374,12 +393,22 @@ export class LvConflictResolutionDialog extends LitElement {
    */
   private priorFinishCommitLanded = false;
   @state() private aborting = false;
+  @state() private continuing = false;
+  /** True while the EMBEDDED merge editor has an external tool session open. */
+  @state() private editorToolActive = false;
+  /**
+   * Number of the embedded editor's resolve/take-side writes in flight. A
+   * COUNT, not a boolean: switching files mid-write deliberately lets a new
+   * resolve start while the old one finishes, and each write dispatches its
+   * own started/finished pair — folding them into a boolean would unlock
+   * Abort/Complete/External on the FIRST finish while a write is still
+   * running.
+   */
+  @state() private editorResolveDepth = 0;
   @state() private showAbortConfirm = false;
   @state() private hasMergeTool = false;
   @state() private launchingExternalTool: string | null = null;
   @state() private detectedMergeTool: string | null = null;
-
-  @query('lv-merge-editor') private mergeEditor?: LvMergeEditor;
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -399,6 +428,9 @@ export class LvConflictResolutionDialog extends LitElement {
       this.resolvedFiles = new Set();
       this.selectedIndex = 0;
       this.aborting = false;
+      this.continuing = false;
+      this.editorToolActive = false;
+      this.editorResolveDepth = 0;
       this.showAbortConfirm = false;
       this.mergeCommitted = false;
       // Seed from the finish context: a first-run release/hotfix whose master
@@ -407,8 +439,32 @@ export class LvConflictResolutionDialog extends LitElement {
       // (not just the dialog-internal re-run).
       this.priorFinishCommitLanded = this.gitflowFinish?.priorFinishCommitLanded ?? false;
       this.loadConflicts();
+      // Capture the to-be-dropped stash entry's IDENTITY at open. Complete
+      // may run much later, and an external `git stash drop` in a terminal
+      // meanwhile shifts the indices — dropping blindly by the open-time
+      // index could then delete an UNRELATED stash. The index AND a session
+      // epoch are captured with the request: the dialog can close and
+      // reopen for a different stash before this resolves, and a late
+      // first-session response must not pair its list with the SECOND
+      // session's index.
+      this.stashOidToDrop = null;
+      this.stashCaptureEpoch++;
+      if (this.operationType === 'stash' && this.dropStashOnComplete) {
+        const idx = this.stashIndex;
+        const epoch = this.stashCaptureEpoch;
+        void gitService.getStashes(this.repositoryPath).then((result) => {
+          if (this.open && epoch === this.stashCaptureEpoch && result.success) {
+            this.stashOidToDrop = result.data?.[idx]?.oid ?? null;
+          }
+        });
+      }
     }
   }
+
+  /** OID of the stash entry Complete must drop, captured at dialog open. */
+  private stashOidToDrop: string | null = null;
+  /** Bumped per open/close so a stale identity capture can't cross sessions. */
+  private stashCaptureEpoch = 0;
 
   private handleKeyDown = (e: KeyboardEvent): void => {
     if (!this.open) return;
@@ -425,21 +481,19 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   };
 
-  async show(): Promise<void> {
-    this.open = true;
-    this.resolvedFiles = new Set();
-    this.selectedIndex = 0;
-    await this.loadConflicts();
-  }
-
   private close(): void {
     this.open = false;
     this.conflicts = [];
     this.resolvedFiles = new Set();
     this.aborting = false;
+    this.continuing = false;
+    this.editorToolActive = false;
+    this.editorResolveDepth = 0;
     this.showAbortConfirm = false;
     this.mergeCommitted = false;
     this.priorFinishCommitLanded = false;
+    this.stashOidToDrop = null;
+    this.stashCaptureEpoch++;
   }
 
   /** Re-run the conflict load after a failure, resetting resolution progress. */
@@ -458,6 +512,14 @@ export class LvConflictResolutionDialog extends LitElement {
       if (result.success && result.data) {
         this.conflicts = result.data;
         this.loadFailed = false;
+        // Open on the file the user clicked, when it's one of the conflicts.
+        // (Continue-with-new-conflicts paths reset the index to 0 afterwards.)
+        if (this.initialFilePath) {
+          const initialIndex = this.conflicts.findIndex((c) => c.path === this.initialFilePath);
+          if (initialIndex >= 0) {
+            this.selectedIndex = initialIndex;
+          }
+        }
       } else {
         console.error('Failed to load conflicts:', result.error);
         showToast('Failed to load conflicts', 'error');
@@ -514,24 +576,76 @@ export class LvConflictResolutionDialog extends LitElement {
   }
 
   private async handleOpenExternalTool(conflictPath: string): Promise<void> {
-    if (!this.repositoryPath) return;
-
+    // Re-entrancy + mutual exclusion: one tool session at a time, and never
+    // under a running abort/complete.
+    if (
+      !this.repositoryPath ||
+      this.launchingExternalTool !== null ||
+      this.aborting ||
+      this.continuing ||
+      this.editorToolActive ||
+      this.editorResolveDepth > 0
+    ) {
+      return;
+    }
+    // Claim the launch BEFORE any await: the confirm below yields to the
+    // event loop, and a second click landing in that window would pass the
+    // entry guard again — two tool sessions editing the same file.
     this.launchingExternalTool = conflictPath;
+    // Launching on the SELECTED file replaces the editor's unsaved picks
+    // with the tool's output on reload — confirm with tool wording (the
+    // file-switch copy would wrongly suggest Mark Resolved keeps the picks
+    // safe from the tool's result).
+    if (this.selectedConflict?.path === conflictPath) {
+      const editor = this.shadowRoot?.querySelector('lv-merge-editor') as LvMergeEditor | null;
+      if (editor?.hasUnsavedResolutions()) {
+        let proceed = false;
+        try {
+          proceed = await showConfirm(
+            'Discard in-progress resolution?',
+            'The external tool works on the file as saved on disk — your unsaved picks here will be replaced by its result.',
+            'warning',
+          );
+        } finally {
+          if (!proceed) this.launchingExternalTool = null;
+        }
+        if (!proceed) return;
+      }
+    }
+
     try {
       const result = await gitService.launchMergeTool(this.repositoryPath, conflictPath);
       if (result.success && result.data?.success) {
         // The tool's exit code alone isn't authoritative — re-check the index to
         // confirm the file is no longer conflicted before marking it resolved.
         const conflictsResult = await gitService.getConflicts(this.repositoryPath);
+        // A FAILED re-check must count as still conflicted — treating it as
+        // resolved would enable Complete (and a stash drop) on a file that
+        // may still hold marker text.
         const stillConflicted =
-          conflictsResult.success &&
+          !conflictsResult.success ||
           (conflictsResult.data ?? []).some((c) => c.path === conflictPath);
+        // The embedded editor is bound to this file's ConflictFile object and
+        // only reloads on identity change — refresh it so it shows the tool's
+        // output instead of a stale parse that Mark Resolved would write back
+        // OVER the merge the user just crafted in the tool. Adopt the FRESH
+        // entry when the file is still conflicted: the tool may have changed
+        // what get_conflicts reports (markerSize, conflictStyle, hunks), and
+        // re-parsing with the stale metadata would misread its output.
+        const wasSelected = this.selectedConflict?.path === conflictPath;
+        const fresh = conflictsResult.data?.find((c) => c.path === conflictPath);
+        this.conflicts = this.conflicts.map((c) =>
+          c.path === conflictPath ? (fresh ?? { ...c }) : c
+        );
         if (stillConflicted) {
           showToast('File still has conflicts', 'warning');
         } else {
           this.resolvedFiles = new Set([...this.resolvedFiles, conflictPath]);
           this.requestUpdate();
           showToast('Merge tool completed', 'success');
+          if (wasSelected) {
+            this.advanceToNextUnresolved();
+          }
         }
       } else {
         showToast(result.data?.message ?? result.error?.message ?? 'Merge tool failed', 'error');
@@ -543,38 +657,133 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   }
 
-  private handleFileSelect(index: number): void {
+  /**
+   * The editor's picks live only in memory until Mark Resolved — navigating
+   * away re-parses the file from disk and silently discards them. Confirm
+   * before a user-driven switch when in-progress work would be lost.
+   * (Auto-advance after a resolution goes straight to selectedIndex — the
+   * resolved file's work IS on disk by then.)
+   */
+  private async confirmLeaveInProgress(): Promise<boolean> {
+    const editor = this.shadowRoot?.querySelector('lv-merge-editor') as LvMergeEditor | null;
+    if (!editor?.hasUnsavedResolutions()) return true;
+    return showConfirm(
+      'Discard in-progress resolution?',
+      'This file has conflict resolutions that are not saved yet — switching files discards them. Use Mark Resolved to keep them.',
+      'warning',
+    );
+  }
+
+  /**
+   * Navigating away mid-write lets the user come BACK and start a second
+   * write against the same file — two overlapping writes, last one wins.
+   * The file-list rows and keyboard shortcuts have no disabled affordance
+   * (unlike the Prev/Next buttons), so the refusal must not be silent.
+   */
+  private navBlockedByResolve(): boolean {
+    if (this.editorResolveDepth === 0) return false;
+    showToast('Wait for the current resolve to finish', 'info');
+    return true;
+  }
+
+  /** The editor's own external-tool session ended. Adopt the fresh
+   * ConflictFile the editor re-fetched: the tool may have changed what
+   * get_conflicts reports (markerSize, conflictStyle, hunks), and keeping
+   * the stale object would misparse the tool's output on the next load. */
+  private handleEditorToolFinished(e: Event): void {
+    this.editorToolActive = false;
+    const detail = (e as CustomEvent<{
+      filePath?: string;
+      freshConflicts?: ConflictFile[] | null;
+    }>).detail;
+    const filePath = detail?.filePath;
+    const fresh = detail?.freshConflicts?.find((c) => c.path === filePath);
+    if (filePath && fresh) {
+      this.conflicts = this.conflicts.map((c) => (c.path === filePath ? fresh : c));
+    }
+  }
+
+  private async handleFileSelect(index: number): Promise<void> {
+    if (index === this.selectedIndex) return;
+    if (this.navBlockedByResolve()) return;
+    if (!(await this.confirmLeaveInProgress())) return;
+    if (this.editorResolveDepth > 0) return;
+    // Re-validate the index after the confirm await, like handlePrevious/
+    // handleNext: a runContinue reload (rebase --continue reporting fresh
+    // conflicts) can replace/shrink this.conflicts while the confirm is up,
+    // so a stale index would point past the new array and collapse the
+    // editor to "Select a file" with conflicts still unresolved.
+    if (index < 0 || index >= this.conflicts.length) return;
     this.selectedIndex = index;
   }
 
-  private handlePrevious(): void {
+  private async handlePrevious(): Promise<void> {
     if (this.selectedIndex > 0) {
+      if (this.navBlockedByResolve()) return;
+      if (!(await this.confirmLeaveInProgress())) return;
+      if (this.editorResolveDepth > 0) return;
+      // Re-check the bound after the await: Alt+ArrowUp auto-repeat stacks
+      // several of these behind one confirm, and each read the same stale
+      // index — decrementing twice would drive the selection to -1 and
+      // leave Prev/Next permanently inert.
+      if (this.selectedIndex <= 0) return;
       this.selectedIndex--;
     }
   }
 
-  private handleNext(): void {
+  private async handleNext(): Promise<void> {
     if (this.selectedIndex < this.conflicts.length - 1) {
+      if (this.navBlockedByResolve()) return;
+      if (!(await this.confirmLeaveInProgress())) return;
+      if (this.editorResolveDepth > 0) return;
+      // Same post-await bound re-check as handlePrevious — stacked calls
+      // must not push the index past the last file.
+      if (this.selectedIndex >= this.conflicts.length - 1) return;
       this.selectedIndex++;
+    }
+  }
+
+  /** Move selection to the next unresolved file, wrapping around so files
+   * skipped earlier in the list are still reachable. */
+  private advanceToNextUnresolved(): void {
+    const total = this.conflicts.length;
+    for (let offset = 1; offset < total; offset++) {
+      const i = (this.selectedIndex + offset) % total;
+      if (!this.resolvedFiles.has(this.conflicts[i].path)) {
+        this.selectedIndex = i;
+        return;
+      }
     }
   }
 
   private handleConflictResolved(e: CustomEvent): void {
     const { file } = e.detail as { file: ConflictFile };
+    // A resolve call can land AFTER the user has moved on to another file —
+    // only auto-advance when the resolved file is still the selected one, or
+    // the completion would yank them off the file they're actively working on
+    // (losing its in-memory picks on the way back).
+    const wasSelected = this.conflicts[this.selectedIndex]?.path === file.path;
     this.resolvedFiles = new Set([...this.resolvedFiles, file.path]);
     this.requestUpdate();
+    if (!wasSelected) return;
 
-    // Move to next unresolved file
-    const nextUnresolved = this.conflicts.findIndex(
-      (c, i) => i > this.selectedIndex && !this.resolvedFiles.has(c.path)
-    );
-    if (nextUnresolved !== -1) {
-      this.selectedIndex = nextUnresolved;
-    }
+    this.advanceToNextUnresolved();
   }
 
   private handleAbort(): void {
-    if (this.aborting) return;
+    // Mutually exclusive with Complete and the external merge tool: aborting
+    // while a stash-drop Complete is in flight would revert the files AND
+    // lose the stash entry; aborting under an open external tool would let
+    // its later save re-dirty the just-aborted working tree.
+    if (
+      this.aborting ||
+      this.continuing ||
+      this.launchingExternalTool !== null ||
+      this.editorToolActive ||
+      this.editorResolveDepth > 0
+    ) {
+      return;
+    }
     // Once the merge commit has landed (only the follow-up git-flow finish
     // step failed), there is nothing to abort — exit directly WITHOUT the
     // "all resolved changes will be lost" confirm, which would be false here
@@ -612,7 +821,16 @@ export class LvConflictResolutionDialog extends LitElement {
   }
 
   private async handleAbortConfirm(): Promise<void> {
-    if (!this.repositoryPath || this.aborting) return;
+    if (
+      !this.repositoryPath ||
+      this.aborting ||
+      this.continuing ||
+      this.launchingExternalTool !== null ||
+      this.editorToolActive ||
+      this.editorResolveDepth > 0
+    ) {
+      return;
+    }
 
     // Safety net: if the merge was committed after the confirm opened, exit
     // without a no-op abort_merge. handleAbort normally routes here before the
@@ -648,22 +866,38 @@ export class LvConflictResolutionDialog extends LitElement {
           // them (clears the conflict index entries, resetting to HEAD) then discard
           // their working-tree changes (restores HEAD content). The stash entry is
           // never touched, so the stashed changes remain recoverable.
-          // When the conflict LOAD failed, the local list is empty but the index
-          // is genuinely conflicted — re-fetch so Abort restores the real paths
-          // instead of no-opping with a false success message.
-          let conflictPaths = this.conflicts.map((c) => c.path);
-          if (this.loadFailed) {
-            const refetch = await gitService.getConflicts(this.repositoryPath);
-            if (!refetch.success || !refetch.data) {
-              showToast(
-                refetch.error?.message ?? 'Could not read conflicts — nothing was restored',
-                'error',
-              );
-              this.aborting = false;
-              return;
-            }
-            conflictPaths = refetch.data.map((c) => c.path);
+          // ALWAYS re-fetch the authoritative conflict list from the index
+          // rather than trusting the client-side `this.conflicts`. That list
+          // is empty both when the load FAILED and while it is still
+          // IN FLIGHT (per-file replay detection can take seconds) — in
+          // either case restoring from it would no-op and report a false
+          // "nothing needed restoring" success while the tree stays fully
+          // conflicted.
+          let restoredCount = 0;
+          const refetch = await gitService.getConflicts(this.repositoryPath);
+          if (!refetch.success || !refetch.data) {
+            showToast(
+              refetch.error?.message ?? 'Could not read conflicts — nothing was restored',
+              'error',
+            );
+            this.aborting = false;
+            return;
           }
+          // Restore the UNION of the still-conflicted paths AND the files
+          // that were originally conflicted when the dialog opened. A file
+          // the user already resolved in this session (Mark Resolved →
+          // staged, or take-side deletion) is no longer index-conflicted, so
+          // the refetch alone would EXCLUDE it — Abort would leave that
+          // resolution staged while claiming everything was reverted. The
+          // refetch remains the safety net for an empty/in-flight client
+          // list; the union re-adds the resolved files (their stash changes
+          // stay safe in the retained stash entry).
+          const conflictPaths = Array.from(
+            new Set([
+              ...refetch.data.map((c) => c.path),
+              ...this.conflicts.map((c) => c.path),
+            ]),
+          );
           if (conflictPaths.length === 0) {
             result = { success: true } as CommandResult<void>;
           } else {
@@ -673,18 +907,23 @@ export class LvConflictResolutionDialog extends LitElement {
             result = unstageResult.success
               ? await gitService.discardChanges(this.repositoryPath, conflictPaths)
               : unstageResult;
+            if (result.success) restoredCount = conflictPaths.length;
+          }
+          if (result.success) {
+            showToast(
+              restoredCount === 0
+                ? 'Nothing needed restoring'
+                : this.stashSourceCertain
+                  ? 'Conflicted files restored — your changes remain in the stash'
+                  : 'Conflicted files restored to their committed (HEAD) state',
+              'info',
+            );
           }
           break;
         }
       }
 
       if (result.success) {
-        if (this.operationType === 'stash') {
-          showToast(
-            'Conflicted files restored — your changes remain in the stash',
-            'info',
-          );
-        }
         if (this.operationType === 'merge' && this.priorFinishCommitLanded) {
           // Only the in-progress develop merge was rolled back — the master
           // merge and version tag from this finish are already committed.
@@ -700,6 +939,20 @@ export class LvConflictResolutionDialog extends LitElement {
           })
         );
         this.close();
+      } else if (this.abortFailedBecauseNoOperation(result.error?.message)) {
+        // The user concluded the operation outside the app (`git merge
+        // --abort` / `git commit` in a terminal), so there's nothing left
+        // to abort. Escape is suppressed and Complete may be disabled, so
+        // without this the full-screen dialog is inescapable. Treat it as
+        // concluded and close.
+        showToast(
+          `This ${this.getOperationTitle().toLowerCase()} was already concluded outside the app`,
+          'warning',
+        );
+        this.dispatchEvent(
+          new CustomEvent('operation-aborted', { bubbles: true, composed: true })
+        );
+        this.close();
       } else {
         console.error('Failed to abort:', result.error);
         showToast(result.error?.message ?? `Failed to abort ${this.getOperationTitle()}`, 'error');
@@ -712,6 +965,24 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   }
 
+  /** True when an abort failed because the operation no longer exists in the
+   * repo — the user concluded it outside the app. Detected from the
+   * backend/git2 "no ... to abort / not in progress" wording. */
+  private abortFailedBecauseNoOperation(message?: string): boolean {
+    const m = (message ?? '').toLowerCase();
+    return (
+      m.includes('no merge to abort') ||
+      m.includes('merge_head') ||
+      m.includes('no rebase') ||
+      m.includes('no cherry') ||
+      m.includes('cherry_pick_head') ||
+      m.includes('no revert') ||
+      m.includes('revert_head') ||
+      m.includes('not in progress') ||
+      m.includes('nothing to abort')
+    );
+  }
+
   /**
    * Close a stash dialog that has nothing to resolve WITHOUT dropping or
    * resetting anything. The backend reported a conflict but nothing was applied,
@@ -721,8 +992,10 @@ export class LvConflictResolutionDialog extends LitElement {
    */
   private handleStashNotApplied(): void {
     showToast(
-      'The stash was not applied — your changes are still in the stash',
-      'warning',
+      this.stashSourceCertain
+        ? 'The stash was not applied — your changes are still in the stash'
+        : 'No conflicted files remain — nothing to resolve',
+      this.stashSourceCertain ? 'warning' : 'info',
     );
     this.dispatchEvent(
       new CustomEvent('operation-aborted', {
@@ -734,7 +1007,58 @@ export class LvConflictResolutionDialog extends LitElement {
   }
 
   private async handleContinue(): Promise<void> {
-    if (!this.repositoryPath) return;
+    // Re-entry guard: a double-click during the awaited backend call must not
+    // run the flow twice — a duplicate dropStash would delete an UNRELATED
+    // stash entry after the indices shift. Also mutually exclusive with Abort.
+    if (
+      !this.repositoryPath ||
+      this.continuing ||
+      this.aborting ||
+      this.launchingExternalTool !== null ||
+      this.editorToolActive ||
+      this.editorResolveDepth > 0
+    ) {
+      return;
+    }
+    // Claim BEFORE any await so a fast double-click is swallowed by the
+    // entry guard above rather than stacking a second confirm/continue —
+    // the same claim-before-confirm pattern as the external-tool launcher.
+    // The Complete AND Abort buttons' disabled bindings both reflect
+    // `continuing`, so claiming here also inerts Abort for the confirm
+    // window.
+    this.continuing = true;
+    try {
+      // The editor can hold visible rework that was never Mark-Resolved: a
+      // reopened block (Reset), fresh picks, or a mid-typing edit draft. All
+      // files still COUNT as resolved (their last Mark Resolved is on disk),
+      // so Complete would silently commit that older content — a mere file
+      // switch confirms in this state, and completing is far more final.
+      const editor = this.shadowRoot?.querySelector('lv-merge-editor') as LvMergeEditor | null;
+      if (editor?.hasUnsavedResolutions()) {
+        const proceed = await showConfirm(
+          'Complete without the latest changes?',
+          'This file has picks or edits that were not saved with Mark Resolved — completing uses the last saved content and discards them.',
+          'warning',
+        );
+        if (!proceed) return;
+        // Re-check the OTHER exclusion guards after the confirm's await (a
+        // tool session or abort may have started). `continuing` is ours.
+        if (
+          this.aborting ||
+          this.launchingExternalTool !== null ||
+          this.editorToolActive ||
+          this.editorResolveDepth > 0
+        ) {
+          return;
+        }
+      }
+      await this.runContinue();
+    } finally {
+      this.continuing = false;
+    }
+  }
+
+  private async runContinue(): Promise<void> {
 
     // A failed load leaves us with no conflict data even though the index IS
     // conflicted. Never proceed (or drop the stash) in that state — keep the
@@ -850,18 +1174,53 @@ export class LvConflictResolutionDialog extends LitElement {
             return;
           }
           break;
-        case 'stash':
+        case 'stash': {
           // All conflicts resolved. Drop the stash only for pop semantics
           // (dropAfter/pop/auto-stash) — a plain apply must keep the stash entry.
           if (this.dropStashOnComplete) {
-            result = await gitService.dropStash({ path: this.repositoryPath, index: this.stashIndex });
-            if (!result.success) {
-              console.error('Failed to drop stash:', result.error);
-              showToast(result.error?.message ?? 'Failed to drop stash', 'error');
-              return;
+            // Drop ONLY via the identity captured at OPEN — never by a
+            // blind index, not even as a fallback. The list can shift
+            // under the dialog (an external `git stash push` puts new WIP
+            // at index 0), so any index read after open — including a
+            // "fresh capture" at Complete time — can name the wrong entry.
+            // Skipping the drop (with a warning) is always safer than
+            // dropping the wrong one.
+            let dropIndex: number | null = null;
+            if (this.stashOidToDrop !== null) {
+              const stashes = await gitService.getStashes(this.repositoryPath);
+              if (stashes.success && stashes.data) {
+                const found = stashes.data.findIndex((s) => s.oid === this.stashOidToDrop);
+                if (found >= 0) {
+                  dropIndex = found;
+                }
+              }
+            }
+            if (dropIndex === null) {
+              showToast(
+                'Could not verify the stash entry — it was left in the stash list',
+                'warning',
+              );
+            }
+            if (dropIndex !== null) {
+              result = await gitService.dropStash({ path: this.repositoryPath, index: dropIndex });
+              if (!result.success) {
+                // The conflict resolution and the stash APPLY already
+                // succeeded — only removing the (now-redundant) stash entry
+                // failed. That entry lingering is recoverable, so this is
+                // NOT an operation failure: warn, but still complete like
+                // the unverifiable-identity branch above, or the pinned
+                // repo would never get refreshed and the dialog would
+                // dead-end on an already-applied stash.
+                console.error('Failed to drop stash:', result.error);
+                showToast(
+                  `${result.error?.message ?? 'Failed to drop stash'} — it was left in the stash list`,
+                  'warning',
+                );
+              }
             }
           }
           break;
+        }
       }
 
       this.dispatchEvent(
@@ -993,6 +1352,15 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   }
 
+  /** The pinned repo's name. The dialog stays bound to the repo the
+   * operation started on even when another tab is active — without naming
+   * it, a user who switched tabs mid-operation has no way to tell whose
+   * merge Complete/Abort will hit. */
+  private get repositoryName(): string {
+    const path = this.repositoryPath ?? '';
+    return path.split(/[\\/]/).filter(Boolean).pop() ?? '';
+  }
+
   render() {
     if (!this.open) return nothing;
 
@@ -1005,7 +1373,7 @@ export class LvConflictResolutionDialog extends LitElement {
               Resolve ${this.getOperationTitle()} Conflicts
             </div>
             <div class="header-subtitle">
-              ${this.resolvedCount} of ${this.totalCount} conflicts resolved
+              ${this.resolvedCount} of ${this.totalCount} file${this.totalCount === 1 ? '' : 's'} resolved${this.repositoryName ? ` · ${this.repositoryName}` : ''}
             </div>
           </div>
           <div class="header-actions">
@@ -1013,7 +1381,7 @@ export class LvConflictResolutionDialog extends LitElement {
               <button
                 class="nav-btn"
                 @click=${this.handlePrevious}
-                ?disabled=${this.selectedIndex === 0}
+                ?disabled=${this.selectedIndex === 0 || this.editorResolveDepth > 0}
                 title="Previous file (Alt+Up)"
               >
                 ← Prev
@@ -1021,7 +1389,8 @@ export class LvConflictResolutionDialog extends LitElement {
               <button
                 class="nav-btn"
                 @click=${this.handleNext}
-                ?disabled=${this.selectedIndex >= this.conflicts.length - 1}
+                ?disabled=${this.selectedIndex >= this.conflicts.length - 1 ||
+                this.editorResolveDepth > 0}
                 title="Next file (Alt+Down)"
               >
                 Next →
@@ -1055,13 +1424,20 @@ export class LvConflictResolutionDialog extends LitElement {
                       </span>
                       <span class="file-name" title=${conflict.path}>
                         ${conflict.path.split('/').pop()}
+                        ${conflict.path.includes('/')
+                          ? html`<span class="file-dir">${conflict.path.slice(0, conflict.path.lastIndexOf('/'))}</span>`
+                          : nothing}
                       </span>
                       ${this.hasMergeTool && !this.resolvedFiles.has(conflict.path) ? html`
                         <button
                           class="btn btn-sm"
                           style="margin-left: auto; padding: 2px 6px; font-size: 11px;"
                           @click=${(e: Event) => { e.stopPropagation(); this.handleOpenExternalTool(conflict.path); }}
-                          ?disabled=${this.launchingExternalTool === conflict.path}
+                          ?disabled=${this.launchingExternalTool !== null ||
+                          this.aborting ||
+                          this.continuing ||
+                          this.editorToolActive ||
+                          this.editorResolveDepth > 0}
                           title="Open in external merge tool"
                         >
                           ${this.launchingExternalTool === conflict.path ? '...' : 'External'}
@@ -1078,7 +1454,19 @@ export class LvConflictResolutionDialog extends LitElement {
                   <lv-merge-editor
                     .repositoryPath=${this.repositoryPath}
                     .conflictFile=${this.selectedConflict}
+                    .operationType=${this.operationType}
+                    .externalToolLocked=${this.continuing ||
+                    this.aborting ||
+                    this.launchingExternalTool !== null}
                     @conflict-resolved=${this.handleConflictResolved}
+                    @external-tool-started=${() => { this.editorToolActive = true; }}
+                    @external-tool-finished=${this.handleEditorToolFinished}
+                    @resolve-started=${() => {
+                      this.editorResolveDepth++;
+                    }}
+                    @resolve-finished=${() => {
+                      this.editorResolveDepth = Math.max(0, this.editorResolveDepth - 1);
+                    }}
                   ></lv-merge-editor>
                 `
               : html`
@@ -1111,13 +1499,26 @@ export class LvConflictResolutionDialog extends LitElement {
               : 'No file selected'}
           </div>
           <div class="footer-actions">
-            <button class="btn btn-danger" @click=${this.handleAbort}>
+            <button
+              class="btn btn-danger"
+              @click=${this.handleAbort}
+              ?disabled=${this.continuing ||
+                this.aborting ||
+                this.launchingExternalTool !== null ||
+                this.editorToolActive ||
+                this.editorResolveDepth > 0}
+            >
               Abort ${this.getOperationTitle()}
             </button>
             <button
               class="btn btn-primary"
               @click=${this.handleContinue}
-              ?disabled=${this.loadFailed ||
+              ?disabled=${this.continuing ||
+                this.aborting ||
+                this.launchingExternalTool !== null ||
+                this.editorToolActive ||
+                this.editorResolveDepth > 0 ||
+                this.loadFailed ||
                 this.resolvedCount < this.totalCount ||
                 (this.operationType === 'stash' && this.conflicts.length === 0)}
             >
@@ -1137,7 +1538,9 @@ export class LvConflictResolutionDialog extends LitElement {
                   <div class="confirm-title">Abort ${this.getOperationTitle()}?</div>
                   <div class="confirm-message">
                     ${this.operationType === 'stash'
-                      ? 'The conflicted files will be reverted to their committed (HEAD) state, discarding the applied stash changes in those files. Any unrelated uncommitted changes are kept, and the stash entry itself remains in the stash list.'
+                      ? this.stashSourceCertain
+                        ? 'The conflicted files will be reverted to their committed (HEAD) state, discarding the applied stash changes in those files. Any unrelated uncommitted changes are kept, and the stash entry itself remains in the stash list.'
+                        : 'The conflicted files will be reverted to their committed (HEAD) state, discarding those changes. If they did not come from a stash apply, they are not saved anywhere else — this cannot be undone.'
                       : 'All resolved changes will be lost. This cannot be undone.'}
                   </div>
                   <div class="confirm-actions">

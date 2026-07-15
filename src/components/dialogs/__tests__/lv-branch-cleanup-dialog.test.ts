@@ -558,6 +558,57 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(deletedNames).to.include('feature/wip');
     });
 
+    it('deletes + prunes the repo it was opened for, not the tab switched to while open', async () => {
+      // The dialog pins its repo at open(); repositoryPath is bound live to the
+      // active tab. Switching tabs while the (irreversible) cleanup dialog is
+      // open must not redirect the force-deletes / remote prune to another repo.
+      const el = await renderAndOpen([mergedSafe]);
+
+      // User switches to another repo while the dialog is open.
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+
+      let detail: { repositoryPath?: string } | null = null;
+      el.addEventListener('cleanup-complete', (e) => {
+        detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+      });
+
+      clearHistory();
+      const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
+      deleteBtn.click();
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+
+      const deleteCalls = findCommands('delete_branch');
+      expect(deleteCalls.length).to.be.greaterThan(0);
+      deleteCalls.forEach((c) =>
+        expect((c.args as { path: string }).path).to.equal(REPO_PATH),
+      );
+      const pruneCalls = findCommands('prune_remote_tracking_branches');
+      pruneCalls.forEach((c) =>
+        expect((c.args as { path: string }).path).to.equal(REPO_PATH),
+      );
+      expect(detail, 'cleanup-complete dispatched').to.not.be.null;
+      expect(detail!.repositoryPath).to.equal(REPO_PATH);
+    });
+
+    it('exposes its pinned repo only while open, for host self-close', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'get_cleanup_candidates') return [];
+        return null;
+      };
+      const el = await fixture<LvBranchCleanupDialog>(
+        html`<lv-branch-cleanup-dialog .repositoryPath=${REPO_PATH}></lv-branch-cleanup-dialog>`,
+      );
+      await el.updateComplete;
+      expect(el.pinnedRepositoryPathIfOpen, 'null before open').to.be.null;
+      el.open();
+      await settle(el);
+      expect(el.pinnedRepositoryPathIfOpen, 'pinned while open').to.equal(REPO_PATH);
+      el.close();
+      expect(el.pinnedRepositoryPathIfOpen, 'null after close').to.be.null;
+    });
+
     it('cleanup-complete event dispatched after successful deletion', async () => {
       const el = await renderAndOpen([mergedSafe]);
 

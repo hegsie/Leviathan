@@ -190,10 +190,23 @@ describe('lv-conflict-resolution-dialog', () => {
       await el.updateComplete;
 
       const fileNames = el.shadowRoot!.querySelectorAll('.file-name');
-      const names = Array.from(fileNames).map(n => n.textContent!.trim());
-      expect(names).to.include('main.ts');
-      expect(names).to.include('utils.ts');
-      expect(names).to.include('app.ts');
+      const names = Array.from(fileNames).map(n => n.textContent!.replace(/\s+/g, ' ').trim());
+      expect(names.some(n => n.startsWith('main.ts'))).to.be.true;
+      expect(names.some(n => n.startsWith('utils.ts'))).to.be.true;
+      expect(names.some(n => n.startsWith('app.ts'))).to.be.true;
+    });
+
+    it('shows the directory hint for files in subdirectories', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const dirs = Array.from(el.shadowRoot!.querySelectorAll('.file-dir')).map(
+        n => n.textContent!.trim()
+      );
+      expect(dirs).to.include('src');
     });
 
     it('marks first file as selected by default', async () => {
@@ -327,6 +340,177 @@ describe('lv-conflict-resolution-dialog', () => {
       internal.handlePrevious();
       expect(internal.selectedIndex).to.equal(0);
     });
+
+    it('stacked Next calls behind one confirm cannot push the selection out of bounds', async () => {
+      // Alt+ArrowDown auto-repeat stacks several handleNext calls behind a
+      // single unsaved-work confirm; each read the same stale index. Without
+      // the post-await bound re-check they drive selectedIndex past the last
+      // file and Prev/Next go permanently inert.
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        handleNext: () => Promise<void>;
+        confirmLeaveInProgress: () => Promise<boolean>;
+        selectedConflict: ConflictFile | null;
+      };
+      internal.selectedIndex = 1; // one below the last file (index 2 of 3)
+      const release: Array<(v: boolean) => void> = [];
+      internal.confirmLeaveInProgress = () =>
+        new Promise<boolean>((res) => release.push(res));
+
+      const p1 = internal.handleNext.call(el);
+      const p2 = internal.handleNext.call(el);
+      release.forEach((r) => r(true));
+      await Promise.all([p1, p2]);
+
+      expect(internal.selectedIndex, 'must stop at the last file').to.equal(2);
+      expect(internal.selectedConflict, 'selection must stay valid').to.not.be.null;
+    });
+
+    it('stacked Previous calls behind one confirm cannot go below index 0', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        handlePrevious: () => Promise<void>;
+        confirmLeaveInProgress: () => Promise<boolean>;
+        selectedConflict: ConflictFile | null;
+      };
+      internal.selectedIndex = 1;
+      const release: Array<(v: boolean) => void> = [];
+      internal.confirmLeaveInProgress = () =>
+        new Promise<boolean>((res) => release.push(res));
+
+      const p1 = internal.handlePrevious.call(el);
+      const p2 = internal.handlePrevious.call(el);
+      release.forEach((r) => r(true));
+      await Promise.all([p1, p2]);
+
+      expect(internal.selectedIndex, 'must stop at the first file').to.equal(0);
+      expect(internal.selectedConflict).to.not.be.null;
+    });
+
+    it('file-select re-validates the index after the confirm await against a shrunken list', async () => {
+      // A runContinue reload can replace/shrink this.conflicts while the
+      // leave confirm is up; the stacked select must not point past the new
+      // array and collapse the editor to "Select a file".
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        conflicts: ConflictFile[];
+        handleFileSelect: (i: number) => Promise<void>;
+        confirmLeaveInProgress: () => Promise<boolean>;
+        selectedConflict: ConflictFile | null;
+      };
+      internal.selectedIndex = 0;
+      let release!: (v: boolean) => void;
+      internal.confirmLeaveInProgress = () =>
+        new Promise<boolean>((res) => { release = res; });
+
+      // Select the last file (index 2 of 3); the confirm is pending.
+      const pending = internal.handleFileSelect.call(el, 2);
+      // A reload shrinks the list to one file while the confirm is up.
+      internal.conflicts = internal.conflicts.slice(0, 1);
+      release(true);
+      await pending;
+
+      expect(internal.selectedIndex, 'stale index must be rejected').to.equal(0);
+      expect(internal.selectedConflict, 'selection stays valid').to.not.be.null;
+    });
+  });
+
+  // ── Pinned repository visibility ─────────────────────────────────────────
+  describe('pinned repository visibility', () => {
+    it('names the repository it operates on in the header subtitle', async () => {
+      // The dialog stays pinned to the repo the operation started on even
+      // when another tab is active — without naming it, the user cannot
+      // tell whose merge Complete/Abort will hit.
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const subtitle = el.shadowRoot!.querySelector('.header-subtitle');
+      expect(subtitle?.textContent).to.include('· repo');
+    });
+  });
+
+  // ── Fresh conflict metadata adoption ─────────────────────────────────────
+  describe('fresh conflict metadata adoption', () => {
+    it('adopts the fresh ConflictFile when the editor tool session ends', async () => {
+      // The external tool can change what get_conflicts reports for the
+      // file (markerSize, hunks); keeping the stale object would misparse
+      // the tool's output on the next load.
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      const fresh = { ...makeConflict('src/main.ts'), markerSize: 12 };
+      editor.dispatchEvent(
+        new CustomEvent('external-tool-finished', {
+          detail: { filePath: 'src/main.ts', freshConflicts: [fresh] },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        conflicts: ConflictFile[];
+        editorToolActive: boolean;
+      };
+      expect(internal.editorToolActive).to.be.false;
+      expect(internal.conflicts[0].markerSize).to.equal(12);
+    });
+
+    it('the dialog launcher adopts the re-fetched ConflictFile for a still-conflicted file', async () => {
+      setupDefaultMocks();
+      const freshEntry = { ...makeConflict('src/main.ts'), markerSize: 9 };
+      let conflictsCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'launch_merge_tool') return { success: true, message: null };
+        if (command === 'get_conflicts') {
+          conflictsCalls++;
+          // First call: dialog open. Later calls: post-tool re-check.
+          return conflictsCalls === 1 ? TEST_CONFLICTS : [freshEntry];
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        conflicts: ConflictFile[];
+        handleOpenExternalTool: (path: string) => Promise<void>;
+      };
+      await internal.handleOpenExternalTool.call(el, 'src/main.ts');
+      await el.updateComplete;
+
+      expect(internal.conflicts[0].markerSize, 'fresh metadata adopted').to.equal(9);
+      clearToasts();
+    });
   });
 
   // ── Conflict resolution tracking ───────────────────────────────────────
@@ -416,6 +600,146 @@ describe('lv-conflict-resolution-dialog', () => {
 
       // Should advance to index 2 (src/app.ts), skipping resolved src/utils.ts
       expect(internal.selectedIndex).to.equal(2);
+    });
+
+    it('does not yank selection when a mid-flight resolution lands for another file', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        resolvedFiles: Set<string>;
+      };
+      // User clicked Mark Resolved on main.ts (index 0), then switched to
+      // utils.ts (index 1) and is working there when the call completes.
+      internal.selectedIndex = 1;
+
+      const handleConflictResolved = (el as unknown as {
+        handleConflictResolved: (e: CustomEvent) => void;
+      }).handleConflictResolved.bind(el);
+
+      handleConflictResolved(
+        new CustomEvent('conflict-resolved', {
+          detail: { file: makeConflict('src/main.ts') },
+        })
+      );
+
+      // main.ts is marked resolved but the selection stays on the file the
+      // user is actively editing.
+      expect(internal.resolvedFiles.has('src/main.ts')).to.be.true;
+      expect(internal.selectedIndex).to.equal(1);
+    });
+
+    it('refreshes the embedded editor when the external tool resolves the selected file', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        conflicts: ConflictFile[];
+        resolvedFiles: Set<string>;
+        handleOpenExternalTool: (path: string) => Promise<void>;
+      };
+      const before = internal.conflicts[0];
+      expect(internal.selectedIndex).to.equal(0);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'launch_merge_tool') return { success: true };
+        // After the tool, the file is no longer conflicted.
+        if (command === 'get_conflicts') return TEST_CONFLICTS.slice(1);
+        return null;
+      };
+
+      await internal.handleOpenExternalTool.call(el, 'src/main.ts');
+      await el.updateComplete;
+
+      // The conflict object identity changed (forcing the editor to reload
+      // the tool's output instead of a stale parse), the file is resolved,
+      // and selection advanced off it.
+      expect(internal.conflicts[0]).to.not.equal(before);
+      expect(internal.resolvedFiles.has('src/main.ts')).to.be.true;
+      expect(internal.selectedIndex).to.equal(1);
+    });
+
+    it('confirms before a file switch that would discard in-progress picks', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        handleFileSelect: (index: number) => Promise<void>;
+      };
+      // Give the embedded editor unsaved in-memory picks.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor') as unknown as {
+        segments: Array<Record<string, unknown>>;
+        userTouched: boolean;
+        updateComplete: Promise<boolean>;
+      };
+      editor.segments = [
+        { id: 1, type: 'resolved', lines: ['picked'], oursLines: ['a'], theirsLines: ['b'], oursLabel: '', theirsLabel: '', origin: 'ours', fromConflict: true },
+      ];
+      editor.userTouched = true;
+      await editor.updateComplete;
+
+      // Confirm declined → the switch is cancelled and the picks survive.
+      let confirmCalls = 0;
+      const prevMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return false;
+        }
+        return prevMock(command, args);
+      };
+      await internal.handleFileSelect.call(el, 2);
+      expect(confirmCalls).to.be.greaterThan(0);
+      expect(internal.selectedIndex).to.equal(0);
+
+      // Confirm accepted → the switch proceeds. (The plugin maps the native
+      // dialog's button label: 'Ok' means confirmed.)
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') return 'Ok';
+        return prevMock(command, args);
+      };
+      await internal.handleFileSelect.call(el, 2);
+      expect(internal.selectedIndex).to.equal(2);
+    });
+
+    it('wraps around to earlier unresolved files after resolving the last one', async () => {
+      const el = await renderDialog();
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        resolvedFiles: Set<string>;
+      };
+      // User skipped ahead and resolved the LAST file first; the earlier
+      // files (index 0, 1) are still unresolved and must be reachable.
+      internal.selectedIndex = 2;
+
+      const handleConflictResolved = (el as unknown as {
+        handleConflictResolved: (e: CustomEvent) => void;
+      }).handleConflictResolved.bind(el);
+
+      handleConflictResolved(
+        new CustomEvent('conflict-resolved', {
+          detail: { file: makeConflict('src/app.ts') },
+        })
+      );
+
+      expect(internal.selectedIndex).to.equal(0);
     });
   });
 
@@ -547,6 +871,69 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(continueBtn.disabled).to.be.false;
     });
 
+    it('Complete confirms when the editor holds unsaved rework', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      // The selected file was Mark-Resolved earlier, then reworked: an
+      // unsaved pick sits on screen. Complete must not silently commit the
+      // older on-disk content.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      const editorInternal = editor as unknown as {
+        segments: Array<Record<string, unknown>>;
+        userTouched: boolean;
+      };
+      editorInternal.segments = [
+        {
+          id: 1,
+          type: 'resolved',
+          lines: ['rework'],
+          oursLines: [],
+          theirsLines: [],
+          oursLabel: '',
+          theirsLabel: '',
+          origin: 'ours',
+          fromConflict: true,
+        },
+      ];
+      editorInternal.userTouched = true;
+
+      let confirmAnswer: unknown = false;
+      let confirmCalls = 0;
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => {
+        completedFired = true;
+      });
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return confirmAnswer;
+        }
+        return baseMock(command, args);
+      };
+
+      // Declined: nothing commits, the dialog stays open with the rework.
+      await internal.handleContinue.call(el);
+      expect(confirmCalls).to.equal(1);
+      expect(completedFired).to.be.false;
+
+      // Accepted: the continue proceeds normally.
+      confirmAnswer = 'Ok';
+      await internal.handleContinue.call(el);
+      expect(completedFired).to.be.true;
+    });
+
     it('dispatches operation-completed on successful continue', async () => {
       const el = await renderDialog();
       el.open = true;
@@ -651,15 +1038,81 @@ describe('lv-conflict-resolution-dialog', () => {
     });
   });
 
-  // ── Show/close methods ─────────────────────────────────────────────────
-  describe('show/close', () => {
-    it('sets open to true and resets state on show()', async () => {
+  // ── Open/close behavior ─────────────────────────────────────────────────
+  describe('open/close', () => {
+    it('resets state and loads conflicts once when opened', async () => {
       const el = await renderDialog();
+      invokeHistory.length = 0;
 
-      await el.show();
+      el.open = true;
+      await el.updateComplete;
       await new Promise(r => setTimeout(r, 100));
 
       expect(el.open).to.be.true;
+      const internal = el as unknown as { selectedIndex: number };
+      expect(internal.selectedIndex).to.equal(0);
+      // The open transition must trigger exactly one conflicts load — a
+      // second load would race the first.
+      const loads = invokeHistory.filter(h => h.command === 'get_conflicts');
+      expect(loads.length).to.equal(1);
+    });
+
+    it('preselects the file the user clicked to enter the flow', async () => {
+      const el = await renderDialog();
+      el.initialFilePath = 'src/app.ts';
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as { selectedIndex: number };
+      // TEST_CONFLICTS order: main.ts (0), utils.ts (1), app.ts (2)
+      expect(internal.selectedIndex).to.equal(2);
+      const selected = el.shadowRoot!.querySelector('.file-item.selected');
+      expect(selected!.textContent).to.include('app.ts');
+    });
+
+    it('uses honest non-stash wording when the stash source is only inferred', async () => {
+      const el = await renderDialog('stash');
+      el.stashSourceCertain = false;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      // Open the abort confirm and check its message doesn't promise the
+      // changes are safe in a stash entry that may not exist.
+      const abortBtn = el.shadowRoot!.querySelector('.footer-actions .btn-danger') as HTMLElement;
+      abortBtn.click();
+      await el.updateComplete;
+
+      const msg = el.shadowRoot!.querySelector('.confirm-message')!;
+      expect(msg.textContent).to.include('not saved anywhere else');
+      expect(msg.textContent).to.not.include('remains in the stash list');
+    });
+
+    it('keeps the reassuring stash wording when the stash source is known', async () => {
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const abortBtn = el.shadowRoot!.querySelector('.footer-actions .btn-danger') as HTMLElement;
+      abortBtn.click();
+      await el.updateComplete;
+
+      const msg = el.shadowRoot!.querySelector('.confirm-message')!;
+      expect(msg.textContent).to.include('remains in the stash list');
+    });
+
+    it('falls back to the first conflict when the clicked file is not conflicted', async () => {
+      const el = await renderDialog();
+      el.initialFilePath = 'src/not-conflicted.ts';
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
       const internal = el as unknown as { selectedIndex: number };
       expect(internal.selectedIndex).to.equal(0);
     });
@@ -676,6 +1129,427 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(el.open).to.be.false;
       const internal = el as unknown as { conflicts: ConflictFile[] };
       expect(internal.conflicts.length).to.equal(0);
+    });
+  });
+
+  // ── Continue re-entry guard ──────────────────────────────────────────────
+  describe('continue re-entry guard', () => {
+    it('a double-click on Complete drops the stash only once', async () => {
+      const el = await renderDialog('stash');
+      el.dropStashOnComplete = true;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      await el.updateComplete;
+
+      let dropCalls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'get_stashes')
+          return [{ index: 0, message: 'popped', oid: 'oid-drop-me' }];
+        if (command === 'drop_stash') {
+          dropCalls++;
+          // Slow backend call — the second click arrives while this awaits.
+          await new Promise(r => setTimeout(r, 30));
+          return null;
+        }
+        return null;
+      };
+      // Identity captured at open (drops are identity-verified, never blind).
+      (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop = 'oid-drop-me';
+
+      // Double-click: both invocations start before the first completes. A
+      // second dropStash would delete an UNRELATED entry after indices shift.
+      const first = internal.handleContinue.call(el);
+      const second = internal.handleContinue.call(el);
+      await Promise.all([first, second]);
+
+      expect(dropCalls).to.equal(1);
+    });
+
+    it('a double-click on Complete with unsaved rework shows only ONE confirm', async () => {
+      // The Complete claim is taken BEFORE the unsaved-rework confirm await,
+      // so a fast second click is swallowed by the entry guard rather than
+      // stacking a second confirm dialog.
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      await el.updateComplete;
+
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor') as unknown as {
+        hasUnsavedResolutions: () => boolean;
+      };
+      expect(editor, 'the embedded editor is present').to.exist;
+      editor.hasUnsavedResolutions = () => true;
+
+      let confirmCalls = 0;
+      let releaseConfirm: (() => void) | null = null;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return new Promise((res) => { releaseConfirm = () => res(false); });
+        }
+        return { success: true };
+      };
+
+      const first = internal.handleContinue.call(el);
+      const second = internal.handleContinue.call(el);
+      await new Promise(r => setTimeout(r, 30));
+      expect(confirmCalls, 'only one confirm may be shown').to.equal(1);
+      releaseConfirm!();
+      await Promise.all([first, second]);
+    });
+
+    it('blocks Abort while Complete is running (and vice versa)', async () => {
+      const el = await renderDialog('stash');
+      el.dropStashOnComplete = true;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        showAbortConfirm: boolean;
+        handleContinue: () => Promise<void>;
+        handleAbort: () => void;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      await el.updateComplete;
+
+      let release: (() => void) | null = null;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'get_stashes')
+          return [{ index: 0, message: 'popped', oid: 'oid-drop-me' }];
+        if (command === 'drop_stash') {
+          await new Promise<void>(r => { release = r; });
+          return null;
+        }
+        return null;
+      };
+      (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop = 'oid-drop-me';
+
+      const completing = internal.handleContinue.call(el);
+      await el.updateComplete;
+      // The identity verification awaits getStashes before dropping — poll
+      // until the drop call is actually in flight.
+      for (let i = 0; i < 50 && !release; i++) {
+        await new Promise(r => setTimeout(r, 10));
+      }
+
+      // While Complete awaits the backend, Abort must be inert — aborting now
+      // would revert the files AND lose the stash entry, with a false toast.
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      expect(abortBtn.disabled).to.be.true;
+      internal.handleAbort.call(el);
+      expect(internal.showAbortConfirm).to.be.false;
+
+      release!();
+      await completing;
+    });
+
+    it('blocks Abort and Complete while the external merge tool is open', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        launchingExternalTool: string | null;
+        showAbortConfirm: boolean;
+        handleAbort: () => void;
+      };
+      // Simulate an external tool session in flight (launchMergeTool blocks
+      // until the tool exits).
+      internal.launchingExternalTool = 'src/main.ts';
+      await el.updateComplete;
+
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      const continueBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-primary'
+      ) as HTMLButtonElement;
+      expect(abortBtn.disabled).to.be.true;
+      expect(continueBtn.disabled).to.be.true;
+
+      // Aborting under an open tool would let its later save re-dirty the
+      // just-aborted working tree.
+      internal.handleAbort.call(el);
+      expect(internal.showAbortConfirm).to.be.false;
+    });
+
+    it("blocks Abort and Complete while the EDITOR's external tool is open", async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      // The embedded merge editor announces its tool session with an event.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      editor.dispatchEvent(
+        new CustomEvent('external-tool-started', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        showAbortConfirm: boolean;
+        handleAbort: () => void;
+      };
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      const continueBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-primary'
+      ) as HTMLButtonElement;
+      expect(abortBtn.disabled).to.be.true;
+      expect(continueBtn.disabled).to.be.true;
+      internal.handleAbort.call(el);
+      expect(internal.showAbortConfirm).to.be.false;
+
+      // The lock releases when the tool session ends.
+      editor.dispatchEvent(
+        new CustomEvent('external-tool-finished', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+      expect(abortBtn.disabled).to.be.false;
+    });
+
+    it("footer buttons disable while the editor's resolve write is in flight", async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      editor.dispatchEvent(
+        new CustomEvent('resolve-started', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      const continueBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-primary'
+      ) as HTMLButtonElement;
+      expect(abortBtn.disabled).to.be.true;
+      expect(continueBtn.disabled).to.be.true;
+
+      editor.dispatchEvent(
+        new CustomEvent('resolve-finished', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+      expect(abortBtn.disabled).to.be.false;
+    });
+
+    it('overlapping resolve writes keep the guards held until the LAST one finishes', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      // Two writes can be in flight at once by design: a file switch resets
+      // the editor's own flag so the new file can resolve while the old
+      // file's write drains. Each write dispatches its own started/finished
+      // pair — the first finish must NOT unlock Abort/Complete.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      const fire = (name: string) =>
+        editor.dispatchEvent(new CustomEvent(name, { bubbles: true, composed: true }));
+      fire('resolve-started');
+      fire('resolve-started');
+      fire('resolve-finished');
+      await el.updateComplete;
+
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      expect(
+        abortBtn.disabled,
+        'the first finish must not unlock while a second write is in flight'
+      ).to.be.true;
+      const internal = el as unknown as { showAbortConfirm: boolean; handleAbort: () => void };
+      internal.handleAbort.call(el);
+      expect(internal.showAbortConfirm).to.be.false;
+
+      fire('resolve-finished');
+      await el.updateComplete;
+      expect(abortBtn.disabled).to.be.false;
+
+      // A stray extra finish must not underflow into a negative depth that
+      // a later started could no-op against.
+      fire('resolve-finished');
+      fire('resolve-started');
+      await el.updateComplete;
+      expect(abortBtn.disabled, 'depth must floor at zero').to.be.true;
+      fire('resolve-finished');
+      await el.updateComplete;
+      expect(abortBtn.disabled).to.be.false;
+    });
+
+    it('file navigation is blocked while a resolve write is in flight', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      // Navigating away mid-write and back lets a SECOND write start against
+      // the same file — two overlapping writes, last-to-land wins silently.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      editor.dispatchEvent(
+        new CustomEvent('resolve-started', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        selectedIndex: number;
+        handleFileSelect: (i: number) => Promise<void>;
+        handleNext: () => Promise<void>;
+      };
+      expect(internal.selectedIndex).to.equal(0);
+      await internal.handleFileSelect.call(el, 1);
+      expect(internal.selectedIndex, 'file-list click must be inert mid-write').to.equal(0);
+      await internal.handleNext.call(el);
+      expect(internal.selectedIndex, 'Next must be inert mid-write').to.equal(0);
+
+      const nextBtn = Array.from(el.shadowRoot!.querySelectorAll('.nav-btn')).find(
+        (b) => b.textContent?.includes('Next')
+      ) as HTMLButtonElement;
+      expect(nextBtn.disabled, 'Next renders disabled mid-write').to.be.true;
+
+      editor.dispatchEvent(
+        new CustomEvent('resolve-finished', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+      await internal.handleNext.call(el);
+      expect(internal.selectedIndex, 'navigation works again after the write').to.equal(1);
+    });
+
+    it('a double-click on External during the confirm window launches one tool session', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      let confirmCalls = 0;
+      let launchCalls = 0;
+      let releaseConfirm: (() => void) | null = null;
+      let confirmMessage = '';
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          confirmMessage = String((args as { message?: unknown })?.message ?? '');
+          return new Promise(res => {
+            releaseConfirm = () => res('Ok');
+          });
+        }
+        if (command === 'launch_merge_tool') {
+          launchCalls++;
+          return { success: true };
+        }
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        return null;
+      };
+
+      // The selected file has unsaved picks, so launching on it confirms.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      const editorInternal = editor as unknown as {
+        segments: Array<Record<string, unknown>>;
+        userTouched: boolean;
+      };
+      editorInternal.segments = [
+        {
+          id: 1,
+          type: 'resolved',
+          lines: ['x'],
+          oursLines: [],
+          theirsLines: [],
+          oursLabel: '',
+          theirsLabel: '',
+          origin: 'ours',
+          fromConflict: true,
+        },
+      ];
+      editorInternal.userTouched = true;
+
+      const internal = el as unknown as {
+        selectedConflict: ConflictFile | null;
+        handleOpenExternalTool: (path: string) => Promise<void>;
+      };
+      const selectedPath = internal.selectedConflict!.path;
+      const first = internal.handleOpenExternalTool.call(el, selectedPath);
+      const second = internal.handleOpenExternalTool.call(el, selectedPath);
+      await new Promise(r => setTimeout(r, 30));
+      expect(confirmCalls, 'only one confirm may be shown').to.equal(1);
+      expect(
+        confirmMessage,
+        'the confirm must use tool wording, not the file-switch copy'
+      ).to.include('external tool works on the file as saved on disk');
+      releaseConfirm!();
+      await Promise.all([first, second]);
+      await new Promise(r => setTimeout(r, 30));
+      expect(launchCalls, 'only one tool session may launch').to.equal(1);
+    });
+
+    it('the two tool launchers are mutually exclusive in both directions', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        launchingExternalTool: string | null;
+        editorToolActive: boolean;
+        hasMergeTool: boolean;
+      };
+      internal.hasMergeTool = true;
+
+      // Dialog tool session open → the editor's launcher must be locked.
+      internal.launchingExternalTool = 'src/main.ts';
+      await el.updateComplete;
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor') as HTMLElement & {
+        externalToolLocked: boolean;
+      };
+      expect(editor.externalToolLocked).to.be.true;
+      internal.launchingExternalTool = null;
+
+      // Editor tool session open → the dialog's file-list launchers must
+      // render disabled, matching their handler guard.
+      internal.editorToolActive = true;
+      await el.updateComplete;
+      const fileToolBtns = el.shadowRoot!.querySelectorAll('.file-item button');
+      for (const btn of Array.from(fileToolBtns)) {
+        expect((btn as HTMLButtonElement).disabled).to.be.true;
+      }
     });
   });
 
@@ -791,6 +1665,34 @@ describe('lv-conflict-resolution-dialog', () => {
       const errorToast = uiStore.getState().toasts.find(t => t.type === 'error');
       expect(errorToast, 'error toast shown').to.not.be.undefined;
     });
+
+    it('closes the dialog (not a dead-end) when the operation was concluded outside the app', async () => {
+      // The user ran `git merge --abort` in a terminal, so the backend abort
+      // reports the operation no longer exists. Escape is suppressed and
+      // Complete may be disabled, so the dialog must recognize this and
+      // close rather than trap the user.
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      mockInvoke = async (command: string) => {
+        if (command === 'abort_merge')
+          throw { code: 'COMMAND_ERROR', message: 'There is no merge to abort (MERGE_HEAD missing).' };
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        return null;
+      };
+
+      let abortedFired = false;
+      el.addEventListener('operation-aborted', () => { abortedFired = true; });
+
+      await (el as unknown as { handleAbortConfirm: () => Promise<void> }).handleAbortConfirm.bind(el)();
+
+      expect(abortedFired, 'operation-aborted dispatched so the host cleans up').to.be.true;
+      expect(el.open, 'dialog closed instead of trapping the user').to.be.false;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn?.message).to.contain('concluded outside the app');
+    });
   });
 
   // ── External merge tool verification ───────────────────────────────────────
@@ -857,6 +1759,12 @@ describe('lv-conflict-resolution-dialog', () => {
     });
 
     it('drops the stash and completes on continue', async () => {
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes')
+          return [{ index: 0, message: 'popped', oid: 'oid-popped' }];
+        return baseMock(command, args);
+      };
       const el = await renderDialog('stash');
       el.open = true;
       await el.updateComplete;
@@ -876,6 +1784,210 @@ describe('lv-conflict-resolution-dialog', () => {
       expect((dropCall!.args as Record<string, unknown>).index).to.equal(0);
       expect(completedFired).to.be.true;
       expect(el.open).to.be.false;
+    });
+
+    it('drops the stash by IDENTITY when the list shifted while the dialog was open', async () => {
+      // An external `git stash drop` in a terminal mid-resolution shifts
+      // the indices — dropping blindly by the open-time index would delete
+      // an UNRELATED stash.
+      let stashList = [
+        { index: 0, message: 'the conflicted stash', oid: 'oid-target' },
+        { index: 1, message: 'other', oid: 'oid-other' },
+      ];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') return stashList;
+        return baseMock(command, args);
+      };
+
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      // The external drop removes an entry ABOVE ours: our stash is now index 0.
+      stashList = [{ index: 0, message: 'the conflicted stash', oid: 'oid-target' }];
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      const dropCall = invokeHistory.find(h => h.command === 'drop_stash');
+      expect(dropCall, 'drop_stash called').to.exist;
+      expect(
+        (dropCall!.args as Record<string, unknown>).index,
+        'dropped at the RE-LOCATED index'
+      ).to.equal(0);
+    });
+
+    it('a late identity capture from a PREVIOUS dialog session cannot cross over', async () => {
+      // Session 1 opens for stashIndex=1 and its getStashes hangs; the
+      // dialog closes and reopens (session 2, stashIndex=0). When session
+      // 1's response finally lands it must be discarded — pairing its list
+      // with session 2's index would capture the wrong entry's identity.
+      let releaseFirst: ((v: unknown) => void) | null = null;
+      let call = 0;
+      const stale = [
+        { index: 0, message: 'other', oid: 'oid-wrong' },
+        { index: 1, message: 'first session target', oid: 'oid-session1' },
+      ];
+      const fresh = [{ index: 0, message: 'second session target', oid: 'oid-session2' }];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') {
+          call++;
+          if (call === 1) {
+            return new Promise((res) => {
+              releaseFirst = () => res(stale);
+            });
+          }
+          return fresh;
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderDialog('stash');
+      (el as unknown as { stashIndex: number }).stashIndex = 1;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 50));
+
+      // Close and reopen for a different stash.
+      (el as unknown as { close: () => void }).close.call(el);
+      await el.updateComplete;
+      (el as unknown as { stashIndex: number }).stashIndex = 0;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 50));
+
+      // Session 2's capture landed.
+      expect(
+        (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop
+      ).to.equal('oid-session2');
+
+      // Session 1's response arrives late — it must not overwrite.
+      releaseFirst!(stale);
+      await new Promise(r => setTimeout(r, 20));
+      expect(
+        (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop,
+        "a stale session's list must not pair with the new session's index"
+      ).to.equal('oid-session2');
+    });
+
+    it('skips the drop with a warning when the stash entry vanished mid-dialog', async () => {
+      let stashList: Array<{ index: number; message: string; oid: string }> = [
+        { index: 0, message: 'the conflicted stash', oid: 'oid-target' },
+      ];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') return stashList;
+        return baseMock(command, args);
+      };
+
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      // The entry is gone entirely (dropped externally).
+      stashList = [];
+
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => {
+        completedFired = true;
+      });
+      clearToasts();
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(
+        invokeHistory.some(h => h.command === 'drop_stash'),
+        'nothing may be dropped'
+      ).to.be.false;
+      expect(completedFired, 'the resolution itself still completes').to.be.true;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn?.message).to.include('left in the stash list');
+    });
+
+    it('a FAILED drop_stash still completes the operation (the apply already succeeded)', async () => {
+      // The conflict resolution and stash APPLY succeeded; only removing the
+      // redundant stash entry failed. That must NOT dead-end the dialog —
+      // it should warn but complete, or the pinned repo never refreshes.
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes')
+          return [{ index: 0, message: 'the conflicted stash', oid: 'oid-target' }];
+        if (command === 'drop_stash')
+          return Promise.reject({ code: 'IO_ERROR', message: 'disk error' });
+        return baseMock(command, args);
+      };
+
+      const el = await renderDialog('stash');
+      el.dropStashOnComplete = true;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop = 'oid-target';
+      const internal = el as unknown as { resolvedFiles: Set<string>; conflicts: ConflictFile[] };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => {
+        completedFired = true;
+      });
+      clearToasts();
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(invokeHistory.some(h => h.command === 'drop_stash'), 'drop was attempted').to.be.true;
+      expect(completedFired, 'the operation still completes so the repo refreshes').to.be.true;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn?.message, 'warns the stash was left behind').to.include('left in the stash list');
+    });
+
+    it('an unverifiable identity NEVER falls back to a blind index drop', async () => {
+      // The open-time capture failed (get_stashes errored); meanwhile an
+      // external `git stash push` put unrelated WIP at index 0. A blind
+      // index drop would permanently delete that WIP.
+      let allowStashList = false;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') {
+          if (!allowStashList) throw new Error('transient failure');
+          return [{ index: 0, message: 'unrelated WIP', oid: 'oid-wip' }];
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      allowStashList = true;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => {
+        completedFired = true;
+      });
+      clearToasts();
+      invokeHistory.length = 0;
+      await internal.handleContinue.call(el);
+
+      expect(
+        invokeHistory.some(h => h.command === 'drop_stash'),
+        'no identity, no drop — never a blind index'
+      ).to.be.false;
+      expect(completedFired).to.be.true;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn?.message).to.include('left in the stash list');
     });
 
     it('aborts a stash conflict by restoring ONLY the conflicted files (no hard reset, stash kept)', async () => {
@@ -904,6 +2016,71 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(abortedFired).to.be.true;
       const infoToast = uiStore.getState().toasts.find(t => t.type === 'info');
       expect(infoToast, 'info toast shown').to.not.be.undefined;
+    });
+
+    it('stash abort re-fetches the real conflict paths even when the client list is empty (load in flight)', async () => {
+      // The conflict load can still be in flight (empty this.conflicts,
+      // loadFailed false) when the user hits Abort. Trusting the empty
+      // client list would no-op and falsely report success while the tree
+      // stays conflicted — the abort must re-fetch the authoritative list.
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      // Simulate an in-flight load: the index IS conflicted but the client
+      // list has not populated yet.
+      const internal = el as unknown as { conflicts: ConflictFile[]; loadFailed: boolean };
+      internal.conflicts = [];
+      internal.loadFailed = false;
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleAbortConfirm: () => Promise<void> }).handleAbortConfirm.bind(el)();
+
+      // The abort re-fetched and restored the REAL paths, not no-opped.
+      const unstageCall = invokeHistory.find(h => h.command === 'unstage_files');
+      expect(unstageCall, 'unstage_files called for the re-fetched paths').to.exist;
+      expect((unstageCall!.args as Record<string, unknown>).paths).to.deep.equal(
+        TEST_CONFLICTS.map(c => c.path),
+      );
+      expect(invokeHistory.some(h => h.command === 'discard_changes'), 'files restored').to.be.true;
+    });
+
+    it('stash abort restores files ALREADY resolved this session, not just still-conflicted ones', async () => {
+      // A file resolved in-session (Mark Resolved → staged, or take-side
+      // deletion) is no longer index-conflicted, so the refetch alone would
+      // EXCLUDE it. Abort must restore the UNION so it doesn't leave that
+      // resolution staged while claiming everything was reverted.
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+
+      const internal = el as unknown as { conflicts: ConflictFile[] };
+      // Two files were originally conflicted...
+      const originalPaths = internal.conflicts.map((c) => c.path);
+      expect(originalPaths.length).to.be.greaterThan(1);
+
+      // ...but the refetch reports only ONE still conflicted (the other was
+      // resolved in-session and is now staged).
+      const stillConflicted = originalPaths[0];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_conflicts') return [{ path: stillConflicted }];
+        return baseMock(command, args);
+      };
+
+      invokeHistory.length = 0;
+      await (el as unknown as { handleAbortConfirm: () => Promise<void> }).handleAbortConfirm.bind(el)();
+
+      const unstageCall = invokeHistory.find((h) => h.command === 'unstage_files');
+      expect(unstageCall, 'unstage called').to.exist;
+      const paths = (unstageCall!.args as { paths: string[] }).paths;
+      // The UNION: every originally-conflicted path, including the resolved one.
+      for (const p of originalPaths) {
+        expect(paths, `resolved file ${p} must be restored`).to.include(p);
+      }
     });
   });
 
@@ -961,6 +2138,18 @@ describe('lv-conflict-resolution-dialog', () => {
     beforeEach(() => clearToasts());
 
     it('drops stash@{stashIndex} when dropStashOnComplete is true', async () => {
+      // Four entries; the popped one is index 3. Its identity is captured
+      // at open and the drop is verified against it.
+      const stashList = [0, 1, 2, 3].map((i) => ({
+        index: i,
+        message: `stash ${i}`,
+        oid: `oid-${i}`,
+      }));
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') return stashList;
+        return baseMock(command, args);
+      };
       const el = await renderDialog('stash');
       el.stashIndex = 3;
       el.dropStashOnComplete = true;

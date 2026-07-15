@@ -961,5 +961,46 @@ describe('lv-file-status', () => {
 
       expect(findCommands('get_status').length).to.equal(1);
     });
+
+    it('discards against the origin repo even if the user switches tabs during the confirm', async () => {
+      // Discard is irreversible. The confirm is an OS dialog wrapper whose
+      // await can yield; a tab switch during it rebinds this.repositoryPath.
+      // The discard must still run against the repo it was invoked on — else
+      // it silently destroys the WRONG repo's uncommitted work.
+      openRepoInStore(REPO_PATH);
+      const el = await renderFileStatus();
+
+      let resolveConfirm!: (v: unknown) => void;
+      mockInvoke = async (command: string) => {
+        if (command === 'plugin:dialog|message') {
+          return new Promise((resolve) => {
+            resolveConfirm = resolve;
+          });
+        }
+        if (command === 'get_status') return mockStatusEntries;
+        return null;
+      };
+
+      clearHistory();
+      const file = {
+        path: 'src/utils/helper.ts',
+        status: 'modified',
+        isStaged: false,
+        isConflicted: false,
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const promise = (el as any).handleDiscardFile(file, new Event('click'));
+
+      // The confirm is now in flight; the user switches tabs.
+      await new Promise((r) => setTimeout(r, 10));
+      el.repositoryPath = '/other/repo';
+
+      resolveConfirm('Ok');
+      await promise;
+
+      const discard = findCommands('discard_changes')[0];
+      expect(discard, 'discard_changes was called').to.not.be.undefined;
+      expect((discard.args as { path: string }).path).to.equal(REPO_PATH);
+    });
   });
 });

@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { repositoryStore } from '../../stores/repository.store.ts';
 import type { Tag } from '../../types/git.types.ts';
 import '../dialogs/lv-create-tag-dialog.ts';
 import type { LvCreateTagDialog } from '../dialogs/lv-create-tag-dialog.ts';
@@ -322,12 +323,25 @@ export class LvTagList extends LitElement {
 
   @query('lv-create-tag-dialog') private createTagDialog!: LvCreateTagDialog;
 
+  private storeUnsubscribe?: () => void;
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     // Keep in sync with app-level refreshes (e.g. a gitflow release finish
     // creating a tag completes inside the shared conflict dialog) — same
     // subscription as the sibling branch/stash/gitflow lists.
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
+    // Close our OWN embedded create-tag dialog when its pinned repo's tab is
+    // closed — app-shell's guard only reaches app-shell's instance, not this
+    // one in the sidebar's shadow root. A create on a closed repo would be a
+    // silent mutation of a repo no longer in the tab bar.
+    this.storeUnsubscribe = repositoryStore.subscribe((state) => {
+      const pinned = this.createTagDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (pinned && !state.openRepositories.some((r) => r.repository.path === pinned)) {
+        this.createTagDialog.close();
+        showToast('The repository tab was closed — tag creation cancelled', 'warning');
+      }
+    });
     await this.loadTags();
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
@@ -338,6 +352,7 @@ export class LvTagList extends LitElement {
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
+    this.storeUnsubscribe?.();
   }
 
   private handleRepositoryRefresh = (): void => {
@@ -513,6 +528,10 @@ export class LvTagList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: the checkout must run on the repo it
+    // was invoked on (and the conflict event must carry it), even if the user
+    // switches tabs while the confirm is up and the prop rebinds.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Checkout Tag',
       `Checking out tag "${tag.name}" will put you in 'detached HEAD' state. Any new commits won't belong to any branch. Continue?`,
@@ -523,7 +542,7 @@ export class LvTagList extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.checkoutWithAutoStash(this.repositoryPath, tag.name);
+      const result = await gitService.checkoutWithAutoStash(repoPath, tag.name);
 
       if (result.success && result.data?.success) {
         const data = result.data;
@@ -534,7 +553,12 @@ export class LvTagList extends LitElement {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
-            detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
+            detail: {
+              operationType: 'stash',
+              stashIndex: 0,
+              dropStashOnComplete: true,
+              repositoryPath: repoPath,
+            },
           }));
         } else if (data.stashed && data.stashApplied) {
           showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
@@ -542,7 +566,7 @@ export class LvTagList extends LitElement {
           showToast(data.message, 'warning');
         }
         this.dispatchEvent(new CustomEvent('tag-checkout', {
-          detail: { tag },
+          detail: { tag, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -562,6 +586,10 @@ export class LvTagList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: tag deletion is irreversible and must
+    // target the repo it was invoked on, even if the user switches tabs (to a
+    // repo that may have a same-named tag) while the confirm is up.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Delete Tag',
       `Are you sure you want to delete tag "${tag.name}"?\n\nThis action cannot be undone.`,
@@ -574,13 +602,14 @@ export class LvTagList extends LitElement {
 
     try {
       const result = await gitService.deleteTag({
-        path: this.repositoryPath,
+        path: repoPath,
         name: tag.name,
       });
 
       if (result.success) {
         await this.loadTags();
         this.dispatchEvent(new CustomEvent('tags-changed', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -612,9 +641,17 @@ export class LvTagList extends LitElement {
     this.createTagDialog.open(tag?.targetOid);
   }
 
-  private async handleTagCreated(): Promise<void> {
-    await this.loadTags();
+  private async handleTagCreated(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
+    // The dialog pins to the repo it was opened for and reports it here. The
+    // user may have switched tabs while the dialog was open (rebinding our live
+    // repositoryPath), so trust the event's repo — not our current prop — and
+    // only reload OUR view when it matches the repo we're showing.
+    const repoPath = e?.detail?.repositoryPath ?? this.repositoryPath;
+    if (repoPath === this.repositoryPath) {
+      await this.loadTags();
+    }
     this.dispatchEvent(new CustomEvent('tags-changed', {
+      detail: { repositoryPath: repoPath },
       bubbles: true,
       composed: true,
     }));
@@ -627,9 +664,13 @@ export class LvTagList extends LitElement {
     this.contextMenu = { ...this.contextMenu, visible: false };
     this.operationInProgress = true;
 
+    // Captured BEFORE the push await: the push and its refresh must pin to the
+    // repo it was invoked on, even if the user switches tabs during the (often
+    // slow) network push, which rebinds this.repositoryPath.
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.pushTag({
-        path: this.repositoryPath,
+        path: repoPath,
         name: tag.name,
       });
 
@@ -637,6 +678,7 @@ export class LvTagList extends LitElement {
         await this.loadTags();
         showToast(`Pushed tag ${tag.name} to remote`, 'success');
         this.dispatchEvent(new CustomEvent('tags-changed', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -835,6 +877,23 @@ export class LvTagList extends LitElement {
   }
 
   render() {
+    // Single stable outer template: the create-tag dialog must live at ONE
+    // template position, or an open dialog would be destroyed (losing its
+    // pinned repo, in-progress input, and open modal) when the tag list flips
+    // empty<->non-empty (e.g. a watcher refresh after an external `git tag`).
+    // Lit re-clones a subtree when the enclosing template literal changes, so
+    // the varying content goes through renderBody() while the dialog stays put.
+    return html`
+      ${this.renderBody()}
+      ${this.renderContextMenu()}
+      <lv-create-tag-dialog
+        .repositoryPath=${this.repositoryPath}
+        @tag-created=${this.handleTagCreated}
+      ></lv-create-tag-dialog>
+    `;
+  }
+
+  private renderBody() {
     if (this.loading) {
       return html`<div class="loading">Loading tags...</div>`;
     }
@@ -843,10 +902,6 @@ export class LvTagList extends LitElement {
       return html`
         ${this.renderControls()}
         <div class="empty">No tags</div>
-        <lv-create-tag-dialog
-          .repositoryPath=${this.repositoryPath}
-          @tag-created=${this.handleTagCreated}
-        ></lv-create-tag-dialog>
       `;
     }
 
@@ -889,13 +944,6 @@ export class LvTagList extends LitElement {
                 ` : nothing}
               `;
             })}
-
-      ${this.renderContextMenu()}
-
-      <lv-create-tag-dialog
-        .repositoryPath=${this.repositoryPath}
-        @tag-created=${this.handleTagCreated}
-      ></lv-create-tag-dialog>
     `;
   }
 }

@@ -127,18 +127,6 @@ interface SplitLine {
   inlineSegments?: InlineDiffSegment[];
 }
 
-interface ConflictRegion {
-  index: number;
-  startLine: number;
-  endLine: number;
-  oursStart: number;
-  oursEnd: number;
-  theirsStart: number;
-  theirsEnd: number;
-  oursContent: string;
-  theirsContent: string;
-}
-
 interface DiffContextMenuState {
   visible: boolean;
   x: number;
@@ -667,67 +655,45 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         text-align: center;
       }
 
-      /* Conflict resolution styles */
-      .conflict-banner {
+      /* Conflicted-file redirect (conflicts are resolved in the merge editor) */
+      .conflict-redirect {
         display: flex;
+        flex-direction: column;
         align-items: center;
-        justify-content: space-between;
-        padding: var(--spacing-sm);
-        background: var(--color-error-bg);
-        border-bottom: 1px solid var(--color-error);
+        justify-content: center;
+        gap: var(--spacing-md);
+        height: 100%;
+        padding: var(--spacing-lg);
+        text-align: center;
+        color: var(--color-text-secondary);
       }
 
-      .conflict-info {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        color: var(--color-error);
+      .conflict-redirect svg {
+        width: 32px;
+        height: 32px;
+        color: var(--color-warning);
+      }
+
+      .conflict-redirect-title {
+        font-size: var(--font-size-md);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-primary);
+      }
+
+      .conflict-redirect-btn {
+        padding: var(--spacing-xs) var(--spacing-md);
+        border-radius: var(--radius-sm);
         font-size: var(--font-size-sm);
         font-weight: var(--font-weight-medium);
-      }
-
-      .conflict-actions {
-        display: flex;
-        gap: var(--spacing-sm);
-      }
-
-      .conflict-btn {
-        padding: var(--spacing-xs) var(--spacing-sm);
-        border-radius: var(--radius-sm);
-        font-size: var(--font-size-xs);
-        font-weight: var(--font-weight-medium);
         cursor: pointer;
-        transition: all 0.15s ease;
+        border: 1px solid var(--color-primary);
+        background: var(--color-primary);
+        color: var(--color-text-inverse);
       }
 
-
-      .conflict-marker {
-        display: flex;
-        align-items: center;
-        padding: var(--spacing-xs) var(--spacing-sm);
-        background: var(--color-error-bg);
-        border-left: 3px solid var(--color-error);
-        font-size: var(--font-size-xs);
-        color: var(--color-error);
-        font-weight: var(--font-weight-bold);
+      .conflict-redirect-btn:hover {
+        background: var(--color-primary-hover);
       }
-
-      .conflict-inline-actions {
-        display: flex;
-        gap: var(--spacing-xs);
-        margin-left: auto;
-        padding-left: var(--spacing-md);
-      }
-
-      .conflict-inline-btn {
-        padding: 2px 6px;
-        border-radius: var(--radius-sm);
-        font-size: 10px;
-        font-weight: var(--font-weight-medium);
-        cursor: pointer;
-        transition: all 0.15s ease;
-      }
-
 
       /* Line selection mode */
       .line-selection-mode .line.code-addition,
@@ -964,8 +930,6 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   @state() private editContent = '';
   @state() private originalContent = '';
   @state() private saving = false;
-  @state() private conflictRegions: ConflictRegion[] = [];
-  @state() private hasConflicts = false;
   @state() private contextMenu: DiffContextMenuState = { visible: false, x: 0, y: 0, line: null, hunk: null };
   @state() private selectedLines: Set<LineKey> = new Set();
   @state() private lineSelectionMode = false;
@@ -1088,6 +1052,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
   private async loadWorkingDiff(): Promise<void> {
     if (!this.repositoryPath || !this.file) return;
+    // Conflicted files render a redirect to the merge editor — don't load the
+    // marker-laden diff at all.
+    if (this.isConflicted) return;
 
     this.loading = true;
     this.error = null;
@@ -1108,8 +1075,6 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
       if (result.success) {
         this.diff = result.data!;
-        // Check for conflict markers in conflicted files
-        await this.checkForConflicts();
       } else {
         this.error = result.error?.message ?? 'Failed to load diff';
       }
@@ -1165,7 +1130,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    * Check if edit mode is available (only for working directory changes, not commit diffs)
    */
   private get canEdit(): boolean {
-    return this.file !== null && this.commitFile === null && !this.diff?.isBinary;
+    // Conflicted files must not be free-text edited here — their working-tree
+    // content is git's conflict-marker text.
+    return this.file !== null && this.commitFile === null && !this.diff?.isBinary && !this.isConflicted;
   }
 
   /**
@@ -1291,178 +1258,37 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     return this.file?.isConflicted ?? false;
   }
 
-  /**
-   * Check file content for conflict markers and parse regions
-   */
-  private async checkForConflicts(): Promise<void> {
-    if (!this.isConflicted || !this.repositoryPath || !this.file) {
-      this.hasConflicts = false;
-      this.conflictRegions = [];
-      return;
-    }
-
-    const result = await gitService.readFileContent(this.repositoryPath, this.file.path, false);
-    if (!result.success || !result.data) {
-      this.hasConflicts = false;
-      this.conflictRegions = [];
-      return;
-    }
-
-    this.parseConflictRegions(result.data);
-  }
-
-  /**
-   * Parse conflict markers from file content
-   */
-  private parseConflictRegions(content: string): void {
-    const lines = content.split('\n');
-    const regions: ConflictRegion[] = [];
-    let index = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (line.startsWith('<<<<<<<')) {
-        // Found start of conflict
-        const region: ConflictRegion = {
-          index: index++,
-          startLine: i,
-          endLine: -1,
-          oursStart: i + 1,
-          oursEnd: -1,
-          theirsStart: -1,
-          theirsEnd: -1,
-          oursContent: '',
-          theirsContent: '',
-        };
-
-        // Find the separator and end
-        const oursLines: string[] = [];
-        const theirsLines: string[] = [];
-        let inTheirs = false;
-
-        for (let j = i + 1; j < lines.length; j++) {
-          if (lines[j].startsWith('=======')) {
-            region.oursEnd = j - 1;
-            region.theirsStart = j + 1;
-            inTheirs = true;
-          } else if (lines[j].startsWith('>>>>>>>')) {
-            region.theirsEnd = j - 1;
-            region.endLine = j;
-            break;
-          } else if (inTheirs) {
-            theirsLines.push(lines[j]);
-          } else {
-            oursLines.push(lines[j]);
-          }
-        }
-
-        region.oursContent = oursLines.join('\n');
-        region.theirsContent = theirsLines.join('\n');
-        regions.push(region);
-
-        // Skip past this conflict
-        i = region.endLine;
-      }
-    }
-
-    this.conflictRegions = regions;
-    this.hasConflicts = regions.length > 0;
-  }
-
-  /**
-   * Resolve a single conflict region
-   */
-  private async resolveConflict(region: ConflictRegion, choice: 'ours' | 'theirs' | 'both'): Promise<void> {
-    if (!this.repositoryPath || !this.file) return;
-
-    const result = await gitService.readFileContent(this.repositoryPath, this.file.path, false);
-    if (!result.success || !result.data) return;
-
-    const lines = result.data.split('\n');
-    let replacement: string[];
-
-    switch (choice) {
-      case 'ours':
-        replacement = region.oursContent.split('\n');
-        break;
-      case 'theirs':
-        replacement = region.theirsContent.split('\n');
-        break;
-      case 'both':
-        replacement = [...region.oursContent.split('\n'), ...region.theirsContent.split('\n')];
-        break;
-    }
-
-    // Replace the conflict region with the resolution
-    const newLines = [
-      ...lines.slice(0, region.startLine),
-      ...replacement,
-      ...lines.slice(region.endLine + 1),
-    ];
-
-    const newContent = newLines.join('\n');
-    const writeResult = await gitService.writeFileContent(
-      this.repositoryPath,
-      this.file.path,
-      newContent,
-      false
-    );
-
-    if (writeResult.success) {
-      // Reload the diff and re-check for conflicts
-      await this.loadWorkingDiff();
-      await this.checkForConflicts();
-
-      this.dispatchEvent(new CustomEvent('file-edited', {
+  /** Ask the app shell to open the structured conflict-resolution flow. */
+  private handleOpenMergeEditor(): void {
+    this.dispatchEvent(
+      new CustomEvent('open-conflict-dialog', {
+        // Pass the file so the dialog opens preselected on it.
+        detail: { filePath: this.file?.path },
         bubbles: true,
         composed: true,
-        detail: { path: this.file.path }
-      }));
-    }
+      })
+    );
   }
 
   /**
-   * Resolve all conflicts with the same choice
+   * Shown instead of the diff for conflicted files: the raw working-tree
+   * content contains conflict markers, which must never be rendered.
    */
-  private async resolveAllConflicts(choice: 'ours' | 'theirs'): Promise<void> {
-    if (!this.repositoryPath || !this.file) return;
-
-    const result = await gitService.readFileContent(this.repositoryPath, this.file.path, false);
-    if (!result.success || !result.data) return;
-
-    let content = result.data;
-
-    // Process conflicts from end to start to maintain line numbers
-    for (const region of [...this.conflictRegions].reverse()) {
-      const lines = content.split('\n');
-      const replacement = choice === 'ours' ? region.oursContent : region.theirsContent;
-
-      const newLines = [
-        ...lines.slice(0, region.startLine),
-        ...replacement.split('\n'),
-        ...lines.slice(region.endLine + 1),
-      ];
-
-      content = newLines.join('\n');
-    }
-
-    const writeResult = await gitService.writeFileContent(
-      this.repositoryPath,
-      this.file.path,
-      content,
-      false
-    );
-
-    if (writeResult.success) {
-      await this.loadWorkingDiff();
-      await this.checkForConflicts();
-
-      this.dispatchEvent(new CustomEvent('file-edited', {
-        bubbles: true,
-        composed: true,
-        detail: { path: this.file.path }
-      }));
-    }
+  private renderConflictedNotice(): ReturnType<typeof html> {
+    return html`
+      <div class="conflict-redirect">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+          <line x1="12" y1="9" x2="12" y2="13"></line>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+        <div class="conflict-redirect-title">${this.file?.path ?? ''} has merge conflicts</div>
+        <div>Resolve them side by side in the merge editor.</div>
+        <button class="conflict-redirect-btn" @click=${this.handleOpenMergeEditor}>
+          Open Merge Editor
+        </button>
+      </div>
+    `;
   }
 
   /**
@@ -2634,6 +2460,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       return html`<div class="empty">No file selected</div>`;
     }
 
+    // A conflicted file's working-tree content is git's marker text — never
+    // show it as a diff or free-text edit. Route to the merge editor instead.
+    if (this.isConflicted) {
+      return this.renderConflictedNotice();
+    }
+
     if (this.loading) {
       return html`<div class="loading">Loading diff...</div>`;
     }
@@ -2832,36 +2664,6 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
             </div>
           `
         : nothing}
-      ${this.hasConflicts
-        ? html`
-            <div class="conflict-banner">
-              <div class="conflict-info">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-                  <line x1="12" y1="9" x2="12" y2="13"></line>
-                  <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                </svg>
-                ${this.conflictRegions.length} conflict${this.conflictRegions.length !== 1 ? 's' : ''} found
-              </div>
-              <div class="conflict-actions">
-                <button
-                  class="conflict-btn code-conflict-btn-ours"
-                  @click=${() => this.resolveAllConflicts('ours')}
-                  title="Accept all changes from current branch"
-                >
-                  Accept All Ours
-                </button>
-                <button
-                  class="conflict-btn code-conflict-btn-theirs"
-                  @click=${() => this.resolveAllConflicts('theirs')}
-                  title="Accept all changes from incoming branch"
-                >
-                  Accept All Theirs
-                </button>
-              </div>
-            </div>
-          `
-        : nothing}
       ${this.diff?.truncated ? html`
         <div class="large-diff-info">
           Showing first ${this.diff.hunks.reduce((sum, h) => sum + h.lines.length, 0).toLocaleString()} of ${this.diff.totalLines?.toLocaleString() ?? 'many'} lines
@@ -2873,36 +2675,6 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     `;
   }
 
-  /**
-   * Render a conflict region with inline resolution buttons
-   */
-  private renderConflictActions(region: ConflictRegion) {
-    return html`
-      <div class="conflict-inline-actions">
-        <button
-          class="conflict-inline-btn code-conflict-btn-ours"
-          @click=${() => this.resolveConflict(region, 'ours')}
-          title="Accept current branch version"
-        >
-          Ours
-        </button>
-        <button
-          class="conflict-inline-btn code-conflict-btn-theirs"
-          @click=${() => this.resolveConflict(region, 'theirs')}
-          title="Accept incoming branch version"
-        >
-          Theirs
-        </button>
-        <button
-          class="conflict-inline-btn code-conflict-btn-both"
-          @click=${() => this.resolveConflict(region, 'both')}
-          title="Keep both versions"
-        >
-          Both
-        </button>
-      </div>
-    `;
-  }
 }
 
 declare global {
