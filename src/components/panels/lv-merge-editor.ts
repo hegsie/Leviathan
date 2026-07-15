@@ -624,7 +624,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       this.externalToolLocked ||
       this.launchingExternalTool ||
       this.resolving ||
-      this.resolvedAsDeleted
+      this.resolvedAsDeleted ||
+      // A chooser/verbatim take-side or gitlink resolution leaves the file
+      // in this terminal state — launching the tool on a no-longer-
+      // conflicted file (and locking the dialog's Complete/Abort behind
+      // editorToolActive) must not be possible.
+      this.resolvedInPlace
     ) {
       return;
     }
@@ -2580,7 +2585,8 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               ?disabled=${this.launchingExternalTool ||
               this.externalToolLocked ||
               this.resolving ||
-              this.resolvedAsDeleted}
+              this.resolvedAsDeleted ||
+              this.resolvedInPlace}
               title="Open in external merge tool"
             >
               ${this.launchingExternalTool ? 'Waiting for tool...' : 'External Tool'}
