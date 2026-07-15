@@ -1006,8 +1006,12 @@ export class LvBranchList extends LitElement {
    * Handle cleanup completion by refreshing branches
    */
   private async handleCleanupComplete(): Promise<void> {
+    // Captured BEFORE the loadBranches await: the refresh must pin to the repo
+    // the cleanup ran on, not whichever tab is active if the user switches
+    // during the reload (which rebinds this.repositoryPath).
+    const repoPath = this.repositoryPath;
     await this.loadBranches();
-    this.dispatchBranchesChanged(this.repositoryPath);
+    this.dispatchBranchesChanged(repoPath);
   }
 
   /**
@@ -1246,6 +1250,9 @@ export class LvBranchList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: the merge must run on the repo it was
+    // invoked on, even if the user switches tabs while the confirm is up.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Merge Branch',
       `Merge "${branch.shorthand}" into the current branch?`,
@@ -1256,7 +1263,6 @@ export class LvBranchList extends LitElement {
 
     this.operationInProgress = true;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.merge({
         path: repoPath,
@@ -1288,6 +1294,9 @@ export class LvBranchList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: the rebase must run on the repo it was
+    // invoked on, even if the user switches tabs while the confirm is up.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Rebase Branch',
       `Rebase current branch onto "${branch.shorthand}"?\n\nThis will rewrite commit history.`,
@@ -1298,7 +1307,6 @@ export class LvBranchList extends LitElement {
 
     this.operationInProgress = true;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.rebase({
         path: repoPath,

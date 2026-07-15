@@ -421,6 +421,45 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect((renameCall!.args as { newName: string }).newName).to.equal('feature/new');
   });
 
+  it('handleMergeBranch merges the origin repo, not the tab switched to during the confirm', async () => {
+    // showConfirm's await yields; a tab switch during it rebinds
+    // this.repositoryPath. The merge must run on the repo it was invoked on.
+    const el = await createComponent();
+
+    let resolveConfirm!: (v: unknown) => void;
+    mockInvoke = (command: string) => {
+      if (command === 'plugin:dialog|message') {
+        return new Promise((resolve) => {
+          resolveConfirm = resolve;
+        });
+      }
+      if (command === 'merge') return Promise.resolve({ success: true });
+      return defaultMockInvoke(command);
+    };
+
+    const branch = makeBranch({ name: 'feature/m', shorthand: 'feature/m', isHead: false });
+    (
+      el as unknown as {
+        contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null };
+      }
+    ).contextMenu = { visible: true, x: 0, y: 0, branch };
+
+    invokeCalls.length = 0;
+    const promise = (
+      el as unknown as { handleMergeBranch: () => Promise<void> }
+    ).handleMergeBranch();
+
+    await new Promise((r) => setTimeout(r, 10));
+    (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
+
+    resolveConfirm('Ok');
+    await promise;
+
+    const mergeCall = invokeCalls.find((c) => c.command === 'merge');
+    expect(mergeCall, 'merge called').to.not.be.undefined;
+    expect((mergeCall!.args as { path: string }).path).to.equal(REPO_PATH);
+  });
+
   it('handleUnsetUpstream emits branches-changed pinned to the origin repo after a mid-op switch', async () => {
     // Regression: these context-menu handlers previously dispatched a bare
     // branches-changed with no repositoryPath, so a mid-op tab switch made the

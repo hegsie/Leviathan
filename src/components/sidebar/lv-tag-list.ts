@@ -513,6 +513,10 @@ export class LvTagList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: the checkout must run on the repo it
+    // was invoked on (and the conflict event must carry it), even if the user
+    // switches tabs while the confirm is up and the prop rebinds.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Checkout Tag',
       `Checking out tag "${tag.name}" will put you in 'detached HEAD' state. Any new commits won't belong to any branch. Continue?`,
@@ -522,9 +526,6 @@ export class LvTagList extends LitElement {
 
     this.operationInProgress = true;
 
-    // Captured BEFORE the await: the conflict event must carry the repo the
-    // checkout actually ran on, even if the prop is rebound mid-flight.
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.checkoutWithAutoStash(repoPath, tag.name);
 
@@ -570,6 +571,10 @@ export class LvTagList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: tag deletion is irreversible and must
+    // target the repo it was invoked on, even if the user switches tabs (to a
+    // repo that may have a same-named tag) while the confirm is up.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Delete Tag',
       `Are you sure you want to delete tag "${tag.name}"?\n\nThis action cannot be undone.`,
@@ -580,7 +585,6 @@ export class LvTagList extends LitElement {
 
     this.operationInProgress = true;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.deleteTag({
         path: repoPath,
@@ -623,9 +627,13 @@ export class LvTagList extends LitElement {
   }
 
   private async handleTagCreated(): Promise<void> {
+    // Captured BEFORE the loadTags await: the refresh must pin to the repo the
+    // tag was created on, not whichever tab is active if the user switches
+    // during the reload (which rebinds this.repositoryPath).
+    const repoPath = this.repositoryPath;
     await this.loadTags();
     this.dispatchEvent(new CustomEvent('tags-changed', {
-      detail: { repositoryPath: this.repositoryPath },
+      detail: { repositoryPath: repoPath },
       bubbles: true,
       composed: true,
     }));
@@ -638,9 +646,13 @@ export class LvTagList extends LitElement {
     this.contextMenu = { ...this.contextMenu, visible: false };
     this.operationInProgress = true;
 
+    // Captured BEFORE the push await: the push and its refresh must pin to the
+    // repo it was invoked on, even if the user switches tabs during the (often
+    // slow) network push, which rebinds this.repositoryPath.
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.pushTag({
-        path: this.repositoryPath,
+        path: repoPath,
         name: tag.name,
       });
 
@@ -648,6 +660,7 @@ export class LvTagList extends LitElement {
         await this.loadTags();
         showToast(`Pushed tag ${tag.name} to remote`, 'success');
         this.dispatchEvent(new CustomEvent('tags-changed', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));

@@ -218,6 +218,44 @@ describe('lv-stash-list operationInProgress guards', () => {
     expect(detail!.repositoryPath).to.equal(REPO_PATH);
   });
 
+  it('handleDropStash drops from the origin repo, not the tab switched to during the confirm', async () => {
+    // Dropping is irreversible and stash.index is from THIS repo's list.
+    // showConfirm's await yields; a tab switch during it rebinds
+    // this.repositoryPath. The drop must target the repo it was invoked on.
+    const el = await createComponent();
+
+    let resolveConfirm!: (v: unknown) => void;
+    mockInvoke = (command: string) => {
+      if (command === 'plugin:dialog|message') {
+        return new Promise((resolve) => {
+          resolveConfirm = resolve;
+        });
+      }
+      if (command === 'drop_stash') return Promise.resolve(null);
+      return defaultMockInvoke(command);
+    };
+
+    const stash = makeStash({ index: 0 });
+    (
+      el as unknown as {
+        contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null };
+      }
+    ).contextMenu = { visible: true, x: 0, y: 0, stash };
+
+    invokeCalls.length = 0;
+    const promise = (el as unknown as { handleDropStash: () => Promise<void> }).handleDropStash();
+
+    await new Promise((r) => setTimeout(r, 10));
+    (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
+
+    resolveConfirm('Ok');
+    await promise;
+
+    const dropCall = invokeCalls.find((c) => c.command === 'drop_stash');
+    expect(dropCall, 'drop_stash called').to.not.be.undefined;
+    expect((dropCall!.args as { path: string }).path).to.equal(REPO_PATH);
+  });
+
   it('isStashing guard prevents double createStash', async () => {
     const el = await createComponent();
 

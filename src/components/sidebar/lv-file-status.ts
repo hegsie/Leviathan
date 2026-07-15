@@ -711,6 +711,10 @@ export class LvFileStatus extends LitElement {
 
     const paths = this.discardablePaths(filesToDiscard);
     if (paths.length === 0) return;
+    // Captured BEFORE the confirm await: discarding is irreversible and must
+    // target the repo it was invoked on, even if the user switches tabs (which
+    // rebinds this.repositoryPath) while the confirm is up.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       "Discard Changes",
       `Discard changes to ${paths.length} file${paths.length > 1 ? "s" : ""} in "${dirPath}"? This cannot be undone.`,
@@ -718,7 +722,7 @@ export class LvFileStatus extends LitElement {
     );
     if (!confirmed) return;
 
-    const result = await gitService.discardChanges(this.repositoryPath, paths);
+    const result = await gitService.discardChanges(repoPath, paths);
     if (result.success) {
       await this.loadStatus();
     } else {
@@ -1263,6 +1267,10 @@ export class LvFileStatus extends LitElement {
       return;
     }
 
+    // Captured BEFORE the confirm await: discarding is irreversible and must
+    // target the repo it was invoked on, even if the user switches tabs (which
+    // rebinds this.repositoryPath) while the confirm is up.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       "Discard Changes",
       `Are you sure you want to discard changes to "${file.path}"? This action cannot be undone.`,
@@ -1271,7 +1279,7 @@ export class LvFileStatus extends LitElement {
 
     if (!confirmed) return;
 
-    const result = await gitService.discardChanges(this.repositoryPath, [
+    const result = await gitService.discardChanges(repoPath, [
       file.path,
     ]);
     if (result.success) {
@@ -1402,6 +1410,10 @@ export class LvFileStatus extends LitElement {
     );
     if (paths.length === 0) return;
 
+    // Captured BEFORE the confirm await: discarding is irreversible and must
+    // target the repo it was invoked on, even if the user switches tabs (which
+    // rebinds this.repositoryPath) while the confirm is up.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       "Discard Changes",
       `Discard changes to ${paths.length} file${paths.length > 1 ? "s" : ""}? This cannot be undone.`,
@@ -1409,7 +1421,7 @@ export class LvFileStatus extends LitElement {
     );
     if (!confirmed) return;
 
-    const result = await gitService.discardChanges(this.repositoryPath, paths);
+    const result = await gitService.discardChanges(repoPath, paths);
     if (result.success) {
       const newSelected = new Set(this.selectedFiles);
       paths.forEach((p) => newSelected.delete(p));
@@ -1529,13 +1541,17 @@ export class LvFileStatus extends LitElement {
       this.redirectConflictedToMergeEditor(file);
       return;
     }
+    // Captured BEFORE the confirm await: discarding is irreversible and must
+    // target the repo it was invoked on, even if the user switches tabs (which
+    // rebinds this.repositoryPath) while the confirm is up.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       "Discard Changes",
       `Discard changes to "${file.path}"? This cannot be undone.`,
       "warning",
     );
     if (!confirmed) return;
-    const result = await gitService.discardChanges(this.repositoryPath, [
+    const result = await gitService.discardChanges(repoPath, [
       file.path,
     ]);
     if (result.success) {

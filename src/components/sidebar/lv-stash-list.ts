@@ -368,6 +368,11 @@ export class LvStashList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: stash.index is from THIS repo's list,
+    // so the pop must run on this repo even if the user switches tabs while the
+    // confirm is up — applying stash.index against another repo pops the wrong
+    // stash.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Pop Stash',
       `This will apply the stash "${stash.message}" and remove it from the stash list. Any conflicts will need to be resolved manually. Continue?`,
@@ -377,7 +382,6 @@ export class LvStashList extends LitElement {
 
     this.operationInProgress = true;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.popStash({
         path: repoPath,
@@ -421,6 +425,11 @@ export class LvStashList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the confirm await: dropping is irreversible and stash.index
+    // is from THIS repo's list, so it must target this repo even if the user
+    // switches tabs while the confirm is up — otherwise a different, unrelated
+    // stash is dropped in the wrong repo.
+    const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Drop Stash',
       `Are you sure you want to drop "${stash.message}"?\n\nThis action cannot be undone.`,
@@ -431,7 +440,6 @@ export class LvStashList extends LitElement {
 
     this.operationInProgress = true;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.dropStash({
         path: repoPath,
