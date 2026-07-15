@@ -947,7 +947,7 @@ export class AppShell extends LitElement {
       // state, keeping the clicked file preselected when one was given.
       this.openConflictDialogFromState(customEvent.detail?.filePath);
     }
-    this.handleRefresh();
+    this.refreshConflictDialogRepo(customEvent.detail?.repositoryPath ?? null);
   };
 
   // Handle merge-conflict events from branch list (e.g., sidebar merge resulting in conflicts)
@@ -956,7 +956,7 @@ export class AppShell extends LitElement {
     this.conflictOperationType = 'merge';
     this.resetConflictDetailState();
     this.openConflictDialogPinned(detail?.repositoryPath);
-    this.handleRefresh();
+    this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
   };
 
   /**
@@ -1506,7 +1506,7 @@ export class AppShell extends LitElement {
       this.resetConflictDetailState();
       this.conflictDropStashOnComplete = true;
       this.openConflictDialogPinned(repoPath);
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else if (data.stashed && data.stashApplied) {
       showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
     } else if (data.stashed && !data.stashApplied) {
@@ -1535,6 +1535,7 @@ export class AppShell extends LitElement {
       this.conflictOperationType = 'merge';
       this.resetConflictDetailState();
       this.openConflictDialogPinned(repoPath);
+      this.refreshConflictDialogRepo(repoPath);
       notifyWarning(
         'Merge Conflict',
         `Conflicts detected while merging ${refName}. Please resolve conflicts to continue.`,
@@ -1565,6 +1566,7 @@ export class AppShell extends LitElement {
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
       this.openConflictDialogPinned(repoPath);
+      this.refreshConflictDialogRepo(repoPath);
       notifyWarning(
         'Rebase Conflict',
         `Conflicts detected while rebasing onto ${refName}. Please resolve conflicts to continue.`,
@@ -1669,7 +1671,7 @@ export class AppShell extends LitElement {
       'Conflicts detected during cherry-pick. Please resolve conflicts to continue.',
       !settingsStore.getState().showNativeNotifications
     );
-    this.handleRefresh();
+    this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
   }
 
   private canResolveConflicts(state: string): boolean {
@@ -1778,6 +1780,7 @@ export class AppShell extends LitElement {
       this.conflictOperationType = 'revert';
       this.resetConflictDetailState();
       this.openConflictDialogPinned(repoPath);
+      this.refreshConflictDialogRepo(repoPath);
       notifyWarning(
         'Revert Conflict',
         `Conflicts detected while reverting ${commit.oid.substring(0, 7)}. Please resolve conflicts to continue.`,
@@ -2137,12 +2140,15 @@ export class AppShell extends LitElement {
   }
 
   /**
-   * The dialog operated on the repo it was PINNED to. If the user switched
-   * tabs while it was up, refreshing the ACTIVE repo would leave the
-   * operated-on repo showing a stale merge state (state/status/graph) until
-   * some unrelated event refreshed it. Refresh the pinned repo instead:
-   * live when it is still active, via the stale-on-activate path (plus a
-   * badge hydration so its tab clears promptly) when it is backgrounded.
+   * Refresh the repo a conflict dialog operates/operated ON — used both
+   * when a conflict opens the dialog and when Complete/Abort closes it.
+   * The user can switch tabs during the triggering operation's await (and
+   * behind the open dialog), so refreshing the ACTIVE repo could leave the
+   * operated-on repo showing a stale merge state (state/status/graph)
+   * until some unrelated event refreshed it. Refresh the pinned repo
+   * instead: live when it is still active, via the stale-on-activate path
+   * (plus a badge hydration so its tab updates promptly) when it is
+   * backgrounded.
    */
   private refreshConflictDialogRepo(pinnedPath: string | null): void {
     if (!pinnedPath || pinnedPath === this.activeRepository?.repository.path) {
@@ -3109,13 +3115,13 @@ export class AppShell extends LitElement {
       this.conflictOperationType = 'merge';
       this.resetConflictDetailState();
       this.openConflictDialogPinned(repoPath);
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       progressService.failOperation(opId);
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
       this.openConflictDialogPinned(repoPath);
-      this.handleRefresh();
+      this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
       showToast(result.error?.message ?? 'Pull failed', 'error');

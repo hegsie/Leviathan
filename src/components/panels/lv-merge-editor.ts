@@ -1064,14 +1064,18 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       } else if (closed) {
         pushConflict(closed.split!, oursLabel, labelOf(lines[closed.end], 'THEIRS'));
         i = closed.end + 1;
-      } else if (blobsAvailable && lineInBlobs(line)) {
+      } else if (blobsAvailable && lineInBlobs(line) && firstCandidate) {
         // NOTHING below this start-shaped line validates, and the line
         // itself is blob content — it is a quoted example sitting directly
         // above the real conflict, and it opened the region one line too
         // early (every candidate ours-slice began with the real start
         // marker, which is in neither blob). Treat it as content and
         // rescan from the next line so the REAL start can open a region
-        // whose split validates.
+        // whose split validates. The recovery requires END-CANDIDATE
+        // evidence: with no end-shaped line anywhere below, this is a
+        // genuinely unterminated conflict at EOF — reclassifying its start
+        // as content would zero the conflict count and let Mark Resolved
+        // write the real marker back to disk.
         currentResolved.push(line);
         i++;
       } else if (firstCandidate) {
@@ -1534,6 +1538,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         console.error('Failed to resolve conflict:', result.error);
         showToast(`Failed to mark file as resolved: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
+    } catch (err) {
+      // invokeCommand is designed not to throw, but a silent failure here
+      // would strand the user with no feedback — same catch as the
+      // external-tool sibling.
+      console.error('Failed to resolve conflict:', err);
+      showToast('Failed to mark file as resolved', 'error');
     } finally {
       // Only the call that owns the flag may clear it — a file switch resets
       // it and a newer call may own it by now.
@@ -1604,6 +1614,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         console.error('Failed to resolve conflict:', result.error);
         showToast(`Failed to resolve conflict: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
+    } catch (err) {
+      console.error('Failed to resolve conflict:', err);
+      showToast('Failed to resolve conflict', 'error');
     } finally {
       if (token === this.resolveToken) {
         this.resolving = false;

@@ -945,6 +945,33 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('a conflict OPENING on a background-tabbed repo refreshes the pinned repo too', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        // The merge ran on repo A, but the user switched to B during its
+        // await — the conflict event still carries A's path, and A (not B)
+        // must be the repo that gets refreshed.
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        (el as any).handleMergeConflictEvent(
+          new CustomEvent('merge-conflict', { detail: { repositoryPath: '/repo/a' } })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/a')).to.be.true;
+        const dialog = el.shadowRoot!.querySelector(
+          'lv-conflict-resolution-dialog'
+        ) as HTMLElement & { repositoryPath: string };
+        expect(dialog.repositoryPath).to.equal('/repo/a');
+      } finally {
+        el.remove();
+      }
+    });
+
     it('completing on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
       const el = createAppShell();
       document.body.appendChild(el);

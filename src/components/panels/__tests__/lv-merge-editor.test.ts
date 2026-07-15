@@ -916,6 +916,41 @@ describe('lv-merge-editor', () => {
       expect(resolvedText).to.deep.equal(['tail']);
     });
 
+    it('an unterminated conflict stays a block even when its start text is quoted elsewhere', async () => {
+      // The ours blob quotes '<<<<<<< HEAD' in a docs section, and the
+      // file ALSO has a genuinely truncated conflict at EOF (crashed save).
+      // The quoted-start recovery must not fire without end-candidate
+      // evidence — reclassifying the real start as content would zero the
+      // conflict count and let Mark Resolved write the marker back.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'docs quote:\n<<<<<<< HEAD\ncontext';
+          if (blobArgs?.oid === 'ours-oid')
+            return 'docs quote:\n<<<<<<< HEAD\ncontext\nours-body';
+          if (blobArgs?.oid === 'theirs-oid') return 'docs quote:\n<<<<<<< HEAD\ncontext';
+          return '';
+        }
+        if (command === 'read_file_content') {
+          return ['context', '<<<<<<< HEAD', 'ours-body'].join('\n');
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/broken.txt');
+      const internal = internalOf(el);
+      expect(
+        internal.segments.filter((s) => s.type === 'conflict').length,
+        'the truncated conflict must stay a block, keeping Mark Resolved locked'
+      ).to.equal(1);
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled).to.be.true;
+    });
+
     it('keeps an unterminated conflict as a conflict block', async () => {
       const el = await renderEditor();
       const segments = internalOf(el).parseSegments(
