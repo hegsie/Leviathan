@@ -126,6 +126,11 @@ export class LvCreateBranchDialog extends LitElement {
   @property({ type: String }) repositoryPath = '';
   @property({ type: String }) startPoint = '';
 
+  /** The repo this dialog was opened for, captured at open(). The
+   * `repositoryPath` property is bound live to the active tab, so a tab switch
+   * while the modal is open would otherwise make Create target the wrong repo. */
+  private pinnedRepoPath = '';
+
   @state() private branchName = '';
   @state() private checkoutAfterCreate = true;
   @state() private isCreating = false;
@@ -136,6 +141,7 @@ export class LvCreateBranchDialog extends LitElement {
 
   public open(startPoint?: string): void {
     this.reset();
+    this.pinnedRepoPath = this.repositoryPath;
     if (startPoint) {
       this.startPoint = startPoint;
     }
@@ -184,7 +190,8 @@ export class LvCreateBranchDialog extends LitElement {
     this.error = '';
 
     try {
-      const result = await createBranch(this.repositoryPath, {
+      const repoPath = this.pinnedRepoPath;
+      const result = await createBranch(repoPath, {
         name,
         startPoint: this.startPoint || undefined,
         checkout: this.checkoutAfterCreate,
@@ -192,7 +199,11 @@ export class LvCreateBranchDialog extends LitElement {
 
       if (result.success) {
         this.dispatchEvent(new CustomEvent('branch-created', {
-          detail: { branch: result.data, checkedOut: this.checkoutAfterCreate },
+          detail: {
+            branch: result.data,
+            checkedOut: this.checkoutAfterCreate,
+            repositoryPath: repoPath,
+          },
           bubbles: true,
           composed: true,
         }));

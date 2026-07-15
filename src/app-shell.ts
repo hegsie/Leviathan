@@ -4102,11 +4102,13 @@ export class AppShell extends LitElement {
       ${this.activeRepository ? html`
         <lv-create-tag-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          @tag-created=${() => this.handleRefresh()}
+          @tag-created=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-create-tag-dialog>
         <lv-create-branch-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          @branch-created=${() => this.handleRefresh()}
+          @branch-created=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-create-branch-dialog>
         <lv-cherry-pick-dialog
           .repositoryPath=${this.activeRepository.repository.path}
