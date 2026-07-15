@@ -829,11 +829,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
       const todo = todoLines.join('\n');
 
-      const result = await gitService.executeInteractiveRebase(
-        this.repositoryPath,
-        this.onto,
-        todo
-      );
+      // Captured BEFORE the await: the conflict event must carry the repo
+      // the rebase actually ran on, even if the prop is rebound mid-flight.
+      const repoPath = this.repositoryPath;
+      const result = await gitService.executeInteractiveRebase(repoPath, this.onto, todo);
 
       if (result.success) {
         this.dispatchEvent(new CustomEvent('rebase-complete', {
@@ -847,7 +846,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
-            detail: { operationType: 'rebase' },
+            detail: { operationType: 'rebase', repositoryPath: repoPath },
           }));
           showToast('Rebase paused — resolve conflicts to continue', 'warning');
         } else {

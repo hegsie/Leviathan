@@ -618,7 +618,12 @@ export class LvGitflowPanel extends LitElement {
     this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
       bubbles: true,
       composed: true,
-      detail: { operationType: 'merge', squash, gitflowFinish },
+      detail: {
+        operationType: 'merge',
+        squash,
+        gitflowFinish,
+        repositoryPath: this.repositoryPath,
+      },
     }));
   }
 

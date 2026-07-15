@@ -502,6 +502,78 @@ describe('lv-merge-editor', () => {
       }
     });
 
+    it('a setext underline in ours cannot swallow the real separator (blob-validated resplit)', async () => {
+      // Ours legitimately contains a line of exactly seven equals (a
+      // Markdown setext H1 underline). Shape alone cannot tell it from
+      // git's separator — the split must validate against the blobs, or
+      // the real separator leaks into the theirs pane and gets written
+      // back to disk on Use Theirs + Mark Resolved.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'Intro\ntail';
+          if (blobArgs?.oid === 'ours-oid') return 'Intro\nHeading\n=======\nOURS CHANGE\ntail';
+          if (blobArgs?.oid === 'theirs-oid') return 'Intro\nTHEIRS CHANGE\ntail';
+          return '';
+        }
+        if (command === 'read_file_content') {
+          return [
+            'Intro',
+            '<<<<<<< HEAD',
+            'Heading',
+            '=======',
+            'OURS CHANGE',
+            '=======',
+            'THEIRS CHANGE',
+            '>>>>>>> theirs',
+            'tail',
+          ].join('\n');
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/doc.md');
+      const segments = internalOf(el).segments;
+      const conflicts = segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['Heading', '=======', 'OURS CHANGE']);
+      expect(conflicts[0].theirsLines).to.deep.equal(['THEIRS CHANGE']);
+    });
+
+    it('a setext underline in THEIRS does not shift the split either', async () => {
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'tail';
+          if (blobArgs?.oid === 'ours-oid') return 'OURS\ntail';
+          if (blobArgs?.oid === 'theirs-oid') return 'Heading\n=======\ntail';
+          return '';
+        }
+        if (command === 'read_file_content') {
+          return [
+            '<<<<<<< HEAD',
+            'OURS',
+            '=======',
+            'Heading',
+            '=======',
+            '>>>>>>> theirs',
+            'tail',
+          ].join('\n');
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/doc.md');
+      const conflicts = internalOf(el).segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['OURS']);
+      expect(conflicts[0].theirsLines).to.deep.equal(['Heading', '=======']);
+    });
+
     it('keeps an unterminated conflict as a conflict block', async () => {
       const el = await renderEditor();
       const segments = internalOf(el).parseSegments(
@@ -609,6 +681,51 @@ describe('lv-merge-editor', () => {
       expect(internal.loadFailed).to.be.false;
       expect(internal.segments.length).to.equal(1);
       expect(internal.segments[0].type).to.equal('resolved');
+    });
+
+    it('a workdir-only read failure still offers verbatim take-side resolution', async () => {
+      // Non-UTF-8 (legacy encoding) text files fail read_file_content but
+      // are not binary — without a verbatim escape hatch the file could
+      // never be resolved in-app and Complete would stay disabled forever.
+      setupDefaultMocks();
+      workdirContent = () => Promise.reject(new Error('invalid utf-8'));
+      const el = await renderLoadedEditor();
+      expect(internalOf(el).loadFailed).to.be.true;
+
+      const takeOurs = Array.from(el.shadowRoot!.querySelectorAll('.output-error button')).find(
+        (b) => b.textContent?.includes('verbatim') && b.classList.contains('btn-ours')
+      ) as HTMLButtonElement;
+      expect(takeOurs, 'verbatim Use Ours offered in the error state').to.not.be.undefined;
+
+      let resolvedFired = false;
+      el.addEventListener('conflict-resolved', () => {
+        resolvedFired = true;
+      });
+      invokeHistory.length = 0;
+      takeOurs.click();
+      await new Promise((r) => setTimeout(r, 30));
+      const call = invokeHistory.find((h) => h.command === 'resolve_conflict_take_side');
+      expect(call, 'take-side resolves blob-verbatim').to.not.be.undefined;
+      expect((call!.args as { side: string }).side).to.equal('ours');
+      expect(resolvedFired).to.be.true;
+    });
+
+    it('a side-blob read failure does NOT offer verbatim take-side (sides untrustworthy)', async () => {
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'ours-oid') throw new Error('blob read failed');
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      expect(internalOf(el).loadFailed).to.be.true;
+      const verbatimBtns = Array.from(
+        el.shadowRoot!.querySelectorAll('.output-error button')
+      ).filter((b) => b.textContent?.includes('verbatim'));
+      expect(verbatimBtns.length).to.equal(0);
     });
   });
 
@@ -2350,6 +2467,72 @@ describe('lv-merge-editor', () => {
       expect(segment.type).to.equal('resolved');
       expect(segment.lines).to.deep.equal(['Heading', '=======']);
       expect(internal.editingSegmentId).to.equal(null);
+    });
+
+    it('a lock engaging during the confirm window makes the apply inert', async () => {
+      setupDefaultMocks();
+      let releaseConfirm: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          return new Promise((res) => {
+            releaseConfirm = () => res('Ok');
+          });
+        }
+        return baseMock(command, args);
+      };
+      const { el, internal } = await renderWithEdit();
+      const editedId = internal.editingSegmentId!;
+      internal.editDraft = '<<<<<<< HEAD\npasted';
+      const applying = internal.applyEditSegment.call(el);
+      await new Promise((r) => setTimeout(r, 10));
+
+      // A host tool session starts while the confirm is up — the apply
+      // must re-check the lock after the await, like Reload does.
+      el.externalToolLocked = true;
+      releaseConfirm!();
+      await applying;
+      await el.updateComplete;
+
+      expect(
+        internal.segments.find((s) => s.id === editedId)?.type,
+        'the apply must be inert once the lock engaged'
+      ).to.equal('conflict');
+      el.externalToolLocked = false;
+    });
+
+    it('whole-file accept with an open edit draft confirms before discarding it', async () => {
+      setupDefaultMocks();
+      let confirmAnswer: unknown = false;
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return confirmAnswer;
+        }
+        return baseMock(command, args);
+      };
+      const { el, internal } = await renderWithEdit();
+      const editedId = internal.editingSegmentId!;
+      internal.editDraft = 'careful hand-typed merge';
+      const accept = (el as unknown as { acceptWholeFile: (o: string) => Promise<void> })
+        .acceptWholeFile;
+
+      // Declined: the draft and the open edit survive.
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+      expect(confirmCalls).to.equal(1);
+      expect(internal.editingSegmentId, 'declining keeps the edit open').to.equal(editedId);
+      expect(internal.editDraft).to.equal('careful hand-typed merge');
+
+      // Accepted: the whole file replaces the segments.
+      confirmAnswer = 'Ok';
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+      expect(internal.editingSegmentId).to.equal(null);
+      expect(internal.segments.length).to.equal(1);
+      expect(internal.segments[0].origin).to.equal('ours');
     });
 
     it('marker-free edits apply without any confirmation', async () => {

@@ -709,7 +709,8 @@ export class LvFileStatus extends LitElement {
     const filesToDiscard = this.getFilesUnderPath(this.unstagedFiles, dirPath);
     if (filesToDiscard.length === 0) return;
 
-    const paths = filesToDiscard.map((f) => f.path);
+    const paths = this.discardablePaths(filesToDiscard);
+    if (paths.length === 0) return;
     const confirmed = await showConfirm(
       "Discard Changes",
       `Discard changes to ${paths.length} file${paths.length > 1 ? "s" : ""} in "${dirPath}"? This cannot be undone.`,
@@ -1181,6 +1182,24 @@ export class LvFileStatus extends LitElement {
     return files.filter((f) => !f.isConflicted).map((f) => f.path);
   }
 
+  /**
+   * Filter conflicted files out of a bulk discard, with feedback for what
+   * was skipped. A conflicted path has no stage-0 index entry, so the
+   * backend either silently no-ops or DELETES the merged working file while
+   * the index stays conflicted — either way the conflict must be resolved
+   * (or the operation aborted) in the merge editor instead.
+   */
+  private discardablePaths(files: StatusEntry[]): string[] {
+    const conflicted = files.filter((f) => f.isConflicted);
+    if (conflicted.length > 0) {
+      showToast(
+        `${conflicted.length} conflicted file${conflicted.length === 1 ? '' : 's'} skipped — resolve ${conflicted.length === 1 ? 'it' : 'them'} in the merge editor (or abort the operation) instead`,
+        'warning',
+      );
+    }
+    return files.filter((f) => !f.isConflicted).map((f) => f.path);
+  }
+
   private async handleStageFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
 
@@ -1229,10 +1248,18 @@ export class LvFileStatus extends LitElement {
 
   private async handleDiscardFile(file: StatusEntry, e: Event): Promise<void> {
     e.stopPropagation();
-    
+
     // If multiple files are selected and this file is one of them, discard all selected
     if (this.selectedFiles.size > 1 && this.selectedFiles.has(file.path)) {
       await this.handleDiscardSelected();
+      return;
+    }
+
+    // Discarding a conflicted file either silently no-ops or deletes the
+    // merged working file (no stage-0 entry) — route to the merge editor,
+    // matching the stage guard.
+    if (file.isConflicted) {
+      this.redirectConflictedToMergeEditor(file);
       return;
     }
 
@@ -1370,9 +1397,9 @@ export class LvFileStatus extends LitElement {
   }
 
   private async handleDiscardSelected(): Promise<void> {
-    const paths = this.unstagedFiles
-      .filter((f) => this.selectedFiles.has(f.path))
-      .map((f) => f.path);
+    const paths = this.discardablePaths(
+      this.unstagedFiles.filter((f) => this.selectedFiles.has(f.path))
+    );
     if (paths.length === 0) return;
 
     const confirmed = await showConfirm(
@@ -1498,6 +1525,10 @@ export class LvFileStatus extends LitElement {
     const file = this.contextMenu.file;
     if (!file) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
+    if (file.isConflicted) {
+      this.redirectConflictedToMergeEditor(file);
+      return;
+    }
     const confirmed = await showConfirm(
       "Discard Changes",
       `Discard changes to "${file.path}"? This cannot be undone.`,

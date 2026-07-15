@@ -245,9 +245,12 @@ export class LvCherryPickDialog extends LitElement {
     this.isExecuting = true;
     this.error = '';
 
+    // Captured BEFORE the await: the conflict event must carry the repo the
+    // cherry-pick actually ran on, even if the prop is rebound mid-flight.
+    const repoPath = this.repositoryPath;
     try {
       const result = await cherryPick({
-        path: this.repositoryPath,
+        path: repoPath,
         commitOid: this.commit.oid,
         noCommit: this.noCommit || undefined,
         // A merge commit needs an explicit mainline parent (like
@@ -277,6 +280,7 @@ export class LvCherryPickDialog extends LitElement {
             detail: {
               sourceCommit: this.commit,
               error: result.error,
+              repositoryPath: repoPath,
             },
             bubbles: true,
             composed: true,

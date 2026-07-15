@@ -160,4 +160,79 @@ describe('lv-file-status conflicted staging guards', () => {
     expect(calls.length).to.equal(1);
     expect((calls[0].args as { paths: string[] }).paths).to.deep.equal(['src/ok.ts']);
   });
+
+  // ── Discard guards (siblings of the stage guards above) ────────────────
+  // Discarding a conflicted path either silently no-ops or DELETES the
+  // merged working file (no stage-0 index entry) while the index stays
+  // conflicted — it must be routed to the merge editor / skipped instead.
+
+  function discardCalls(): Array<{ command: string; args?: unknown }> {
+    return invokeHistory.filter((h) => h.command === 'discard_changes');
+  }
+
+  it('discarding a conflicted file opens the conflict flow instead', async () => {
+    const conflicted = makeEntry({
+      path: 'src/conflict.ts',
+      status: 'conflicted',
+      isConflicted: true,
+    });
+    const el = await renderFileStatus([conflicted]);
+
+    let dialogRequestedFor: string | null = null;
+    el.addEventListener('open-conflict-dialog', ((e: CustomEvent) => {
+      dialogRequestedFor = e.detail?.filePath ?? null;
+    }) as EventListener);
+
+    invokeHistory.length = 0;
+    await (
+      el as unknown as { handleDiscardFile: (f: StatusEntry, e: Event) => Promise<void> }
+    ).handleDiscardFile(conflicted, new Event('click'));
+
+    expect(discardCalls().length, 'discard_changes must not be called').to.equal(0);
+    expect(dialogRequestedFor).to.equal('src/conflict.ts');
+  });
+
+  it('discard-selected skips conflicted files and discards the rest', async () => {
+    const clean = makeEntry({ path: 'src/ok.ts' });
+    const conflicted = makeEntry({
+      path: 'src/conflict.ts',
+      status: 'conflicted',
+      isConflicted: true,
+    });
+    const el = await renderFileStatus([clean, conflicted]);
+    const internal = el as unknown as FileStatusInternal & {
+      handleDiscardSelected: () => Promise<void>;
+    };
+    internal.selectedFiles = new Set(['src/ok.ts', 'src/conflict.ts']);
+
+    // The destructive confirm must be accepted for the clean file's discard.
+    const baseMock = mockInvoke;
+    mockInvoke = async (command: string, args?: unknown) => {
+      if (command === 'plugin:dialog|message') return 'Ok';
+      return baseMock(command, args);
+    };
+
+    invokeHistory.length = 0;
+    await internal.handleDiscardSelected();
+
+    const calls = discardCalls();
+    expect(calls.length).to.equal(1);
+    expect((calls[0].args as { paths: string[] }).paths).to.deep.equal(['src/ok.ts']);
+  });
+
+  it('discard-selected with only conflicted files discards nothing', async () => {
+    const conflicted = makeEntry({
+      path: 'src/conflict.ts',
+      status: 'conflicted',
+      isConflicted: true,
+    });
+    const el = await renderFileStatus([conflicted]);
+    const internal = el as unknown as FileStatusInternal & {
+      handleDiscardSelected: () => Promise<void>;
+    };
+    internal.selectedFiles = new Set(['src/conflict.ts']);
+    invokeHistory.length = 0;
+    await internal.handleDiscardSelected();
+    expect(discardCalls().length).to.equal(0);
+  });
 });

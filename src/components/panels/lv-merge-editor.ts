@@ -853,11 +853,68 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const segments: OutputSegment[] = [];
     let currentResolved: string[] = [];
     let inConflict = false;
-    let section: 'ours' | 'base' | 'theirs' = 'ours';
-    let oursLines: string[] = [];
-    let theirsLines: string[] = [];
+    let seenSeparator = false;
+    let body: string[] = [];
     let oursLabel = '';
     let theirsLabel = '';
+
+    /** True when `needle` appears as a consecutive slice of `hay`
+     * (CR-insensitively — the workdir may be CRLF while blobs are LF). */
+    const isContiguousRun = (needle: string[], hay: string[]): boolean => {
+      if (needle.length === 0) return true;
+      const n = needle.map(stripCr);
+      outer: for (let i = 0; i + n.length <= hay.length; i++) {
+        for (let j = 0; j < n.length; j++) {
+          if (stripCr(hay[i + j]) !== n[j]) continue outer;
+        }
+        return true;
+      }
+      return false;
+    };
+
+    /**
+     * Split a conflict block's raw body (the lines between the start and
+     * end markers) into ours/theirs. Content shaped exactly like the
+     * separator — a Markdown setext underline is `=======` — is
+     * indistinguishable from git's separator by shape alone, so when more
+     * than one candidate exists each split is validated against the
+     * ours/theirs blob contents: each side of a hunk is a contiguous slice
+     * of its blob. The first candidate whose BOTH sides validate wins;
+     * with no valid candidate the first is kept (blobs unavailable).
+     */
+    const splitConflictBody = (b: string[]): { ours: string[]; theirs: string[] } => {
+      const baseIdxBefore = (limit: number): number => {
+        for (let i = 0; i < limit; i++) {
+          if (isBaseMarker(b[i])) return i;
+        }
+        return -1;
+      };
+      const oursUpTo = (limit: number): string[] => {
+        const bi = baseIdxBefore(limit);
+        // diff3 base sections (between ||||||| and the separator) are
+        // discarded — never leak base into ours.
+        return b.slice(0, bi < 0 ? limit : bi);
+      };
+      const candidates: number[] = [];
+      for (let i = 0; i < b.length; i++) {
+        if (isSeparator(b[i])) candidates.push(i);
+      }
+      if (candidates.length === 0) {
+        // Unterminated at EOF before any separator — everything is ours.
+        return { ours: oursUpTo(b.length), theirs: [] };
+      }
+      if (candidates.length > 1) {
+        for (const s of candidates) {
+          const ours = oursUpTo(s);
+          const theirs = b.slice(s + 1);
+          if (isContiguousRun(ours, this.oursLines) && isContiguousRun(theirs, this.theirsLines)) {
+            return { ours, theirs };
+          }
+        }
+      }
+      const s = candidates[0];
+      return { ours: oursUpTo(s), theirs: b.slice(s + 1) };
+    };
 
     const flushResolved = (): void => {
       if (currentResolved.length > 0) {
@@ -866,12 +923,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       }
     };
     const pushConflict = (): void => {
+      const { ours, theirs } = splitConflictBody(body);
       segments.push({
         id: this.nextSegmentId++,
         type: 'conflict',
         lines: [],
-        oursLines: [...oursLines],
-        theirsLines: [...theirsLines],
+        oursLines: ours,
+        theirsLines: theirs,
         oursLabel,
         theirsLabel,
         origin: null,
@@ -884,37 +942,25 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (!inConflict && isConflictStart(line)) {
         flushResolved();
         inConflict = true;
-        section = 'ours';
-        oursLines = [];
-        theirsLines = [];
+        seenSeparator = false;
+        body = [];
         oursLabel = stripCr(line).slice(markerSize).trim() || 'OURS';
         theirsLabel = '';
-      } else if (inConflict && section === 'ours' && isBaseMarker(line)) {
-        // diff3 common-ancestor marker — begin discarding base lines. Only
-        // valid directly after the ours section; anywhere else it's content.
-        section = 'base';
-      } else if (inConflict && section !== 'theirs' && isSeparator(line)) {
-        section = 'theirs';
-      } else if (inConflict && section === 'theirs' && isConflictEnd(line)) {
+      } else if (inConflict && seenSeparator && isConflictEnd(line)) {
         // Git always emits '=======' before '>>>>>>>', so an end marker is
-        // only valid in the theirs section — anywhere earlier it's content
-        // (a quoted diff, docs about conflicts) and treating it as the end
-        // would drop the real theirs side and leak the true markers.
+        // only valid once a separator was seen — anywhere earlier it's
+        // content (a quoted diff, docs about conflicts) and treating it as
+        // the end would drop the real theirs side and leak the true markers.
         theirsLabel = stripCr(line).slice(markerSize).trim() || 'THEIRS';
         pushConflict();
         inConflict = false;
-        section = 'ours';
-        oursLines = [];
-        theirsLines = [];
+        body = [];
       } else if (inConflict) {
-        // A nested '<<<<<<<' (or any non-marker line) while already inside a
-        // conflict is treated as content, not as a new conflict start.
-        if (section === 'ours') {
-          oursLines.push(line);
-        } else if (section === 'theirs') {
-          theirsLines.push(line);
-        }
-        // section === 'base': discard — never leak base into ours
+        // Everything between the start and end markers — including nested
+        // '<<<<<<<' lines, separator candidates, and diff3 base sections —
+        // is collected raw; splitConflictBody derives the ours/theirs split.
+        if (isSeparator(line)) seenSeparator = true;
+        body.push(line);
       } else {
         currentResolved.push(line);
       }
@@ -1079,8 +1125,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (!proceed) return;
       // The confirm awaited — the edit may have been closed or retargeted
       // by a file switch in the meantime; applying a stale draft would
-      // write it into the wrong segment.
+      // write it into the wrong segment. A resolve/tool session may also
+      // have started while the confirm was up (same re-check as Reload).
       if (this.editingSegmentId !== id || !this.segments.some((s) => s.id === id)) return;
+      if (this.actionsBlocked) return;
     }
 
     this.clearAiExplanation(id);
@@ -1108,12 +1156,36 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   // ── Whole-file operations ─────────────────────────────────────────────
 
-  private acceptWholeFile(origin: 'ours' | 'theirs' | 'base'): void {
+  /**
+   * True when it is safe to throw away an open inline-edit draft: no edit
+   * is open, or the user confirmed the discard. Whole-file operations
+   * replace ALL segments, so a typed-but-unapplied draft would vanish
+   * silently without this — the same hazard Reload and file switches
+   * already confirm for.
+   */
+  private async confirmDiscardOpenEdit(): Promise<boolean> {
+    if (this.editingSegmentId === null) return true;
+    return showConfirm(
+      'Discard the open edit?',
+      'This section has an edit that was not applied — continuing discards the typed text.',
+      'warning',
+    );
+  }
+
+  private async acceptWholeFile(origin: 'ours' | 'theirs' | 'base'): Promise<void> {
     // With a failed load the side contents are not trustworthy — accepting
     // one would replace the segments with fabricated (possibly empty) text.
     // Blocked during resolve writes / tool sessions like every other
-    // in-memory mutation (the take-side delegation below re-checks too).
+    // in-memory mutation.
     if (this.loadFailed || this.actionsBlocked) return;
+    if (this.editingSegmentId !== null) {
+      if (!(await this.confirmDiscardOpenEdit())) return;
+      // Re-check after the confirm's await — a resolve/tool session may
+      // have started while it was up (same re-check as Reload and Apply).
+      if (this.loadFailed || this.actionsBlocked) return;
+      this.editingSegmentId = null;
+      this.editDraft = '';
+    }
 
     // A side with no entry DELETED the file — accepting it means staging the
     // deletion, not writing a 0-byte file from its empty content.
@@ -1127,21 +1199,20 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
     const content =
       origin === 'ours' ? this.oursContent : origin === 'theirs' ? this.theirsContent : this.baseContent;
-    this.editingSegmentId = null;
     this.userTouched = true;
     this.segments = [this.makeResolvedSegment(content.split('\n'), origin, false)];
   }
 
   private handleAcceptOurs(): void {
-    this.acceptWholeFile('ours');
+    void this.acceptWholeFile('ours');
   }
 
   private handleAcceptTheirs(): void {
-    this.acceptWholeFile('theirs');
+    void this.acceptWholeFile('theirs');
   }
 
   private handleAcceptBase(): void {
-    this.acceptWholeFile('base');
+    void this.acceptWholeFile('base');
   }
 
   /** Re-read the on-disk merge, discarding all in-editor resolutions. */
@@ -1346,6 +1417,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    */
   private async handleTakeSide(side: 'ours' | 'theirs'): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
+    // Taking a side writes the whole file — an open typed-but-unapplied
+    // draft would vanish silently. (The acceptWholeFile delegation already
+    // confirmed and cleared the edit, so this only fires for the direct
+    // deleted-side buttons.)
+    if (this.editingSegmentId !== null) {
+      if (!(await this.confirmDiscardOpenEdit())) return;
+      if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
+      this.editingSegmentId = null;
+      this.editDraft = '';
+    }
 
     // Same capture-before-await as handleMarkResolved: the dispatched file
     // must be the one the call actually resolved.
@@ -1693,6 +1774,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       // only a side blob was unreadable would be wrong and alarming.
       const sideFailed =
         this.sideReadErrors.base || this.sideReadErrors.ours || this.sideReadErrors.theirs;
+      const labels = SIDE_LABELS[this.operationType] ?? SIDE_LABELS.merge;
       return html`
         <div class="output-error">
           <div>
@@ -1701,6 +1783,34 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               : 'Could not read the merged file from the working directory.'}
           </div>
           <button class="btn btn-primary" @click=${this.handleReload}>Retry</button>
+          ${!sideFailed
+            ? html`
+                <div>
+                  This can happen for text files in a legacy (non-UTF-8) encoding. You can
+                  still resolve the conflict by taking one side verbatim:
+                </div>
+                <div>
+                  ${this.conflictFile?.ours
+                    ? html`<button
+                        class="btn btn-ours"
+                        @click=${() => this.handleTakeSide('ours')}
+                        ?disabled=${this.actionsBlocked}
+                      >
+                        Use ${labels.ours} (verbatim)
+                      </button>`
+                    : nothing}
+                  ${this.conflictFile?.theirs
+                    ? html`<button
+                        class="btn btn-theirs"
+                        @click=${() => this.handleTakeSide('theirs')}
+                        ?disabled=${this.actionsBlocked}
+                      >
+                        Use ${labels.theirs} (verbatim)
+                      </button>`
+                    : nothing}
+                </div>
+              `
+            : nothing}
         </div>
       `;
     }

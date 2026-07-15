@@ -522,8 +522,11 @@ export class LvTagList extends LitElement {
 
     this.operationInProgress = true;
 
+    // Captured BEFORE the await: the conflict event must carry the repo the
+    // checkout actually ran on, even if the prop is rebound mid-flight.
+    const repoPath = this.repositoryPath;
     try {
-      const result = await gitService.checkoutWithAutoStash(this.repositoryPath, tag.name);
+      const result = await gitService.checkoutWithAutoStash(repoPath, tag.name);
 
       if (result.success && result.data?.success) {
         const data = result.data;
@@ -534,7 +537,12 @@ export class LvTagList extends LitElement {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
-            detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
+            detail: {
+              operationType: 'stash',
+              stashIndex: 0,
+              dropStashOnComplete: true,
+              repositoryPath: repoPath,
+            },
           }));
         } else if (data.stashed && data.stashApplied) {
           showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');

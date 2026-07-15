@@ -1081,11 +1081,14 @@ export class LvBranchList extends LitElement {
     // Close context menu immediately
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the await: conflict events must carry the repo the
+    // operation actually ran on, even if the prop is rebound mid-flight.
+    const repoPath = this.repositoryPath;
     try {
       // Use branch.name for both local and remote branches
       // - For local branches: branch.name is the branch name (e.g., "main", "feature/my-branch")
       // - For remote branches: branch.name is the full remote reference (e.g., "origin/feature/my-branch")
-      const result = await gitService.checkoutWithAutoStash(this.repositoryPath, branch.name);
+      const result = await gitService.checkoutWithAutoStash(repoPath, branch.name);
 
       if (result.success && result.data?.success) {
         const data = result.data;
@@ -1095,7 +1098,12 @@ export class LvBranchList extends LitElement {
             bubbles: true,
             composed: true,
             // Auto-stash is pop semantics: entry at index 0, drop it once resolved.
-            detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
+            detail: {
+              operationType: 'stash',
+              stashIndex: 0,
+              dropStashOnComplete: true,
+              repositoryPath: repoPath,
+            },
           }));
         } else if (data.stashed && data.stashApplied) {
           showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
@@ -1241,9 +1249,10 @@ export class LvBranchList extends LitElement {
 
     this.operationInProgress = true;
 
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.merge({
-        path: this.repositoryPath,
+        path: repoPath,
         sourceRef: branch.shorthand,
       });
 
@@ -1255,7 +1264,11 @@ export class LvBranchList extends LitElement {
         }));
       } else if (result.error?.code === 'MERGE_CONFLICT') {
         // Open the conflict-resolution dialog (same flow as the drag-drop path)
-        this.dispatchEvent(new CustomEvent('merge-conflict', { bubbles: true, composed: true }));
+        this.dispatchEvent(new CustomEvent('merge-conflict', {
+          bubbles: true,
+          composed: true,
+          detail: { repositoryPath: repoPath },
+        }));
       } else {
         console.error('Merge failed:', result.error);
         showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
@@ -1281,9 +1294,10 @@ export class LvBranchList extends LitElement {
 
     this.operationInProgress = true;
 
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.rebase({
-        path: this.repositoryPath,
+        path: repoPath,
         onto: branch.shorthand,
       });
 
@@ -1298,7 +1312,7 @@ export class LvBranchList extends LitElement {
         this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
           bubbles: true,
           composed: true,
-          detail: { operationType: 'rebase' },
+          detail: { operationType: 'rebase', repositoryPath: repoPath },
         }));
       } else {
         console.error('Rebase failed:', result.error);
@@ -1619,6 +1633,10 @@ export class LvBranchList extends LitElement {
     this.dropAction = null;
     dragDropService.endDrag();
 
+    // Captured BEFORE the awaits below: conflict events must carry the repo
+    // the operation actually ran on, even if the prop is rebound mid-flight.
+    const repoPath = this.repositoryPath;
+
     // If target is HEAD, merge source into current
     if (targetBranch.isHead) {
       if (action === 'merge') {
@@ -1631,7 +1649,7 @@ export class LvBranchList extends LitElement {
         if (!confirmed) return;
 
         const result = await gitService.merge({
-          path: this.repositoryPath,
+          path: repoPath,
           sourceRef: sourceBranch.shorthand,
         });
 
@@ -1639,7 +1657,11 @@ export class LvBranchList extends LitElement {
           await this.loadBranches();
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'MERGE_CONFLICT') {
-          this.dispatchEvent(new CustomEvent('merge-conflict', { bubbles: true, composed: true }));
+          this.dispatchEvent(new CustomEvent('merge-conflict', {
+            bubbles: true,
+            composed: true,
+            detail: { repositoryPath: repoPath },
+          }));
         } else {
           showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
         }
@@ -1653,7 +1675,7 @@ export class LvBranchList extends LitElement {
         if (!confirmed) return;
 
         const result = await gitService.rebase({
-          path: this.repositoryPath,
+          path: repoPath,
           onto: sourceBranch.shorthand,
         });
 
@@ -1664,7 +1686,7 @@ export class LvBranchList extends LitElement {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
-            detail: { operationType: 'rebase' },
+            detail: { operationType: 'rebase', repositoryPath: repoPath },
           }));
         } else {
           showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
@@ -1684,7 +1706,7 @@ export class LvBranchList extends LitElement {
       // Use the full branch.name — for remote branches this is the full
       // "origin/topic" reference the backend needs to create/use a local
       // tracking branch; the stripped shorthand ("topic") cannot be resolved.
-      const checkoutResult = await gitService.checkoutWithAutoStash(this.repositoryPath, targetBranch.name);
+      const checkoutResult = await gitService.checkoutWithAutoStash(repoPath, targetBranch.name);
 
       if (!checkoutResult.success || !checkoutResult.data?.success) {
         console.error('Checkout failed:', checkoutResult.data?.message || checkoutResult.error);
@@ -1702,7 +1724,12 @@ export class LvBranchList extends LitElement {
           bubbles: true,
           composed: true,
           // Auto-stash is pop semantics: entry at index 0, drop it once resolved.
-          detail: { operationType: 'stash', stashIndex: 0, dropStashOnComplete: true },
+          detail: {
+            operationType: 'stash',
+            stashIndex: 0,
+            dropStashOnComplete: true,
+            repositoryPath: repoPath,
+          },
         }));
         // The working tree is conflicted from the failed stash pop; do NOT fall
         // through into merge/rebase on a conflicted tree — the user must resolve
@@ -1717,7 +1744,7 @@ export class LvBranchList extends LitElement {
       // Then perform the action
       if (action === 'merge') {
         const result = await gitService.merge({
-          path: this.repositoryPath,
+          path: repoPath,
           sourceRef: sourceBranch.shorthand,
         });
 
@@ -1725,13 +1752,17 @@ export class LvBranchList extends LitElement {
           await this.loadBranches();
           this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
         } else if (result.error?.code === 'MERGE_CONFLICT') {
-          this.dispatchEvent(new CustomEvent('merge-conflict', { bubbles: true, composed: true }));
+          this.dispatchEvent(new CustomEvent('merge-conflict', {
+            bubbles: true,
+            composed: true,
+            detail: { repositoryPath: repoPath },
+          }));
         } else {
           showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
         }
       } else {
         const result = await gitService.rebase({
-          path: this.repositoryPath,
+          path: repoPath,
           onto: sourceBranch.shorthand,
         });
 
@@ -1742,7 +1773,7 @@ export class LvBranchList extends LitElement {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
-            detail: { operationType: 'rebase' },
+            detail: { operationType: 'rebase', repositoryPath: repoPath },
           }));
         } else {
           showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');

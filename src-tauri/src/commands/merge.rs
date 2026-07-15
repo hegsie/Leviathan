@@ -1054,14 +1054,28 @@ fn detect_conflict_emission(
         candidates.push(7);
     }
 
-    if let (Some(anc), Some(our), Some(their)) = (ancestor, ours, theirs) {
+    // Replay from blob CONTENTS (not index entries): a missing ancestor —
+    // an add/add conflict — is merged against an empty base, exactly as git
+    // does, so those files still get replay verification instead of falling
+    // through to the ambiguous structural scan.
+    let blob = |e: Option<&git2::IndexEntry>| -> Option<Vec<u8>> {
+        e.and_then(|e| repo.find_blob(e.id).ok().map(|b| b.content().to_vec()))
+    };
+    let anc_bytes = blob(ancestor).unwrap_or_default();
+    if let (Some(our_bytes), Some(their_bytes)) = (blob(ours), blob(theirs)) {
+        let mut anc_in = git2::MergeFileInput::new();
+        anc_in.content(&anc_bytes);
+        let mut our_in = git2::MergeFileInput::new();
+        our_in.content(&our_bytes);
+        let mut their_in = git2::MergeFileInput::new();
+        their_in.content(&their_bytes);
         for &size in &candidates {
             for style in ["merge", "diff3", "zdiff3"] {
                 let mut opts = git2::MergeFileOptions::new();
                 opts.marker_size(size as u16);
                 opts.style_diff3(style == "diff3");
                 opts.style_zdiff3(style == "zdiff3");
-                let Ok(result) = repo.merge_file_from_index(anc, our, their, Some(&mut opts))
+                let Ok(result) = git2::merge_file(&anc_in, &our_in, &their_in, Some(&mut opts))
                 else {
                     continue;
                 };
@@ -1075,9 +1089,11 @@ fn detect_conflict_emission(
         }
     }
 
-    // Structural fallback. When BOTH sizes show a complete conflict the
-    // bytes are undecidable — follow the gitattributes-documented semantics
-    // (the replay above already resolved the common libgit2 case).
+    // Structural fallback (hand-edited files, missing sides). When BOTH
+    // sizes show a complete conflict the bytes are genuinely undecidable —
+    // prefer 7: it is what this app's own merge engine (libgit2) always
+    // writes, and CLI-written files at the raised size are certified by the
+    // replay above before any user edit could break its equality.
     let size = if attr_size == 7 {
         7
     } else {
@@ -1085,9 +1101,8 @@ fn detect_conflict_emission(
             has_complete_conflict(&content, attr_size as usize),
             has_complete_conflict(&content, 7),
         ) {
-            (true, _) => attr_size,
-            (false, true) => 7,
-            (false, false) => 7,
+            (true, false) => attr_size,
+            _ => 7,
         }
     };
     let style = if diff3_within_first_conflict(&content, size as usize) {
@@ -2718,6 +2733,127 @@ mod tests {
             txt.marker_size, 7,
             "the quoted sample must not defeat the replay verification"
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_add_add_conflict_replays_against_empty_base() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // An add/add conflict has NO ancestor entry, so index-based replay
+        // is impossible — the empty-base replay must still certify the size.
+        // One side quotes a complete 12-char conflict (the docs case the
+        // attribute was raised for); the real markers are libgit2's 7.
+        let quoted = "docs:\n<<<<<<<<<<<< sample\none\n============\ntwo\n>>>>>>>>>>>> sample\n";
+        repo.create_commit(
+            "Add attrs",
+            &[(".gitattributes", "*.md conflict-marker-size=12\n")],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature adds doc", &[("new.md", quoted)]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main adds doc", &[("new.md", "unrelated text\n")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let written = std::fs::read_to_string(repo.path.join("new.md")).unwrap();
+        assert!(
+            written.contains("<<<<<<< ") && written.contains("<<<<<<<<<<<< sample"),
+            "precondition: real 7-char markers AND the quoted 12-sample coexist; got:\n{written}"
+        );
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let md = conflicts
+            .iter()
+            .find(|c| c.path == "new.md")
+            .expect("add/add conflict should be listed");
+        assert!(md.ancestor.is_none(), "precondition: no ancestor entry");
+        assert_eq!(
+            md.marker_size, 7,
+            "empty-base replay must certify the real size for add/add conflicts"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_add_add_pipe_content_is_not_diff3() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // Ours content contains a 7-pipe run (Markdown table art). With no
+        // ancestor entry the replay must still run (empty base) and report
+        // merge style — a diff3 misreport would make the frontend discard
+        // every ours line after the pipe run as a "base section".
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature adds", &[("new.txt", "THEIRS\n")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main adds", &[("new.txt", "a\n|||||||\nz\n")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "new.txt")
+            .expect("add/add conflict should be listed");
+        assert!(txt.ancestor.is_none(), "precondition: no ancestor entry");
+        assert_eq!(txt.marker_size, 7);
+        assert_eq!(
+            txt.conflict_style, "merge",
+            "pipe-run content must not misreport diff3 for add/add conflicts"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_undecidable_fallback_prefers_default_size() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=12\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Hand-edit the file so no replay matches, with COMPLETE conflict
+        // structures at BOTH sizes. Undecidable from bytes — the fallback
+        // must prefer 7 (this app's own engine) so the real markers written
+        // by libgit2 stay parseable rather than leaking as resolved text.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<<<<<<< quoted\nq1\n============\nq2\n>>>>>>>>>>>> quoted\nedited by hand\n<<<<<<< HEAD\nmain content\n=======\nfeature content\n>>>>>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 7);
     }
 
     #[tokio::test]

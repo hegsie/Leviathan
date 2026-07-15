@@ -311,9 +311,12 @@ export class LvStashList extends LitElement {
     this.contextMenu = { ...this.contextMenu, visible: false };
     this.operationInProgress = true;
 
+    // Captured BEFORE the await: the conflict event must carry the repo the
+    // apply actually ran on, even if the prop is rebound mid-flight.
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.applyStash({
-        path: this.repositoryPath,
+        path: repoPath,
         index: stash.index,
         dropAfter: false,
       });
@@ -338,6 +341,7 @@ export class LvStashList extends LitElement {
               operationType: 'stash',
               stashIndex: stash.index,
               dropStashOnComplete: false,
+              repositoryPath: repoPath,
             },
           }));
         }
@@ -370,9 +374,10 @@ export class LvStashList extends LitElement {
 
     this.operationInProgress = true;
 
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.popStash({
-        path: this.repositoryPath,
+        path: repoPath,
         index: stash.index,
       });
 
@@ -396,6 +401,7 @@ export class LvStashList extends LitElement {
               operationType: 'stash',
               stashIndex: stash.index,
               dropStashOnComplete: true,
+              repositoryPath: repoPath,
             },
           }));
         }

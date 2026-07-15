@@ -912,6 +912,39 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('a second conflict event cannot hijack an open dialog', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+
+        // User Ctrl+Tabs to repo B behind the dialog, then a NEW merge
+        // conflict fires there. It must not retarget the open dialog's
+        // repo or operation — that would aim repo A's picks at repo B.
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+        (el as any).handleMergeConflictEvent(new CustomEvent('merge-conflict'));
+        await el.updateComplete;
+
+        const dialog = el.shadowRoot!.querySelector(
+          'lv-conflict-resolution-dialog'
+        ) as HTMLElement & { repositoryPath: string; operationType: string };
+        expect(dialog.repositoryPath).to.equal('/repo/a');
+        expect(dialog.operationType).to.equal('stash');
+        // The refusal is not silent.
+        const toasts = uiStore.getState().toasts;
+        expect(toasts.some((t) => t.message.includes('already in progress'))).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('re-pins to the repo active at the NEXT open', async () => {
       const el = createAppShell();
       document.body.appendChild(el);
