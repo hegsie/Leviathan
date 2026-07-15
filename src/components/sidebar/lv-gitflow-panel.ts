@@ -363,11 +363,15 @@ export class LvGitflowPanel extends LitElement {
     this.error = null;
     this.operationInProgress = true;
 
+    // Captured BEFORE the await — the host's refresh must target the repo
+    // the init actually ran on, even if the prop is rebound mid-flight.
+    const repoPath = this.repositoryPath;
     try {
-      const result = await gitService.initGitFlow(this.repositoryPath);
+      const result = await gitService.initGitFlow(repoPath);
       if (result.success) {
         await this.loadConfig();
         this.dispatchEvent(new CustomEvent('gitflow-initialized', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -398,7 +402,7 @@ export class LvGitflowPanel extends LitElement {
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'start-feature', name: name.trim() },
+          detail: { type: 'start-feature', name: name.trim(), repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -425,7 +429,7 @@ export class LvGitflowPanel extends LitElement {
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'finish-feature', name: item.name },
+          detail: { type: 'finish-feature', name: item.name, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -469,7 +473,7 @@ export class LvGitflowPanel extends LitElement {
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'start-release', name: version.trim() },
+          detail: { type: 'start-release', name: version.trim(), repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -508,7 +512,7 @@ export class LvGitflowPanel extends LitElement {
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'finish-release', name: item.name },
+          detail: { type: 'finish-release', name: item.name, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -552,7 +556,7 @@ export class LvGitflowPanel extends LitElement {
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'start-hotfix', name: version.trim() },
+          detail: { type: 'start-hotfix', name: version.trim(), repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -586,7 +590,7 @@ export class LvGitflowPanel extends LitElement {
       if (result.success) {
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
-          detail: { type: 'finish-hotfix', name: item.name },
+          detail: { type: 'finish-hotfix', name: item.name, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));

@@ -1185,6 +1185,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       const body: string[] = [];
       let seenSep = false;
       let firstCandidate: { end: number; body: string[] } | null = null;
+      let orphanTerminator: { end: number; body: string[] } | null = null;
       let weakCandidate: { end: number; split: { ours: string[]; theirs: string[] } } | null =
         null;
       let closed: { end: number; split: { ours: string[]; theirs: string[] } | null } | null =
@@ -1242,6 +1243,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           if (split && !weakCandidate && !orphanMarkerAfter(j)) {
             weakCandidate = { end: j, split };
           }
+          // Even when nothing blob-justifies a split (the hand edit also
+          // changed body lines), remember the orphan marker as a region
+          // TERMINATOR: if no real separator+end ever shows up below, the
+          // region must close here rather than sweep this line into the
+          // ours pane as visible marker text.
+          if (!orphanTerminator) {
+            orphanTerminator = { end: j, body: [...body] };
+          }
           body.push(l);
           continue;
         }
@@ -1282,6 +1291,19 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           labelOf(lines[firstCandidate.end], 'THEIRS'),
         );
         i = firstCandidate.end + 1;
+      } else if (orphanTerminator) {
+        // The only end-shaped evidence is an ORPHAN real end marker with
+        // no separator anywhere below it (a hand edit deleted the
+        // `=======` AND changed body lines, so no split blob-justified).
+        // The marker is still the region's terminator — closing here keeps
+        // it out of the panes; falling through to the unterminated case
+        // would render it verbatim inside the ours side.
+        pushConflict(
+          validSplitOf(orphanTerminator.body) ?? fallbackSplitOf(orphanTerminator.body),
+          oursLabel,
+          labelOf(lines[orphanTerminator.end], 'THEIRS'),
+        );
+        i = orphanTerminator.end + 1;
       } else {
         // Unterminated conflict (truncated file) — keep it as a conflict
         // block rather than silently promoting marker content to resolved
@@ -2364,6 +2386,22 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const theirs = this.conflictFile.theirs;
     const labels = SIDE_LABELS[this.operationType] ?? SIDE_LABELS.merge;
     const short = (oid?: string): string => (oid ? oid.slice(0, 7) : '');
+    // A submodule↔file TYPE conflict routes here too (any side being a
+    // gitlink does) — the non-gitlink side's OID is a BLOB, and formatting
+    // it like a commit pointer would mislead.
+    const isLinkSide = (e: typeof ours): boolean => e?.mode === 0o160000;
+    const sideDesc = (e: typeof ours): ReturnType<typeof html> | string =>
+      !e
+        ? 'submodule removed'
+        : isLinkSide(e)
+          ? html`commit <code>${short(e.oid)}</code>`
+          : 'a regular file';
+    const buttonLabel = (e: typeof ours, name: string): string =>
+      !e
+        ? `Use ${name} (remove submodule)`
+        : isLinkSide(e)
+          ? `Use ${name} (${short(e.oid)})`
+          : `Use ${name} (file)`;
 
     return html`
       <div class="toolbar">
@@ -2374,20 +2412,20 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <strong>Submodule conflict</strong>
         </div>
         <div style="font-style: normal; text-align: center; max-width: 420px;">
-          Each side records a different commit for this submodule. Choose which commit to
-          keep — the submodule's own files are not changed here (update the submodule
-          afterwards to check the chosen commit out).
+          The sides disagree about this submodule. Choose which version to keep — the
+          submodule's own files are not changed here (update the submodule afterwards to
+          check a chosen commit out).
         </div>
         <div style="font-style: normal; text-align: center; max-width: 420px;">
-          ${labels.ours}: ${ours ? html`<code>${short(ours.oid)}</code>` : 'submodule removed'}<br />
-          ${labels.theirs}: ${theirs ? html`<code>${short(theirs.oid)}</code>` : 'submodule removed'}
+          ${labels.ours}: ${sideDesc(ours)}<br />
+          ${labels.theirs}: ${sideDesc(theirs)}
         </div>
         <div class="toolbar-actions">
           <button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} ?disabled=${this.actionsBlocked}>
-            ${ours ? `Use Ours (${short(ours.oid)})` : 'Use Ours (remove submodule)'}
+            ${buttonLabel(ours, 'Ours')}
           </button>
           <button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} ?disabled=${this.actionsBlocked}>
-            ${theirs ? `Use Theirs (${short(theirs.oid)})` : 'Use Theirs (remove submodule)'}
+            ${buttonLabel(theirs, 'Theirs')}
           </button>
         </div>
       </div>

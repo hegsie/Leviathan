@@ -1026,8 +1026,12 @@ export class AppShell extends LitElement {
   }
 
   // Handle gitflow events (init, feature/release/hotfix operations) to trigger refresh
-  private handleGitflowEvent = (): void => {
-    this.handleRefresh();
+  private handleGitflowEvent = (e: Event): void => {
+    // Pinned refresh, like every other operation completion: the gitflow
+    // command ran on the repo the panel showed at click time, which may be
+    // backgrounded by the time it finishes.
+    const detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
   };
 
   // Handle show-commit events (e.g., from reflog dialog "Show in graph")

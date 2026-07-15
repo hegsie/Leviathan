@@ -1103,6 +1103,28 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('gitflow-operation on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).handleGitflowEvent(
+          new CustomEvent('gitflow-operation', {
+            detail: { type: 'finish-feature', name: 'login', repositoryPath: '/repo/b' },
+          })
+        );
+        await el.updateComplete;
+
+        expect((el as any).staleRepoPaths.has('/repo/b'), 'pinned repo marked stale').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('rebase-complete on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
       const el = createAppShell();
       document.body.appendChild(el);

@@ -3477,6 +3477,34 @@ describe('lv-merge-editor', () => {
       expectNoMarkers(el);
     });
 
+    it('a deleted separator PLUS an edited body line still keeps the orphan marker out of the panes', async () => {
+      // The hand edit removed the separator AND changed a line, so no
+      // blob-validated split exists. The orphan end marker must still act
+      // as the region terminator — sweeping it into the ours pane would
+      // render a raw marker.
+      setupDefaultMocks();
+      workdirContent = [
+        'line1',
+        '<<<<<<< HEAD',
+        'line2-edited',
+        'line2-theirs',
+        '>>>>>>> feature',
+        'line3',
+      ].join('\n');
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+
+      const conflicts = internal.segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      // No split validates — the body falls back to everything-ours, but
+      // the marker itself is consumed as the terminator.
+      expect(conflicts[0].oursLines).to.deep.equal(['line2-edited', 'line2-theirs']);
+      expect(conflicts[0].theirsLines).to.deep.equal([]);
+      // The trailing content after the terminator is normal resolved text.
+      expect(internal.segments[internal.segments.length - 1].lines).to.deep.equal(['line3']);
+      expectNoMarkers(el);
+    });
+
     it('a hand-typed end-shaped line before the separator does not close the region early', async () => {
       // Mid-region junk: an end-shaped line typed BEFORE the real
       // separator, with the real separator+end below. Closing at the junk
@@ -3714,6 +3742,23 @@ describe('lv-merge-editor', () => {
       expect((takeSide!.args as Record<string, unknown>).side).to.equal('theirs');
       expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
       expect(resolvedFired).to.be.true;
+    });
+
+    it('a submodule<->file type conflict labels the file side honestly, not as a commit', async () => {
+      // is_submodule is set when ANY side is a gitlink, so a type conflict
+      // routes here — the file side's OID is a BLOB and must not be
+      // formatted like a commit pointer.
+      const file = {
+        ...makeSubmoduleConflict(),
+        theirs: { oid: 'd'.repeat(40), path: 'sub', mode: 0o100644 },
+      };
+      const el = await renderSubmoduleEditor(file);
+
+      const text = shadowText(el);
+      expect(text).to.include('a regular file');
+      expect(text, 'blob OID must not be shown as a commit').to.not.include('d'.repeat(7));
+      const theirsBtn = el.shadowRoot!.querySelector('.btn-theirs') as HTMLButtonElement;
+      expect(theirsBtn.textContent).to.include('Use Theirs (file)');
     });
 
     it('a deleted side offers removing the submodule and lands in the terminal state', async () => {

@@ -351,8 +351,10 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      let eventFired = false;
-      el.addEventListener('gitflow-initialized', () => { eventFired = true; });
+      let eventDetail: unknown = null;
+      el.addEventListener('gitflow-initialized', ((e: CustomEvent) => {
+        eventDetail = e.detail;
+      }) as EventListener);
 
       const initBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
       initBtn.click();
@@ -360,7 +362,9 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      expect(eventFired).to.be.true;
+      // Carries the pre-await repo capture so the host's refresh pins to
+      // the repo the init ran on.
+      expect(eventDetail).to.deep.equal({ repositoryPath: REPO_PATH });
     });
   });
 
@@ -473,7 +477,13 @@ describe('lv-gitflow-panel', () => {
         await new Promise((r) => setTimeout(r, 150));
         await el.updateComplete;
 
-        expect(eventDetail).to.deep.equal({ type: 'start-feature', name: 'new-feat' });
+        // repositoryPath is the PRE-AWAIT capture — the host's refresh must
+        // target the repo the start ran on, not the tab active at completion.
+        expect(eventDetail).to.deep.equal({
+          type: 'start-feature',
+          name: 'new-feat',
+          repositoryPath: REPO_PATH,
+        });
       } finally {
         cleanupMockPrompt();
       }
@@ -571,7 +581,13 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 150));
       await el.updateComplete;
 
-      expect(eventDetail).to.deep.equal({ type: 'finish-feature', name: 'login' });
+      // repositoryPath is the PRE-AWAIT capture — same pinning as the
+      // conflict-path events.
+      expect(eventDetail).to.deep.equal({
+        type: 'finish-feature',
+        name: 'login',
+        repositoryPath: REPO_PATH,
+      });
     });
 
     it('does NOT call finish release when prompt is cancelled', async () => {
