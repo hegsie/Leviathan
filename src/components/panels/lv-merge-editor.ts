@@ -1026,7 +1026,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       showToast('Failed to get AI suggestion', 'error');
       return false;
     } finally {
-      this.suggestingSegment = null;
+      // Only clear the in-flight flag if it still tracks THIS call — a file
+      // switch resets it and a newer suggestion may own it by now; clobbering
+      // that would re-enable the AI buttons while a call is genuinely running.
+      if (this.suggestingSegment === id) {
+        this.suggestingSegment = null;
+      }
     }
   }
 

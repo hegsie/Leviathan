@@ -1138,6 +1138,53 @@ describe('lv-merge-editor', () => {
       await el.updateComplete;
     });
 
+    it('a stale AI call from a previous file does not clear the new file\'s in-flight flag', async () => {
+      setupDefaultMocks();
+      aiAvailable = true;
+      const releases: Array<() => void> = [];
+      aiSuggestion = () =>
+        new Promise((resolve) => {
+          releases.push(() =>
+            resolve({ resolvedContent: 'ai-resolved', explanation: '' })
+          );
+        });
+
+      // Start a suggestion on file A, then switch to file B mid-flight.
+      const el = await renderLoadedEditor('src/a.ts');
+      findConflictButton(el, 'AI Suggest').click();
+      await el.updateComplete;
+
+      const internal = internalOf(el);
+      internal.conflictFile = makeConflictFile('src/b.ts');
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.segments.length > 0) break;
+      }
+      await el.updateComplete;
+
+      // Start a suggestion on file B (the switch reset the in-flight flag).
+      findConflictButton(el, 'AI Suggest').click();
+      await el.updateComplete;
+
+      // File A's stale call resolves — it must not clear B's in-flight flag,
+      // or the AI buttons would re-enable while B's call is still running.
+      releases[0]!();
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+
+      const aiBtn = Array.from(
+        el.shadowRoot!.querySelector('.code-conflict-block')!.querySelectorAll('button')
+      ).find((b) => b.textContent?.includes('AI')) as HTMLButtonElement;
+      expect(aiBtn.disabled).to.be.true;
+
+      // Release B's call and let it settle.
+      releases[1]!();
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+      expect(internalOf(el).segments.some((s) => s.origin === 'ai')).to.be.true;
+    });
+
     it('a slow AI suggestion never overwrites a manual resolution made mid-flight', async () => {
       setupDefaultMocks();
       aiAvailable = true;
