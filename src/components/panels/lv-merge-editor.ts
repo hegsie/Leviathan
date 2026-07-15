@@ -613,6 +613,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       return;
     }
 
+    const file = this.conflictFile;
     this.launchingExternalTool = true;
     // Tell the host a tool session is open so its Abort/Complete stay inert —
     // they would otherwise race the tool's eventual save.
@@ -620,10 +621,26 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       new CustomEvent('external-tool-started', { bubbles: true, composed: true })
     );
     try {
-      const result = await gitService.launchMergeTool(this.repositoryPath, this.conflictFile.path);
+      const result = await gitService.launchMergeTool(this.repositoryPath, file.path);
       if (result.success && result.data?.success) {
         showToast('Merge tool completed', 'success');
-        await this.loadContents();
+        // The tool may have fully resolved (and staged) the file — verify
+        // against the index and let the host mark it, so this path behaves
+        // like the dialog's own external tool instead of leaving the file
+        // listed unresolved until an extra Mark Resolved click.
+        const conflictsResult = await gitService.getConflicts(this.repositoryPath);
+        const stillConflicted =
+          !conflictsResult.success ||
+          (conflictsResult.data ?? []).some((c) => c.path === file.path);
+        if (stillConflicted) {
+          await this.loadContents();
+        } else {
+          this.dispatchEvent(new CustomEvent('conflict-resolved', {
+            detail: { file },
+            bubbles: true,
+            composed: true,
+          }));
+        }
       } else {
         showToast(result.data?.message ?? result.error?.message ?? 'Merge tool failed', 'error');
       }
@@ -864,9 +881,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   }
 
   /** Resolve writes and an open external tool must never overlap — both
-   * mutate the same on-disk file and the last write would silently win. */
+   * mutate the same on-disk file and the last write would silently win.
+   * The host lock counts too: the dialog sets it while ITS tool session or
+   * abort/complete runs against this same file. */
   private get actionsBlocked(): boolean {
-    return this.resolving || this.launchingExternalTool;
+    return this.resolving || this.launchingExternalTool || this.externalToolLocked;
   }
 
   private get conflictCount(): number {

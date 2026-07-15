@@ -1168,7 +1168,10 @@ export class LvConflictResolutionDialog extends LitElement {
                           class="btn btn-sm"
                           style="margin-left: auto; padding: 2px 6px; font-size: 11px;"
                           @click=${(e: Event) => { e.stopPropagation(); this.handleOpenExternalTool(conflict.path); }}
-                          ?disabled=${this.launchingExternalTool !== null || this.aborting || this.continuing}
+                          ?disabled=${this.launchingExternalTool !== null ||
+                          this.aborting ||
+                          this.continuing ||
+                          this.editorToolActive}
                           title="Open in external merge tool"
                         >
                           ${this.launchingExternalTool === conflict.path ? '...' : 'External'}
@@ -1186,7 +1189,9 @@ export class LvConflictResolutionDialog extends LitElement {
                     .repositoryPath=${this.repositoryPath}
                     .conflictFile=${this.selectedConflict}
                     .operationType=${this.operationType}
-                    .externalToolLocked=${this.continuing || this.aborting}
+                    .externalToolLocked=${this.continuing ||
+                    this.aborting ||
+                    this.launchingExternalTool !== null}
                     @conflict-resolved=${this.handleConflictResolved}
                     @external-tool-started=${() => { this.editorToolActive = true; }}
                     @external-tool-finished=${() => { this.editorToolActive = false; }}

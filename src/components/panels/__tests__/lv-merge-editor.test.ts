@@ -1504,6 +1504,57 @@ describe('lv-merge-editor', () => {
       expect(events).to.deep.equal(['started', 'finished']);
     });
 
+    it('POC: switching files during an external tool session discards the new file\'s WIP', async () => {
+      setupDefaultMocks();
+      let releaseTool: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'launch_merge_tool') {
+          return new Promise((res) => {
+            releaseTool = () => res({ success: true });
+          });
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/a.ts');
+      const internal = el as unknown as EditorInternal & {
+        handleOpenExternalMergeTool: () => Promise<void>;
+      };
+
+      // Launch the external tool for file A.
+      const toolPromise = internal.handleOpenExternalMergeTool.call(el);
+      await el.updateComplete;
+
+      // Switch to file B while A's tool is still open.
+      internal.conflictFile = makeConflictFile('src/b.ts');
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.segments.length > 0) break;
+      }
+      await el.updateComplete;
+
+      // User does WIP on file B: resolve a conflict block manually.
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      const resolvedCountBefore = internal.segments.filter((s) => s.type === 'resolved' && s.origin === 'ours').length;
+      expect(resolvedCountBefore, 'B has a manual resolution in progress').to.equal(1);
+
+      // A's external tool now finishes.
+      releaseTool!();
+      await toolPromise;
+      await el.updateComplete;
+      console.error('DEBUG conflictFile after tool:', internal.conflictFile?.path, 'segments:', JSON.stringify(internal.segments.map(s => ({type: s.type, origin: s.origin}))));
+
+      // BUG: B's WIP resolution should still be there (untouched by A's tool),
+      // but the unconditional loadContents() in handleOpenExternalMergeTool
+      // reloads whatever this.conflictFile currently is (B), wiping it.
+      const resolvedCountAfter = internal.segments.filter((s) => s.type === 'resolved' && s.origin === 'ours').length;
+      expect(resolvedCountAfter, 'B\'s WIP resolution must survive an unrelated file\'s external tool completing').to.equal(1);
+    });
+
     it('resolve actions and the external tool are mutually exclusive', async () => {
       setupDefaultMocks();
       let releaseTool: (() => void) | null = null;
@@ -1548,7 +1599,7 @@ describe('lv-merge-editor', () => {
       await Promise.all([first, second]);
     });
 
-    it('the external tool button disables while the host locks it', async () => {
+    it('the host lock disables the tool button AND resolve writes', async () => {
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
@@ -1557,6 +1608,8 @@ describe('lv-merge-editor', () => {
       };
 
       const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
       el.externalToolLocked = true;
       await el.updateComplete;
 
@@ -1564,6 +1617,44 @@ describe('lv-merge-editor', () => {
         (b) => b.textContent?.includes('External Tool')
       ) as HTMLButtonElement;
       expect(toolBtn.disabled).to.be.true;
+
+      // The dialog's own tool session runs against this same file — resolve
+      // writes must also be inert, not just the tool button.
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled).to.be.true;
+      invokeHistory.length = 0;
+      await (el as unknown as { handleMarkResolved: () => Promise<void> }).handleMarkResolved.call(el);
+      expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
+    });
+
+    it('a tool run that fully resolves the file dispatches conflict-resolved', async () => {
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'launch_merge_tool') return { success: true };
+        // Post-tool index check: the file is no longer conflicted.
+        if (command === 'get_conflicts') return [];
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/test.ts');
+      let resolvedPath: string | null = null;
+      el.addEventListener('conflict-resolved', ((e: CustomEvent) => {
+        resolvedPath = e.detail.file.path;
+      }) as EventListener);
+
+      const toolBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.includes('External Tool')
+      ) as HTMLButtonElement;
+      toolBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Matching the dialog's own tool path: the host marks the file
+      // resolved instead of leaving it listed as unresolved.
+      expect(resolvedPath).to.equal('src/test.ts');
     });
   });
 

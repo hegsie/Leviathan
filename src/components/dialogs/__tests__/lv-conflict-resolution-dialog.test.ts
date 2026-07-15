@@ -1002,6 +1002,39 @@ describe('lv-conflict-resolution-dialog', () => {
       await el.updateComplete;
       expect(abortBtn.disabled).to.be.false;
     });
+
+    it('the two tool launchers are mutually exclusive in both directions', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        launchingExternalTool: string | null;
+        editorToolActive: boolean;
+        hasMergeTool: boolean;
+      };
+      internal.hasMergeTool = true;
+
+      // Dialog tool session open → the editor's launcher must be locked.
+      internal.launchingExternalTool = 'src/main.ts';
+      await el.updateComplete;
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor') as HTMLElement & {
+        externalToolLocked: boolean;
+      };
+      expect(editor.externalToolLocked).to.be.true;
+      internal.launchingExternalTool = null;
+
+      // Editor tool session open → the dialog's file-list launchers must
+      // render disabled, matching their handler guard.
+      internal.editorToolActive = true;
+      await el.updateComplete;
+      const fileToolBtns = el.shadowRoot!.querySelectorAll('.file-item button');
+      for (const btn of Array.from(fileToolBtns)) {
+        expect((btn as HTMLButtonElement).disabled).to.be.true;
+      }
+    });
   });
 
   // ── Merge completion ─────────────────────────────────────────────────────
