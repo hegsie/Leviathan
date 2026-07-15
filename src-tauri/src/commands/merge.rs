@@ -1249,14 +1249,23 @@ fn detect_conflict_emission(
 
     // Structural fallback (hand-edited files, missing sides). When BOTH
     // the attribute size and 7 show a complete conflict the bytes are
-    // genuinely undecidable — prefer 7: it is what this app's own merge
-    // engine (libgit2) always writes, and CLI-written files at the raised
-    // size are certified by the replay above before any user edit could
-    // break its equality. When NEITHER matches, fall back to a size the
-    // content itself demonstrates (stale attribute).
+    // genuinely undecidable — one size is the real marker, the other is
+    // quoted content (e.g. a README showing `<<<<<<<`) that coincidentally
+    // forms a complete conflict at its own size. Prefer the SMALLER size:
+    // the frontend parser matches markers of EXACTLY the reported size,
+    // while its orphan safety-net matches runs of `>=` that size. Reporting
+    // the smaller size means a real marker of the LARGER size is still caught
+    // by the safety net (which collapses to a clean whole-file conflict),
+    // whereas reporting the LARGER size lets a real SMALLER marker slip under
+    // both the exact-match parser and the `>=` net — leaking raw markers into
+    // the pane and letting Mark Resolved round-trip them to disk. When NEITHER
+    // matches, fall back to a size the content itself demonstrates (stale
+    // attribute).
     let complete_attr = attr_size != 7 && has_complete_conflict(&content, attr_size as usize);
     let complete_7 = has_complete_conflict(&content, 7);
-    let size = if complete_attr && !complete_7 {
+    let size = if complete_attr && complete_7 {
+        attr_size.min(7)
+    } else if complete_attr {
         attr_size
     } else if complete_7 {
         7
@@ -3472,6 +3481,56 @@ mod tests {
             .find(|c| c.path == "shared.txt")
             .expect("conflict should be listed");
         assert_eq!(txt.marker_size, 7);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_undecidable_fallback_prefers_smaller_real_sub7_size() {
+        // Mirror of the prefers-default-size case, in the DANGEROUS direction:
+        // the real markers are a SUB-7 size (conflict-marker-size=3, honored by
+        // the git CLI) and the file ALSO quotes a standard 7-char conflict (a
+        // README/fixture showing markers). Both sizes look complete, so the
+        // structural fallback is undecidable — it must prefer the SMALLER (3).
+        // Reporting 7 would make the frontend's exact-match parser miss the
+        // real size-3 markers AND its `>=7` orphan safety-net miss them too,
+        // leaking raw markers into the pane and letting Mark Resolved stage
+        // them to disk as "resolved".
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=3\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Hand-edit: a QUOTED standard 7-char conflict block (plain content)
+        // plus the REAL size-3 conflict, with a stray edit so no replay matches
+        // and the structural fallback must decide.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<< quoted\nq1\n=======\nq2\n>>>>>>> quoted\nedited by hand\n<<< HEAD\nmain content\n===\nfeature content\n>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 3);
     }
 
     #[tokio::test]
