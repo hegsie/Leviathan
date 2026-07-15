@@ -1018,6 +1018,10 @@ export class LvBranchList extends LitElement {
    * Delete all branches that are merged into HEAD
    */
   private async handleDeleteMergedBranches(): Promise<void> {
+    // Captured BEFORE the confirm await: these irreversible deletes (and the
+    // refresh) must target the repo they were invoked on, even if the user
+    // switches tabs while the confirm is up and this.repositoryPath rebinds.
+    const repoPath = this.repositoryPath;
     const mergedBranches = this.getMergedBranches();
 
     if (mergedBranches.length === 0) {
@@ -1039,7 +1043,6 @@ export class LvBranchList extends LitElement {
     if (!confirmed) return;
 
     // Delete branches one by one
-    const repoPath = this.repositoryPath;
     let deleted = 0;
     let failed = 0;
 
@@ -1072,8 +1075,12 @@ export class LvBranchList extends LitElement {
   }
 
   private async handleBranchCreated(): Promise<void> {
+    // Captured BEFORE the loadBranches await: the refresh must pin to the repo
+    // the branch was created on, not whichever tab is active if the user
+    // switches during the reload (which rebinds this.repositoryPath).
+    const repoPath = this.repositoryPath;
     await this.loadBranches();
-    this.dispatchBranchesChanged(this.repositoryPath);
+    this.dispatchBranchesChanged(repoPath);
   }
 
   private handleBranchClick(branch: Branch): void {
