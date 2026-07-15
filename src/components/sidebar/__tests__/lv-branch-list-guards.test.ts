@@ -334,6 +334,50 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect(detail!.repositoryPath).to.equal('/repo/origin');
   });
 
+  it('handleUnsetUpstream emits branches-changed pinned to the origin repo after a mid-op switch', async () => {
+    // Regression: these context-menu handlers previously dispatched a bare
+    // branches-changed with no repositoryPath, so a mid-op tab switch made the
+    // host refresh the wrong (newly active) repo. repoPath is captured
+    // pre-await; the event must still name the origin repo.
+    const el = await createComponent();
+
+    let resolveUnset!: (v: unknown) => void;
+    mockInvoke = (command: string) => {
+      if (command === 'unset_upstream_branch') {
+        return new Promise((resolve) => {
+          resolveUnset = resolve;
+        });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    let detail: { repositoryPath?: string } | null = null;
+    el.addEventListener('branches-changed', (e) => {
+      detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    });
+
+    const branch = makeBranch({ name: 'feature/up', isRemote: false, upstream: 'origin/feature/up' });
+    (
+      el as unknown as {
+        contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null };
+      }
+    ).contextMenu = { visible: true, x: 0, y: 0, branch };
+
+    const promise = (
+      el as unknown as { handleUnsetUpstream: () => Promise<void> }
+    ).handleUnsetUpstream();
+
+    // User switches tabs mid-operation.
+    (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
+
+    resolveUnset({ success: true });
+    await promise;
+    await el.updateComplete;
+
+    expect(detail, 'branches-changed dispatched').to.not.be.null;
+    expect(detail!.repositoryPath).to.equal(REPO_PATH);
+  });
+
   it('handleCheckout should clear operationInProgress even on error', async () => {
     const el = await createComponent();
 

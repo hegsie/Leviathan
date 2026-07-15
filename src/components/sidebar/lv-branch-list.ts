@@ -1395,7 +1395,7 @@ export class LvBranchList extends LitElement {
       if (upstreamResult.success) {
         showToast(`Tracking ${remoteBranchRef} as ${localName}`, 'success');
         await this.loadBranches();
-        this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+        this.dispatchBranchesChanged(repoPath);
       } else {
         showToast(`Failed to set upstream: ${upstreamResult.error?.message ?? 'Unknown error'}`, 'error');
       }
@@ -1425,7 +1425,7 @@ export class LvBranchList extends LitElement {
       if (result.success) {
         showToast(`Upstream set to ${upstream.trim()}`, 'success');
         await this.loadBranches();
-        this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+        this.dispatchBranchesChanged(repoPath);
       } else {
         showToast(`Failed to set upstream: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
@@ -1450,7 +1450,7 @@ export class LvBranchList extends LitElement {
       if (result.success) {
         showToast(`Upstream removed for ${branch.shorthand}`, 'success');
         await this.loadBranches();
-        this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+        this.dispatchBranchesChanged(repoPath);
       } else {
         showToast(`Failed to unset upstream: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
@@ -1672,7 +1672,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
-          this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+          this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'MERGE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('merge-conflict', {
             bubbles: true,
@@ -1698,7 +1698,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
-          this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+          this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'REBASE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
@@ -1767,7 +1767,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
-          this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+          this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'MERGE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('merge-conflict', {
             bubbles: true,
@@ -1785,7 +1785,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
-          this.dispatchEvent(new CustomEvent('branches-changed', { bubbles: true, composed: true }));
+          this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'REBASE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
