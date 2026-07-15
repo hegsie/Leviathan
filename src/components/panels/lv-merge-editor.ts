@@ -615,18 +615,26 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
 
     const file = this.conflictFile;
+    // Claim the launch BEFORE any await: the confirm below yields to the
+    // event loop, and a second click landing in that window would pass the
+    // entry guard again — two tool sessions editing the same file.
+    this.launchingExternalTool = true;
     // The tool edits the ON-DISK file, which doesn't have the editor's
     // unsaved picks — its output will replace them on reload. Confirm first.
     if (this.hasUnsavedResolutions()) {
-      const proceed = await showConfirm(
-        'Discard in-progress resolution?',
-        'The external tool works on the file as saved on disk — your unsaved picks here will be replaced by its result.',
-        'warning',
-      );
+      let proceed = false;
+      try {
+        proceed = await showConfirm(
+          'Discard in-progress resolution?',
+          'The external tool works on the file as saved on disk — your unsaved picks here will be replaced by its result.',
+          'warning',
+        );
+      } finally {
+        if (!proceed) this.launchingExternalTool = false;
+      }
       if (!proceed) return;
     }
 
-    this.launchingExternalTool = true;
     // Tell the host a tool session is open so its Abort/Complete stay inert —
     // they would otherwise race the tool's eventual save.
     this.dispatchEvent(
@@ -784,73 +792,53 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   }
 
   /**
+   * Marker size the current file's conflict hunks were written with. The
+   * backend reports it per file (conflict-marker-size gitattribute verified
+   * against the file's actual emission); git's default 7 is the fallback
+   * for missing or nonsense values. Parsing MUST use this exact size — the
+   * same byte pattern is a real conflict at one size and plain content at
+   * another, so it is not decidable from file bytes alone.
+   */
+  private get effectiveMarkerSize(): number {
+    const size = this.conflictFile?.markerSize;
+    return typeof size === 'number' && Number.isInteger(size) && size >= 1 ? size : 7;
+  }
+
+  /**
    * Parse git's conflict-marker text into structured segments — the ONLY
    * place markers are ever interpreted; they never reach the DOM.
    * Handles diff3-style `|||||||` base sections (discarded) and tolerates an
    * unterminated conflict at EOF (kept as a conflict block).
    *
-   * Git emits exactly seven marker characters, optionally followed by a
-   * space and label (the `=======` separator is always bare). Content lines
-   * that merely BEGIN with 7+ of the character — banner comments, Markdown
-   * setext underlines, `====…` dividers — must not match, or the ours/theirs
-   * split silently corrupts and the real separator leaks in as content.
+   * Git emits exactly `effectiveMarkerSize` marker characters, optionally
+   * followed by a space and label (the `=======` separator is always bare).
+   * Content lines with runs of any OTHER length — banner comments, Markdown
+   * setext underlines, `====…` dividers, docs samples showing default-size
+   * markers inside a raised-size conflict — must not match, or the
+   * ours/theirs split silently corrupts and real markers leak as content.
    * Lines are compared with a trailing CR stripped so CRLF files parse, but
    * content lines are stored verbatim to round-trip their line endings.
    */
   private parseSegments(text: string): OutputSegment[] {
+    const markerSize = this.effectiveMarkerSize;
     const stripCr = (l: string): string => (l.endsWith('\r') ? l.slice(0, -1) : l);
     /**
-     * Length of a marker run of `ch` at the start of the line, or 0 when the
-     * line is not a marker (fewer than 7 chars, or followed by anything other
-     * than a space/EOL). Repos can raise the run length above git's default 7
-     * via the conflict-marker-size gitattribute, so the start marker's run
-     * defines the size the rest of that conflict's markers must match exactly.
+     * True when the line is a marker of `ch`: a run of EXACTLY the file's
+     * marker size followed by a space or end-of-line. Longer or shorter
+     * runs are content.
      */
-    const markerRun = (l: string, ch: string): number => {
+    const isMarker = (l: string, ch: string): boolean => {
       const s = stripCr(l);
       let n = 0;
       while (n < s.length && s[n] === ch) n++;
-      return n >= 7 && (s.length === n || s[n] === ' ') ? n : 0;
+      return n === markerSize && (s.length === n || s[n] === ' ');
     };
-    let markerSize = 7;
-    const isBaseMarker = (l: string): boolean => markerRun(l, '|') === markerSize;
+    const isConflictStart = (l: string): boolean => isMarker(l, '<');
+    const isBaseMarker = (l: string): boolean => isMarker(l, '|');
     const isSeparator = (l: string): boolean => stripCr(l) === '='.repeat(markerSize);
-    const isConflictEnd = (l: string): boolean => markerRun(l, '>') === markerSize;
+    const isConflictEnd = (l: string): boolean => isMarker(l, '>');
 
     const lines = text.split('\n');
-
-    /**
-     * A start-marker run of git's default size (7) always opens a conflict.
-     * A LONGER run (raised conflict-marker-size gitattribute) only counts
-     * when a matching exact-size separator follows later — otherwise a
-     * content line like '<<<<<<<< not a marker' would swallow the rest of
-     * the file into a phantom conflict.
-     */
-    const conflictStartSize = (index: number): number => {
-      const n = markerRun(lines[index], '<');
-      if (n === 0) return 0;
-      if (n === 7) return 7;
-      // A raised size must look like a REAL git conflict, in git's emission
-      // order: the exact-size separator, then an exact-size end marker.
-      // Bail if a DEFAULT-size start appears before the separator — the
-      // raised "start" would otherwise swallow a real conflict (and its
-      // markers) as pickable content, e.g. in a docs file that shows a long
-      // marker example above an actual conflict.
-      const sep = '='.repeat(n);
-      let sepIndex = -1;
-      for (let j = index + 1; j < lines.length; j++) {
-        if (markerRun(lines[j], '<') === 7) return 0;
-        if (stripCr(lines[j]) === sep) {
-          sepIndex = j;
-          break;
-        }
-      }
-      if (sepIndex < 0) return 0;
-      for (let j = sepIndex + 1; j < lines.length; j++) {
-        if (markerRun(lines[j], '>') === n) return n;
-      }
-      return 0;
-    };
 
     const segments: OutputSegment[] = [];
     let currentResolved: string[] = [];
@@ -883,14 +871,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
       const line = lines[lineIndex];
-      const startSize = inConflict ? 0 : conflictStartSize(lineIndex);
-      if (!inConflict && startSize > 0) {
+      if (!inConflict && isConflictStart(line)) {
         flushResolved();
         inConflict = true;
         section = 'ours';
         oursLines = [];
         theirsLines = [];
-        markerSize = startSize;
         oursLabel = stripCr(line).slice(markerSize).trim() || 'OURS';
         theirsLabel = '';
       } else if (inConflict && section === 'ours' && isBaseMarker(line)) {
@@ -1157,9 +1143,12 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         // AI output bypasses parseSegments, so it must be validated here:
         // a suggestion that echoes marker lines would otherwise render them
         // as "resolved" text and let them be written back to the file. Runs
-        // of 7+ cover repos with a raised conflict-marker-size; being overly
-        // conservative here just leaves the block unresolved, which is safe.
-        if (/^(<{7,}|={7,}|>{7,}|\|{7,})( |\r?$)/m.test(result.data.resolvedContent)) {
+        // of min(7, size)+ cover the default, raised, AND lowered
+        // conflict-marker-size cases; being overly conservative here just
+        // leaves the block unresolved, which is safe.
+        const n = Math.min(7, this.effectiveMarkerSize);
+        const markerEcho = new RegExp(`^(<{${n},}|={${n},}|>{${n},}|\\|{${n},})( |\\r?$)`, 'm');
+        if (markerEcho.test(result.data.resolvedContent)) {
           showToast('AI suggestion contained conflict markers — block left unresolved', 'error');
           return false;
         }

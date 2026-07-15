@@ -396,8 +396,15 @@ export class LvConflictResolutionDialog extends LitElement {
   @state() private continuing = false;
   /** True while the EMBEDDED merge editor has an external tool session open. */
   @state() private editorToolActive = false;
-  /** True while the embedded editor's resolve/take-side write is in flight. */
-  @state() private editorResolving = false;
+  /**
+   * Number of the embedded editor's resolve/take-side writes in flight. A
+   * COUNT, not a boolean: switching files mid-write deliberately lets a new
+   * resolve start while the old one finishes, and each write dispatches its
+   * own started/finished pair — folding them into a boolean would unlock
+   * Abort/Complete/External on the FIRST finish while a write is still
+   * running.
+   */
+  @state() private editorResolveDepth = 0;
   @state() private showAbortConfirm = false;
   @state() private hasMergeTool = false;
   @state() private launchingExternalTool: string | null = null;
@@ -423,7 +430,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting = false;
       this.continuing = false;
       this.editorToolActive = false;
-      this.editorResolving = false;
+      this.editorResolveDepth = 0;
       this.showAbortConfirm = false;
       this.mergeCommitted = false;
       // Seed from the finish context: a first-run release/hotfix whose master
@@ -457,7 +464,7 @@ export class LvConflictResolutionDialog extends LitElement {
     this.aborting = false;
     this.continuing = false;
     this.editorToolActive = false;
-    this.editorResolving = false;
+    this.editorResolveDepth = 0;
     this.showAbortConfirm = false;
     this.mergeCommitted = false;
     this.priorFinishCommitLanded = false;
@@ -551,17 +558,35 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting ||
       this.continuing ||
       this.editorToolActive ||
-      this.editorResolving
+      this.editorResolveDepth > 0
     ) {
       return;
     }
-    // Launching on the SELECTED file replaces the editor's unsaved picks with
-    // the tool's output on reload — same confirm as a file switch.
-    if (this.selectedConflict?.path === conflictPath && !(await this.confirmLeaveInProgress())) {
-      return;
+    // Claim the launch BEFORE any await: the confirm below yields to the
+    // event loop, and a second click landing in that window would pass the
+    // entry guard again — two tool sessions editing the same file.
+    this.launchingExternalTool = conflictPath;
+    // Launching on the SELECTED file replaces the editor's unsaved picks
+    // with the tool's output on reload — confirm with tool wording (the
+    // file-switch copy would wrongly suggest Mark Resolved keeps the picks
+    // safe from the tool's result).
+    if (this.selectedConflict?.path === conflictPath) {
+      const editor = this.shadowRoot?.querySelector('lv-merge-editor') as LvMergeEditor | null;
+      if (editor?.hasUnsavedResolutions()) {
+        let proceed = false;
+        try {
+          proceed = await showConfirm(
+            'Discard in-progress resolution?',
+            'The external tool works on the file as saved on disk — your unsaved picks here will be replaced by its result.',
+            'warning',
+          );
+        } finally {
+          if (!proceed) this.launchingExternalTool = null;
+        }
+        if (!proceed) return;
+      }
     }
 
-    this.launchingExternalTool = conflictPath;
     try {
       const result = await gitService.launchMergeTool(this.repositoryPath, conflictPath);
       if (result.success && result.data?.success) {
@@ -676,7 +701,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.continuing ||
       this.launchingExternalTool !== null ||
       this.editorToolActive ||
-      this.editorResolving
+      this.editorResolveDepth > 0
     ) {
       return;
     }
@@ -723,7 +748,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.continuing ||
       this.launchingExternalTool !== null ||
       this.editorToolActive ||
-      this.editorResolving
+      this.editorResolveDepth > 0
     ) {
       return;
     }
@@ -865,7 +890,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting ||
       this.launchingExternalTool !== null ||
       this.editorToolActive ||
-      this.editorResolving
+      this.editorResolveDepth > 0
     ) {
       return;
     }
@@ -1211,7 +1236,7 @@ export class LvConflictResolutionDialog extends LitElement {
                           this.aborting ||
                           this.continuing ||
                           this.editorToolActive ||
-                          this.editorResolving}
+                          this.editorResolveDepth > 0}
                           title="Open in external merge tool"
                         >
                           ${this.launchingExternalTool === conflict.path ? '...' : 'External'}
@@ -1235,8 +1260,12 @@ export class LvConflictResolutionDialog extends LitElement {
                     @conflict-resolved=${this.handleConflictResolved}
                     @external-tool-started=${() => { this.editorToolActive = true; }}
                     @external-tool-finished=${() => { this.editorToolActive = false; }}
-                    @resolve-started=${() => { this.editorResolving = true; }}
-                    @resolve-finished=${() => { this.editorResolving = false; }}
+                    @resolve-started=${() => {
+                      this.editorResolveDepth++;
+                    }}
+                    @resolve-finished=${() => {
+                      this.editorResolveDepth = Math.max(0, this.editorResolveDepth - 1);
+                    }}
                   ></lv-merge-editor>
                 `
               : html`
@@ -1276,7 +1305,7 @@ export class LvConflictResolutionDialog extends LitElement {
                 this.aborting ||
                 this.launchingExternalTool !== null ||
                 this.editorToolActive ||
-                this.editorResolving}
+                this.editorResolveDepth > 0}
             >
               Abort ${this.getOperationTitle()}
             </button>
@@ -1287,7 +1316,7 @@ export class LvConflictResolutionDialog extends LitElement {
                 this.aborting ||
                 this.launchingExternalTool !== null ||
                 this.editorToolActive ||
-                this.editorResolving ||
+                this.editorResolveDepth > 0 ||
                 this.loadFailed ||
                 this.resolvedCount < this.totalCount ||
                 (this.operationType === 'stash' && this.conflicts.length === 0)}

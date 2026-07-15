@@ -900,17 +900,71 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             .filter_map(|e| e.as_ref())
             .any(|e| repo.find_blob(e.id).map(|b| b.is_binary()).unwrap_or(false));
 
+        // The marker size git used when writing this file's conflict hunks.
+        // A raised size means 7-char marker-shaped lines are CONTENT, so the
+        // parser cannot guess — it needs the authoritative attribute value.
+        // BUT the attribute only describes what git's CLI writes: libgit2's
+        // own merge/checkout ignores conflict-marker-size and always emits
+        // 7-char markers, so a raised attribute is only trusted when the
+        // working file really contains a complete conflict at that size.
+        let attr_size = repo
+            .get_attr(
+                Path::new(&file_path),
+                "conflict-marker-size",
+                git2::AttrCheckFlags::default(),
+            )
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or_else(crate::models::conflict::default_marker_size);
+        let marker_size = if attr_size == 7 {
+            7
+        } else {
+            match std::fs::read_to_string(Path::new(&path).join(&file_path)) {
+                Ok(content) if has_complete_conflict(&content, attr_size as usize) => attr_size,
+                Ok(_) => 7,
+                // Unreadable working file (deleted side, binary) — the size
+                // is moot for parsing, report the attribute value.
+                Err(_) => attr_size,
+            }
+        };
+
         conflicts.push(ConflictFile {
             path: file_path,
             ancestor: get_entry(conflict.ancestor),
             ours: get_entry(conflict.our),
             theirs: get_entry(conflict.their),
             is_binary,
+            marker_size,
         });
     }
 
     tracing::debug!("get_conflicts: returning {} conflicts", conflicts.len());
     Ok(conflicts)
+}
+
+/// True when `content` holds a complete conflict written at `size`: a start
+/// run, then a separator, then an end run — each exactly `size` marker
+/// characters followed by a space or end-of-line, in git's emission order.
+/// Used to verify that a raised conflict-marker-size attribute matches what
+/// was actually written (libgit2 ignores the attribute and emits 7).
+fn has_complete_conflict(content: &str, size: usize) -> bool {
+    let run_is = |line: &str, ch: char| -> bool {
+        let n = line.chars().take_while(|&c| c == ch).count();
+        n == size && matches!(line.chars().nth(n), None | Some(' '))
+    };
+    let sep: String = "=".repeat(size);
+    let mut stage = 0u8; // 0 = want start, 1 = want separator, 2 = want end
+    for line in content.lines() {
+        match stage {
+            0 if run_is(line, '<') => stage = 1,
+            1 if line == sep => stage = 2,
+            2 if run_is(line, '>') => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Get content of a blob by OID
@@ -2336,6 +2390,111 @@ mod tests {
             .find(|c| c.path == "blob.bin")
             .expect("binary conflict should be listed");
         assert!(bin.is_binary, "binary conflict must be flagged");
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_reports_marker_size() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Raise the marker size for .txt files via gitattributes, committed
+        // on all branches so it is in effect during the merge.
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=12\n"),
+                ("shared.txt", "base"),
+                ("other.md", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit(
+            "Feature change",
+            &[("shared.txt", "feature content"), ("other.md", "feature")],
+        );
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit(
+            "Main change",
+            &[("shared.txt", "main content"), ("other.md", "main")],
+        );
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // libgit2's merge ignores conflict-marker-size and writes 7-char
+        // markers, so the raised attribute must NOT be reported for this
+        // file — the frontend would parse the real markers as content.
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(
+            written.lines().any(|l| l.starts_with("<<<<<<<")),
+            "precondition: libgit2 wrote default-size markers; got:\n{written}"
+        );
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 7,
+            "raised attribute must fall back to 7 when the file was written with 7-char markers"
+        );
+        let md = conflicts
+            .iter()
+            .find(|c| c.path == "other.md")
+            .expect("md conflict should be listed");
+        assert_eq!(md.marker_size, 7, "unset attribute must default to 7");
+
+        // Git's CLI (rebase/cherry-pick shell-outs, external git) DOES honor
+        // the attribute. Simulate its emission: with real 12-char markers on
+        // disk the raised size must be reported.
+        std::fs::write(
+            repo.path.join("shared.txt"),
+            "<<<<<<<<<<<< HEAD\nmain content\n<<<<<<< a 7-char sample in content\n============\nfeature content\n>>>>>>>>>>>> feature\n",
+        )
+        .unwrap();
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 12,
+            "raised attribute must be reported when the file really uses raised markers"
+        );
+    }
+
+    #[test]
+    fn test_has_complete_conflict() {
+        let raised = "<<<<<<<<<<<< HEAD\nours\n============\ntheirs\n>>>>>>>>>>>> feature\n";
+        assert!(has_complete_conflict(raised, 12));
+        assert!(
+            !has_complete_conflict(raised, 7),
+            "runs longer than the size must not match"
+        );
+
+        let default = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\n";
+        assert!(!has_complete_conflict(default, 12));
+
+        // Emission order is required: an end marker before the separator
+        // (quoted docs) does not complete a conflict.
+        let out_of_order = "<<<<<<<<<<<< HEAD\n>>>>>>>>>>>> nope\n============\n";
+        assert!(!has_complete_conflict(out_of_order, 12));
+
+        // CRLF-terminated lines still match.
+        let crlf =
+            "<<<<<<<<<<<< HEAD\r\nours\r\n============\r\ntheirs\r\n>>>>>>>>>>>> feature\r\n";
+        assert!(has_complete_conflict(crlf, 12));
+
+        // A separator with trailing label text is not git's separator.
+        let labeled_sep = "<<<<<<<<<<<< HEAD\n============ x\n>>>>>>>>>>>> f\n";
+        assert!(!has_complete_conflict(labeled_sep, 12));
     }
 
     #[tokio::test]

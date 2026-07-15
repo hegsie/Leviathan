@@ -1079,6 +1079,118 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(abortBtn.disabled).to.be.false;
     });
 
+    it('overlapping resolve writes keep the guards held until the LAST one finishes', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      // Two writes can be in flight at once by design: a file switch resets
+      // the editor's own flag so the new file can resolve while the old
+      // file's write drains. Each write dispatches its own started/finished
+      // pair — the first finish must NOT unlock Abort/Complete.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      const fire = (name: string) =>
+        editor.dispatchEvent(new CustomEvent(name, { bubbles: true, composed: true }));
+      fire('resolve-started');
+      fire('resolve-started');
+      fire('resolve-finished');
+      await el.updateComplete;
+
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      expect(
+        abortBtn.disabled,
+        'the first finish must not unlock while a second write is in flight'
+      ).to.be.true;
+      const internal = el as unknown as { showAbortConfirm: boolean; handleAbort: () => void };
+      internal.handleAbort.call(el);
+      expect(internal.showAbortConfirm).to.be.false;
+
+      fire('resolve-finished');
+      await el.updateComplete;
+      expect(abortBtn.disabled).to.be.false;
+
+      // A stray extra finish must not underflow into a negative depth that
+      // a later started could no-op against.
+      fire('resolve-finished');
+      fire('resolve-started');
+      await el.updateComplete;
+      expect(abortBtn.disabled, 'depth must floor at zero').to.be.true;
+      fire('resolve-finished');
+      await el.updateComplete;
+      expect(abortBtn.disabled).to.be.false;
+    });
+
+    it('a double-click on External during the confirm window launches one tool session', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      let confirmCalls = 0;
+      let launchCalls = 0;
+      let releaseConfirm: (() => void) | null = null;
+      let confirmMessage = '';
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          confirmMessage = String((args as { message?: unknown })?.message ?? '');
+          return new Promise(res => {
+            releaseConfirm = () => res('Ok');
+          });
+        }
+        if (command === 'launch_merge_tool') {
+          launchCalls++;
+          return { success: true };
+        }
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        return null;
+      };
+
+      // The selected file has unsaved picks, so launching on it confirms.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      const editorInternal = editor as unknown as {
+        segments: Array<Record<string, unknown>>;
+        userTouched: boolean;
+      };
+      editorInternal.segments = [
+        {
+          id: 1,
+          type: 'resolved',
+          lines: ['x'],
+          oursLines: [],
+          theirsLines: [],
+          oursLabel: '',
+          theirsLabel: '',
+          origin: 'ours',
+          fromConflict: true,
+        },
+      ];
+      editorInternal.userTouched = true;
+
+      const internal = el as unknown as {
+        selectedConflict: ConflictFile | null;
+        handleOpenExternalTool: (path: string) => Promise<void>;
+      };
+      const selectedPath = internal.selectedConflict!.path;
+      const first = internal.handleOpenExternalTool.call(el, selectedPath);
+      const second = internal.handleOpenExternalTool.call(el, selectedPath);
+      await new Promise(r => setTimeout(r, 30));
+      expect(confirmCalls, 'only one confirm may be shown').to.equal(1);
+      expect(
+        confirmMessage,
+        'the confirm must use tool wording, not the file-switch copy'
+      ).to.include('external tool works on the file as saved on disk');
+      releaseConfirm!();
+      await Promise.all([first, second]);
+      await new Promise(r => setTimeout(r, 30));
+      expect(launchCalls, 'only one tool session may launch').to.equal(1);
+    });
+
     it('the two tool launchers are mutually exclusive in both directions', async () => {
       const el = await renderDialog('merge');
       el.open = true;

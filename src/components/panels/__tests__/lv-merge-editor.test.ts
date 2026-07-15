@@ -37,13 +37,14 @@ const MARKER_CHARS = ['<<<<<<<', '=======', '>>>>>>>', '|||||||'];
 const DEFAULT_WORKDIR_CONTENT =
   'line1\n<<<<<<< HEAD\nline2-ours\n=======\nline2-theirs\n>>>>>>> feature\nline3';
 
-function makeConflictFile(path: string): ConflictFile {
+function makeConflictFile(path: string, markerSize?: number): ConflictFile {
   return {
     path,
     ancestor: { oid: 'base-oid', path, mode: 0o100644 },
     ours: { oid: 'ours-oid', path, mode: 0o100644 },
     theirs: { oid: 'theirs-oid', path, mode: 0o100644 },
     isBinary: false,
+    ...(markerSize !== undefined ? { markerSize } : {}),
   };
 }
 
@@ -335,9 +336,9 @@ describe('lv-merge-editor', () => {
 
     it('a long bracket run with only a coincidental divider stays content', async () => {
       const el = await renderEditor();
-      // An 8-char banner plus a stray 8-equals divider is NOT a conflict —
-      // without a matching 8-char end marker the size lookahead must reject
-      // it instead of swallowing the file into a phantom conflict.
+      // An 8-char banner plus a stray 8-equals divider is NOT a conflict in
+      // a default-size (7) file — only runs of EXACTLY the file's marker
+      // size are markers, so nothing here can open a phantom conflict.
       const segments = internalOf(el).parseSegments(
         '<<<<<<<< banner heading\ntext\n========\nmore text'
       );
@@ -374,8 +375,9 @@ describe('lv-merge-editor', () => {
       expect(segments[0].lines).to.include('<<<<<<<< (a raised-size marker looks like this)');
     });
 
-    it('parses raised conflict-marker-size markers (gitattribute)', async () => {
+    it('parses raised conflict-marker-size markers using the backend-reported size', async () => {
       const el = await renderEditor();
+      internalOf(el).conflictFile = makeConflictFile('src/test.ts', 32);
       const m = (ch: string) => ch.repeat(32);
       const segments = internalOf(el).parseSegments(
         [
@@ -396,6 +398,88 @@ describe('lv-merge-editor', () => {
       expect(segments[1].theirsLines).to.deep.equal(['theirs-line']);
       expect(segments[1].oursLabel).to.equal('HEAD');
       expect(segments[1].theirsLabel).to.equal('feature');
+    });
+
+    it('a complete default-size conflict sample inside a raised-size conflict stays content', async () => {
+      const el = await renderEditor();
+      internalOf(el).conflictFile = makeConflictFile('src/test.ts', 12);
+      const m = (ch: string) => ch.repeat(12);
+      // THE reason conflict-marker-size gets raised: the file's own content
+      // shows what a (7-char) conflict looks like. Every line of the sample
+      // — start, separator, end — must stay ours CONTENT of the real
+      // 12-char conflict; the real markers must parse and never render.
+      const segments = internalOf(el).parseSegments(
+        [
+          'Intro text',
+          `${m('<')} HEAD`,
+          'A conflict looks like:',
+          '<<<<<<< A',
+          'one',
+          '=======',
+          'two',
+          '>>>>>>> B',
+          m('='),
+          'their docs version',
+          `${m('>')} feature`,
+          'tail',
+        ].join('\n')
+      );
+      expect(segments.map((s) => s.type)).to.deep.equal(['resolved', 'conflict', 'resolved']);
+      expect(segments[1].oursLines).to.deep.equal([
+        'A conflict looks like:',
+        '<<<<<<< A',
+        'one',
+        '=======',
+        'two',
+        '>>>>>>> B',
+      ]);
+      expect(segments[1].theirsLines).to.deep.equal(['their docs version']);
+      expect(segments[0].lines).to.deep.equal(['Intro text']);
+      expect(segments[2].lines).to.deep.equal(['tail']);
+    });
+
+    it('raised-size markers are content when the file was written at the default size', async () => {
+      const el = await renderEditor();
+      // No markerSize (or 7) means git wrote 7-char markers; a 12-char docs
+      // sample above the real conflict is content, never a phantom start.
+      const m = (ch: string) => ch.repeat(12);
+      const segments = internalOf(el).parseSegments(
+        [
+          `${m('<')} (a raised-size marker looks like this)`,
+          'some prose',
+          '<<<<<<< HEAD',
+          'real ours line',
+          '=======',
+          'real theirs line',
+          '>>>>>>> feature',
+        ].join('\n')
+      );
+      const conflicts = segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['real ours line']);
+      expect(conflicts[0].theirsLines).to.deep.equal(['real theirs line']);
+      expect(segments[0].lines).to.include(`${m('<')} (a raised-size marker looks like this)`);
+    });
+
+    it('parses a lowered conflict-marker-size', async () => {
+      const el = await renderEditor();
+      internalOf(el).conflictFile = makeConflictFile('src/test.ts', 3);
+      const segments = internalOf(el).parseSegments(
+        '<<< HEAD\nours\n===\ntheirs\n>>> feature'
+      );
+      expect(segments.length).to.equal(1);
+      expect(segments[0].type).to.equal('conflict');
+      expect(segments[0].oursLines).to.deep.equal(['ours']);
+      expect(segments[0].theirsLines).to.deep.equal(['theirs']);
+    });
+
+    it('falls back to size 7 for missing or nonsense marker sizes', async () => {
+      const el = await renderEditor();
+      for (const bad of [0, -3, 2.5, undefined]) {
+        internalOf(el).conflictFile = makeConflictFile('src/test.ts', bad as number | undefined);
+        const segments = internalOf(el).parseSegments(DEFAULT_WORKDIR_CONTENT);
+        expect(segments.filter((s) => s.type === 'conflict').length, `size=${bad}`).to.equal(1);
+      }
     });
 
     it('keeps an unterminated conflict as a conflict block', async () => {
@@ -1785,6 +1869,90 @@ describe('lv-merge-editor', () => {
       toolBtn().click();
       await new Promise((r) => setTimeout(r, 80));
       expect(launchCalls).to.equal(1);
+    });
+
+    it('a double-click during the confirm window launches only one tool session', async () => {
+      setupDefaultMocks();
+      let launchCalls = 0;
+      let confirmCalls = 0;
+      let releaseConfirm: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          // The native confirm is an async IPC round-trip — a second click
+          // can land before it resolves.
+          return new Promise((res) => {
+            releaseConfirm = () => res('Ok');
+          });
+        }
+        if (command === 'launch_merge_tool') {
+          launchCalls++;
+          return { success: true };
+        }
+        if (command === 'get_conflicts') {
+          return [
+            { path: 'src/test.ts', ancestor: null, ours: null, theirs: null, isBinary: false },
+          ];
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/test.ts');
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(el.hasUnsavedResolutions()).to.be.true;
+
+      const internal = el as unknown as EditorInternal & {
+        handleOpenExternalMergeTool: () => Promise<void>;
+      };
+      // Two rapid invocations: the second must be swallowed by the claimed
+      // launch flag, not stack a second confirm/tool session.
+      const first = internal.handleOpenExternalMergeTool();
+      const second = internal.handleOpenExternalMergeTool();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(confirmCalls, 'only one confirm may be shown').to.equal(1);
+      releaseConfirm!();
+      await Promise.all([first, second]);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(launchCalls, 'only one tool session may launch').to.equal(1);
+    });
+
+    it('cancelling the confirm releases the launch claim for a later attempt', async () => {
+      setupDefaultMocks();
+      let launchCalls = 0;
+      const baseMock = mockInvoke;
+      let confirmAnswer: unknown = false;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'plugin:dialog|message') return confirmAnswer;
+        if (command === 'launch_merge_tool') {
+          launchCalls++;
+          return { success: true };
+        }
+        if (command === 'get_conflicts') {
+          return [
+            { path: 'src/test.ts', ancestor: null, ours: null, theirs: null, isBinary: false },
+          ];
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/test.ts');
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+
+      const internal = el as unknown as EditorInternal & {
+        handleOpenExternalMergeTool: () => Promise<void>;
+      };
+      // Declined: the claim must be released, or the button is dead forever.
+      await internal.handleOpenExternalMergeTool();
+      expect(launchCalls).to.equal(0);
+      confirmAnswer = 'Ok';
+      await internal.handleOpenExternalMergeTool();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(launchCalls, 'a fresh attempt after cancel must work').to.equal(1);
     });
 
     it('resolve actions and the external tool are mutually exclusive', async () => {

@@ -19,6 +19,16 @@ pub struct ConflictFile {
     /// whole blobs (see resolve_conflict_take_side).
     #[serde(default)]
     pub is_binary: bool,
+    /// Effective `conflict-marker-size` gitattribute for this path (git's
+    /// default is 7). The frontend parser must use this exact size — the
+    /// same byte pattern is a real conflict at one size and plain content
+    /// at another, so it is not decidable from file contents alone.
+    #[serde(default = "default_marker_size")]
+    pub marker_size: u32,
+}
+
+pub(crate) fn default_marker_size() -> u32 {
+    7
 }
 
 /// Represents one side of a conflict
