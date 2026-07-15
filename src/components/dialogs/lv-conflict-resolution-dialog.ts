@@ -1275,7 +1275,8 @@ export class LvConflictResolutionDialog extends LitElement {
               ?disabled=${this.continuing ||
                 this.aborting ||
                 this.launchingExternalTool !== null ||
-                this.editorToolActive}
+                this.editorToolActive ||
+                this.editorResolving}
             >
               Abort ${this.getOperationTitle()}
             </button>
@@ -1286,6 +1287,7 @@ export class LvConflictResolutionDialog extends LitElement {
                 this.aborting ||
                 this.launchingExternalTool !== null ||
                 this.editorToolActive ||
+                this.editorResolving ||
                 this.loadFailed ||
                 this.resolvedCount < this.totalCount ||
                 (this.operationType === 'stash' && this.conflicts.length === 0)}

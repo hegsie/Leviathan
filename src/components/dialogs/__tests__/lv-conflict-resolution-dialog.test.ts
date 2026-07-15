@@ -1050,6 +1050,35 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(abortBtn.disabled).to.be.false;
     });
 
+    it("footer buttons disable while the editor's resolve write is in flight", async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      editor.dispatchEvent(
+        new CustomEvent('resolve-started', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      const continueBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-primary'
+      ) as HTMLButtonElement;
+      expect(abortBtn.disabled).to.be.true;
+      expect(continueBtn.disabled).to.be.true;
+
+      editor.dispatchEvent(
+        new CustomEvent('resolve-finished', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+      expect(abortBtn.disabled).to.be.false;
+    });
+
     it('the two tool launchers are mutually exclusive in both directions', async () => {
       const el = await renderDialog('merge');
       el.open = true;
